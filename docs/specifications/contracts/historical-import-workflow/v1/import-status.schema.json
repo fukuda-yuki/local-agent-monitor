@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/import-status.schema.json",
+  "title": "Historical import operation status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "schema_version",
+    "operation_id",
+    "request_id",
+    "operation_version",
+    "state",
+    "lifecycle",
+    "transaction_outcome",
+    "counts",
+    "result_available",
+    "failure_code"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-import-workflow/v1" },
+    "schema_version": { "const": "historical-import-workflow-import-status/v1" },
+    "operation_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hop_[0-9a-f]{32}$" },
+    "request_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hir_[0-9a-f]{32}$" },
+    "operation_version": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "state": { "enum": ["queued", "running", "succeeded", "failed", "rejected"] },
+    "lifecycle": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["queued", "running", "succeeded", "failed", "rejected"] }
+    },
+    "transaction_outcome": { "enum": ["pending", "committed", "rolled_back", "not_started"] },
+    "counts": { "$ref": "#/$defs/counts" },
+    "result_available": { "type": "boolean" },
+    "failure_code": {
+      "type": ["string", "null"],
+      "enum": [
+        "historical_import_request_invalid",
+        "historical_import_preview_not_found",
+        "historical_import_preview_expired",
+        "historical_import_preview_stale",
+        "historical_import_source_changed",
+        "historical_import_no_eligible_candidates",
+        "historical_import_confirmation_invalid",
+        "historical_import_confirmation_expired",
+        "historical_import_confirmation_consumed",
+        "historical_import_idempotency_conflict",
+        "historical_import_result_not_available",
+        "historical_import_profile_not_admitted",
+        "historical_import_candidate_invalid",
+        "historical_import_fixture_not_source_support_evidence",
+        "historical_import_store_busy",
+        "historical_import_store_unavailable",
+        "historical_import_transaction_failed",
+        null
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation_version": { "const": 1 },
+        "state": { "const": "queued" },
+        "lifecycle": { "const": ["queued"] },
+        "transaction_outcome": { "const": "pending" },
+        "counts": { "$ref": "#/$defs/zero_progress_counts" },
+        "result_available": { "const": false },
+        "failure_code": { "const": null }
+      }
+    },
+    {
+      "properties": {
+        "operation_version": { "const": 2 },
+        "state": { "const": "running" },
+        "lifecycle": { "const": ["queued", "running"] },
+        "transaction_outcome": { "const": "pending" },
+        "counts": { "$ref": "#/$defs/zero_progress_counts" },
+        "result_available": { "const": false },
+        "failure_code": { "const": null }
+      }
+    },
+    {
+      "properties": {
+        "operation_version": { "const": 3 },
+        "state": { "const": "succeeded" },
+        "lifecycle": { "const": ["queued", "running", "succeeded"] },
+        "transaction_outcome": { "const": "committed" },
+        "result_available": { "const": true },
+        "failure_code": { "const": null }
+      }
+    },
+    {
+      "properties": {
+        "operation_version": { "const": 3 },
+        "state": { "const": "failed" },
+        "lifecycle": { "const": ["queued", "running", "failed"] },
+        "transaction_outcome": { "const": "rolled_back" },
+        "counts": { "$ref": "#/$defs/zero_progress_counts" },
+        "result_available": { "const": false },
+        "failure_code": { "const": "historical_import_transaction_failed" }
+      }
+    },
+    {
+      "properties": {
+        "operation_version": { "const": 3 },
+        "state": { "const": "rejected" },
+        "lifecycle": { "const": ["queued", "running", "rejected"] },
+        "transaction_outcome": { "const": "not_started" },
+        "counts": { "$ref": "#/$defs/zero_progress_counts" },
+        "result_available": { "const": false },
+        "failure_code": {
+          "enum": [
+            "historical_import_request_invalid",
+            "historical_import_preview_not_found",
+            "historical_import_preview_expired",
+            "historical_import_preview_stale",
+            "historical_import_source_changed",
+            "historical_import_no_eligible_candidates",
+            "historical_import_confirmation_invalid",
+            "historical_import_confirmation_expired",
+            "historical_import_confirmation_consumed",
+            "historical_import_profile_not_admitted",
+            "historical_import_candidate_invalid",
+            "historical_import_fixture_not_source_support_evidence",
+            "historical_import_store_busy",
+            "historical_import_store_unavailable"
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "processed", "new_observations", "duplicates", "conflicts", "record_rejections"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "processed": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "new_observations": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "duplicates": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "conflicts": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "record_rejections": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      }
+    },
+    "zero_progress_counts": {
+      "allOf": [
+        { "$ref": "#/$defs/counts" },
+        {
+          "properties": {
+            "processed": { "const": 0 },
+            "new_observations": { "const": 0 },
+            "duplicates": { "const": 0 },
+            "conflicts": { "const": 0 },
+            "record_rejections": { "const": 0 }
+          }
+        }
+      ]
+    }
+  }
+}

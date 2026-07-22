@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/preview.schema.json",
+  "title": "Historical import workflow preview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "schema_version",
+    "preview_id",
+    "preview_digest",
+    "snapshot_version",
+    "expires_after_seconds",
+    "source_selection_id",
+    "source_kind",
+    "source_surface",
+    "source_badge",
+    "source_tier",
+    "profile_id",
+    "adapter_id",
+    "adapter_state",
+    "adapter_diagnostics",
+    "evidence_status",
+    "source_application_version",
+    "source_format",
+    "requested_capture",
+    "source_time_range",
+    "counts",
+    "content_risk",
+    "completeness_ceiling",
+    "completeness_reasons",
+    "missing_capabilities",
+    "merge_candidates",
+    "retention_impact",
+    "exclusions",
+    "commit_allowed",
+    "rejection_code"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-import-workflow/v1" },
+    "schema_version": { "const": "historical-import-workflow-preview/v1" },
+    "preview_id": { "$ref": "#/$defs/preview_id" },
+    "preview_digest": { "$ref": "#/$defs/digest" },
+    "snapshot_version": { "$ref": "#/$defs/snapshot_version" },
+    "expires_after_seconds": { "type": "integer", "minimum": 0, "maximum": 300 },
+    "source_selection_id": { "$ref": "#/$defs/selection_id" },
+    "source_kind": { "const": "historical" },
+    "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+    "source_badge": { "enum": ["historical", "unsupported"] },
+    "source_tier": { "const": "tier_b" },
+    "profile_id": { "$ref": "#/$defs/token" },
+    "adapter_id": { "$ref": "#/$defs/token" },
+    "adapter_state": { "enum": ["available", "unavailable", "unsupported", "malformed"] },
+    "adapter_diagnostics": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "historical_source_format_unsupported",
+          "historical_source_malformed",
+          "historical_source_reference_required"
+        ]
+      }
+    },
+    "evidence_status": { "enum": ["production", "fixture_only_not_source_support_evidence"] },
+    "source_application_version": { "type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$(?![\\s\\S])" },
+    "source_format": { "$ref": "#/$defs/source_format" },
+    "requested_capture": { "const": "metadata_only" },
+    "source_time_range": { "$ref": "#/$defs/source_time_range" },
+    "counts": { "$ref": "#/$defs/counts" },
+    "content_risk": { "enum": ["not_read", "source_read_metadata_only"] },
+    "completeness_ceiling": { "enum": ["none", "partial"] },
+    "completeness_reasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["historical_summary_only"] }
+    },
+    "missing_capabilities": {
+      "type": "array",
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": { "enum": ["content", "event_identity", "lifecycle", "session_identity", "timing", "trace_identity"] }
+    },
+    "merge_candidates": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/merge_candidate" }
+    },
+    "retention_impact": { "$ref": "#/$defs/retention_impact" },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/exclusion" }
+    },
+    "commit_allowed": { "type": "boolean" },
+    "rejection_code": {
+      "type": ["string", "null"],
+      "enum": [
+        "historical_import_no_eligible_candidates",
+        "historical_import_profile_not_admitted",
+        "historical_import_candidate_invalid",
+        "historical_import_fixture_not_source_support_evidence",
+        null
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "commit_allowed": { "const": true } } },
+      "then": {
+        "properties": {
+          "adapter_state": { "const": "available" },
+          "evidence_status": { "const": "production" },
+          "source_badge": { "const": "historical" },
+          "source_application_version": {
+            "type": "string",
+            "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])"
+          },
+          "source_format": {
+            "properties": {
+              "name": { "type": "string" },
+              "version": { "type": "string" }
+            }
+          },
+          "content_risk": { "const": "source_read_metadata_only" },
+          "completeness_ceiling": { "const": "partial" },
+          "counts": {
+            "properties": {
+              "eligible": {
+                "properties": {
+                  "availability": { "const": "available" },
+                  "value": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                }
+              }
+            }
+          },
+          "rejection_code": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "commit_allowed": { "const": false } } },
+      "then": { "properties": { "rejection_code": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "completeness_ceiling": { "const": "none" } } },
+      "then": {
+        "properties": {
+          "completeness_reasons": { "maxItems": 0 },
+          "missing_capabilities": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "completeness_ceiling": { "const": "partial" } } },
+      "then": {
+        "properties": {
+          "completeness_reasons": { "minItems": 1, "maxItems": 1 },
+          "missing_capabilities": { "minItems": 1, "maxItems": 6 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "evidence_status": { "const": "fixture_only_not_source_support_evidence" } } },
+      "then": {
+        "properties": {
+          "commit_allowed": { "const": false },
+          "rejection_code": { "const": "historical_import_fixture_not_source_support_evidence" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "requested_capture": { "const": "metadata_only" } } },
+      "then": {
+        "properties": {
+          "retention_impact": {
+            "properties": {
+              "disposition": { "const": "not_applicable" },
+              "created_item_count": { "const": 0 },
+              "default_ttl_days": { "const": null },
+              "automatic_pin": { "const": false }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "preview_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hip_[0-9a-f]{32}$" },
+    "selection_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hss_[0-9a-f]{32}$" },
+    "snapshot_version": { "type": "string", "minLength": 5, "pattern": "^hsv_[1-9][0-9]*$(?![\\s\\S])" },
+    "digest": { "type": "string", "minLength": 71, "maxLength": 71, "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
+    },
+    "source_format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])" },
+        "version": { "type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])" }
+      }
+    },
+    "source_time_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "start", "end"],
+      "properties": {
+        "availability": { "const": "unavailable" },
+        "start": { "const": null },
+        "end": { "const": null }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "eligible",
+        "unsupported",
+        "malformed",
+        "duplicates",
+        "conflicts",
+        "new_observations",
+        "new_sessions",
+        "new_events",
+        "merge_candidates",
+        "excluded"
+      ],
+      "properties": {
+        "total": { "$ref": "#/$defs/count" },
+        "eligible": { "$ref": "#/$defs/count" },
+        "unsupported": { "$ref": "#/$defs/count" },
+        "malformed": { "$ref": "#/$defs/count" },
+        "duplicates": { "$ref": "#/$defs/count" },
+        "conflicts": { "$ref": "#/$defs/count" },
+        "new_observations": { "$ref": "#/$defs/count" },
+        "new_sessions": { "$ref": "#/$defs/unavailable_count" },
+        "new_events": { "$ref": "#/$defs/unavailable_count" },
+        "merge_candidates": { "$ref": "#/$defs/count" },
+        "excluded": { "$ref": "#/$defs/count" }
+      }
+    },
+    "count": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "value"],
+      "properties": {
+        "availability": { "enum": ["available", "unavailable"] },
+        "value": { "type": ["integer", "null"], "minimum": 0, "maximum": 1000 }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "availability": { "const": "available" },
+            "value": { "type": "integer", "minimum": 0, "maximum": 1000 }
+          }
+        },
+        {
+          "properties": {
+            "availability": { "const": "unavailable" },
+            "value": { "const": null }
+          }
+        }
+      ]
+    },
+    "unavailable_count": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "value"],
+      "properties": {
+        "availability": { "const": "unavailable" },
+        "value": { "const": null }
+      }
+    },
+    "merge_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["merge_candidate_id", "binding_basis"],
+      "properties": {
+        "merge_candidate_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hmc_[0-9a-f]{32}$" },
+        "binding_basis": { "enum": ["native_id", "explicit_link", "exact_trace_id"] }
+      }
+    },
+    "retention_impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "created_item_count", "default_ttl_days", "automatic_pin"],
+      "properties": {
+        "disposition": { "const": "not_applicable" },
+        "created_item_count": { "const": 0 },
+        "default_ttl_days": { "const": null },
+        "automatic_pin": { "const": false }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "count"],
+      "properties": {
+        "code": {
+          "enum": [
+            "historical_source_format_unsupported",
+            "historical_source_malformed",
+            "historical_source_reference_required",
+            "historical_candidate_schema_invalid",
+            "historical_candidate_profile_mismatch",
+            "historical_import_fixture_not_source_support_evidence"
+          ]
+        },
+        "count": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    }
+  }
+}

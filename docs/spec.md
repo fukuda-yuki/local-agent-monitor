@@ -261,9 +261,10 @@ an evaluation preview for the persisted evaluation.
 
 The UI proxy provides ordered source discovery and begin/status/complete/cancel
 operations. Existing five `/api/doctor` routes, D051 readiness, and D042's
-seven-screen/two-navigation-item information architecture remain unchanged.
-Doctor controls, exact Session summary, and source-diagnostic targeting are
-sections of `/diagnostics`, not new screens.
+two-navigation-item information architecture remain unchanged. Issue #105
+itself adds no screen: Doctor controls, exact Session summary, and source-
+diagnostic targeting are sections of `/diagnostics`. The separate Issue #79
+`/historical-import` page described below is outside that Doctor closeout.
 
 Evidence navigation is an additive sanitized projection over exact persisted
 linkage. The only destinations are `/traces/{traceId}`,
@@ -373,6 +374,31 @@ snapshot, candidate provenance/conflict behavior, and retention mapping remain
 unavailable until a complete redistributable fixture/version/format/fingerprint
 golden tuple is accepted as a named compatibility revision; detector-observed
 application versions alone do not authorize support.
+
+Issue #79 adds the separate `historical-import-workflow/v1` orchestration
+family without changing the strict producer preview v1 shape. The Local
+Monitor and Config CLI use the same application contracts for explicit probe
+consent, preview, confirmation, commit, result/history, and historical
+observation reads. Preview binds the exact adapter/candidate admission,
+database decision snapshot, workflow version, and a five-minute expiry;
+confirmation and commit revalidate that binding, and a commit is one
+idempotent all-or-none SQLite transaction. Current #77/#78 outputs remain
+valid non-actionable previews and issue no confirmation. Positive production
+admission is reachable only from an internal typed seam populated by a later
+exact profile promotion; HTTP/CLI callers and the checked-in synthetic fixture
+cannot activate it.
+
+Accepted candidates are persisted by the dedicated `historical_import`
+component as observations, exact field provenance, sanitized conflicts, and
+operation receipts. The workflow does not synthesize or write Session, Run,
+Event, trace, or source timestamps. An optional source-specific exact binding
+may link an observation to an already-existing Session without altering that
+Session; otherwise it stays distinct and unbound. Source date and new
+Session/Event counts are explicitly unavailable when the admitted evidence
+does not carry them. Metadata-only observations have `content_state =
+not_captured` and create no retention item. Content import remains unavailable
+in workflow v1; any later content profile must use `session_event_content` and
+the existing #89/#90 authority.
 
 ## Historical evidence extraction
 
@@ -595,6 +621,37 @@ Publicly documented interfaces are:
 - Static dashboard artifact layout: `index.html` and `dashboard-data.json`。
 - Data safety boundary for repository-stored files。
 - Local Ingestion Monitor loopback endpoints: `POST /v1/traces`、`GET /api/monitor/ingestions`、`GET /api/monitor/traces`、`GET /api/monitor/traces/{traceId}/spans`、`GET /api/monitor/summary`、`GET /api/monitor/overview?period=today|7d|30d`（期間別 token KPI / モデル別集計 / 時間帯分布。D042/D044）、`GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`（offset paging のトレース一覧 + cache 集計 + `trace_status`。`q` は TraceId 部分一致のみで prompt 本文は検索・返却しない。D042/D044）、`GET /health/live`、`GET /health/ready`、および SSE notification stream。`/api/monitor/*` と SSE は raw / PII を返さない（sanitized のみ）。`/health/ready` は飽和継続時に `503`（瞬間的 backpressure は `degraded` の `2xx`）を返し、`status` / `checks` / `degraded_reasons` を持つ機械可読 body を伴う。既定しきい値は ingestion-stall `10s` / projection-lag `60s`（設定可能）。
+- Historical import CLI commands:
+  `historical-import preview --database <monitor.db> --request <request.json>`,
+  `historical-import confirm --database <monitor.db> --request <request.json>`,
+  `historical-import commit --database <monitor.db> --request <request.json>`,
+  `historical-import status --database <monitor.db> --operation-id <hop-id>`,
+  `historical-import result --database <monitor.db> --operation-id <hop-id>`,
+  `historical-import history --database <monitor.db> [--limit <1..100>]`, and
+  `historical-import observations --database <monitor.db> [--limit <1..100>] [--cursor <hoc-id>]`.
+  They emit the shared `historical-import-workflow/v1` JSON projection, never
+  echo a source locator, and use the fixed exit mapping in the canonical
+  historical-import interface.
+- Local Monitor historical import surface: `GET /historical-import`,
+  `POST /api/historical-import/v1/previews`,
+  `GET /api/historical-import/v1/previews/{preview_id}`,
+  `POST /api/historical-import/v1/confirmations`,
+  `POST /api/historical-import/v1/imports`,
+  `GET /api/historical-import/v1/imports/{operation_id}`,
+  `GET /api/historical-import/v1/imports/{operation_id}/result`,
+  `GET /api/historical-import/v1/history?limit=<1..100>`,
+  `GET /api/historical-import/v1/observations?limit=<1..100>&cursor=<hoc_...>`, and
+  `GET /api/historical-import/v1/observations/{observation_id}`. The page is
+  discoverable from the existing diagnostics/integration area without adding
+  a third sidebar destination. It keeps live Session and historical
+  observation tabs separate, reuses existing Session workspace v1 reads for
+  the live tab, and never unions their identities. All API responses are
+  sanitized/no-store; writes require same-origin, CSRF, strict JSON, and the
+  request bound. Every successful workflow DTO uses HTTP `200`; transport
+  rejections use `400 invalid_host`, `403 cross_origin_forbidden` /
+  `csrf_required`, `413 request_too_large`, or `415 unsupported_media_type`
+  outside the workflow error registry. `--sanitized-only` keeps this
+  metadata-only surface available.
 - Local Monitor Doctor endpoints: `POST /api/doctor/evaluations`,
   `POST /api/doctor/verifications`,
   `GET /api/doctor/verifications/{verificationId}`,

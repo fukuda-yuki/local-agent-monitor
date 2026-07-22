@@ -48,6 +48,8 @@ internal static class CliApplication
 
         if (args[0] == "sanitized-export") return SanitizedExportCli.Run(args[1..], output, error);
 
+        if (args[0] == "historical-import") return HistoricalImportCli.Run(args[1..], output, error);
+
         switch (args[0])
         {
             case "list-collection-profiles":

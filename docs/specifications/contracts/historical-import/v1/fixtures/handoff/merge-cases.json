@@ -14,14 +14,14 @@
       "required_result": "Preserve the stored value, record a conflict diagnostic without source content, and require an explicit later repair contract."
     },
     {
-      "case_id": "strong-event-exact-binding",
-      "condition": "An explicit existing binding names a strong event and the candidate contributes an allowed historical summary field.",
+      "case_id": "existing-session-exact-binding",
+      "condition": "An explicit existing binding names an existing Session and the candidate contributes an allowed historical summary field.",
       "decision": "attach_observation_preserve_strong",
-      "required_result": "Attach provenance-scoped historical observation data only; never overwrite strong identity, hierarchy, timing, lifecycle, or event identity."
+      "required_result": "Store only a navigation relationship from the historical observation; never mutate the Session or overwrite strong identity, hierarchy, timing, lifecycle, or event identity."
     },
     {
       "case_id": "no-explicit-binding",
-      "condition": "No explicit event binding exists, even when repository names, times, text, or model values look similar.",
+      "condition": "No explicit existing-Session binding exists, even when repository names, times, text, or model values look similar.",
       "decision": "keep_distinct_unbound",
       "required_result": "Keep the candidate distinct and unbound; do not infer a trace, span, parent, event, session, or repository relationship."
     },
@@ -33,9 +33,9 @@
     },
     {
       "case_id": "weak-field-conflict",
-      "condition": "A historical field conflicts with an existing normalized or live-capture value.",
-      "decision": "record_conflict_no_overwrite",
-      "required_result": "Preserve the stronger value and record a field-level conflict without replacing either value or provenance."
+      "condition": "An exact binding names an existing Session whose live data differs from the historical observation value.",
+      "decision": "keep_separate_no_cross_store_comparison",
+      "required_result": "Preserve the Session and the historical observation independently; the navigation-only binding does not compare values or create a cross-store conflict."
     },
     {
       "case_id": "historical-completeness",

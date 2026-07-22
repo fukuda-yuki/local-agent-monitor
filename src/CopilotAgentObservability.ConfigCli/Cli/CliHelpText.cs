@@ -38,6 +38,13 @@ internal static class CliHelpText
           config-cli sanitized-export preview --database <monitor.db> --request <request.json>
           config-cli sanitized-export export --database <monitor.db> --request <request.json> --output <bundle.zip>
           config-cli sanitized-export result --bundle <bundle.zip>
+          config-cli historical-import preview --database <monitor.db> --request <request.json>
+          config-cli historical-import confirm --database <monitor.db> --request <request.json>
+          config-cli historical-import commit --database <monitor.db> --request <request.json>
+          config-cli historical-import status --database <monitor.db> --operation-id <hop_...>
+          config-cli historical-import result --database <monitor.db> --operation-id <hop_...>
+          config-cli historical-import history --database <monitor.db> [--limit <1..100>]
+          config-cli historical-import observations --database <monitor.db> [--limit <1..100>] [--cursor <hoc_...>]
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]

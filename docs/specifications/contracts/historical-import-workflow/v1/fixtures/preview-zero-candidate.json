@@ -1,0 +1,63 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-preview/v1",
+  "preview_id": "hip_0123456789abcdef0123456789abcdef",
+  "preview_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "snapshot_version": "hsv_1",
+  "expires_after_seconds": 300,
+  "source_selection_id": "hss_0123456789abcdef0123456789abcdef",
+  "source_kind": "historical",
+  "source_surface": "github-copilot-cli",
+  "source_badge": "unsupported",
+  "source_tier": "tier_b",
+  "profile_id": "github-copilot-cli-session-state",
+  "adapter_id": "github-copilot-cli-history-v1",
+  "adapter_state": "unsupported",
+  "adapter_diagnostics": [
+    "historical_source_format_unsupported"
+  ],
+  "evidence_status": "production",
+  "source_application_version": "1.0.71",
+  "source_format": {
+    "name": null,
+    "version": null
+  },
+  "requested_capture": "metadata_only",
+  "source_time_range": {
+    "availability": "unavailable",
+    "start": null,
+    "end": null
+  },
+  "counts": {
+    "total": { "availability": "unavailable", "value": null },
+    "eligible": { "availability": "available", "value": 0 },
+    "unsupported": { "availability": "unavailable", "value": null },
+    "malformed": { "availability": "unavailable", "value": null },
+    "duplicates": { "availability": "unavailable", "value": null },
+    "conflicts": { "availability": "unavailable", "value": null },
+    "new_observations": { "availability": "unavailable", "value": null },
+    "new_sessions": { "availability": "unavailable", "value": null },
+    "new_events": { "availability": "unavailable", "value": null },
+    "merge_candidates": { "availability": "unavailable", "value": null },
+    "excluded": { "availability": "unavailable", "value": null }
+  },
+  "content_risk": "not_read",
+  "completeness_ceiling": "none",
+  "completeness_reasons": [],
+  "missing_capabilities": [],
+  "merge_candidates": [],
+  "retention_impact": {
+    "disposition": "not_applicable",
+    "created_item_count": 0,
+    "default_ttl_days": null,
+    "automatic_pin": false
+  },
+  "exclusions": [
+    {
+      "code": "historical_source_format_unsupported",
+      "count": 1
+    }
+  ],
+  "commit_allowed": false,
+  "rejection_code": "historical_import_no_eligible_candidates"
+}

@@ -80,6 +80,7 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     [Theory]
     [InlineData("1.0.71", true)]
     [InlineData("1.0.73", false)]
+    [InlineData("1.0.73-rc.1+build.5", false)]
     public void Probe_DetectedExactVersion_RemainsUnsupportedWithoutReadingContent(
         string version,
         bool observedByProfile)
@@ -107,6 +108,28 @@ public sealed class GitHubCopilotHistoricalAdapterTests
             profile.RootElement.GetProperty("observed_detector_versions")
                 .EnumerateArray()
                 .Any(item => item.GetString() == version));
+    }
+
+    [Theory]
+    [InlineData("01.0.71")]
+    [InlineData("1.0.71-")]
+    [InlineData("1.0.71+")]
+    [InlineData("1.0.71-01")]
+    [InlineData("1.0.71-alpha..1")]
+    [InlineData("1.0.71+build..1")]
+    [InlineData("v1.0.71")]
+    [InlineData("build_2026")]
+    public void Probe_MetadataTokenThatIsNotSemanticVersion_IsProbedButNotProjected(string version)
+    {
+        var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var probe = RequireProbe(adapter.Probe(ValidRequest(version)));
+
+        Assert.Null(probe.AdapterResult.SourceApplicationVersion);
+        Assert.Equal("detected", probe.AdapterResult.DetectionState);
+        Assert.Equal(["historical_source_format_unsupported"], probe.AdapterResult.Diagnostics);
+        Assert.Equal(4, fileSystem.InspectedPaths.Count);
     }
 
     [Theory]
@@ -169,7 +192,7 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Fact]
-    public void Probe_OversizeReference_FailsClosedWithoutIo()
+    public void Probe_MaximumLengthSessionLocator_IsAccepted()
     {
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
@@ -177,6 +200,41 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
             SelectedRoot,
             new string('s', 256),
+            "1.0.71",
+            true,
+            "metadata_only")));
+
+        Assert.Equal(4, fileSystem.InspectedPaths.Count);
+        Assert.Equal(["historical_source_format_unsupported"], probe.AdapterResult.Diagnostics);
+    }
+
+    [Fact]
+    public void Probe_OversizeSessionLocator_FailsClosedWithoutIo()
+    {
+        var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+            SelectedRoot,
+            new string('s', 257),
+            "1.0.71",
+            true,
+            "metadata_only")));
+
+        Assert.Empty(fileSystem.InspectedPaths);
+        AssertMalformed(probe);
+    }
+
+    [Theory]
+    [MemberData(nameof(UnsafeSourceRoots))]
+    public void Probe_NonNativeOrDeviceRoot_FailsClosedBeforeFilesystemIo(string root)
+    {
+        var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+            root,
+            "session-123",
             "1.0.71",
             true,
             "metadata_only")));
@@ -292,8 +350,42 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         { SelectedRoot, "nested/session", "1.0.71" },
         { SelectedRoot, "nested\\session", "1.0.71" },
         { SelectedRoot, "session:123", "1.0.71" },
+        { SelectedRoot, "session 123", "1.0.71" },
+        { SelectedRoot, "session\n123", "1.0.71" },
+        { SelectedRoot, "-session-123", "1.0.71" },
+        { SelectedRoot, "session-é", "1.0.71" },
         { SelectedRoot, "session-123", "invalid version" },
+        { SelectedRoot, "session-123", "_1.0.71" },
+        { SelectedRoot, "session-123", "1.0.71\n" },
+        { SelectedRoot, "session-123", new string('v', 65) },
     };
+
+    public static TheoryData<string> UnsafeSourceRoots()
+    {
+        var values = new TheoryData<string>
+        {
+            @"\\server\share\copilot",
+            @"\\?\C:\private\copilot",
+            @"\\.\C:\private\copilot",
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            values.Add("/private/copilot");
+            values.Add(@"C:\private\NUL\copilot");
+            values.Add("C:/private/copilot");
+            values.Add(SelectedRoot + "\\");
+        }
+        else
+        {
+            values.Add(@"C:\private\copilot");
+            values.Add("//server/share/copilot");
+            values.Add("/dev/copilot");
+            values.Add("/proc/self/fd/0");
+            values.Add(SelectedRoot + "/");
+        }
+
+        return values;
+    }
 
     [Fact]
     public void Probe_ProducesDeterministicContractBytes()

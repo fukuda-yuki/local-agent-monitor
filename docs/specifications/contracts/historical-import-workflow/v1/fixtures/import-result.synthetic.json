@@ -1,0 +1,74 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-import-result/v1",
+  "operation_id": "hop_11111111111111111111111111111111",
+  "request_id": "hir_11111111111111111111111111111111",
+  "preview_id": "hip_11111111111111111111111111111111",
+  "preview_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "snapshot_version": "hsv_1",
+  "outcome": "succeeded",
+  "transaction_outcome": "committed",
+  "idempotency_outcome": "first_application",
+  "source_kind": "historical",
+  "source_surface": "github-copilot-cli",
+  "source_tier": "tier_b",
+  "profile_id": "synthetic-contract-profile",
+  "adapter_id": "synthetic-contract-adapter-v1",
+  "evidence_status": "production",
+  "counts": {
+    "total": { "availability": "available", "value": 3 },
+    "new_observations": { "availability": "available", "value": 1 },
+    "new_sessions": { "availability": "unavailable", "value": null },
+    "new_events": { "availability": "unavailable", "value": null },
+    "duplicates": { "availability": "available", "value": 1 },
+    "conflicts": { "availability": "available", "value": 1 },
+    "record_rejections": { "availability": "available", "value": 1 }
+  },
+  "observations": [
+    {
+      "observation_id": "hob_11111111111111111111111111111111",
+      "identity_resolution": "distinct_unbound",
+      "binding_basis": "none",
+      "completeness": "partial",
+      "completeness_reasons": [
+        "historical_summary_only"
+      ],
+      "missing_capabilities": [
+        "content",
+        "event_identity",
+        "lifecycle",
+        "session_identity",
+        "timing",
+        "trace_identity"
+      ],
+      "content_state": "not_captured"
+    }
+  ],
+  "duplicates": [
+    {
+      "record_result_id": "hrr_22222222222222222222222222222222",
+      "observation_id": "hob_22222222222222222222222222222222",
+      "candidate_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "decision": "exact_duplicate_noop"
+    }
+  ],
+  "conflicts": [
+    {
+      "record_result_id": "hrr_33333333333333333333333333333333",
+      "observation_id": "hob_33333333333333333333333333333333",
+      "code": "source_record_conflict",
+      "conflict_fields": [
+        "errors.code"
+      ],
+      "existing_fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "incoming_fingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "decision": "preserve_existing"
+    }
+  ],
+  "retention": {
+    "disposition": "not_applicable",
+    "created_item_count": 0,
+    "pin_state": "not_applicable",
+    "deletion_state": "not_applicable"
+  }
+}

@@ -129,11 +129,13 @@ already terminal verification/evidence is `410`; store busy/unavailable is
 canonical FirstTrace/Doctor code and is authoritative; HTTP status never turns
 a failure into success.
 
-The Doctor section lives in the existing `/diagnostics` page. D042 remains a
-seven-screen, two-navigation-item information architecture. The section shows
-source selection, empty/detected state, the returned current state, severity,
-source, evidence references, next action, retryability and active/expired/
-cancelled/completed lifecycle. It exposes at most one primary action. API
+The Doctor section lives in the existing `/diagnostics` page and adds no Doctor
+screen. D042's two-navigation-item sidebar remains unchanged. Issue #79 adds
+the separate `/historical-import` page through an explicit diagnostics card;
+that page is outside this Doctor interface. The Doctor section shows source
+selection, empty/detected state, the returned current state, severity, source,
+evidence references, next action, retryability and active/expired/cancelled/
+completed lifecycle. It exposes at most one primary action. API
 failure provides an explicit GET retry action, restores focus to the result
 heading, and announces state changes through a labelled live region. All
 controls are keyboard reachable in DOM order and carry explicit labels.

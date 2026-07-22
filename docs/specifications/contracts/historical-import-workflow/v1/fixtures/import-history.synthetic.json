@@ -1,0 +1,26 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-import-history/v1",
+  "items": [
+    {
+      "operation_id": "hop_11111111111111111111111111111111",
+      "state": "succeeded",
+      "outcome": "committed",
+      "source_kind": "historical",
+      "source_surface": "github-copilot-cli",
+      "source_badge": "historical",
+      "source_tier": "tier_b",
+      "profile_id": "synthetic-contract-profile",
+      "adapter_id": "synthetic-contract-adapter-v1",
+      "new_observation_count": 1,
+      "duplicate_count": 1,
+      "conflict_count": 1,
+      "completeness": "partial",
+      "completeness_reasons": [
+        "historical_summary_only"
+      ],
+      "content_state": "not_captured",
+      "retention_disposition": "not_applicable"
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/observation-detail.schema.json",
+  "title": "Historical observation detail projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "schema_version",
+    "observation_id",
+    "source_kind",
+    "source_surface",
+    "source_badge",
+    "source_tier",
+    "profile_id",
+    "adapter_id",
+    "identity_resolution",
+    "binding_basis",
+    "completeness",
+    "completeness_reasons",
+    "missing_capabilities",
+    "content_state",
+    "summary_fields",
+    "trace_controls_enabled",
+    "retention_disposition"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-import-workflow/v1" },
+    "schema_version": { "const": "historical-import-workflow-observation-detail/v1" },
+    "observation_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hob_[0-9a-f]{32}$" },
+    "source_kind": { "const": "historical" },
+    "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+    "source_badge": { "const": "historical" },
+    "source_tier": { "const": "tier_b" },
+    "profile_id": { "$ref": "#/$defs/token" },
+    "adapter_id": { "$ref": "#/$defs/token" },
+    "identity_resolution": { "enum": ["distinct_unbound", "attached_exact"] },
+    "binding_basis": { "enum": ["none", "native_id", "explicit_link", "exact_trace_id"] },
+    "completeness": { "const": "partial" },
+    "completeness_reasons": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": { "const": "historical_summary_only" }
+    },
+    "missing_capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": { "enum": ["content", "event_identity", "lifecycle", "session_identity", "timing", "trace_identity"] }
+    },
+    "content_state": { "const": "not_captured" },
+    "summary_fields": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "model_tokens.model",
+          "model_tokens.input_tokens",
+          "model_tokens.output_tokens",
+          "model_tokens.total_tokens",
+          "model_tokens.cache_tokens",
+          "model_tokens.reasoning_tokens",
+          "retry_attempt.retry",
+          "retry_attempt.attempt",
+          "errors.present",
+          "errors.code"
+        ]
+      }
+    },
+    "trace_controls_enabled": { "const": false },
+    "retention_disposition": { "const": "not_applicable" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "identity_resolution": { "const": "distinct_unbound" },
+        "binding_basis": { "const": "none" }
+      }
+    },
+    {
+      "properties": {
+        "identity_resolution": { "const": "attached_exact" },
+        "binding_basis": { "enum": ["native_id", "explicit_link", "exact_trace_id"] }
+      }
+    }
+  ],
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
+    }
+  }
+}

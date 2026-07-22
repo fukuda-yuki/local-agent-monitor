@@ -1,0 +1,137 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "inventory_date": "2026-07-23",
+  "environment_boundary": "Draft Issue #79 candidate on Windows native with deterministic synthetic adapter results, disposable SQLite databases, loopback-only test hosts, and repository-safe fixtures; no real producer source is claimed.",
+  "active_rows": [
+    {
+      "row_id": "91-I-079",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-import-workflow",
+      "operation": "versioned preview, confirmation, stale-preview rejection, transactional import, deduplication, conflict preservation, history, CLI, API, and UI",
+      "profiles": {
+        "collection": ["adapter-result", "sqlite", "config-cli", "loopback-api", "playwright-ui"],
+        "content_access": ["raw-default", "sanitized-only"],
+        "compatibility": ["supported", "new-version", "unsupported", "schema-drift"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-identity", "explicit-link", "exact-trace", "unbound"],
+        "restart": ["idempotent-retry"],
+        "retention": ["metadata-only"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "workflow_contract": "historical-import-workflow.v1",
+        "matrix_contract": "validation-matrix.v1"
+      },
+      "expected_invariant": "The source-neutral workflow consumes only schema-valid adapter output and commits an unchanged confirmed preview atomically, idempotently, and without overwriting stronger evidence or inventing merge identity.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "high",
+      "blocker": "The exact final candidate automation, full suite, and browser matrix have not yet been executed.",
+      "retry_condition": "Freeze the final functional SHA and execute every named Issue #79 contract, store, application, gateway, CLI, route, and Playwright test plus the required repository validation suite.",
+      "unverified_capability": "End-to-end workflow correctness on the exact final candidate.",
+      "owner": "Issue #79 historical import",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Draft-only deterministic test boundary; no passing result is recorded."
+    },
+    {
+      "row_id": "91-S-079",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-import-security",
+      "operation": "metadata-only preview/history/conflicts, include-content rejection, same-origin mutation, no-store responses, inert rendering, logs, and repository evidence",
+      "profiles": {
+        "collection": ["loopback-api", "playwright-ui", "application-output", "repository-artifacts"],
+        "content_access": ["raw-default", "sanitized-only"],
+        "compatibility": ["supported", "new-version", "unsupported", "schema-drift"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-identity", "unbound"],
+        "restart": [],
+        "retention": ["metadata-only"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "secret_corpus": "validation-secret-corpus.v1",
+        "workflow_contract": "historical-import-workflow.v1"
+      },
+      "expected_invariant": "Preview, rejection, conflict, history, HTTP, UI, log, and repository artifacts expose bounded metadata only; include-content requests are rejected and the workflow creates no parallel raw-content or retention lifecycle.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "high",
+      "blocker": "The exact final candidate security, scanner, and no-leak validation has not yet been executed.",
+      "retry_condition": "Run the named security-focused Issue #79 tests, Issue #91 scanner checks, artifact scan, and required repository validation against the frozen final SHA.",
+      "unverified_capability": "Repository-safe and same-machine security boundaries on the exact final candidate.",
+      "owner": "Issue #79 historical import",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Draft-only synthetic corpus and disposable local resources; no passing result is recorded."
+    },
+    {
+      "row_id": "91-L-079",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-import-live-producer",
+      "operation": "real fixture-bound producer discovery, preview, confirmed import, bounded result, and leak scan",
+      "profiles": {
+        "collection": ["fixture-bound-real-producer"],
+        "content_access": ["sanitized-only"],
+        "compatibility": ["supported"],
+        "hook": [],
+        "otel": [],
+        "binding": ["profile-tuple"],
+        "restart": [],
+        "retention": ["metadata-only"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "source_profile_contract": "historical-source-profile.v1",
+        "adapter_result_contract": "historical-adapter-result.v1"
+      },
+      "expected_invariant": "A real producer source is accepted only when its exact version, schema fingerprint, and fixture digest match a source-owner-promoted production profile tuple, and its bounded evidence contains no source content or sensitive path.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "Required live evidence is absent because the upstream source owners have not promoted any production-supported fixture tuple.",
+          "compatibility_basis": "This records the external precondition only; it is not a functional pass and is not inherited from Issue #91."
+        }
+      ],
+      "actual_result": "No real fixture-bound producer run was attempted because no production-supported tuple exists.",
+      "classification": "blocked_external",
+      "severity": "medium",
+      "blocker": "The frozen source profiles expose no production-supported fixture tuple for a real historical producer.",
+      "retry_condition": "A source owner must promote an exact production tuple and repository-safe fixture, after which the final candidate must execute discovery, preview, confirmed import, result inspection, and leak scanning for that tuple.",
+      "unverified_capability": "Successful import interoperability with a real supported historical producer.",
+      "owner": "Issue #79 historical import with Issues #76, #77, and #78 source owners",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "External source-profile activation boundary; no real source data was read, retained, or copied."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/specifications/contracts/historical-import-workflow/v1/issue-91-validation-handoff.json",
+    "docs/sprints/issue-79-historical-import/final-evidence.md"
+  ],
+  "release_decision": {
+    "decision": "release_blocked",
+    "external_blockers": [
+      {
+        "row_id": "91-L-079",
+        "severity": "medium",
+        "blocker": "The frozen source profiles expose no production-supported fixture tuple for a real historical producer.",
+        "retry_condition": "A source owner must promote an exact production tuple and repository-safe fixture, after which the final candidate must execute discovery, preview, confirmed import, result inspection, and leak scanning for that tuple.",
+        "unverified_capability": "Successful import interoperability with a real supported historical producer."
+      }
+    ]
+  }
+}

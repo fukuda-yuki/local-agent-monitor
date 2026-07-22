@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/error.schema.json",
+  "title": "Historical import machine error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "enum": [
+        "historical_import_request_invalid",
+        "historical_import_preview_not_found",
+        "historical_import_preview_expired",
+        "historical_import_preview_stale",
+        "historical_import_source_changed",
+        "historical_import_no_eligible_candidates",
+        "historical_import_confirmation_invalid",
+        "historical_import_confirmation_expired",
+        "historical_import_confirmation_consumed",
+        "historical_import_idempotency_conflict",
+        "historical_import_result_not_available",
+        "historical_import_operation_not_found",
+        "historical_import_observation_not_found",
+        "historical_import_profile_not_admitted",
+        "historical_import_candidate_invalid",
+        "historical_import_fixture_not_source_support_evidence",
+        "historical_import_store_busy",
+        "historical_import_store_unavailable",
+        "historical_import_transaction_failed"
+      ]
+    }
+  }
+}

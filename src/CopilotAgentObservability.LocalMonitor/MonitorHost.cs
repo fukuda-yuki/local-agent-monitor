@@ -1,10 +1,12 @@
 using System.Text.Encodings.Web;
 using CopilotAgentObservability.Alerts;
+using CopilotAgentObservability.ConfigCli.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Alerts;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Doctor.ClaudeCode;
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
+using CopilotAgentObservability.LocalMonitor.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
@@ -13,6 +15,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.SanitizedExport;
@@ -130,6 +133,15 @@ internal static class MonitorHost
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
+        var historicalImportStore = new SqliteHistoricalImportStore(options.DatabasePath);
+        historicalImportStore.CreateSchema();
+        IHistoricalImportApplication historicalImportApplication = testOptions?.HistoricalImportApplication
+            ?? new HistoricalImportApplicationService(
+                historicalImportStore,
+                new HistoricalImportSourceGateway(),
+                HistoricalAdmissionRegistry.Empty,
+                timeProvider);
+        builder.Services.AddSingleton<IHistoricalImportApplication>(_ => historicalImportApplication);
         var historicalEvidenceStore = new SqliteHistoricalEvidenceDatasetStoreV1(options.DatabasePath);
         historicalEvidenceStore.CreateSchema();
         builder.Services.AddSingleton(historicalEvidenceStore);
@@ -230,6 +242,25 @@ internal static class MonitorHost
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
                     return;
                 }
+                if (HistoricalImportRoutes.IsPath(context.Request.Path)
+                    && exception is BadHttpRequestException historicalBodyException
+                    && historicalBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                {
+                    await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "request_too_large");
+                    return;
+                }
+                if (HistoricalImportRoutes.IsPath(context.Request.Path)
+                    && exception is BadHttpRequestException historicalRequestException
+                    && historicalRequestException.StatusCode == StatusCodes.Status400BadRequest)
+                {
+                    await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, HistoricalImportErrorCodes.RequestInvalid);
+                    return;
+                }
+                if (HistoricalImportRoutes.IsPath(context.Request.Path))
+                {
+                    await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, HistoricalImportErrorCodes.StoreUnavailable);
+                    return;
+                }
                 if (AlertLifecycleRoutes.IsAlertPath(context.Request.Path)
                     && exception is BadHttpRequestException alertBodyException
                     && alertBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge)
@@ -257,7 +288,8 @@ internal static class MonitorHost
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
             var alertPath = AlertLifecycleRoutes.IsAlertPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath || alertPath)
+            var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath || alertPath || historicalImportPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -266,6 +298,10 @@ internal static class MonitorHost
                 if (retentionPath)
                 {
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (historicalImportPath)
+                {
+                    await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (sanitizedExportPath)
                 {
@@ -301,6 +337,7 @@ internal static class MonitorHost
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
+        HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1703,6 +1740,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public IHistoricalImportApplication? HistoricalImportApplication { get; init; }
+
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
     public IAlertEngineStore? AlertEngineStore { get; set; }
 

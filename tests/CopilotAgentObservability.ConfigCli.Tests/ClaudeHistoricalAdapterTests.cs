@@ -8,6 +8,10 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class ClaudeHistoricalAdapterTests
 {
+    private static readonly string ExactReference = Path.GetFullPath(Path.Combine(
+        Path.GetTempPath(),
+        "claude-historical-adapter-tests",
+        "transcript.jsonl"));
     private static readonly string ContractRoot = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
@@ -97,7 +101,7 @@ public sealed class ClaudeHistoricalAdapterTests
         var consentKind = (ClaudeTranscriptReferenceKind)consentKindValue;
         var fileSystem = new RecordingFileSystem();
         var adapter = new ClaudeHistoricalAdapter(fileSystem);
-        var reference = new ClaudeTranscriptReference(referenceKind, "C:/private/transcript.jsonl");
+        var reference = new ClaudeTranscriptReference(referenceKind, ExactReference);
 
         var wrongKind = adapter.Probe(new(
             reference,
@@ -105,7 +109,7 @@ public sealed class ClaudeHistoricalAdapterTests
             "2.1.215"));
         var wrongPath = adapter.Probe(new(
             reference,
-            new(referenceKind, "C:/private/adjacent.jsonl", "metadata_only"),
+            new(referenceKind, Path.Combine(Path.GetDirectoryName(ExactReference)!, "adjacent.jsonl"), "metadata_only"),
             "2.1.215"));
 
         Assert.Equal(["historical_source_reference_required"], wrongKind.Diagnostics);
@@ -125,11 +129,9 @@ public sealed class ClaudeHistoricalAdapterTests
             Inspection = ClaudeTranscriptReferenceInspection.RegularFile
         };
         var adapter = new ClaudeHistoricalAdapter(fileSystem);
-        const string exactReference = "C:/private/transcript.jsonl";
+        var result = adapter.Probe(AuthorizedRequest(kind, ExactReference));
 
-        var result = adapter.Probe(AuthorizedRequest(kind, exactReference));
-
-        Assert.Equal([exactReference], fileSystem.InspectedReferences);
+        Assert.Equal([ExactReference], fileSystem.InspectedReferences);
         Assert.Equal("detected", result.DetectionState);
         Assert.Equal("provided", result.SourceReferenceState);
         Assert.Equal("2.1.215", result.SourceApplicationVersion);
@@ -138,6 +140,116 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal(0, result.CandidateCount);
         Assert.Equal("not_read", result.ContentRisk);
         Assert.Equal(["historical_source_format_unsupported"], result.Diagnostics);
+    }
+
+    [Theory]
+    [MemberData(nameof(UnsafeExactReferences))]
+    public void NonNativeOrDeviceReference_IsMalformedBeforeFilesystemIo(string exactReference)
+    {
+        var fileSystem = new RecordingFileSystem();
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+
+        var result = adapter.Probe(AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.ExplicitUserSelection,
+            exactReference));
+
+        Assert.Equal("not_evaluated", result.DetectionState);
+        Assert.Equal("provided", result.SourceReferenceState);
+        Assert.Equal(["historical_source_malformed"], result.Diagnostics);
+        AssertNoFileSystemIo(fileSystem);
+    }
+
+    [Theory]
+    [InlineData("01.0.0")]
+    [InlineData("2.1.215-")]
+    [InlineData("2.1.215-01")]
+    [InlineData("2.1.215-alpha..1")]
+    [InlineData("2.1.215+")]
+    [InlineData("2.1.215+build..1")]
+    [InlineData("v2.1.215")]
+    [InlineData("build_2026")]
+    public void MetadataTokenThatIsNotSemanticVersion_IsProbedButNotProjected(string version)
+    {
+        var fileSystem = new RecordingFileSystem
+        {
+            Inspection = ClaudeTranscriptReferenceInspection.RegularFile,
+        };
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+        var request = AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            ExactReference) with
+        {
+            SourceApplicationVersion = version,
+        };
+
+        var result = adapter.Probe(request);
+
+        Assert.Null(result.SourceApplicationVersion);
+        Assert.Equal("detected", result.DetectionState);
+        Assert.Equal(["historical_source_format_unsupported"], result.Diagnostics);
+        Assert.Equal([ExactReference], fileSystem.InspectedReferences);
+    }
+
+    [Theory]
+    [InlineData("invalid version")]
+    [InlineData("_2.1.215")]
+    [InlineData("2.1.215\n")]
+    public void InvalidMetadataToken_IsMalformedBeforeFilesystemIo(string version)
+    {
+        var fileSystem = new RecordingFileSystem();
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+        var request = AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            ExactReference) with
+        {
+            SourceApplicationVersion = version,
+        };
+
+        var result = adapter.Probe(request);
+
+        Assert.Null(result.SourceApplicationVersion);
+        Assert.Equal(["historical_source_malformed"], result.Diagnostics);
+        AssertNoFileSystemIo(fileSystem);
+    }
+
+    [Fact]
+    public void OversizeMetadataToken_IsMalformedBeforeFilesystemIo()
+    {
+        var fileSystem = new RecordingFileSystem();
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+        var request = AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            ExactReference) with
+        {
+            SourceApplicationVersion = new string('v', 65),
+        };
+
+        var result = adapter.Probe(request);
+
+        Assert.Null(result.SourceApplicationVersion);
+        Assert.Equal(["historical_source_malformed"], result.Diagnostics);
+        AssertNoFileSystemIo(fileSystem);
+    }
+
+    [Fact]
+    public void SemanticVersionWithPrereleaseAndBuildMetadata_IsAcceptedExactly()
+    {
+        var fileSystem = new RecordingFileSystem
+        {
+            Inspection = ClaudeTranscriptReferenceInspection.RegularFile,
+        };
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+        var request = AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            ExactReference) with
+        {
+            SourceApplicationVersion = "2.1.215-rc.1+build.5",
+        };
+
+        var result = adapter.Probe(request);
+
+        Assert.Equal("2.1.215-rc.1+build.5", result.SourceApplicationVersion);
+        Assert.Equal([ExactReference], fileSystem.InspectedReferences);
     }
 
     [Theory]
@@ -152,13 +264,13 @@ public sealed class ClaudeHistoricalAdapterTests
 
         var result = adapter.Probe(AuthorizedRequest(
             ClaudeTranscriptReferenceKind.ExplicitUserSelection,
-            "C:/private/transcript.jsonl"));
+            ExactReference));
 
         Assert.Equal(["historical_source_malformed"], result.Diagnostics);
         AssertMatchesGolden(
             adapter.ProbeUtf8(AuthorizedRequest(
                 ClaudeTranscriptReferenceKind.ExplicitUserSelection,
-                "C:/private/transcript.jsonl")),
+                ExactReference)),
             "malformed-source.json",
             "historical-adapter-result.schema.json");
     }
@@ -169,7 +281,7 @@ public sealed class ClaudeHistoricalAdapterTests
     {
         var fileSystem = new RecordingFileSystem { InspectionFailure = failure };
         var adapter = new ClaudeHistoricalAdapter(fileSystem);
-        const string sensitiveReference = "C:/Users/private/secret-transcript.jsonl";
+        var sensitiveReference = Path.Combine(Path.GetDirectoryName(ExactReference)!, "secret-transcript.jsonl");
 
         var resultBytes = adapter.ProbeUtf8(AuthorizedRequest(
             ClaudeTranscriptReferenceKind.OfficialHook,
@@ -191,7 +303,7 @@ public sealed class ClaudeHistoricalAdapterTests
 
         var resultBytes = adapter.ProbeUtf8(AuthorizedRequest(
             ClaudeTranscriptReferenceKind.OfficialHook,
-            "C:/private/transcript.jsonl"));
+            ExactReference));
         var json = Encoding.UTF8.GetString(resultBytes);
         using var result = JsonDocument.Parse(resultBytes);
 
@@ -217,7 +329,7 @@ public sealed class ClaudeHistoricalAdapterTests
 
         var thrown = Assert.Throws(failure.GetType(), () => adapter.Probe(AuthorizedRequest(
             ClaudeTranscriptReferenceKind.OfficialHook,
-            "C:/private/transcript.jsonl")));
+            ExactReference)));
 
         Assert.Same(failure, thrown);
     }
@@ -247,7 +359,7 @@ public sealed class ClaudeHistoricalAdapterTests
         var adapter = new ClaudeHistoricalAdapter(fileSystem);
         var request = AuthorizedRequest(
             ClaudeTranscriptReferenceKind.OfficialHook,
-            "C:/private/transcript.jsonl");
+            ExactReference);
 
         var firstResult = adapter.ProbeUtf8(request);
         var secondResult = adapter.ProbeUtf8(request);
@@ -282,6 +394,34 @@ public sealed class ClaudeHistoricalAdapterTests
         new IOException("malformed source contains TOP_SECRET"),
         new PathTooLongException("oversize reference contains TOP_SECRET")
     };
+
+    public static TheoryData<string> UnsafeExactReferences()
+    {
+        var values = new TheoryData<string>
+        {
+            @"\\server\share\transcript.jsonl",
+            @"\\?\C:\private\transcript.jsonl",
+            @"\\.\C:\private\transcript.jsonl",
+            "relative-transcript.jsonl",
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            values.Add("/private/transcript.jsonl");
+            values.Add(@"C:\private\NUL.jsonl");
+            values.Add("C:/private/transcript.jsonl");
+            values.Add(ExactReference + "\\");
+        }
+        else
+        {
+            values.Add(@"C:\private\transcript.jsonl");
+            values.Add("//server/share/transcript.jsonl");
+            values.Add("/dev/null");
+            values.Add("/proc/self/fd/0");
+            values.Add(ExactReference + "/");
+        }
+
+        return values;
+    }
 
     public static TheoryData<Exception> NonFatalUnexpectedInspectionFailures() => new()
     {

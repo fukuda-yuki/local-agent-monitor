@@ -30,11 +30,13 @@
     "source_reference_state": { "enum": ["provided", "missing"] },
     "source_application_version": {
       "type": ["string", "null"],
-      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])"
     },
     "support_authorized": { "type": "boolean" },
     "source_format_profile": { "$ref": "#/$defs/token" },
-    "candidate_count": { "type": "integer", "minimum": 0 },
+    "candidate_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
     "content_risk": { "enum": ["not_read", "source_read_metadata_only", "source_read_include_content"] },
     "repository_safe": { "const": true },
     "diagnostics": {
@@ -49,11 +51,92 @@
       }
     }
   },
+  "oneOf": [
+    {
+      "properties": {
+        "support_authorized": { "const": false },
+        "source_format_profile": { "const": "none" },
+        "candidate_count": { "const": 0 },
+        "content_risk": { "const": "not_read" },
+        "diagnostics": { "type": "array", "minItems": 1, "maxItems": 1 }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "detection_state": { "const": "not_evaluated" },
+            "source_reference_state": { "const": "missing" },
+            "source_application_version": { "const": null },
+            "diagnostics": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "const": "historical_source_reference_required" }
+            }
+          }
+        },
+        {
+          "properties": {
+            "detection_state": { "const": "detected" },
+            "source_reference_state": { "const": "provided" },
+            "diagnostics": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "const": "historical_source_format_unsupported" }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_reference_state": { "const": "provided" },
+            "diagnostics": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "const": "historical_source_malformed" }
+            }
+          },
+          "oneOf": [
+            {
+              "properties": {
+                "detection_state": { "const": "not_evaluated" },
+                "source_application_version": { "const": null }
+              }
+            },
+            {
+              "properties": {
+                "detection_state": { "const": "detected" }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "properties": {
+        "support_authorized": { "const": true },
+        "detection_state": { "const": "detected" },
+        "source_reference_state": { "const": "provided" },
+        "source_application_version": { "type": "string" },
+        "source_format_profile": { "$ref": "#/$defs/supported_format_profile" },
+        "candidate_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "content_risk": { "enum": ["source_read_metadata_only", "source_read_include_content"] },
+        "diagnostics": { "type": "array", "maxItems": 0 }
+      }
+    }
+  ],
   "$defs": {
     "token": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
+    },
+    "supported_format_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!none$(?![\\s\\S]))[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
     }
   }
 }

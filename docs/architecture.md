@@ -39,6 +39,29 @@ Session sanitized events -----------------> timeline as Session / unowned
 This path does not replace or alter the OTLP receiver and existing monitor
 projection.
 
+Issue #79 adds a separate historical-observation path:
+
+```text
+explicit local source selection + one-probe consent
+        |
+        +--> #77/#78 bounded adapter --> strict producer result/candidate batch
+                                           |
+                                           v
+                                typed trusted admission seam
+                                           |
+                      preview -> confirmation -> atomic commit
+                                           |
+                                           v
+                              historical_import schema v1
+                               |-- observations/provenance
+                               |-- sanitized conflicts/receipts
+                               +-- optional exact link to an existing Session
+```
+
+The path never reparses an adapter output, scans for sources, or writes a
+Session, Run, Event, trace, span, or source timestamp. The existing Session
+workspace remains the live read model; historical observations are separate.
+
 Issue #102 adds a source-independent Doctor path shared by direct, CLI, and
 HTTP callers:
 
@@ -195,6 +218,30 @@ to Config CLI and no new Local Monitor route.
 - raw content は secret-filter 後に metadata と分離して保存し、capture から
   90 日で expiry。Retention catalog v1 が item-level physical cleanup を所有し、
   pin / delete-now は Issue #90 に残す。
+
+### Historical Import Subsystem
+
+- Issue #79 owns source-neutral preview, confirmation, stale revalidation,
+  idempotent commit, result/history, and historical-observation reads.
+- `CopilotAgentObservability.ConfigCli` owns the #77/#78 bounded source adapter
+  facade. Local Monitor and Config CLI adapt transport into the same workflow
+  contracts; neither accepts caller-supplied adapter/candidate bytes.
+- `CopilotAgentObservability.Persistence.Sqlite` owns a distinct
+  `schema_version(component='historical_import', version=1)` component in the
+  Local Monitor database. It is not part of `RawTelemetryStore.cs`, Session
+  schema v13, or retention catalog v1.
+- Positive production admission can come only from a source-specific typed seam
+  after exact profile tuple and stable source snapshot validation. Current
+  GitHub Copilot CLI and Claude Code profiles remain zero-candidate and
+  non-actionable.
+- Imported metadata is a distinct historical observation. An exact source-
+  specific binding may store a navigation-only relationship to an existing
+  Session, but never mutates or coalesces that Session. Otherwise the
+  observation stays `distinct_unbound`.
+- Metadata-only observations are sanitized local runtime metadata with
+  `content_state=not_captured`; they create no retention item. A later content
+  profile must use existing `session_event_content` and #89/#90 rather than a
+  new store kind.
 
 ### Retention Mutation Application Service
 
@@ -567,6 +614,17 @@ timestamps, fixed evidence class/kind, bounded opaque references, accepted
 ordinals, state, and revision only. It contains no raw telemetry, prompt,
 response, tool body, PII, credential, authorization value, absolute/local path,
 repository/workspace heuristic, or exception text.
+
+Historical-import workflow state is local runtime data. Public preview,
+progress, result, history, and observation projections contain only fixed
+metadata, availability-wrapped counts, opaque IDs/digests, and sanitized
+conflict evidence. The one selected source locator may be held only as
+ephemeral private database state in `historical_import_previews` until
+commit/rejection/expiry so separate CLI processes or a Local Monitor restart
+can re-probe the exact selection; it is never copied to durable operation
+history or repository-safe output.
+Candidate/source-record keys remain internal. The component stores no source
+body and creates no raw retention item in workflow v1.
 
 ## 5. Aspire AppHost Boundary
 

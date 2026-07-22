@@ -1,0 +1,29 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-observation-list/v1",
+  "source_filter": "historical",
+  "items": [
+    {
+      "observation_id": "hob_11111111111111111111111111111111",
+      "source_kind": "historical",
+      "source_surface": "github-copilot-cli",
+      "source_badge": "historical",
+      "source_tier": "tier_b",
+      "completeness": "partial",
+      "completeness_reasons": [
+        "historical_summary_only"
+      ],
+      "missing_capabilities": [
+        "content",
+        "event_identity",
+        "lifecycle",
+        "session_identity",
+        "timing",
+        "trace_identity"
+      ],
+      "content_state": "not_captured",
+      "trace_controls_enabled": false
+    }
+  ],
+  "next_cursor": null
+}

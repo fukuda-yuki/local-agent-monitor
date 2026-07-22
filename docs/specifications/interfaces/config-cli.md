@@ -177,6 +177,67 @@ schema/profile, payload record count, total uncompressed bytes, and archive
 SHA-256, but does not claim source/store provenance. Full behavior is canonical in
 [sanitized-evidence-export.md](sanitized-evidence-export.md).
 
+## Historical Import Commands
+
+```text
+config-cli historical-import preview --database <monitor.db> --request <request.json>
+config-cli historical-import confirm --database <monitor.db> --request <request.json>
+config-cli historical-import commit --database <monitor.db> --request <request.json>
+config-cli historical-import status --database <monitor.db> --operation-id <hop-id>
+config-cli historical-import result --database <monitor.db> --operation-id <hop-id>
+config-cli historical-import history --database <monitor.db> [--limit <1..100>]
+config-cli historical-import observations --database <monitor.db> [--limit <1..100>] [--cursor <hoc-id>]
+```
+
+The command family is a transport adapter over the same
+`historical-import-workflow/v1` application contracts used by Local Monitor
+HTTP. `preview`, `confirm`, and `commit` read one strict request object from a
+regular file bounded to 1,048,576 bytes. The request file may contain the exact
+local source selection, preview/confirmation binding, or idempotency value where
+that stage requires it; it is local runtime input, must not be committed, and
+is never echoed. Unknown or duplicate JSON properties, unsupported contract
+versions, noncanonical identifier/hash/token values, repeated/unknown options,
+and a missing existing database fail closed. Request input is opened without
+following a target or ancestor link and must be an existing regular file;
+directory, reparse/symlink, FIFO, socket, and device inputs are rejected before
+body reads. The database is opened by the executing store in existing-only
+read/write mode, never `ReadWriteCreate`; disappearance, replacement, access,
+or format failure maps to store-unavailable exit `5`, not an invalid-request
+fallback. The commands neither discover a database/source nor
+fall back to a producer parser.
+Before installing or validating the additive historical-import component, the
+CLI must verify the existing database's `schema_version` monitor owner and the
+canonical Local Monitor base tables. An unrelated but otherwise valid SQLite
+database is store-unavailable and is not mutated. The no-link database lease
+pins one filesystem identity for the invocation; every SQLite connection is
+accepted only when its canonical main-database path and opened file identity
+still match that lease. A missing, moved, replaced, or identity-mismatched
+database is store-unavailable exit `5`.
+
+Every successful invocation writes exactly one closed workflow JSON object to
+stdout and nothing to stderr. A non-success writes no stdout and writes only
+the fixed workflow error code plus one newline to stderr. Rejected input, a
+source locator, raw content, a
+confirmation/idempotency token, exception text, credentials, PII, and database
+paths never enter stderr or error JSON. `preview` returns exit `0` for a valid
+current zero-candidate preview because it is a successful read-only decision;
+it does not make commit available.
+
+Exit categories are fixed:
+
+| Exit | Historical-import outcome |
+| ---: | --- |
+| `0` | successful preview/read/confirmation/commit, including a valid non-actionable preview or idempotent no-op result |
+| `2` | `historical_import_invalid_arguments` or `historical_import_request_invalid` |
+| `4` | fixed not-found, expired, stale, non-actionable, confirmation, idempotency, profile/candidate/fixture, or result-unavailable code |
+| `5` | `historical_import_store_busy`, `historical_import_store_unavailable`, or `historical_import_transaction_failed` |
+
+The exact request/result fields, stage ordering, source revalidation,
+idempotency, persistence, and no-leak mapping are canonical in
+[historical-source-import.md](historical-source-import.md). CLI success does
+not activate a producer profile, prove live source compatibility, or authorize
+content capture.
+
 ## Raw Data Commands
 
 ```text

@@ -1,0 +1,24 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-import-status/v1",
+  "operation_id": "hop_11111111111111111111111111111111",
+  "request_id": "hir_11111111111111111111111111111111",
+  "operation_version": 3,
+  "state": "succeeded",
+  "lifecycle": [
+    "queued",
+    "running",
+    "succeeded"
+  ],
+  "transaction_outcome": "committed",
+  "counts": {
+    "total": 3,
+    "processed": 3,
+    "new_observations": 1,
+    "duplicates": 1,
+    "conflicts": 1,
+    "record_rejections": 1
+  },
+  "result_available": true,
+  "failure_code": null
+}

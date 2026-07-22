@@ -104,6 +104,11 @@ captured raw trace をローカルの GitHub Copilot SDK で解析します。
 
 サイドバーの受信ステータスバッジ → ポップオーバー → 詳細診断の順に、受信 / 書き込み /
 Projection / 表示の 4 段の状態、readiness しきい値、取り込み履歴を確認できます。
+診断ページの明示的なカードから `/historical-import` を開くと、選択した履歴 source の
+metadata-only preview、confirmation、結果/履歴を確認できます。ページを開いただけで
+source を検索・読み取ることはありません。現在の GitHub Copilot CLI / Claude Code profile は
+format 未承認のため、content を読まず zero-candidate / import 不可を明示します。
+詳細は [Local Monitor ユーザーガイド](docs/user-guide/local-monitor.md#履歴インポート) を参照してください。
 
 ---
 

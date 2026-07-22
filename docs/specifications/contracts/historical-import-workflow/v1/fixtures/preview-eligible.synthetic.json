@@ -1,0 +1,65 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-preview/v1",
+  "preview_id": "hip_11111111111111111111111111111111",
+  "preview_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "snapshot_version": "hsv_1",
+  "expires_after_seconds": 300,
+  "source_selection_id": "hss_11111111111111111111111111111111",
+  "source_kind": "historical",
+  "source_surface": "github-copilot-cli",
+  "source_badge": "historical",
+  "source_tier": "tier_b",
+  "profile_id": "synthetic-contract-profile",
+  "adapter_id": "synthetic-contract-adapter-v1",
+  "adapter_state": "available",
+  "adapter_diagnostics": [],
+  "evidence_status": "production",
+  "source_application_version": "9.9.9-synthetic",
+  "source_format": {
+    "name": "synthetic-contract-format",
+    "version": "1.0.0"
+  },
+  "requested_capture": "metadata_only",
+  "source_time_range": {
+    "availability": "unavailable",
+    "start": null,
+    "end": null
+  },
+  "counts": {
+    "total": { "availability": "available", "value": 3 },
+    "eligible": { "availability": "available", "value": 3 },
+    "unsupported": { "availability": "available", "value": 0 },
+    "malformed": { "availability": "available", "value": 0 },
+    "duplicates": { "availability": "available", "value": 1 },
+    "conflicts": { "availability": "available", "value": 1 },
+    "new_observations": { "availability": "available", "value": 1 },
+    "new_sessions": { "availability": "unavailable", "value": null },
+    "new_events": { "availability": "unavailable", "value": null },
+    "merge_candidates": { "availability": "available", "value": 0 },
+    "excluded": { "availability": "available", "value": 0 }
+  },
+  "content_risk": "source_read_metadata_only",
+  "completeness_ceiling": "partial",
+  "completeness_reasons": [
+    "historical_summary_only"
+  ],
+  "missing_capabilities": [
+    "content",
+    "event_identity",
+    "lifecycle",
+    "session_identity",
+    "timing",
+    "trace_identity"
+  ],
+  "merge_candidates": [],
+  "retention_impact": {
+    "disposition": "not_applicable",
+    "created_item_count": 0,
+    "default_ttl_days": null,
+    "automatic_pin": false
+  },
+  "exclusions": [],
+  "commit_allowed": true,
+  "rejection_code": null
+}

@@ -1,0 +1,164 @@
+@page "/historical-import"
+@model HistoricalImportModel
+
+<section class="historical-import-page" id="historical-import-root">
+    <nav class="breadcrumb" aria-label="パンくず">
+        <a href="/diagnostics">診断</a>
+        <span class="breadcrumb-sep" aria-hidden="true">/</span>
+        <span class="breadcrumb-current">履歴インポート</span>
+    </nav>
+
+    <header class="historical-import-head">
+        <div>
+            <h2 class="monitor-page-title">履歴インポート</h2>
+            <p class="monitor-subtle">明示的に選んだ履歴ソースを、メタデータだけでプレビューしてから取り込みます。</p>
+        </div>
+        <span class="monitor-badge">sanitized metadata</span>
+    </header>
+
+    <section class="panel historical-import-source-panel" aria-labelledby="historical-import-source-heading">
+        <div class="panel-head">
+            <span class="panel-title" id="historical-import-source-heading">ソースを選択</span>
+            <span class="panel-meta">ページを開いただけでは検出・読み取りを開始しません</span>
+        </div>
+
+        <div class="historical-import-source-legend" id="historical-import-source-legend" aria-label="ソース種別の凡例">
+            <span class="historical-import-badge badge-live">Live OTel</span>
+            <span class="historical-import-badge badge-saved">Saved raw</span>
+            <span class="historical-import-badge badge-hook">Hook / SDK</span>
+            <span class="historical-import-badge badge-historical">Historical</span>
+            <span class="historical-import-badge badge-unsupported">Unsupported</span>
+        </div>
+
+        <div class="historical-import-source-cards" aria-label="取り込み元カード">
+            <button class="historical-import-source-card" type="button" data-source-selection="github-copilot-cli" aria-pressed="false">
+                <span class="historical-import-source-card-head">
+                    <strong>GitHub Copilot CLI</strong>
+                    <span class="historical-import-badge badge-historical">Historical</span>
+                    <span class="historical-import-badge badge-unsupported">Unsupported</span>
+                </span>
+                <span>範囲: 選択 root の session-state/{Session ID}/events.jsonl</span>
+                <span>読み取り: metadata_only · content risk: not_read</span>
+                <span>現在の profile は候補を許可しません</span>
+            </button>
+            <button class="historical-import-source-card" type="button" data-source-selection="claude-code" aria-pressed="false">
+                <span class="historical-import-source-card-head">
+                    <strong>Claude Code</strong>
+                    <span class="historical-import-badge badge-historical">Historical</span>
+                    <span class="historical-import-badge badge-unsupported">Unsupported</span>
+                </span>
+                <span>範囲: 公式 hook 参照または明示選択した 1 ファイル</span>
+                <span>読み取り: metadata_only · content risk: not_read</span>
+                <span>現在の profile は候補を許可しません</span>
+            </button>
+        </div>
+
+        <form class="historical-import-form" id="historical-import-form" autocomplete="off">
+            <div class="historical-import-field">
+                <label for="historical-import-source">履歴ソース</label>
+                <select id="historical-import-source" required>
+                    <option value="">選択してください</option>
+                    <option value="github-copilot-cli">GitHub Copilot CLI</option>
+                    <option value="claude-code">Claude Code</option>
+                </select>
+            </div>
+
+            <div class="historical-import-field">
+                <label for="historical-import-reference-kind">参照方法</label>
+                <select id="historical-import-reference-kind" required disabled>
+                    <option value="">ソースを先に選択してください</option>
+                </select>
+                <span class="historical-import-help" id="historical-import-scope">選択した正確な参照だけを確認します。</span>
+            </div>
+
+            <div class="historical-import-field">
+                <label for="historical-import-reference">正確なローカル参照</label>
+                <input id="historical-import-reference" type="text" maxlength="4096" required spellcheck="false" autocomplete="off" />
+                <span class="historical-import-help">この値は preview、履歴、ログ、URL に表示しません。</span>
+            </div>
+
+            <div class="historical-import-field" id="historical-import-session-field" hidden>
+                <label for="historical-import-session-id">Session ID</label>
+                <input id="historical-import-session-id" type="text" maxlength="256" spellcheck="false" autocomplete="off" />
+                <span class="historical-import-help">GitHub Copilot CLI の選択 root 内で確認する正確な Session ID です。</span>
+            </div>
+
+            <div class="historical-import-field">
+                <label for="historical-import-version">ソースアプリケーション版</label>
+                <input id="historical-import-version" type="text" maxlength="64" required spellcheck="false" autocomplete="off" />
+            </div>
+
+            <fieldset class="historical-import-capture">
+                <legend>読み取り範囲</legend>
+                <label><input type="radio" name="historical-import-capture" value="metadata_only" checked disabled /> メタデータのみ</label>
+                <p class="historical-import-help">本文・プロンプト・応答・ツール引数は取り込みません。content import はこの版では利用できません。</p>
+            </fieldset>
+
+            <label class="historical-import-consent">
+                <input id="historical-import-consent" type="checkbox" required disabled />
+                メタデータだけを読み取ることに同意します
+            </label>
+
+            <div class="historical-import-actions">
+                <button class="monitor-btn monitor-btn-primary" id="historical-import-preview-button" type="submit">プレビューを作成</button>
+            </div>
+        </form>
+    </section>
+
+    <p class="historical-import-live" id="historical-import-live" role="status" aria-live="polite" aria-atomic="true"></p>
+    <p class="historical-import-error" id="historical-import-error" role="alert" hidden></p>
+
+    <section class="panel historical-import-preview" id="historical-import-preview" aria-labelledby="historical-import-preview-heading" hidden>
+        <div class="panel-head">
+            <span class="panel-title" id="historical-import-preview-heading" tabindex="-1">インポート前のプレビュー</span>
+            <span class="historical-import-badge" id="historical-import-preview-badge"></span>
+        </div>
+        <div class="historical-import-details" id="historical-import-preview-details"></div>
+        <div class="historical-import-actions">
+            <button class="monitor-btn monitor-btn-primary" id="historical-import-confirm-button" type="button" disabled>確認してインポート</button>
+        </div>
+    </section>
+
+    <section class="panel historical-import-progress" id="historical-import-progress" aria-labelledby="historical-import-progress-heading" hidden>
+        <h3 id="historical-import-progress-heading">インポート進行中</h3>
+        <p>トランザクションを実行しています。完了するまで同じ要求を再送信しません。</p>
+        <progress aria-label="履歴インポートの進行" max="1"></progress>
+    </section>
+
+    <section class="panel historical-import-result" id="historical-import-result" aria-labelledby="historical-import-result-heading" hidden>
+        <div class="panel-head">
+            <span class="panel-title" id="historical-import-result-heading" tabindex="-1">インポート結果</span>
+            <span class="panel-meta">分析は自動実行されません</span>
+        </div>
+        <div class="historical-import-details" id="historical-import-result-details"></div>
+    </section>
+
+    <section class="panel historical-import-observations" aria-labelledby="historical-import-observations-heading">
+        <div class="panel-head">
+            <span class="panel-title" id="historical-import-observations-heading">観測一覧</span>
+            <span class="panel-meta">live と historical は別の読み取りモデルです</span>
+        </div>
+        <div class="historical-import-tabs" role="tablist" aria-label="観測ソース">
+            <button class="historical-import-tab" type="button" role="tab" aria-selected="false" data-source-kind="live">Live</button>
+            <button class="historical-import-tab active" type="button" role="tab" aria-selected="true" data-source-kind="historical">Historical</button>
+        </div>
+        <div class="historical-import-observation-list" id="historical-import-observation-list" aria-live="polite"></div>
+        <section class="historical-import-observation-detail" id="historical-import-observation-detail" aria-labelledby="historical-import-observation-detail-heading" hidden>
+            <h3 id="historical-import-observation-detail-heading">Historical observation</h3>
+            <div id="historical-import-observation-detail-content"></div>
+            <div class="historical-import-trace-control">
+                <button class="monitor-btn" id="historical-import-trace-button" type="button" disabled>トレースを開く</button>
+                <span class="historical-import-help" id="historical-import-trace-unavailable">trace_identity がありません。</span>
+            </div>
+        </section>
+    </section>
+
+    <section class="panel historical-import-history" aria-labelledby="historical-import-history-heading">
+        <div class="panel-head">
+            <span class="panel-title" id="historical-import-history-heading">インポート履歴</span>
+            <span class="panel-meta">sanitized result metadata only</span>
+        </div>
+        <div id="historical-import-history-list"></div>
+    </section>
+</section>
+<script src="/monitor-historical-import.js" defer></script>

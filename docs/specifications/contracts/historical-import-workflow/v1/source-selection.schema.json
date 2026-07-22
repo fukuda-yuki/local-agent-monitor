@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/source-selection.schema.json",
+  "title": "Historical import source selection",
+  "description": "Local-sensitive POST preview input. exact_reference is accepted only on the loopback consent boundary and is never echoed in a repository-safe response.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "schema_version",
+    "source_surface",
+    "reference_kind",
+    "exact_reference",
+    "source_application_version",
+    "requested_capture",
+    "consent_granted"
+  ],
+  "properties": {
+    "contract_version": { "const": "historical-import-workflow/v1" },
+    "schema_version": { "const": "historical-import-workflow-source-selection/v1" },
+    "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+    "reference_kind": { "enum": ["selected_root", "official_hook", "explicit_user_selection"] },
+    "exact_reference": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?![\\s\\S]*[\\r\\n])(?:[A-Za-z]:\\\\[^/]+|/(?!/)[^\\\\]+)$(?![\\s\\S])" },
+    "session_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$(?![\\s\\S])" },
+    "source_application_version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$(?![\\s\\S])" },
+    "requested_capture": { "const": "metadata_only" },
+    "consent_granted": { "const": true }
+  },
+  "oneOf": [
+    {
+      "required": ["session_id"],
+      "properties": {
+        "source_surface": { "const": "github-copilot-cli" },
+        "reference_kind": { "const": "selected_root" },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$(?![\\s\\S])" }
+      }
+    },
+    {
+      "properties": {
+        "source_surface": { "const": "claude-code" },
+        "reference_kind": { "enum": ["official_hook", "explicit_user_selection"] },
+        "session_id": { "const": null }
+      }
+    }
+  ]
+}

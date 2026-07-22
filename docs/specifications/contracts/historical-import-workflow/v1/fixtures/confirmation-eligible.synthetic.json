@@ -1,0 +1,11 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-confirmation/v1",
+  "confirmation_id": "hic_11111111111111111111111111111111",
+  "preview_id": "hip_11111111111111111111111111111111",
+  "preview_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "snapshot_version": "hsv_1",
+  "eligibility": "eligible",
+  "decision": "confirm",
+  "expires_after_seconds": 300
+}

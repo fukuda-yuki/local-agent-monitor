@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.HistoricalImport;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 
 namespace CopilotAgentObservability.ConfigCli.HistoricalImport.GitHubCopilot;
 
@@ -14,12 +15,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
     private const string FormatUnsupported = "historical_source_format_unsupported";
     private const string NoEligibleCandidates = "historical_import_no_eligible_candidates";
     private const int MaximumSelectedRootCharacters = 4096;
-    private const int MaximumSessionIdCharacters = 255;
-    private const int MaximumVersionCharacters = 64;
-
-    private static readonly Regex ExactVersionPattern = new(
-        "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$",
-        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private const int MaximumSessionIdCharacters = 256;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -78,7 +74,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
                 return CreateProbe(
                     detectionState: "detected",
                     sourceReferenceState: "provided",
-                    request.SourceApplicationVersion,
+                    ToProducerVersion(request.SourceApplicationVersion),
                     request.RequestedCapture,
                     SourceMalformed);
             }
@@ -86,7 +82,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
             return CreateProbe(
                 detectionState: "detected",
                 sourceReferenceState: "provided",
-                request.SourceApplicationVersion,
+                ToProducerVersion(request.SourceApplicationVersion),
                 request.RequestedCapture,
                 FormatUnsupported);
         }
@@ -95,7 +91,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
             return CreateProbe(
                 detectionState: "detected",
                 sourceReferenceState: "provided",
-                request.SourceApplicationVersion,
+                ToProducerVersion(request.SourceApplicationVersion),
                 request.RequestedCapture,
                 SourceMalformed);
         }
@@ -112,27 +108,23 @@ internal sealed class GitHubCopilotHistoricalAdapter
 
         return selectedRoot.Length <= MaximumSelectedRootCharacters &&
             IsCanonicalAbsoluteRoot(selectedRoot) &&
-            sessionId.Length <= MaximumSessionIdCharacters &&
-            sessionId is not ("." or "..") &&
-            sessionId.IndexOfAny(['/', '\\', ':']) < 0 &&
-            sessionId.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
-            !string.IsNullOrEmpty(version) &&
-            version.Length <= MaximumVersionCharacters &&
-            ExactVersionPattern.IsMatch(version);
+            IsValidSessionLocator(sessionId) &&
+            HistoricalSourceMetadataTokenPolicy.IsValid(version);
     }
 
+    private static bool IsValidSessionLocator(string value) =>
+        value.Length is >= 1 and <= MaximumSessionIdCharacters
+        && char.IsAsciiLetterOrDigit(value[0])
+        && value.AsSpan(1).IndexOfAnyExcept(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") < 0;
+
+    private static string? ToProducerVersion(string? version) =>
+        HistoricalImportSemanticVersionPolicy.IsValid(version) ? version : null;
+
     private static bool IsCanonicalAbsoluteRoot(string selectedRoot)
-    {
-        try
-        {
-            return Path.IsPathFullyQualified(selectedRoot) &&
-                string.Equals(Path.GetFullPath(selectedRoot), selectedRoot, StringComparison.Ordinal);
-        }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or IOException)
-        {
-            return false;
-        }
-    }
+        => HistoricalSourcePathPolicy.IsCanonicalNativeAbsolute(
+            selectedRoot,
+            MaximumSelectedRootCharacters);
 
     private static bool IsFatalOrControlFlow(Exception exception) =>
         IsLegacyFatal(exception) || exception is
@@ -255,27 +247,12 @@ internal sealed class SystemGitHubCopilotHistoricalMetadataFileSystem :
 {
     public GitHubCopilotHistoricalPathKind InspectPath(string path)
     {
-        FileAttributes attributes;
-        try
+        return HistoricalImportLocalFile.Inspect(path) switch
         {
-            attributes = File.GetAttributes(path);
-        }
-        catch (FileNotFoundException)
-        {
-            return GitHubCopilotHistoricalPathKind.Missing;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return GitHubCopilotHistoricalPathKind.Missing;
-        }
-
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
-        {
-            return GitHubCopilotHistoricalPathKind.Other;
-        }
-
-        return (attributes & FileAttributes.Directory) != 0
-            ? GitHubCopilotHistoricalPathKind.Directory
-            : GitHubCopilotHistoricalPathKind.RegularFile;
+            HistoricalImportPathKind.Missing => GitHubCopilotHistoricalPathKind.Missing,
+            HistoricalImportPathKind.Directory => GitHubCopilotHistoricalPathKind.Directory,
+            HistoricalImportPathKind.RegularFile => GitHubCopilotHistoricalPathKind.RegularFile,
+            _ => GitHubCopilotHistoricalPathKind.Other,
+        };
     }
 }

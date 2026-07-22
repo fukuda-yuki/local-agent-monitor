@@ -101,12 +101,14 @@
     "token": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
     },
     "version": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+      "maxLength": 64,
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])"
     },
     "field": {
       "type": "string",
@@ -139,8 +141,8 @@
         "source_application_version": { "$ref": "#/$defs/version" },
         "source_format_name": { "$ref": "#/$defs/token" },
         "source_format_version": { "$ref": "#/$defs/version" },
-        "source_fixture_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "source_schema_fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "source_fixture_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "source_schema_fingerprint": { "type": "string", "minLength": 71, "maxLength": 71, "pattern": "^sha256:[a-f0-9]{64}$" },
         "active_field_allowlist": {
           "type": "array",
           "minItems": 1,

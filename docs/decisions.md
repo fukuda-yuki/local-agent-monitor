@@ -2335,6 +2335,26 @@ candidates, preserves partial / `historical_summary_only`, exact merge, and
 #89/#90 retention boundaries. The canonical policy is
 [historical source import](specifications/interfaces/historical-source-import.md).
 
+Issue #79 implementation clarification (2026-07-23): the strict producer
+preview v1 remains unchanged, while a separate
+`historical-import-workflow/v1` family owns explicit preview, confirmation,
+source/database stale revalidation, idempotent transaction, result/history,
+and observation reads across Local Monitor API/UI and Config CLI. Current real
+profiles remain non-actionable. Positive production flow is reachable only
+through a typed post-admission seam created after exact profile/snapshot
+validation; HTTP/CLI payloads and repository fixtures cannot construct it.
+Accepted metadata is stored in a dedicated `historical_import` schema as a
+distinct observation/receipt, never as a synthesized Session/Run/Event/trace/
+timestamp. An exact binding may add only a relationship and navigation target
+to an existing Session. Date and new Session/Event counts remain explicitly
+unavailable without authoritative evidence. Metadata-only creates no retention
+item, and content remains blocked in workflow v1 pending an existing
+`session_event_content`/#89 mapping. The two-item D042 sidebar remains; an
+explicit diagnostics/integration card links to the dedicated import page,
+whose live and historical tabs use separate read models and never union
+identity. This supersedes only the pre-#79 seven-screen count in D064; D064's
+Doctor-in-diagnostics placement and D042's two-navigation-item rule remain.
+
 ## D067: Alert evaluation uses capability-gated deterministic receipts
 
 Status: Accepted (2026-07-22)

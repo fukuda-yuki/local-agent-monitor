@@ -968,6 +968,86 @@ files, CI artifacts, static artifacts, Issue/PR text, or docs. Direct apply,
 snapshots, and rollback require the Issue #55 boundary and are not authorized
 by this proposal interface.
 
+## Historical Source Import Boundary
+
+Issue #79 remains inside the installed Local Monitor's single-trusted-local-
+user boundary. It adds no remote source, background discovery, CORS surface,
+Canvas action, `session.send()` payload, upload, or repository publication.
+Every historical-import request is loopback/Host-header restricted. POST
+requests require same-origin, `x-monitor-csrf: local-monitor`, JSON, and the
+1,048,576-byte workflow bound; GET and POST responses use `Cache-Control:
+no-store`. Fixed errors never echo rejected input or exception text.
+
+The preview request is the only public stage that accepts a literal local
+source selection. It accepts one explicit profile-specific root/session or
+exact transcript reference only after the user confirms the displayed probe
+scope. That literal may exist in the loopback/CSRF request and in private local
+ephemeral database state in the `historical_import_previews` row only for the
+five-minute workflow lifetime and commit re-probe. Database-backed state is
+required so separate CLI processes and a Local Monitor restart retain the exact
+selection; process memory is not an equivalent store. It is never returned,
+logged, included in request-path/query logging, copied to history/operation/
+observation/conflict rows, rendered in screenshots, or placed in repository-
+safe evidence. A zero-candidate or expired preview, and any succeeded,
+rejected, or failed terminal attempt after exact confirmation, erase the
+private locator. A wrong caller binding creates no operation and does not erase
+an otherwise live preview. Public projections use only the
+opaque `source_selection_id` and fixed source/profile/adapter metadata. Internal
+candidate/source-record keys and exact idempotency values are likewise absent
+from preview, progress, result, history, and observation responses.
+
+The source reference must be a host-native, fully qualified canonical local
+path. Before any source filesystem call, the application, gateway, and system
+adapter reject platform-foreign syntax, relative paths, URI/UNC/device forms,
+Windows remote drives and alternate streams, reserved device names,
+noncanonical segments, and any target or ancestor symlink/junction/reparse
+component. Metadata classification does not follow links; a file read, where a
+future admitted profile authorizes one, must use the same handle-bound policy
+and reject directories, FIFOs, sockets, devices, and other non-regular targets.
+On Unix, a native absolute path already present in the process's local mount
+namespace is inside this v1 boundary after those checks. The backing of an
+opaque mounted filesystem cannot be proven from path syntax, so v1 neither
+parses mount tables nor claims generic network-storage detection. On Windows,
+a volume the host API reports as `Network` is rejected before adapter I/O.
+
+The persisted expiry is authoritative even when no process is running. An
+active Local Monitor schedules physical erasure at expiry, including
+rescheduling every unexpired actionable preview loaded after restart. Every new
+workflow process first clears expired locator, trusted-probe, and candidate
+columns. It recovers only queued/running operations bound to an already expired
+preview; an unexpired operation may be owned by another live process and is not
+reclaimed. Thus dormant bytes cannot regain authority or be used after the
+five-minute lifetime.
+
+The current workflow accepts only `metadata_only`. `--sanitized-only` remains
+the Local Monitor display posture and is not a substitute for probe consent;
+the historical-import page and sanitized workflow routes remain available in
+that mode because they expose no source body. Both current adapters read no
+content, return `content_risk = not_read`, and cannot issue confirmation.
+`include_content` is rejected before a source probe. A later content profile
+must be specified separately, secret-filter into existing
+`session_event_content`, and register through #89; it may not create an import
+raw store kind or treat the external source file as a retention target.
+
+Workflow output is a closed allowlist of fixed codes, bounded counts with
+explicit availability, opaque IDs/digests, source/profile/adapter tokens,
+completeness/capability metadata, and sanitized conflict fingerprints. It
+contains no raw prompt/response, tool data, source/file body, path, repository,
+workspace, PII, credential, authorization value, local database path, raw
+exception, reversible source key, or free-form source-derived label. Public
+historical observation text is rendered with framework/default DOM escaping as
+inert text; no response field is live markup. Logs, tests, screenshots, Issue/
+PR/docs, CI artifacts, and extension-matrix evidence use synthetic opaque IDs
+and fixed labels only.
+
+An optional exact Session navigation target originates only in a trusted typed
+source-specific binding and is a same-origin relative link to an already-
+existing Session. The workflow never derives it from a path, repository,
+timestamp, text, model, token count, or source-record key. Historical-only
+trace controls remain disabled. Selecting the live tab uses the existing
+sanitized Session workspace reads and never unions or coalesces live Session
+identity with a historical observation.
+
 ## Configuration Setup Boundary
 
 Issues #66/#67 create a separate user-invoked configuration setup boundary.

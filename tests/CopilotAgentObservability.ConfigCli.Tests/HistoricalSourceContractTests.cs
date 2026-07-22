@@ -126,6 +126,151 @@ public sealed class HistoricalSourceContractTests
     }
 
     [Fact]
+    public void Adapter_result_schema_enforces_authorized_and_unauthorized_branches()
+    {
+        using var schema = Read("historical-adapter-result.schema.json");
+
+        AssertRejected(Unsupported(result => result["source_format_profile"] = "fixture-bound-v1"));
+        AssertRejected(Unsupported(result => result["candidate_count"] = 1));
+        AssertRejected(Unsupported(result => result["content_risk"] = "source_read_metadata_only"));
+        AssertRejected(Unsupported(result => result["diagnostics"] = new JsonArray()));
+        AssertRejected(Unsupported(result => result["detection_state"] = "not_evaluated"));
+        AssertRejected(Unsupported(result => result["diagnostics"] = new JsonArray("historical_source_reference_required")));
+
+        AssertRejected(Supported(result => result["source_format_profile"] = "none"));
+        AssertRejected(Supported(result => result["candidate_count"] = 0));
+        AssertRejected(Supported(result => result["detection_state"] = "not_evaluated"));
+        AssertRejected(Supported(result => result["source_reference_state"] = "missing"));
+        AssertRejected(Supported(result => result["source_application_version"] = null));
+        AssertRejected(Supported(result => result["content_risk"] = "not_read"));
+        AssertRejected(Supported(result => result["diagnostics"] = new JsonArray("historical_source_format_unsupported")));
+
+        JsonObject Unsupported(Action<JsonObject> mutate)
+        {
+            var result = AdapterFixture();
+            mutate(result);
+            return result;
+        }
+
+        JsonObject Supported(Action<JsonObject> mutate)
+        {
+            var result = AdapterFixture();
+            result["support_authorized"] = true;
+            result["source_format_profile"] = "fixture-bound-v1";
+            result["candidate_count"] = 1;
+            result["content_risk"] = "source_read_metadata_only";
+            result["diagnostics"] = new JsonArray();
+            mutate(result);
+            return result;
+        }
+
+        JsonObject AdapterFixture() => JsonNode.Parse(File.ReadAllText(
+            ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+
+        void AssertRejected(JsonObject result)
+        {
+            using var document = JsonDocument.Parse(result.ToJsonString());
+            Assert.Contains("$ does not match exactly one schema branch.",
+                HistoricalContractSchemaValidator.Validate(schema, document));
+        }
+    }
+
+    [Fact]
+    public void Producer_contract_bounds_match_importer_admission_limits()
+    {
+        using var adapterSchema = Read("historical-adapter-result.schema.json");
+        Assert.Equal(1000, adapterSchema.RootElement.GetProperty("properties").GetProperty("candidate_count").GetProperty("maximum").GetInt32());
+        Assert.Equal(128, adapterSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("maxLength").GetInt32());
+        var tokenPattern = adapterSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("pattern").GetString();
+        var semverPattern = adapterSchema.RootElement.GetProperty("properties").GetProperty("source_application_version").GetProperty("pattern").GetString();
+
+        using var batchSchema = Read("historical-candidate-batch.schema.json");
+        Assert.Equal(1000, batchSchema.RootElement.GetProperty("properties").GetProperty("candidates").GetProperty("maxItems").GetInt32());
+        Assert.Equal(128, batchSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("maxLength").GetInt32());
+        Assert.Equal(tokenPattern, batchSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("pattern").GetString());
+        Assert.Equal(semverPattern, batchSchema.RootElement.GetProperty("$defs").GetProperty("version").GetProperty("pattern").GetString());
+
+        using var profileSchema = Read("historical-source-profile.schema.json");
+        Assert.Equal(tokenPattern, profileSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("pattern").GetString());
+        Assert.Equal(semverPattern, profileSchema.RootElement.GetProperty("$defs").GetProperty("version").GetProperty("pattern").GetString());
+
+        using var previewSchema = Read("historical-import-preview.schema.json");
+        Assert.Equal(tokenPattern, previewSchema.RootElement.GetProperty("$defs").GetProperty("token").GetProperty("pattern").GetString());
+
+        using var mergeSchema = Read("historical-merge-cases.schema.json");
+        Assert.Equal(tokenPattern, mergeSchema.RootElement.GetProperty("$defs").GetProperty("case").GetProperty("properties").GetProperty("case_id").GetProperty("pattern").GetString());
+    }
+
+    [Theory]
+    [InlineData("01.2.3")]
+    [InlineData("1.02.3")]
+    [InlineData("1.2.03")]
+    [InlineData("1.2.3-01")]
+    [InlineData("1.2.3-")]
+    [InlineData("1.2.3-.alpha")]
+    [InlineData("1.2.3-alpha..1")]
+    [InlineData("1.2.3-alpha.")]
+    [InlineData("1.2.3+")]
+    [InlineData("1.2.3+.build")]
+    [InlineData("1.2.3+build..1")]
+    [InlineData("1.2.3+build.")]
+    public void Producer_semver_grammar_rejects_noncanonical_edges(string version)
+    {
+        using var schema = Read("historical-adapter-result.schema.json");
+        var result = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+        result["source_application_version"] = version;
+        using var invalid = JsonDocument.Parse(result.ToJsonString());
+
+        Assert.Contains(
+            "$.source_application_version does not match the required pattern.",
+            HistoricalContractSchemaValidator.Validate(schema, invalid));
+    }
+
+    [Theory]
+    [InlineData("0.0.0")]
+    [InlineData("1.2.3-alpha")]
+    [InlineData("1.2.3-alpha.1+build.001")]
+    [InlineData("1.2.3-0")]
+    public void Producer_semver_grammar_accepts_canonical_edges(string version)
+    {
+        using var schema = Read("historical-adapter-result.schema.json");
+        var result = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+        result["source_application_version"] = version;
+        using var valid = JsonDocument.Parse(result.ToJsonString());
+
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, valid));
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r")]
+    public void Producer_grammar_families_reject_terminal_line_breaks(string lineBreak)
+    {
+        using var adapterSchema = Read("historical-adapter-result.schema.json");
+        var adapter = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+        adapter["profile_id"] = adapter["profile_id"]!.GetValue<string>() + lineBreak;
+        using var invalidToken = JsonDocument.Parse(adapter.ToJsonString());
+        Assert.Contains("$.profile_id does not match the required pattern.", HistoricalContractSchemaValidator.Validate(adapterSchema, invalidToken));
+
+        var versionedAdapter = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "github-copilot-cli", "detected-unsupported.json")))!.AsObject();
+        versionedAdapter["source_application_version"] = "1.0.71" + lineBreak;
+        using var invalidVersion = JsonDocument.Parse(versionedAdapter.ToJsonString());
+        Assert.Contains("$.source_application_version does not match the required pattern.", HistoricalContractSchemaValidator.Validate(adapterSchema, invalidVersion));
+
+        using var batchSchema = Read("historical-candidate-batch.schema.json");
+        var batchWithKey = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "synthetic-candidate-batch.json")))!.AsObject();
+        var candidate = batchWithKey["candidates"]![0]!.AsObject();
+        candidate["candidate_key"] = candidate["candidate_key"]!.GetValue<string>() + lineBreak;
+        using var invalidKey = JsonDocument.Parse(batchWithKey.ToJsonString());
+        Assert.Contains("$.candidates[0].candidate_key is too long.", HistoricalContractSchemaValidator.Validate(batchSchema, invalidKey));
+
+        var batchWithHash = JsonNode.Parse(File.ReadAllText(ContractPath("fixtures", "handoff", "synthetic-candidate-batch.json")))!.AsObject();
+        batchWithHash["source_fixture_sha256"] = batchWithHash["source_fixture_sha256"]!.GetValue<string>() + lineBreak;
+        using var invalidHash = JsonDocument.Parse(batchWithHash.ToJsonString());
+        Assert.Contains("$.source_fixture_sha256 is too long.", HistoricalContractSchemaValidator.Validate(batchSchema, invalidHash));
+    }
+
+    [Fact]
     public void Candidate_handoff_is_synthetic_only_partial_and_contains_no_trace_authority()
     {
         using var fixture = Read("fixtures", "handoff", "synthetic-candidate-batch.json");
@@ -243,7 +388,7 @@ public sealed class HistoricalSourceContractTests
             "attach_observation_preserve_strong",
             "keep_distinct_unbound",
             "missing_does_not_overwrite",
-            "record_conflict_no_overwrite",
+            "keep_separate_no_cross_store_comparison",
             "partial_historical_summary_only",
             "metadata_only_no_retention_item",
             "read_denied_and_deletion_queued",
@@ -285,27 +430,53 @@ public sealed class HistoricalSourceContractTests
     }
 
     [Fact]
-    public void Contract_schema_validator_rejects_unknown_properties_wrong_types_and_invalid_patterns()
+    public void Contract_schema_validator_enforces_composition_bounds_and_duplicate_members()
     {
         using var schema = JsonDocument.Parse("""
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["id", "count", "enabled"],
+              "required": ["id", "kind", "count", "enabled"],
               "properties": {
                 "id": { "type": "string", "pattern": "^[a-z]+$" },
-                "count": { "type": "integer", "minimum": 0 },
+                "kind": { "type": "string" },
+                "count": { "type": "integer", "minimum": 0, "maximum": 1 },
                 "enabled": { "type": "boolean" }
-              }
+              },
+              "oneOf": [
+                { "properties": { "kind": { "const": "a" } } },
+                { "properties": { "kind": { "const": "b" } } }
+              ],
+              "allOf": [
+                {
+                  "if": { "properties": { "enabled": { "const": true } } },
+                  "then": { "properties": { "count": { "maximum": 0 } } }
+                }
+              ]
             }
             """);
-        using var invalid = JsonDocument.Parse("""{ "id": "BAD", "count": "1", "enabled": true, "extra": true }""");
+        using var invalid = JsonDocument.Parse("""{ "id": "BAD", "kind": "c", "count": 1, "enabled": true, "extra": true }""");
 
         var errors = HistoricalContractSchemaValidator.Validate(schema, invalid);
 
         Assert.Contains("$.id does not match the required pattern.", errors);
-        Assert.Contains("$.count must be integer.", errors);
+        Assert.Contains("$ does not match exactly one schema branch.", errors);
+        Assert.Contains("$.count is above the maximum.", errors);
         Assert.Contains("$.extra is not allowed.", errors);
+
+        using var duplicate = JsonDocument.Parse("""{ "id": "first", "id": "second", "kind": "a", "count": 0, "enabled": false }""");
+        Assert.Contains("$.id is duplicated.", HistoricalContractSchemaValidator.Validate(schema, duplicate));
+
+        using var semanticUniqueSchema = JsonDocument.Parse("""{ "type": "array", "uniqueItems": true, "items": { "type": "object" } }""");
+        using var reorderedDuplicate = JsonDocument.Parse("""[{ "a": 1, "b": 2 }, { "b": 2, "a": 1 }]""");
+        Assert.Contains("$ items must be unique.", HistoricalContractSchemaValidator.Validate(semanticUniqueSchema, reorderedDuplicate));
+
+        using var unsupportedVocabulary = JsonDocument.Parse("""{ "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "format": "email" }""");
+        using var stringValue = JsonDocument.Parse("\"value\"");
+        Assert.Contains("$schema.format is not a supported schema keyword.", HistoricalContractSchemaValidator.Validate(unsupportedVocabulary, stringValue));
+
+        using var unsupportedDialect = JsonDocument.Parse("""{ "$schema": "http://json-schema.org/draft-07/schema#", "type": "string" }""");
+        Assert.Contains("$schema.$schema must identify JSON Schema 2020-12.", HistoricalContractSchemaValidator.Validate(unsupportedDialect, stringValue));
     }
 
     private static void AssertProfile(
@@ -416,27 +587,107 @@ public sealed class HistoricalSourceContractTests
 
 internal static class HistoricalContractSchemaValidator
 {
+    private const string SupportedDialect = "https://json-schema.org/draft/2020-12/schema";
+
+    private static readonly IReadOnlySet<string> SupportedKeywords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "$schema", "$id", "$ref", "$defs", "title", "description",
+        "type", "const", "enum", "properties", "required", "additionalProperties",
+        "minProperties", "maxProperties", "minLength", "maxLength", "pattern",
+        "minimum", "maximum", "items", "minItems", "maxItems", "uniqueItems",
+        "allOf", "oneOf", "if", "then", "else",
+    };
+
     public static IReadOnlyList<string> Validate(JsonDocument schema, JsonDocument value)
     {
         var errors = new List<string>();
+        ValidateSupportedSchema(schema.RootElement, "$schema", errors);
+        if (errors.Count != 0) return errors.Distinct(StringComparer.Ordinal).ToArray();
         ValidateNode(schema.RootElement, schema.RootElement, value.RootElement, "$", errors);
-        return errors;
+        return errors.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static void ValidateSupportedSchema(JsonElement schema, string path, List<string> errors)
+    {
+        if (schema.ValueKind != JsonValueKind.Object)
+        {
+            errors.Add($"{path} must be an object schema.");
+            return;
+        }
+
+        var keywords = schema.EnumerateObject().ToArray();
+        foreach (var duplicate in keywords.GroupBy(keyword => keyword.Name, StringComparer.Ordinal).Where(group => group.Count() > 1))
+            errors.Add($"{path}.{duplicate.Key} is duplicated.");
+        foreach (var keyword in keywords)
+        {
+            if (!SupportedKeywords.Contains(keyword.Name))
+            {
+                errors.Add($"{path}.{keyword.Name} is not a supported schema keyword.");
+                continue;
+            }
+
+            switch (keyword.Name)
+            {
+                case "$schema" when keyword.Value.ValueKind != JsonValueKind.String
+                    || keyword.Value.GetString() != SupportedDialect:
+                    errors.Add($"{path}.$schema must identify JSON Schema 2020-12.");
+                    break;
+                case "$ref" when keyword.Value.ValueKind != JsonValueKind.String
+                    || !keyword.Value.GetString()!.StartsWith("#/$defs/", StringComparison.Ordinal):
+                    errors.Add($"{path}.$ref must be a local $defs reference.");
+                    break;
+                case "properties" or "$defs":
+                    ValidateSchemaMap(keyword.Value, $"{path}.{keyword.Name}", errors);
+                    break;
+                case "items" or "if" or "then" or "else":
+                    ValidateSupportedSchema(keyword.Value, $"{path}.{keyword.Name}", errors);
+                    break;
+                case "additionalProperties" when keyword.Value.ValueKind == JsonValueKind.Object:
+                    errors.Add($"{path}.additionalProperties object schemas are not supported.");
+                    break;
+                case "additionalProperties" when keyword.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False):
+                    errors.Add($"{path}.additionalProperties must be boolean.");
+                    break;
+                case "allOf" or "oneOf":
+                    if (keyword.Value.ValueKind != JsonValueKind.Array)
+                    {
+                        errors.Add($"{path}.{keyword.Name} must be an array of schemas.");
+                        break;
+                    }
+                    var index = 0;
+                    foreach (var branch in keyword.Value.EnumerateArray())
+                        ValidateSupportedSchema(branch, $"{path}.{keyword.Name}[{index++}]", errors);
+                    break;
+            }
+        }
+    }
+
+    private static void ValidateSchemaMap(JsonElement map, string path, List<string> errors)
+    {
+        if (map.ValueKind != JsonValueKind.Object)
+        {
+            errors.Add($"{path} must be an object.");
+            return;
+        }
+
+        var entries = map.EnumerateObject().ToArray();
+        foreach (var duplicate in entries.GroupBy(entry => entry.Name, StringComparer.Ordinal).Where(group => group.Count() > 1))
+            errors.Add($"{path}.{duplicate.Key} is duplicated.");
+        foreach (var entry in entries)
+            ValidateSupportedSchema(entry.Value, $"{path}.{entry.Name}", errors);
     }
 
     private static void ValidateNode(JsonElement root, JsonElement schema, JsonElement value, string path, List<string> errors)
     {
         if (schema.TryGetProperty("$ref", out var reference))
-        {
             ValidateNode(root, Resolve(root, reference.GetString()!), value, path, errors);
-            return;
-        }
 
         if (!MatchesDeclaredType(schema, value, path, errors)) return;
 
-        if (schema.TryGetProperty("const", out var constant) && value.GetRawText() != constant.GetRawText())
+        if (schema.TryGetProperty("const", out var constant) && !JsonEquals(value, constant))
             errors.Add($"{path} must equal {constant.GetRawText()}.");
         if (schema.TryGetProperty("enum", out var allowed)
-            && !allowed.EnumerateArray().Any(candidate => candidate.GetRawText() == value.GetRawText()))
+            && !allowed.EnumerateArray().Any(candidate => JsonEquals(value, candidate)))
             errors.Add($"{path} is not an allowed value.");
 
         if (value.ValueKind == JsonValueKind.String)
@@ -450,15 +701,28 @@ internal static class HistoricalContractSchemaValidator
                 errors.Add($"{path} does not match the required pattern.");
         }
 
-        if (value.ValueKind == JsonValueKind.Number && schema.TryGetProperty("minimum", out var minimum)
-            && value.GetDecimal() < minimum.GetDecimal())
-            errors.Add($"{path} is below the minimum.");
+        if (value.ValueKind == JsonValueKind.Number)
+        {
+            if (schema.TryGetProperty("minimum", out var minimum)
+                && (!value.TryGetDecimal(out var minimumNumber) || minimumNumber < minimum.GetDecimal()))
+                errors.Add($"{path} is below the minimum.");
+            if (schema.TryGetProperty("maximum", out var maximum)
+                && (!value.TryGetDecimal(out var maximumNumber) || maximumNumber > maximum.GetDecimal()))
+                errors.Add($"{path} is above the maximum.");
+        }
 
         if (value.ValueKind == JsonValueKind.Object)
         {
+            var members = value.EnumerateObject().ToArray();
+            foreach (var duplicate in members.GroupBy(property => property.Name, StringComparer.Ordinal).Where(group => group.Count() > 1))
+                errors.Add($"{path}.{duplicate.Key} is duplicated.");
+
             if (schema.TryGetProperty("minProperties", out var minProperties)
-                && value.EnumerateObject().Count() < minProperties.GetInt32())
+                && members.Length < minProperties.GetInt32())
                 errors.Add($"{path} has too few properties.");
+            if (schema.TryGetProperty("maxProperties", out var maxProperties)
+                && members.Length > maxProperties.GetInt32())
+                errors.Add($"{path} has too many properties.");
 
             var properties = schema.TryGetProperty("properties", out var declared) ? declared : default;
             if (schema.TryGetProperty("required", out var required))
@@ -482,11 +746,36 @@ internal static class HistoricalContractSchemaValidator
             if (schema.TryGetProperty("maxItems", out var maxItems) && items.Length > maxItems.GetInt32())
                 errors.Add($"{path} has too many items.");
             if (schema.TryGetProperty("uniqueItems", out var unique) && unique.GetBoolean()
-                && items.Select(item => item.GetRawText()).Distinct(StringComparer.Ordinal).Count() != items.Length)
+                && items.Distinct(JsonElementComparer.Instance).Count() != items.Length)
                 errors.Add($"{path} items must be unique.");
             if (schema.TryGetProperty("items", out var itemSchema) && itemSchema.ValueKind == JsonValueKind.Object)
             for (var index = 0; index < items.Length; index++)
                 ValidateNode(root, itemSchema, items[index], $"{path}[{index}]", errors);
+        }
+
+        if (schema.TryGetProperty("allOf", out var allOf))
+        foreach (var branch in allOf.EnumerateArray())
+            ValidateNode(root, branch, value, path, errors);
+
+        if (schema.TryGetProperty("oneOf", out var oneOf))
+        {
+            var matches = 0;
+            foreach (var branch in oneOf.EnumerateArray())
+            {
+                var branchErrors = new List<string>();
+                ValidateNode(root, branch, value, path, branchErrors);
+                if (branchErrors.Count == 0) matches++;
+            }
+            if (matches != 1) errors.Add($"{path} does not match exactly one schema branch.");
+        }
+
+        if (schema.TryGetProperty("if", out var condition))
+        {
+            var conditionErrors = new List<string>();
+            ValidateNode(root, condition, value, path, conditionErrors);
+            var branchName = conditionErrors.Count == 0 ? "then" : "else";
+            if (schema.TryGetProperty(branchName, out var conditionalBranch))
+                ValidateNode(root, conditionalBranch, value, path, errors);
         }
     }
 
@@ -518,6 +807,72 @@ internal static class HistoricalContractSchemaValidator
         if (!reference.StartsWith("#/$defs/", StringComparison.Ordinal))
             throw new InvalidOperationException($"Unsupported schema reference: {reference}");
         return root.GetProperty("$defs").GetProperty(reference[8..]);
+    }
+
+    private static bool JsonEquals(JsonElement left, JsonElement right)
+    {
+        if (left.ValueKind != right.ValueKind) return false;
+        return left.ValueKind switch
+        {
+            JsonValueKind.Object => ObjectsEqual(left, right),
+            JsonValueKind.Array => left.EnumerateArray().SequenceEqual(right.EnumerateArray(), JsonElementComparer.Instance),
+            JsonValueKind.String => left.GetString() == right.GetString(),
+            JsonValueKind.Number => left.TryGetDecimal(out var leftNumber)
+                && right.TryGetDecimal(out var rightNumber)
+                && leftNumber == rightNumber,
+            JsonValueKind.True or JsonValueKind.False => left.GetBoolean() == right.GetBoolean(),
+            JsonValueKind.Null => true,
+            _ => left.GetRawText() == right.GetRawText(),
+        };
+    }
+
+    private static bool ObjectsEqual(JsonElement left, JsonElement right)
+    {
+        var leftProperties = left.EnumerateObject().ToArray();
+        var rightProperties = right.EnumerateObject().ToArray();
+        return leftProperties.Length == rightProperties.Length
+            && leftProperties.All(property => right.TryGetProperty(property.Name, out var other)
+                && JsonEquals(property.Value, other));
+    }
+
+    private sealed class JsonElementComparer : IEqualityComparer<JsonElement>
+    {
+        public static JsonElementComparer Instance { get; } = new();
+
+        public bool Equals(JsonElement left, JsonElement right) => JsonEquals(left, right);
+
+        public int GetHashCode(JsonElement value) => JsonHash(value);
+    }
+
+    private static int JsonHash(JsonElement value)
+    {
+        var hash = new HashCode();
+        hash.Add(value.ValueKind);
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in value.EnumerateObject().OrderBy(property => property.Name, StringComparer.Ordinal))
+                {
+                    hash.Add(property.Name, StringComparer.Ordinal);
+                    hash.Add(JsonHash(property.Value));
+                }
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in value.EnumerateArray()) hash.Add(JsonHash(item));
+                break;
+            case JsonValueKind.String:
+                hash.Add(value.GetString(), StringComparer.Ordinal);
+                break;
+            case JsonValueKind.Number:
+                if (value.TryGetDecimal(out var number)) hash.Add(number);
+                else hash.Add(value.GetRawText(), StringComparer.Ordinal);
+                break;
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                hash.Add(value.GetBoolean());
+                break;
+        }
+        return hash.ToHashCode();
     }
 
     private static string Value(JsonElement element) => element.GetString()!;

@@ -513,6 +513,104 @@ The fixed status vocabulary is exactly `unbound`, `partial`, `rich`, and
 `full`. Completeness does not alter Issue #51 exact identity or Issue #49 Agent
 ownership.
 
+## Historical Import Persistence
+
+Issue #79 adds one independent additive SQLite component in the existing Local
+Monitor database:
+
+```text
+schema_version(component='historical_import', version=1)
+```
+
+It does not bump or extend the monitor, Session, Doctor, alert, analysis, or
+retention component versions and adds no responsibility to
+`RawTelemetryStore.cs`. The v1 component owns exactly these tables:
+
+- `historical_import_previews`
+- `historical_import_confirmation_bindings`
+- `historical_import_operations`
+- `historical_import_observations`
+- `historical_import_observation_fields`
+- `historical_import_observation_provenance`
+- `historical_import_conflicts`
+
+The migration creates all seven empty tables and the component-version row in
+one transaction. It is idempotent only for a complete, shape-valid v1 schema.
+A stamped partial v1 or a newer component version is rejected without repair,
+renumbering, downgrade, or table mutation. There is no fabricated v0 fixture:
+fresh-database and additive installation into a real existing pre-#79 database
+are the supported migration cases. Local Monitor initializes the component
+before mapping historical-import routes; failure fails host construction rather
+than changing D051 readiness fields or thresholds.
+
+`historical_import_previews` stores the opaque selection/preview IDs, workflow
+version/digest, producer and database decision fingerprints, bounded sanitized
+preview projection, expiry/state, and one private exact locator needed for a
+commit re-probe. For an actionable preview only, the row also retains the
+trusted probe without a nested candidate copy and one separate metadata-only
+candidate batch. The locator is ephemeral local-sensitive database state, not
+a public projection: its authority ends exactly at five minutes and it is
+deleted when a preview is non-actionable, expires while the service is active,
+or reaches any terminal attempt after exact confirmation. Invalid caller
+bindings create no operation and do not consume an otherwise live preview.
+Startup sweeps expired private locator/probe/candidate columns before any
+workflow access and reschedules each still-live actionable preview at its
+original absolute expiry, so a database that was dormant across expiry cannot
+reuse private state. This bounded private state lets CLI
+preview/confirm/commit run in separate processes and survive a Local Monitor
+restart; it is never copied to operation/history/observation/conflict rows,
+logs, or evidence. A current zero-candidate preview discards the locator
+immediately. Confirmation bindings store the exact preview/snapshot binding
+and only the digest of any private confirmation material. Operation rows own
+the hashed idempotency key, exact request fingerprint, monotonic
+queued/running/terminal state and version, optional final result/history
+projection, and fixed failure code; public reads never return the idempotency
+key or its hash. Startup recovery terminalizes only queued/running rows whose
+bound preview has expired and cannot replace an unexpired live owner or an
+already committed terminal row.
+
+An observation is identified by its local opaque observation ID and has one
+unique exact admitted-source identity over profile, adapter, application
+version, format name/version, fixture hash, schema fingerprint, normalization
+version, and internal source-record key. The internal candidate/source-record
+keys are never public columns in a workflow projection. Observation-field and
+provenance rows are keyed by `(observation_id, field)` and preserve the exact
+one-to-one policy order. An optional exact existing-Session binding is a
+relationship owned by this component only; no Session table is inserted or
+updated. The relationship is immutable after the exact admitted-source
+observation is first inserted; duplicate/conflicting repeats cannot add or
+replace it. Conflict rows contain only the observation, fixed conflicting field
+names, and existing/incoming canonical fingerprints. They never store or
+return conflicting values, source locators, or raw content.
+
+Commit first persists `queued` and `running`, then uses one `BEGIN IMMEDIATE`
+transaction for confirmation consumption, idempotency/application result,
+successful operation transition, every new observation,
+field/provenance row, exact-binding relationship, duplicate decision, and
+sanitized conflict receipt. An injected or real failure at any stage rolls the
+entire commit back. Exact duplicates are no-op decisions inside the same
+transaction. Same-record conflicts preserve the existing observation and add
+only their sanitized receipt. There is no partial observation/provenance write,
+last-write-wins update, background repair, retry worker, or import-owned
+deletion queue.
+
+Deterministic source/profile/candidate/fixture/expiry/consumption revalidation
+before that domain transaction becomes `rejected` / `not_started`. A
+post-operation pre-domain store failure uses the same no-transaction outcome
+with a fixed store code. Only a domain-transaction attempt that cannot commit
+becomes `failed` / `rolled_back` with
+`historical_import_transaction_failed`; the separate terminal status write
+contains no domain result or partial counts.
+
+Workflow v1 is metadata-only: observations have
+`content_state=not_captured`, so the commit does not open or write
+`session_event_content`, `raw_records`, or `retention_items`. The seven-table
+component is not a retention store kind. Future content remains blocked until
+an admitted contract can write one existing `session_event_content` item and
+its #89 catalog row in the same transaction using the original authoritative
+source time; it must not extend this component with raw content or add a new
+retention store kind.
+
 ## Local Analysis Persistence
 
 The Local Monitor adds local-only analysis tables for Copilot SDK raw analysis.

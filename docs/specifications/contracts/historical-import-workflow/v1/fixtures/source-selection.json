@@ -1,0 +1,11 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-source-selection/v1",
+  "source_surface": "github-copilot-cli",
+  "reference_kind": "selected_root",
+  "exact_reference": "X:\\synthetic-historical-import\\selected-root",
+  "session_id": "synthetic-session",
+  "source_application_version": "1.0.71",
+  "requested_capture": "metadata_only",
+  "consent_granted": true
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.copilot-agent-observability.invalid/contracts/historical-import-workflow/v1/import-history.schema.json",
+  "title": "Historical import history",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "schema_version", "items"],
+  "properties": {
+    "contract_version": { "const": "historical-import-workflow/v1" },
+    "schema_version": { "const": "historical-import-workflow-import-history/v1" },
+    "items": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/history_item" }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])"
+    },
+    "history_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "state",
+        "outcome",
+        "source_kind",
+        "source_surface",
+        "source_badge",
+        "source_tier",
+        "profile_id",
+        "adapter_id",
+        "new_observation_count",
+        "duplicate_count",
+        "conflict_count",
+        "completeness",
+        "completeness_reasons",
+        "content_state",
+        "retention_disposition"
+      ],
+      "properties": {
+        "operation_id": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^hop_[0-9a-f]{32}$" },
+        "state": { "enum": ["succeeded", "failed", "rejected"] },
+        "outcome": { "enum": ["committed", "rolled_back", "not_started"] },
+        "source_kind": { "const": "historical" },
+        "source_surface": { "enum": ["claude-code", "github-copilot-cli"] },
+        "source_badge": { "const": "historical" },
+        "source_tier": { "const": "tier_b" },
+        "profile_id": { "$ref": "#/$defs/token" },
+        "adapter_id": { "$ref": "#/$defs/token" },
+        "new_observation_count": { "type": "integer", "minimum": 0 },
+        "duplicate_count": { "type": "integer", "minimum": 0 },
+        "conflict_count": { "type": "integer", "minimum": 0 },
+        "completeness": { "enum": ["none", "partial"] },
+        "completeness_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["historical_summary_only"] }
+        },
+        "content_state": { "const": "not_captured" },
+        "retention_disposition": { "const": "not_applicable" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": { "const": "succeeded" },
+            "outcome": { "const": "committed" },
+            "completeness": { "const": "partial" },
+            "completeness_reasons": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "const": "historical_summary_only" }
+            }
+          }
+        },
+        {
+          "properties": {
+            "state": { "const": "failed" },
+            "outcome": { "const": "rolled_back" },
+            "completeness": { "const": "none" },
+            "completeness_reasons": { "type": "array", "maxItems": 0 }
+          }
+        },
+        {
+          "properties": {
+            "state": { "const": "rejected" },
+            "outcome": { "const": "not_started" },
+            "completeness": { "const": "none" },
+            "completeness_reasons": { "type": "array", "maxItems": 0 }
+          }
+        }
+      ]
+    }
+  }
+}

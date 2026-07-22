@@ -20,7 +20,7 @@
       "additionalProperties": false,
       "required": ["case_id", "condition", "decision", "required_result"],
       "properties": {
-        "case_id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
+        "case_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$(?![\\s\\S])" },
         "condition": { "type": "string", "minLength": 1 },
         "decision": {
           "enum": [
@@ -29,7 +29,7 @@
             "attach_observation_preserve_strong",
             "keep_distinct_unbound",
             "missing_does_not_overwrite",
-            "record_conflict_no_overwrite",
+            "keep_separate_no_cross_store_comparison",
             "partial_historical_summary_only",
             "metadata_only_no_retention_item",
             "read_denied_and_deletion_queued",

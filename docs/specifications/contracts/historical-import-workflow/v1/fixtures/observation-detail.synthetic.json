@@ -1,0 +1,34 @@
+{
+  "contract_version": "historical-import-workflow/v1",
+  "schema_version": "historical-import-workflow-observation-detail/v1",
+  "observation_id": "hob_11111111111111111111111111111111",
+  "source_kind": "historical",
+  "source_surface": "github-copilot-cli",
+  "source_badge": "historical",
+  "source_tier": "tier_b",
+  "profile_id": "synthetic-contract-profile",
+  "adapter_id": "synthetic-contract-adapter-v1",
+  "identity_resolution": "distinct_unbound",
+  "binding_basis": "none",
+  "completeness": "partial",
+  "completeness_reasons": [
+    "historical_summary_only"
+  ],
+  "missing_capabilities": [
+    "content",
+    "event_identity",
+    "lifecycle",
+    "session_identity",
+    "timing",
+    "trace_identity"
+  ],
+  "content_state": "not_captured",
+  "summary_fields": [
+    "model_tokens.model",
+    "model_tokens.input_tokens",
+    "model_tokens.total_tokens",
+    "errors.present"
+  ],
+  "trace_controls_enabled": false,
+  "retention_disposition": "not_applicable"
+}

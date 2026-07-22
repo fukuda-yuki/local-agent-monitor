@@ -1,10 +1,11 @@
 using System.Buffers;
 using System.Text.Json;
-using System.Text.RegularExpressions;
+using CopilotAgentObservability.ConfigCli.HistoricalImport;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 
 namespace CopilotAgentObservability.ConfigCli.HistoricalImport.ClaudeCode;
 
-internal sealed partial class ClaudeHistoricalAdapter
+internal sealed class ClaudeHistoricalAdapter
 {
     private const string AdapterId = "claude-code-history-v1";
     private const string ProfileId = "claude-code-transcript";
@@ -30,7 +31,17 @@ internal sealed partial class ClaudeHistoricalAdapter
                 "historical_source_reference_required");
         }
 
-        var version = NormalizeVersion(request.SourceApplicationVersion);
+        var version = ToProducerVersion(request.SourceApplicationVersion);
+        if (!HistoricalSourcePathPolicy.IsCanonicalNativeAbsolute(request.Reference.ExactReference)
+            || !HistoricalSourceMetadataTokenPolicy.IsValid(request.SourceApplicationVersion))
+        {
+            return new(
+                "not_evaluated",
+                "provided",
+                version,
+                "historical_source_malformed");
+        }
+
         try
         {
             var inspection = fileSystem.InspectExactReference(request.Reference.ExactReference);
@@ -123,8 +134,8 @@ internal sealed partial class ClaudeHistoricalAdapter
             && string.Equals(consent.RequestedCapture, "metadata_only", StringComparison.Ordinal);
     }
 
-    private static string? NormalizeVersion(string? version) =>
-        version is not null && SemanticVersion().IsMatch(version) ? version : null;
+    private static string? ToProducerVersion(string? version) =>
+        HistoricalImportSemanticVersionPolicy.IsValid(version) ? version : null;
 
     private static bool IsFatalOrControlFlow(Exception exception) =>
         IsLegacyFatal(exception) || exception is
@@ -143,6 +154,4 @@ internal sealed partial class ClaudeHistoricalAdapter
     private static bool IsLegacyFatal(Exception exception) => exception is ExecutionEngineException;
 #pragma warning restore CS0618
 
-    [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$", RegexOptions.CultureInvariant)]
-    private static partial Regex SemanticVersion();
 }
