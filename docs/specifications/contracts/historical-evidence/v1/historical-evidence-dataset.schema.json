@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/historical-evidence/v1/historical-evidence-dataset.schema.json",
+  "title": "Historical evidence dataset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "extraction_id", "snapshot_id", "representation", "selection", "truncated_before", "truncated_session_count", "sessions", "excluded_sessions", "evidence_groups", "distribution"],
+  "properties": {
+    "schema_version": { "enum": ["historical-evidence.raw-local.v1", "historical-evidence.repository-safe.v1"] },
+    "extraction_id": { "type": "string", "pattern": "^historical-extraction-[0-9a-f]{32}$" },
+    "snapshot_id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+    "representation": { "enum": ["raw_local", "repository_safe"] },
+    "selection": { "$ref": "#/$defs/selection" },
+    "truncated_before": { "type": "boolean" },
+    "truncated_session_count": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+    "sessions": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/session" } },
+    "excluded_sessions": { "type": "array", "maxItems": 401, "items": { "$ref": "#/$defs/excluded" } },
+    "evidence_groups": { "type": "array", "maxItems": 51200, "items": { "$ref": "#/$defs/group" } },
+    "distribution": { "$ref": "#/$defs/distribution" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "representation": { "const": "raw_local" } }, "required": ["representation"] },
+      "then": {
+        "properties": {
+          "schema_version": { "const": "historical-evidence.raw-local.v1" },
+          "selection": { "properties": { "explicit_session_ids": { "items": { "type": "string", "format": "uuid" } } } },
+          "sessions": { "items": { "properties": { "session_id": { "type": "string", "format": "uuid" } } } },
+          "excluded_sessions": { "items": { "properties": { "session_id": { "type": "string", "format": "uuid" } } } },
+          "evidence_groups": {
+            "items": {
+              "properties": {
+                "session_id": { "type": "string", "format": "uuid" },
+                "references": { "items": { "properties": { "session_id": { "type": "string", "format": "uuid" } } } }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "schema_version": { "const": "historical-evidence.repository-safe.v1" },
+          "selection": { "properties": { "explicit_session_ids": { "items": { "$ref": "#/$defs/sessionRef" } } } },
+          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "raw_local_descriptor": { "type": "null" } } } },
+          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" } } } },
+          "evidence_groups": {
+            "items": {
+              "properties": {
+                "session_id": { "$ref": "#/$defs/sessionRef" },
+                "exact_call_id": { "type": "null" },
+                "exact_ownership_id": { "type": "null" },
+                "references": {
+                  "items": {
+                    "properties": {
+                      "session_id": { "$ref": "#/$defs/sessionRef" },
+                      "trace_id": { "$ref": "#/$defs/traceRef" },
+                      "span_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/spanRef" }] }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sessionRef": { "type": "string", "pattern": "^session-ref-[0-9a-f]{32}$" },
+    "traceRef": { "type": "string", "pattern": "^trace-ref-[0-9a-f]{32}$" },
+    "spanRef": { "type": "string", "pattern": "^span-ref-[0-9a-f]{32}$" },
+    "nullableString": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 256 }] },
+    "nullableTime": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "workspace", "from", "to", "explicit_session_ids", "source_surfaces", "task_label", "experiment_label", "maximum_session_count", "sanitized_only"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/nullableString" }, "workspace": { "$ref": "#/$defs/nullableString" },
+        "from": { "$ref": "#/$defs/nullableTime" }, "to": { "$ref": "#/$defs/nullableTime" },
+        "explicit_session_ids": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "type": "string", "minLength": 36, "maxLength": 44 } },
+        "source_surfaces": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/surface" } },
+        "task_label": { "$ref": "#/$defs/nullableString" }, "experiment_label": { "$ref": "#/$defs/nullableString" },
+        "maximum_session_count": { "type": "integer", "minimum": 1, "maximum": 200 }, "sanitized_only": { "type": "boolean" }
+      }
+    },
+    "surface": { "enum": ["copilot-sdk", "copilot-cli", "vscode", "hook-unknown", "claude-code"] },
+    "completeness": { "enum": ["unbound", "partial", "rich", "full"] },
+    "sourceKind": { "enum": ["live_otel", "saved_raw", "historical_summary"] },
+    "contentState": { "enum": ["available", "not_captured", "redacted", "unsupported", "expired_pending_deletion"] },
+    "descriptorState": { "enum": ["not_requested", "unavailable", "available", "rejected_sensitive"] },
+    "session": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "source_surface", "source_version", "adapter_version", "completeness", "completeness_reasons", "source_kind", "content_state", "descriptor_state", "raw_local_descriptor", "capabilities"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 64 }, "source_surface": { "$ref": "#/$defs/surface" },
+        "source_version": { "$ref": "#/$defs/nullableString" }, "adapter_version": { "$ref": "#/$defs/nullableString" },
+        "completeness": { "$ref": "#/$defs/completeness" }, "completeness_reasons": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "source_kind": { "$ref": "#/$defs/sourceKind" }, "content_state": { "$ref": "#/$defs/contentState" }, "descriptor_state": { "$ref": "#/$defs/descriptorState" },
+        "raw_local_descriptor": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 160 }] }, "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "excluded": {
+      "type": "object", "additionalProperties": false, "required": ["session_id", "reason"],
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 64 }, "reason": { "enum": ["filter_mismatch", "window_truncated", "unbound", "missing_evidence_reference", "missing_session_reference", "invalid_historical_completeness"] } }
+    },
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turn_rollup", "token_rollup", "cache_rollup", "error_span", "retry_chain", "repeated_tool_call", "permission_wait", "subagent_fan_out", "raw_local_descriptor", "quality_reference", "source_comparison", "instruction_finding_reference"],
+      "properties": {
+        "turn_rollup": {"type":"boolean"}, "token_rollup": {"type":"boolean"}, "cache_rollup": {"type":"boolean"}, "error_span": {"type":"boolean"},
+        "retry_chain": {"type":"boolean"}, "repeated_tool_call": {"type":"boolean"}, "permission_wait": {"type":"boolean"}, "subagent_fan_out": {"type":"boolean"},
+        "raw_local_descriptor": {"type":"boolean"}, "quality_reference": {"type":"boolean"}, "source_comparison": {"type":"boolean"}, "instruction_finding_reference": {"type":"boolean"}
+      }
+    },
+    "reference": {
+      "type": "object", "additionalProperties": false, "required": ["session_id", "trace_id", "span_id", "turn_index", "relative_position"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 64 }, "trace_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "span_id": { "oneOf": [{"type":"null"},{"type":"string","minLength":1,"maxLength":4096}] }, "turn_index": { "oneOf": [{"type":"null"},{"type":"integer","minimum":1}] },
+        "relative_position": { "enum": ["anchor", "previous", "following"] }
+      }
+    },
+    "group": {
+      "type": "object", "additionalProperties": false,
+      "required": ["group_id", "kind", "session_id", "references", "numeric_value", "unit", "status", "exact_call_id", "canonical_call_hash", "exact_ownership_id", "finding_id"],
+      "properties": {
+        "group_id": {"type":"string","pattern":"^historical-group-[0-9a-f]{32}$"},
+        "kind": {"enum":["turn_rollup","token_rollup","cache_rollup","error_span","retry_chain","repeated_tool_call","permission_wait","subagent_fan_out","user_correction","quality_reference","source_difference","instruction_finding"]},
+        "session_id":{"type":"string","minLength":1,"maxLength":64}, "references":{"type":"array","minItems":1,"maxItems":16,"items":{"$ref":"#/$defs/reference"}},
+        "numeric_value":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0}]}, "unit":{"$ref":"#/$defs/nullableString"}, "status":{"$ref":"#/$defs/nullableString"},
+        "exact_call_id":{"$ref":"#/$defs/nullableString"}, "canonical_call_hash":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^[0-9a-f]{64}$"}]},
+        "exact_ownership_id":{"$ref":"#/$defs/nullableString"}, "finding_id":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^instruction-finding-[0-9a-f]{24}$"}]}
+      }
+    },
+    "count": {"type":"object","additionalProperties":false,"required":["key","count"],"properties":{"key":{"type":"string","minLength":1},"count":{"type":"integer","minimum":1}}},
+    "distribution": {
+      "type":"object","additionalProperties":false,"required":["completeness","source_kinds","capabilities"],
+      "properties":{"completeness":{"type":"array","items":{"$ref":"#/$defs/count"}},"source_kinds":{"type":"array","items":{"$ref":"#/$defs/count"}},"capabilities":{"type":"array","items":{"$ref":"#/$defs/count"}}}
+    }
+  }
+}
