@@ -40,6 +40,7 @@ internal static class AlertLifecycleRoutes
         if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
         var result = lifecycleStore.Get(alertId);
         if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteReadErrorAsync(context, result); return; }
+        if (!IsValidReadSuccess(result, alertId)) { await WriteUnavailableAsync(context); return; }
         await WriteJsonAsync(context, LifecycleDto(result.Lifecycle!));
     }
 
@@ -57,6 +58,7 @@ internal static class AlertLifecycleRoutes
         if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
         var result = lifecycleStore.History(alertId, limit);
         if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteHistoryErrorAsync(context, result); return; }
+        if (!IsValidHistorySuccess(result, alertId, limit)) { await WriteUnavailableAsync(context); return; }
         await WriteJsonAsync(context, new
         {
             schema_version = AlertLifecycleContractVersions.Lifecycle,
@@ -89,6 +91,7 @@ internal static class AlertLifecycleRoutes
         if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
         var result = lifecycleStore.Mutate(mutation);
         if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteMutationErrorAsync(context, result); return; }
+        if (!IsValidMutationSuccess(result, mutation)) { await WriteUnavailableAsync(context); return; }
         await WriteJsonAsync(context, new
         {
             schema_version = AlertLifecycleContractVersions.Lifecycle,
@@ -183,6 +186,57 @@ internal static class AlertLifecycleRoutes
 
     private static Task WriteUnavailableAsync(HttpContext context) =>
         WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_unavailable");
+
+    private static bool IsValidReadSuccess(AlertLifecycleStoreResult result, string alertId) =>
+        result.Code is null && result.Event is null && !result.Replayed && IsValidView(result.Lifecycle, alertId);
+
+    private static bool IsValidHistorySuccess(AlertLifecycleHistoryResult result, string alertId, int limit)
+    {
+        if (result.Code is not null || result.Events is null || result.Events.Count > limit) return false;
+        for (var index = 0; index < result.Events.Count; index++)
+        {
+            var item = result.Events[index];
+            if (!AlertLifecycleValidation.IsValidEvent(item) || item.AlertId != alertId) return false;
+            if (index > 0)
+            {
+                var newer = result.Events[index - 1];
+                if (newer.Revision - 1 != item.Revision || newer.PreviousState != item.State) return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsValidMutationSuccess(AlertLifecycleStoreResult result, AlertLifecycleMutation mutation)
+    {
+        var @event = result.Event;
+        var lifecycle = result.Lifecycle;
+        return result.Code is null
+            && IsValidView(lifecycle, mutation.AlertId)
+            && AlertLifecycleValidation.IsValidEvent(@event)
+            && @event!.AlertId == mutation.AlertId
+            && @event.Action == mutation.Action
+            && @event.ExpectedRevision == mutation.ExpectedRevision
+            && @event.Actor == mutation.Actor
+            && @event.ReasonCode == mutation.ReasonCode
+            && @event.Comment == mutation.Comment
+            && @event.IdempotencyKey == mutation.IdempotencyKey
+            && @event.OldAlertId == mutation.OldAlertId
+            && @event.NewAlertId == mutation.NewAlertId
+            && lifecycle!.Revision == @event.Revision
+            && lifecycle.State == @event.State
+            && lifecycle.LastOccurredAt == @event.OccurredAt;
+    }
+
+    private static bool IsValidView(AlertLifecycleView? value, string alertId) =>
+        value is not null
+        && value.SchemaVersion == AlertLifecycleContractVersions.Lifecycle
+        && value.AlertId == alertId
+        && AlertLifecycleValidation.IsCanonicalAlertId(value.AlertId)
+        && Enum.IsDefined(value.State)
+        && value.Revision >= 0
+        && (value.Revision == 0
+            ? value.State == AlertLifecycleState.Open && value.LastOccurredAt is null
+            : value.LastOccurredAt is { Offset: var offset } && offset == TimeSpan.Zero);
 
     private static async Task WriteJsonAsync<T>(HttpContext context, T value)
     {

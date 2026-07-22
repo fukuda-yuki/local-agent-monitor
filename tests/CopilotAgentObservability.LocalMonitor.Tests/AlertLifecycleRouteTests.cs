@@ -103,11 +103,25 @@ public sealed class AlertLifecycleRouteTests
         using var internalActor = Request(valid[..^1] + ",\"actor\":\"local_system\"}");
         await AssertError(await host.Client.SendAsync(internalActor), HttpStatusCode.BadRequest, "alert_invalid_request");
 
-        using var duplicate = Request(valid.Replace("\"expected_revision\":0", "\"expected_revision\":0,\"expected_revision\":0", StringComparison.Ordinal));
-        await AssertError(await host.Client.SendAsync(duplicate), HttpStatusCode.BadRequest, "alert_invalid_request");
-
         using var sensitive = Request(valid.Replace("null", "\"C:\\\\Users\\\\person\\\\raw.json\"", StringComparison.Ordinal));
         await AssertError(await host.Client.SendAsync(sensitive), HttpStatusCode.BadRequest, "alert_comment_not_sanitized");
+    }
+
+    [Theory]
+    [InlineData("\"schema_version\":\"alert.lifecycle.v1\"")]
+    [InlineData("\"action\":\"acknowledge\"")]
+    [InlineData("\"expected_revision\":0")]
+    [InlineData("\"reason_code\":\"user_reviewed\"")]
+    [InlineData("\"comment\":null")]
+    public async Task MutationRoute_RejectsEveryDuplicateJsonProperty(string duplicateMember)
+    {
+        using var temp = NewTemp();
+        SeedReceipt(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        var body = "{\"schema_version\":\"alert.lifecycle.v1\",\"action\":\"acknowledge\",\"expected_revision\":0,\"reason_code\":\"user_reviewed\",\"comment\":null," + duplicateMember + "}";
+        using var request = Request(body);
+
+        await AssertError(await host.Client.SendAsync(request), HttpStatusCode.BadRequest, "alert_invalid_request");
     }
 
     [Fact]
@@ -174,6 +188,25 @@ public sealed class AlertLifecycleRouteTests
         await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle/history"), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
         using var mutation = Request("""{"schema_version":"alert.lifecycle.v1","action":"acknowledge","expected_revision":0,"reason_code":"user_reviewed","comment":null}""");
         await AssertError(await host.Client.SendAsync(mutation), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
+    }
+
+    [Theory]
+    [InlineData("read")]
+    [InlineData("history")]
+    [InlineData("mutation")]
+    public async Task HostileSuccessPayloadsForEveryRoute_MapToFixedUnavailableWithoutReflection(string route)
+    {
+        using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new HostileSuccessStore()));
+
+        var response = route switch
+        {
+            "read" => await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle"),
+            "history" => await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle/history?limit=2"),
+            "mutation" => await host.Client.SendAsync(Request("""{"schema_version":"alert.lifecycle.v1","action":"acknowledge","expected_revision":0,"reason_code":"user_reviewed","comment":null}""")),
+            _ => throw new InvalidOperationException(),
+        };
+        await AssertError(response, HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
     }
 
     [Fact]
@@ -272,5 +305,28 @@ public sealed class AlertLifecycleRouteTests
         public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
         public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
         public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
+    }
+
+    private sealed class HostileSuccessStore : IAlertLifecycleStore
+    {
+        private static readonly DateTimeOffset OccurredAt = new(2026, 7, 22, 0, 0, 0, TimeSpan.Zero);
+        private static AlertLifecycleEvent Event() => new(
+            AlertLifecycleContractVersions.Lifecycle, new string('f', 64), AlertId, 1, 0, AlertLifecycleAction.Acknowledge,
+            AlertLifecycleState.Open, AlertLifecycleState.Acknowledged, OccurredAt, "local_user", "user_reviewed", null,
+            "aid1_" + new string('a', 43), null, null, "alert_lifecycle_updated");
+        private static AlertLifecycleEvent InconsistentNewerHistoryEvent() => new(
+            AlertLifecycleContractVersions.Lifecycle, new string('e', 64), AlertId, 2, 1, AlertLifecycleAction.Reopen,
+            AlertLifecycleState.Dismissed, AlertLifecycleState.Open, OccurredAt, "local_user", "user_reviewed", null,
+            "aid1_" + new string('b', 43), null, null, "alert_lifecycle_updated");
+
+        public AlertLifecycleStoreResult Initialize() => new(AlertLifecycleStoreStatus.Success);
+        public AlertLifecycleStoreResult Get(string alertId) => new(AlertLifecycleStoreStatus.Success, "raw_secret",
+            new(AlertLifecycleContractVersions.Lifecycle, AlertId, AlertLifecycleState.Open, 0, null));
+        public AlertLifecycleHistoryResult History(string alertId, int limit = 50) => new(AlertLifecycleStoreStatus.Success, [InconsistentNewerHistoryEvent(), Event()]);
+        public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Success, Lifecycle:
+            new(AlertLifecycleContractVersions.Lifecycle, AlertId, AlertLifecycleState.Resolved, 1, OccurredAt), Event: Event());
+        public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => Mutate(mutation);
+        public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => Mutate(mutation);
+        public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => Mutate(mutation);
     }
 }

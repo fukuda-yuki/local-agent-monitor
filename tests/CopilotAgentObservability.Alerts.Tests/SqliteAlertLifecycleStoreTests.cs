@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.Data.Sqlite;
@@ -165,20 +167,21 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     }
 
     [Fact]
-    public void Mutate_RejectsByteDistinctMalformedUtf16CommentsBeforeIdempotencyHashing()
+    public void Mutate_SameKeyValidReplacementScalarAndMalformedSurrogateCannotAlias()
     {
         SeedReceipts();
         var store = Store();
         store.Initialize();
-        var first = Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a') with { Comment = "high \ud800 surrogate" };
-        var second = first with { Comment = "low \udc00 surrogate" };
+        var valid = Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a') with { Comment = "reviewed � locally" };
+        var malformed = valid with { Comment = "reviewed \ud800 locally" };
 
-        var firstResult = store.Mutate(first);
-        var secondResult = store.Mutate(second);
+        var validResult = store.Mutate(valid);
+        var malformedResult = store.Mutate(malformed);
 
-        Assert.Equal("alert_comment_not_sanitized", firstResult.Code);
-        Assert.Equal("alert_comment_not_sanitized", secondResult.Code);
-        Assert.Empty(store.History(AlertA).Events);
+        Assert.Equal(AlertLifecycleStoreStatus.Success, validResult.Status);
+        Assert.Equal("alert_comment_not_sanitized", malformedResult.Code);
+        var persisted = Assert.Single(store.History(AlertA).Events);
+        Assert.Equal("reviewed � locally", persisted.Comment);
     }
 
     [Fact]
@@ -433,6 +436,68 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     }
 
     [Fact]
+    public void Get_ImpossiblePersistedTransitionReturnsUnavailable()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", 1L, 0L, action: "resolve", previousState: "dismissed", state: "resolved");
+
+        var result = store.Get(AlertA);
+
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (result.Status, result.Code));
+        Assert.Null(result.Lifecycle);
+    }
+
+    [Theory]
+    [InlineData("acknowledge", "open", "acknowledged", "local_system", null, null)]
+    [InlineData("supersede", "open", "superseded", "local_system", AlertB, AlertB)]
+    public void History_WrongPersistedActorOrSeamIdsReturnsUnavailable(
+        string action, string previousState, string state, string actor, string? oldAlertId, string? newAlertId)
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", 1L, 0L, action: action, previousState: previousState,
+            state: state, actor: actor, oldAlertId: oldAlertId, newAlertId: newAlertId);
+
+        var result = store.History(AlertA);
+
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (result.Status, result.Code));
+        Assert.Empty(result.Events);
+    }
+
+    [Fact]
+    public void Append_PersistedRevisionGapReturnsUnavailableWithoutInsert()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", 2L, 1L);
+
+        var result = store.Mutate(Command(AlertA, AlertLifecycleAction.Resolve, 2, 'b'));
+
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (result.Status, result.Code));
+        using var check = Open();
+        Assert.Equal(1L, Scalar<long>(check, "SELECT count(*) FROM alert_lifecycle_events;"));
+    }
+
+    [Fact]
+    public void Replay_ValidGrammarWrongPersistedRequestHashReturnsUnavailableNotCallerConflict()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", 1L, 0L, requestHash: new string('2', 64), idempotencySuffix: 'a');
+
+        var result = store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a') with { Comment = null });
+
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (result.Status, result.Code));
+        using var check = Open();
+        Assert.Equal(1L, Scalar<long>(check, "SELECT count(*) FROM alert_lifecycle_events;"));
+    }
+
+    [Fact]
     public void Initialize_OverflowingLifecycleVersionReturnsUnavailableWithoutThrowing()
     {
         SeedReceipts();
@@ -498,21 +563,60 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         Assert.Equal(AlertStoreStatus.Success, engine.Append(Evaluation()).Status);
     }
 
-    private void InsertEvent(string occurredAt, object revision, object expectedRevision, bool ignoreChecks = false)
+    private void InsertEvent(
+        string occurredAt,
+        object revision,
+        object expectedRevision,
+        bool ignoreChecks = false,
+        string action = "acknowledge",
+        string previousState = "open",
+        string state = "acknowledged",
+        string actor = "local_user",
+        string? oldAlertId = null,
+        string? newAlertId = null,
+        string? requestHash = null,
+        char idempotencySuffix = 'z')
     {
         using var connection = Open();
         if (ignoreChecks) Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+        var key = "aid1_" + new string(idempotencySuffix, 43);
+        requestHash ??= expectedRevision is long expected
+            ? RequestHash(action, expected, actor, oldAlertId, newAlertId)
+            : new string('1', 64);
         using var command = connection.CreateCommand();
         command.CommandText =
-            "INSERT INTO alert_lifecycle_events(event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,request_hash,old_alert_id,new_alert_id,result_code) VALUES($event,$alert,$revision,$expected,'acknowledge','open','acknowledged',$occurred,'local_user','user_reviewed',NULL,$key,$hash,NULL,NULL,'alert_lifecycle_updated');";
+            "INSERT INTO alert_lifecycle_events(event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,request_hash,old_alert_id,new_alert_id,result_code) VALUES($event,$alert,$revision,$expected,$action,$previous,$state,$occurred,$actor,'user_reviewed',NULL,$key,$hash,$old,$new,'alert_lifecycle_updated');";
         command.Parameters.AddWithValue("$event", new string('f', 64));
         command.Parameters.AddWithValue("$alert", AlertA);
         command.Parameters.AddWithValue("$revision", revision);
         command.Parameters.AddWithValue("$expected", expectedRevision);
+        command.Parameters.AddWithValue("$action", action);
+        command.Parameters.AddWithValue("$previous", previousState);
+        command.Parameters.AddWithValue("$state", state);
         command.Parameters.AddWithValue("$occurred", occurredAt);
-        command.Parameters.AddWithValue("$key", "aid1_" + new string('z', 43));
-        command.Parameters.AddWithValue("$hash", new string('1', 64));
+        command.Parameters.AddWithValue("$actor", actor);
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$hash", requestHash);
+        command.Parameters.AddWithValue("$old", (object?)oldAlertId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$new", (object?)newAlertId ?? DBNull.Value);
         command.ExecuteNonQuery();
+    }
+
+    private static string RequestHash(string action, long expectedRevision, string actor, string? oldAlertId, string? newAlertId)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            schema_version = AlertLifecycleContractVersions.Lifecycle,
+            alert_id = AlertA,
+            action,
+            expected_revision = expectedRevision,
+            reason_code = "user_reviewed",
+            comment = (string?)null,
+            actor,
+            old_alert_id = oldAlertId,
+            new_alert_id = newAlertId,
+        });
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
     }
 
     private string ReceiptJson(string alertId)

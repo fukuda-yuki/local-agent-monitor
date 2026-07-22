@@ -112,6 +112,45 @@ public static partial class AlertLifecycleValidation
     public static bool IsCanonicalAlertId(string? value) => value is { Length: 64 }
         && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
+    public static bool IsValidEvent(AlertLifecycleEvent? value)
+    {
+        if (value is null
+            || value.SchemaVersion != AlertLifecycleContractVersions.Lifecycle
+            || !IsCanonicalAlertId(value.EventId)
+            || !IsCanonicalAlertId(value.AlertId)
+            || value.Revision < 1 || value.ExpectedRevision < 0 || value.ExpectedRevision != value.Revision - 1
+            || !Enum.IsDefined(value.Action) || !Enum.IsDefined(value.PreviousState) || !Enum.IsDefined(value.State)
+            || value.OccurredAt.Offset != TimeSpan.Zero
+            || value.Actor is not ("local_user" or "local_system")
+            || !IsReasonCode(value.ReasonCode)
+            || !IsSanitizedComment(value.Comment)
+            || !IsIdempotencyKey(value.IdempotencyKey)
+            || value.OldAlertId is not null && !IsCanonicalAlertId(value.OldAlertId)
+            || value.NewAlertId is not null && !IsCanonicalAlertId(value.NewAlertId)
+            || value.ResultCode != "alert_lifecycle_updated"
+            || !AlertLifecycleTransition.TryApply(value.PreviousState, value.Action, out var derivedState)
+            || derivedState != value.State)
+        {
+            return false;
+        }
+
+        return value.Action switch
+        {
+            AlertLifecycleAction.Acknowledge or AlertLifecycleAction.Dismiss or AlertLifecycleAction.Reopen =>
+                value.Actor == "local_user" && value.OldAlertId is null && value.NewAlertId is null,
+            AlertLifecycleAction.Resolve when value.Actor == "local_user" =>
+                value.OldAlertId is null && value.NewAlertId is null,
+            AlertLifecycleAction.Resolve =>
+                value.Actor == "local_system" && value.Comment is null && value.OldAlertId is null && value.NewAlertId is null,
+            AlertLifecycleAction.Supersede =>
+                value.Actor == "local_system" && value.Comment is null && value.OldAlertId == value.AlertId
+                && value.NewAlertId is not null && value.NewAlertId != value.AlertId,
+            AlertLifecycleAction.SourceDeleted =>
+                value.Actor == "local_system" && value.Comment is null && value.OldAlertId is null && value.NewAlertId is null,
+            _ => false,
+        };
+    }
+
     public static bool IsSanitizedComment(string? value)
     {
         if (value is null) return true;

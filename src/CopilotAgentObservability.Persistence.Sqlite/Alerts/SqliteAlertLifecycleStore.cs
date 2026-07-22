@@ -49,7 +49,8 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
             using var connection = Open();
             if (!SchemasValid(connection, null)) return Unavailable();
             if (!ReceiptExists(connection, null, alertId)) return NotFound();
-            var latest = ReadLatest(connection, null, alertId);
+            var history = ReadHistory(connection, null, alertId);
+            var latest = history.Count == 0 ? null : history[^1].Event;
             return new(AlertLifecycleStoreStatus.Success, Lifecycle: latest is null ? LazyOpen(alertId) : View(latest));
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return Busy(); }
@@ -68,12 +69,8 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
             using var connection = Open();
             if (!SchemasValid(connection, null)) return HistoryUnavailable();
             if (!ReceiptExists(connection, null, alertId)) return new(AlertLifecycleStoreStatus.NotFound, [], "alert_not_found");
-            using var command = Command(connection, null,
-                "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code FROM alert_lifecycle_events WHERE alert_id=$alert ORDER BY revision DESC LIMIT $limit;",
-                ("$alert", alertId), ("$limit", limit));
-            using var reader = command.ExecuteReader();
-            var events = new List<AlertLifecycleEvent>();
-            while (reader.Read()) events.Add(ReadEvent(reader));
+            var history = ReadHistory(connection, null, alertId);
+            var events = history.Select(item => item.Event).TakeLast(limit).Reverse().ToArray();
             return new(AlertLifecycleStoreStatus.Success, events);
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertLifecycleStoreStatus.Busy, [], "alert_lifecycle_store_busy"); }
@@ -131,16 +128,17 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
             var prior = ReadByIdempotencyKey(connection, transaction, mutation.IdempotencyKey);
             if (prior is not null)
             {
-                var priorHash = ReadRequestHash(connection, transaction, mutation.IdempotencyKey);
+                _ = ReadHistory(connection, transaction, prior.Event.AlertId);
                 transaction.Commit();
-                return priorHash == requestHash
-                    ? new(AlertLifecycleStoreStatus.Success, Lifecycle: View(prior), Event: prior, Replayed: true)
+                return prior.RequestHash == requestHash
+                    ? new(AlertLifecycleStoreStatus.Success, Lifecycle: View(prior.Event), Event: prior.Event, Replayed: true)
                     : Conflict("alert_idempotency_conflict");
             }
 
             if (!ReceiptExists(connection, transaction, mutation.AlertId)) return NotFound();
             if (requireNewReceipt && !ReceiptExists(connection, transaction, mutation.NewAlertId!)) return NotFound();
-            var latest = ReadLatest(connection, transaction, mutation.AlertId);
+            var history = ReadHistory(connection, transaction, mutation.AlertId);
+            var latest = history.Count == 0 ? null : history[^1].Event;
             var current = latest?.State ?? AlertLifecycleState.Open;
             var revision = latest?.Revision ?? 0;
             if (revision != mutation.ExpectedRevision) return Conflict("alert_revision_conflict");
@@ -179,34 +177,39 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         return null;
     }
 
-    private static AlertLifecycleEvent? ReadLatest(SqliteConnection connection, SqliteTransaction? transaction, string alertId)
+    private static StoredEvent? ReadByIdempotencyKey(SqliteConnection connection, SqliteTransaction transaction, string key)
     {
         using var command = Command(connection, transaction,
-            "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code FROM alert_lifecycle_events WHERE alert_id=$alert ORDER BY revision DESC LIMIT 1;", ("$alert", alertId));
+            "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code,request_hash FROM alert_lifecycle_events WHERE idempotency_key=$key;", ("$key", key));
         using var reader = command.ExecuteReader();
-        return reader.Read() ? ReadEvent(reader) : null;
+        return reader.Read() ? ReadStoredEvent(reader) : null;
     }
 
-    private static AlertLifecycleEvent? ReadByIdempotencyKey(SqliteConnection connection, SqliteTransaction transaction, string key)
+    private static IReadOnlyList<StoredEvent> ReadHistory(SqliteConnection connection, SqliteTransaction? transaction, string alertId)
     {
         using var command = Command(connection, transaction,
-            "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code FROM alert_lifecycle_events WHERE idempotency_key=$key;", ("$key", key));
+            "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code,request_hash FROM alert_lifecycle_events WHERE alert_id=$alert ORDER BY revision;", ("$alert", alertId));
         using var reader = command.ExecuteReader();
-        return reader.Read() ? ReadEvent(reader) : null;
-    }
-
-    private static string? ReadRequestHash(SqliteConnection connection, SqliteTransaction transaction, string key)
-    {
-        using var command = Command(connection, transaction, "SELECT request_hash FROM alert_lifecycle_events WHERE idempotency_key=$key;", ("$key", key));
-        return command.ExecuteScalar() switch
+        var events = new List<StoredEvent>();
+        var expectedRevision = 1L;
+        var expectedPreviousState = AlertLifecycleState.Open;
+        while (reader.Read())
         {
-            null or DBNull => null,
-            string value when AlertLifecycleValidation.IsCanonicalAlertId(value) => value,
-            _ => throw new FormatException(),
-        };
+            var stored = ReadStoredEvent(reader);
+            if (stored.Event.Revision != expectedRevision || stored.Event.PreviousState != expectedPreviousState) throw new FormatException();
+            events.Add(stored);
+            expectedPreviousState = stored.Event.State;
+            if (expectedRevision == long.MaxValue)
+            {
+                if (reader.Read()) throw new FormatException();
+                break;
+            }
+            expectedRevision++;
+        }
+        return events;
     }
 
-    private static AlertLifecycleEvent ReadEvent(SqliteDataReader reader)
+    private static StoredEvent ReadStoredEvent(SqliteDataReader reader)
     {
         var eventId = Text(reader, 0);
         var alertId = Text(reader, 1);
@@ -223,23 +226,16 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         var oldAlertId = NullableText(reader, 12);
         var newAlertId = NullableText(reader, 13);
         var resultCode = Text(reader, 14);
-
-        if (!AlertLifecycleValidation.IsCanonicalAlertId(eventId)
-            || !AlertLifecycleValidation.IsCanonicalAlertId(alertId)
-            || revision < 1 || expectedRevision < 0 || expectedRevision != revision - 1
-            || actor is not ("local_user" or "local_system")
-            || !AlertLifecycleValidation.IsReasonCode(reasonCode)
-            || !AlertLifecycleValidation.IsSanitizedComment(comment)
-            || !AlertLifecycleValidation.IsIdempotencyKey(idempotencyKey)
-            || oldAlertId is not null && !AlertLifecycleValidation.IsCanonicalAlertId(oldAlertId)
-            || newAlertId is not null && !AlertLifecycleValidation.IsCanonicalAlertId(newAlertId)
-            || resultCode != "alert_lifecycle_updated")
+        var requestHash = Text(reader, 15);
+        var @event = new AlertLifecycleEvent(AlertLifecycleContractVersions.Lifecycle, eventId, alertId, revision, expectedRevision, action,
+            previousState, state, occurredAt, actor, reasonCode, comment, idempotencyKey, oldAlertId, newAlertId, resultCode);
+        if (!AlertLifecycleValidation.IsValidEvent(@event)
+            || !AlertLifecycleValidation.IsCanonicalAlertId(requestHash)
+            || RequestHash(new AlertLifecycleMutation(alertId, action, expectedRevision, reasonCode, comment, idempotencyKey, actor, oldAlertId, newAlertId)) != requestHash)
         {
             throw new FormatException();
         }
-
-        return new(AlertLifecycleContractVersions.Lifecycle, eventId, alertId, revision, expectedRevision, action,
-            previousState, state, occurredAt, actor, reasonCode, comment, idempotencyKey, oldAlertId, newAlertId, resultCode);
+        return new(@event, requestHash);
     }
 
     private static bool SchemasValid(SqliteConnection connection, SqliteTransaction? transaction) =>
@@ -302,4 +298,6 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
     private static string Wire(AlertLifecycleAction value) => value switch { AlertLifecycleAction.Acknowledge => "acknowledge", AlertLifecycleAction.Dismiss => "dismiss", AlertLifecycleAction.Resolve => "resolve", AlertLifecycleAction.Reopen => "reopen", AlertLifecycleAction.Supersede => "supersede", AlertLifecycleAction.SourceDeleted => "source_deleted", _ => throw new ArgumentOutOfRangeException(nameof(value)) };
     private static AlertLifecycleState State(string value) => value switch { "open" => AlertLifecycleState.Open, "acknowledged" => AlertLifecycleState.Acknowledged, "dismissed" => AlertLifecycleState.Dismissed, "resolved" => AlertLifecycleState.Resolved, "superseded" => AlertLifecycleState.Superseded, _ => throw new FormatException() };
     private static AlertLifecycleAction Action(string value) => value switch { "acknowledge" => AlertLifecycleAction.Acknowledge, "dismiss" => AlertLifecycleAction.Dismiss, "resolve" => AlertLifecycleAction.Resolve, "reopen" => AlertLifecycleAction.Reopen, "supersede" => AlertLifecycleAction.Supersede, "source_deleted" => AlertLifecycleAction.SourceDeleted, _ => throw new FormatException() };
+
+    private sealed record StoredEvent(AlertLifecycleEvent Event, string RequestHash);
 }

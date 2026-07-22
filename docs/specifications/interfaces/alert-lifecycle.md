@@ -112,6 +112,23 @@ idempotent replay, and append map any malformed persisted row or numeric
 conversion/overflow to fixed `alert_lifecycle_store_unavailable`, return no
 partial event/lifecycle data, and do not write.
 
+Every decoded event must also be a semantically valid frozen transition. The
+action must map its stored previous/state pair through the transition table;
+user actions require `local_user` and null old/new IDs; trusted reevaluation
+resolve requires `local_system`, null comment, and null old/new IDs;
+supersession requires `local_system`, null comment, `old_alert_id = alert_id`,
+and a different canonical new ID; source deletion requires `local_system`, null
+comment/IDs, and an unchanged state. For one alert, the store loads and
+validates the complete event chain before Get, History, replay, or Append:
+revisions start at 1, are contiguous, expected revision is the prior revision,
+and each previous state equals the prior event state starting from lazy open.
+History validates the complete chain before applying the caller's output
+limit. The store also loads each persisted `request_hash`, requires canonical
+hash grammar, and recomputes it from that event's canonical request fields. A
+stored/recomputed mismatch is corruption and returns unavailable; only a
+validated stored request compared with a different caller request is an
+idempotency conflict.
+
 ## Idempotency
 
 Every mutation requires one canonical idempotency key. The request hash covers
@@ -220,6 +237,15 @@ or a non-success initialization result outside the accepted engine/lifecycle
 pairs maps to `503 alert_lifecycle_store_unavailable`; store-supplied text is
 never reflected. Engine `alert_store_busy` is translated to the lifecycle busy
 code, while every other malformed engine result is lifecycle unavailable.
+Success is equally closed: code must be null and the endpoint-specific v1
+payload must be present, bounded, canonical, and internally consistent. Read
+requires one valid view for the route alert ID. History requires at most the
+requested limit of valid same-alert events in contiguous revision-descending
+order. Mutation requires a valid view and event matching each other, the route
+alert ID, and the submitted mutation fields. A Success result with a non-null
+code, missing payload, wrong schema/ID, invalid event semantics, oversized
+history, or inconsistent view/event/request maps to the same fixed unavailable
+response and reflects no supplied value.
 
 Lifecycle initialization and route failures are route-local. They do not
 change ingestion acceptance, monitor liveness, readiness, or unrelated route
@@ -234,7 +260,11 @@ source-deletion callback, comment leakage rejection, bounded history order,
 fresh host parent-first creation, supported engine-v1 upgrade/coexistence,
 counterfeit parent refusal, exact lifecycle trigger inventory, persisted
 timestamp/revision/version corruption and overflow refusal, malformed UTF-16
-rejection, broken/newer schema refusal, strict duplicate-free API DTOs,
+rejection and a same-key valid-U+FFFD/unpaired-surrogate non-alias proof,
+impossible transition/actor/ID, revision-gap, and request-hash corruption
+refusal, broken/newer schema refusal, table-driven duplicate rejection for
+every request property, strict duplicate-free API DTOs and hostile Success
+payloads for read/history/mutation,
 closed status/code projection, loopback/same-origin/CSRF/no-store controls,
 route-local 413, and route-local 503 behavior.
 
