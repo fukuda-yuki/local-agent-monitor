@@ -110,6 +110,7 @@ public sealed class SanitizedImportCliTests
         using var previewJson = JsonDocument.Parse(preview.Output);
         var digest = previewJson.RootElement.GetProperty("preview_digest").GetString()!;
         Execute(database, """
+            PRAGMA foreign_keys=OFF;
             CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
             INSERT INTO schema_version VALUES('monitor',7),('session',13);
             CREATE TABLE parent(id INTEGER PRIMARY KEY);
@@ -172,7 +173,7 @@ public sealed class SanitizedImportCliTests
         var digest = previewJson.RootElement.GetProperty("preview_digest").GetString()!;
         Assert.Equal(0, Run(["sanitized-import", "import", "--database", database,
             "--bundle", bundle, "--preview-digest", digest]).ExitCode);
-        Execute(database, $"UPDATE sanitized_import_records SET first_import_id='{new string('b', 64)}';");
+        Execute(database, $"PRAGMA foreign_keys=OFF; UPDATE sanitized_import_records SET first_import_id='{new string('b', 64)}';");
 
         var corruptPreview = Run(["sanitized-import", "preview", "--database", database, "--bundle", bundle]);
 

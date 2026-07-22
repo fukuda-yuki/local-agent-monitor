@@ -137,15 +137,24 @@ internal static class SanitizedImportRoutes
         var buffer = new byte[8192];
         long total = 0;
         int read;
-        while ((read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted)) > 0)
+        try
         {
-            total += read;
-            if (total > SanitizedExportLimits.MaximumUncompressedBytes)
+            while ((read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted)) > 0)
             {
-                await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "bundle_too_large");
-                return null;
+                total += read;
+                if (total > SanitizedExportLimits.MaximumUncompressedBytes)
+                {
+                    await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "bundle_too_large");
+                    return null;
+                }
+                await output.WriteAsync(buffer.AsMemory(0, read), context.RequestAborted);
             }
-            await output.WriteAsync(buffer.AsMemory(0, read), context.RequestAborted);
+        }
+        catch (BadHttpRequestException exception)
+        {
+            var mapped = MapUnhandledException(exception);
+            await ErrorAsync(context, mapped.Status, mapped.Error);
+            return null;
         }
         return output.ToArray();
     }

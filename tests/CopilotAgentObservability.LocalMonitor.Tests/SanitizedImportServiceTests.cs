@@ -1047,7 +1047,7 @@ public sealed class SanitizedImportServiceTests
     {
         var alertBytes = variant is null
             ? AlertBytes()
-            : SanitizedExportAlertFixture.Bytes(new(
+            : SanitizedExportAlertFixture.Bytes(new AlertEvidenceReference(
                 AlertEvidenceKind.Event,
                 $"evidence-{variant}",
                 "session-1",
