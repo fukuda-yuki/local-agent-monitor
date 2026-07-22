@@ -2371,6 +2371,24 @@ downstream scanning remain separate. Existing serializer/evaluator/store
 admission remains unchanged, including the unchanged serializer-only golden
 with its fabricated alert ID.
 
+The Wave 3 Alert Center compatibility repair is also additive. One
+source-neutral application object owns a construction-time registry,
+configuration, evidence resolver, and `IAlertEngineStore`; it accepts only an
+already-normalized snapshot and returns an immutable typed success outcome with
+ordered receipt IDs, suppression facts, and rejected-match facts only after the
+exact completed evaluation is appended. Initialization busy/unavailable, append
+busy/unavailable/conflict, and contract rejection remain distinguishable and
+no source mapping, background analysis, lifecycle mutation, or evidence
+inference enters this boundary. `IAlertEngineQueryStore` reads the unchanged
+schema-v1 engine tables through 1..100 cursor pages ordered by alert ID,
+evaluation ID, or suppression ordinal. SQLite receipt enumeration reuses the
+existing strict receipt authority before returning exact bytes with a new
+sealed fully typed #80-owned Alert Center projection; the existing five-field
+consumer API is unchanged. It fails the whole page closed on invalid bytes.
+This trusted local acquisition does not add
+signing, authentication, or provenance attestation, and #84 receives no direct
+SQL authority.
+
 ## D068: Sanitized export separates trusted capture from structural inspection
 
 Status: Accepted (2026-07-22)

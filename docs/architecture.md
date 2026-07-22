@@ -297,6 +297,15 @@ moving domain validation into an upper layer. Historical evidence extraction
 is an internal Local Monitor application/persistence boundary and adds no HTTP
 or shared lower-level dependency.
 
+The Wave 3 alert compatibility repair keeps the same dependency direction.
+`Alerts` additionally owns the source-neutral evaluate-and-append application
+contract and the bounded query contract. `Persistence.Sqlite` implements the
+query contract over the existing `alert_engine` v1 tables and invokes the
+shared `Alerts` strict receipt authority before returning exact bytes with the
+fully typed #80-owned Alert Center projection. #84 remains an
+upper-layer projection/UI consumer and receives neither arbitrary SQL nor a
+source-specific snapshot adapter from this repair.
+
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
 - Sprint8 の Local Ingestion Monitor（ASP.NET Core host、M2 以降）はこれらの共有 module を再利用する前提とする。ConfigCli の外部動作・CLI 表面は M1 で変更しない。
@@ -315,6 +324,17 @@ exact-bound Session metadata + sanitized monitor facts + #59 handoffs
 immutable #80 alert receipt
   -> append-only #83 lifecycle event
   -> derived current state / bounded sanitized API
+
+caller-provided normalized alert snapshot
+  -> frozen #80 registry/configuration + exact evidence resolver
+  -> deterministic evaluation
+  -> initialize + append through IAlertEngineStore
+  -> bounded typed success outcome only after append success
+
+trusted alert_engine v1 query
+  -> alert-id/evaluation-id/suppression-ordinal cursor pages (1..100)
+  -> strict #80 owner validation + fully typed receipt/suppression projections
+  -> #84 server-side projection without direct SQL
 
 trusted read-only SQLite snapshot (#58 + optional #59 / #80)
   -> deterministic #85 dependency closure + canonical members

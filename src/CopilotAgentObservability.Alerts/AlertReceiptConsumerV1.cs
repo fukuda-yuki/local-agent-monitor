@@ -9,6 +9,17 @@ public static class AlertReceiptConsumerV1
 
     public static AlertReceiptConsumerEnvelopeV1 Validate(ReadOnlySpan<byte> canonicalReceipt)
     {
+        var receipt = ValidateCanonicalReceipt(canonicalReceipt);
+        return new AlertReceiptConsumerEnvelopeV1(
+            receipt.AlertId,
+            receipt.SessionId,
+            receipt.TraceId,
+            receipt.SourceSurface,
+            receipt.LastObservedAt);
+    }
+
+    internal static AlertReceipt ValidateCanonicalReceipt(ReadOnlySpan<byte> canonicalReceipt)
+    {
         if (canonicalReceipt.Length is 0 or > MaximumCanonicalBytes)
         {
             throw new AlertReceiptConsumerException();
@@ -31,12 +42,7 @@ public static class AlertReceiptConsumerV1
                 throw new AlertReceiptFormatException();
             }
 
-            return new AlertReceiptConsumerEnvelopeV1(
-                receipt.AlertId,
-                receipt.SessionId,
-                receipt.TraceId,
-                receipt.SourceSurface,
-                receipt.LastObservedAt);
+            return receipt;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException and not AccessViolationException)
         {

@@ -690,14 +690,14 @@ Route boundary:
 
 ### Alert receipt consumer boundary
 
-The public Issue #80 receipt consumer accepts only exact canonical
+The existing Issue #80 sanitized dependency/export receipt consumer accepts only exact canonical
 `alert.receipt.v1` bytes under `sanitized-alert-receipt.v1`. It rejects
 malformed, unknown, duplicate, non-canonical, over-8-MiB, over-depth, or
 semantically invalid input through one fixed no-leak error. Parser failures,
 input fragments, identifiers, paths, values, and inner exceptions never cross
 the boundary.
 
-Successful validation returns only the bounded alert ID, Session ID, optional
+`AlertReceiptConsumerV1` validation returns only the bounded alert ID, Session ID, optional
 trace ID, source surface, and last-observed time required for dependency
 selection. It does not return raw JSON, evidence arrays, observed values,
 thresholds, summaries, or configuration data. Canonical validation is not a
@@ -715,6 +715,21 @@ A self-consistent fabricated receipt can recompute its alert ID; authorized stor
 acquisition and the downstream scanner remain mandatory separate controls. The
 fixed failure also covers nonfatal parser/decoder/serializer exceptions,
 including malformed Unicode, without preserving an inner exception.
+
+The Alert Center compatibility query is a trusted local-store acquisition
+boundary, not a new origin or authentication proof. It reads only the existing
+`alert_engine` v1 tables through fixed parameterized queries and bounded cursor
+pages. Every returned receipt uses the same strict authority as
+`AlertReceiptConsumerV1` and is returned only as exact bytes plus the sealed
+fully typed #80-owned Alert Center projection; #84 does not parse it again. One
+invalid receipt, schema mismatch, newer component, decode failure, or malformed
+suppression makes the complete page unavailable with no partial items, cursor,
+database text, input value, or exception detail. Evaluation metadata is a
+closed projection of engine-owned IDs/hashes/version and row counts, while
+suppression metadata is reconstructed from canonical engine bytes. The query
+does not read raw/content tables, accept SQL, infer source/evidence facts, or
+claim signing, authorization, producer identity, or store provenance beyond
+the caller's explicit use of the trusted local SQLite store.
 
 ### Alert lifecycle boundary
 

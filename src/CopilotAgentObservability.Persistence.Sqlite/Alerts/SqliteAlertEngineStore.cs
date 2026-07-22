@@ -3,7 +3,7 @@ using CopilotAgentObservability.Alerts;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-public sealed class SqliteAlertEngineStore : IAlertEngineStore
+public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEngineQueryStore
 {
     private readonly string _connectionString;
 

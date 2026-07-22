@@ -4,7 +4,9 @@
 
 This specification defines Issue #80: the source-neutral, deterministic alert
 receipt, compiled rule registry, evaluation engine, immutable engine store, and
-read interfaces consumed by Issues #81, #82, #83, #84, and #85.
+read interfaces consumed by Issues #81, #82, #83, #84, and #85. It also defines
+the additive source-neutral evaluate-and-append application boundary and the
+bounded trusted-store query handoff required by Issue #84.
 
 The engine does not ship a concrete alert rule. Issues #81 and #82 own rule
 implementations and their source-neutral fixtures. Issue #83 owns lifecycle
@@ -193,6 +195,50 @@ time, random IDs, process state, dictionary enumeration order, and local-machine
 state are not inputs. The same normalized snapshot, registry, and configuration
 therefore produce byte-equivalent `alert.evaluation.v1` bytes.
 
+## Evaluate-And-Append Application Boundary
+
+`AlertEvaluationApplication` is the single production composition boundary for
+engine execution. Its constructor receives one `AlertRuleRegistry`, one
+`AlertEngineConfiguration`, one `IAlertEvidenceResolver`, and one existing
+`IAlertEngineStore`. The registry, configuration, and resolver selection are
+fixed for the lifetime of the application object; the configuration and its
+collections are defensively frozen. `EvaluateAndAppend` accepts only one
+caller-provided, already-normalized `AlertNormalizedSnapshot`. Source-specific
+discovery, parsing, mapping, raw reads, background scheduling, and lifecycle
+mutation remain outside this boundary.
+
+For every call the application:
+
+1. initializes/validates the existing engine store;
+2. evaluates with `AlertEvaluationEngine` and the construction-time inputs;
+3. appends the complete canonical evaluation through `IAlertEngineStore`; and
+4. returns a bounded immutable typed outcome only after append returns the exact
+   valid success pair.
+
+The closed statuses are `success`, `initialization_busy`,
+`initialization_unavailable`, `append_busy`, `append_unavailable`,
+`append_conflict`, and `contract_rejected`. Success has no code and returns the
+evaluation/input/configuration identities, ordered receipt IDs, typed
+suppression facts, and typed rejected-match rule ID/version/code facts. The
+derived identity counts are the lengths of those immutable collections. Every
+non-success returns no identity or outcome. Valid contract failures preserve
+only their bounded `AlertContractException.Code`; another nonfatal evaluation
+exception is reduced to `alert_contract_rejected` without detail. Unknown/malformed store
+status-code pairs and nonfatal store exceptions fail closed to the applicable
+initialization/append unavailable status. Missing capability is a successful
+appended evaluation with a suppression; unresolved evidence is a successful
+appended evaluation with a rejected match. Neither is reclassified as a store
+or contract failure. A byte-identical repeated evaluation remains the existing
+idempotent store success, while a same identity with different stored bytes is
+`append_conflict` and never success.
+
+The public handoff is
+`EvaluateAndAppend(AlertNormalizedSnapshot) -> AlertEvaluationApplicationResult`.
+On success its `Outcome` is `AlertEvaluationOutcomeV1`; `Identity` is the
+derived identity/count view of that same outcome. `Outcome.ReceiptIds`,
+`Outcome.Suppressions`, and `Outcome.RejectedMatches` preserve engine order and
+are read-only. They are null on every non-success through the enclosing result.
+
 ## Alert Receipt
 
 An immutable `alert.receipt.v1` contains:
@@ -283,6 +329,64 @@ Issue #80 adds no HTTP/CLI route. Issue #83 owns lifecycle persistence and API;
 Issue #84 owns UI/read-model routes. Both consume these IDs/bytes rather than
 creating a second receipt/evidence identity model.
 
+### Bounded trusted-store query interface
+
+`IAlertEngineQueryStore` is additive to `IAlertEngineStore`; existing methods,
+statuses, serializer behavior, and schema ownership do not change. Its page
+limit is exactly `1..100`, and canonical bytes returned in one page total at
+most 8,388,608 bytes. A page may therefore contain fewer than the requested
+item limit without splitting or truncating a record. Invalid cursor, ID,
+ordinal, or limit returns `invalid / invalid_alert_query`; unknown evaluation
+suppression lookup returns `not_found / alert_not_found`; locked and
+invalid/unreadable state return only `busy / alert_store_busy` or
+`unavailable / alert_store_unavailable`. Successful results have a null code.
+Any other status-code pair is invalid.
+
+The three queries are:
+
+- receipts after an optional canonical 64-lowercase-hex alert-ID cursor,
+  ordered by `alert_id` ordinal ascending;
+- evaluations after an optional canonical 64-lowercase-hex evaluation-ID
+  cursor, ordered by `evaluation_id` ordinal ascending, projecting only the
+  evaluation/input/configuration identities and non-negative receipt and
+  suppression counts; and
+- suppressions for one exact evaluation ID after an optional non-negative
+  suppression ordinal, ordered by `suppression_ordinal` ascending, projecting
+  the ordinal, evaluation/rule/code metadata, missing-capability tokens, and
+  exact canonical suppression bytes.
+
+The public method signatures are
+`ListReceipts(string? afterAlertId, int limit)`,
+`ListEvaluations(string? afterEvaluationId, int limit)`, and
+`ListSuppressions(string evaluationId, long? afterSuppressionOrdinal, int limit)`.
+Their result types are respectively `AlertReceiptQueryPage`,
+`AlertEvaluationQueryPage`, and `AlertSuppressionQueryPage`.
+
+Each method reads at most `limit + 1` rows to determine whether a next cursor
+exists and returns at most `limit` items. The next cursor is the last returned
+alert ID, evaluation ID, or suppression ordinal only when another row exists;
+otherwise it is null. Empty receipt/evaluation pages are successful. A known
+evaluation with no remaining suppressions returns an empty successful page.
+
+`SqliteAlertEngineStore` implements both interfaces using only fixed,
+parameterized statements over `alert_evaluations`, `alert_receipts`, and
+`alert_suppressions`. Every receipt is converted back to exact UTF-8 and passed
+through the shared strict authority used by
+`AlertCenterReceiptConsumerV1`; a receipt query item carries those bytes and the
+sealed fully typed Alert Center projection. Suppression JSON is
+strict-reconstructed by the #80-owned
+`AlertSuppressionConsumerV1.Validate(ReadOnlySpan<byte>)`, byte-compared with
+`AlertCanonicalJson.SerializeSuppression`, and projected as evaluation ID,
+rule ID/version, code, and a read-only canonical missing-capability list. Its
+query item carries those bytes and sealed typed projection. Both consumers use
+the same 8 MiB/no-leak rejection posture. One invalid row,
+invalid/newer/broken schema,
+decode or conversion failure makes the whole page unavailable with no items or
+cursor. No query repairs a row, truncates a record, reads raw/content tables,
+accepts SQL, or makes provenance/authentication claims. The fact that the
+production SQLite implementation acquired bytes from its configured trusted
+local database is separate from the consumer's internal-consistency proof.
+
 ## Optional Sanitized Export Profile
 
 Issue #85 may include the exact canonical `alert.receipt.v1` bytes under profile
@@ -347,6 +451,22 @@ is not derivation-valid, so it is not a positive consumer fixture. Consumer
 acceptance is pinned instead to deterministic bytes produced through the real
 engine path; tests also prove every covered engine-produced receipt validates.
 
+`AlertCenterReceiptConsumerV1.Validate(ReadOnlySpan<byte>)` is a separate
+additive #80-owned projection over the same strict parse, semantic validation,
+canonical byte comparison, and derived-alert-ID authority. It does not add a
+second parser or change `AlertReceiptConsumerV1.Validate` or its sealed
+five-field envelope. It returns one sealed `AlertCenterReceiptProjectionV1`
+with exactly the receipt fields #84 needs: alert/evaluation/rule identities,
+severity and initial state, source/version, Session/optional trace, exact
+evidence references, numeric observed values/effective thresholds,
+configuration identity, required capabilities, completeness/reasons,
+first/last observation, evaluation-input hash, and receipt summary. The
+projection omits the constant v1 schema/profile fields and exposes every
+collection read-only. It returns no raw JSON, source body, arbitrary provider
+text, path, credential, PII, lifecycle state/history, repository/workspace
+label, or provenance/authentication claim. Failure is the existing fixed
+`invalid_alert_receipt` no-leak exception.
+
 The 8 MiB gate is additive to this public consumer/export boundary only. It does
 not change reachable producer serialization or existing persistence bytes. A
 downstream component encountering a larger receipt reports it unavailable or
@@ -363,7 +483,13 @@ historical completeness, receipt privacy, low-entropy HMAC safety, immutable
 append/read, fresh database, supported existing-database initialization,
 transaction rollback, newer/broken schema refusal, unchanged serializer-golden
 fixture bytes/hash, an engine-produced consumer-golden hash, and the strict
-public receipt-consumer compatibility boundary.
+public receipt-consumer compatibility boundary. The Wave 3 repair additionally
+proves fresh/identical/conflicting application execution, append failure and
+contract-rejection mapping, appended missing/unresolved evidence outcomes,
+receipt/evaluation/suppression pagination and page-byte bounds, owner-validated
+fully typed receipt/suppression projections, invalid/newer schema no-leak
+refusal, and unchanged v1 table inventory, existing five-field API, and golden
+hashes.
 
 Handoffs:
 
@@ -372,5 +498,16 @@ Handoffs:
   contracts.
 - #83 references immutable `alert_id`/evaluation metadata and adds separate
   lifecycle tables/events/API; it never adds lifecycle fields to the receipt.
+- #84 constructs source-specific snapshots outside #80, invokes
+  `AlertEvaluationApplication` explicitly, and consumes only
+  `IAlertEngineQueryStore` pages after successful initialization. It uses the
+  returned owner-validated typed receipt/suppression projections and evaluation
+  metadata; it adds no receipt parser, direct SQL, client evaluation,
+  background analysis, source/evidence inference, or provenance claim. Receipt
+  ordering is alert-ID order, not chronology; #84 may deterministically
+  group/sort only the bounded validated page data it has acquired and must not
+  infer missing cross-page facts. Lifecycle state/history still comes only from
+  #83, repository/workspace labels come only from their accepted sanitized
+  authority, and rule formulas/descriptions come from the frozen registry.
 - #85 consumes only `sanitized-alert-receipt.v1` canonical bytes and explicitly
   records unavailable future profiles.

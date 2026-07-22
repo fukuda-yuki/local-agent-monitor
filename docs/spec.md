@@ -403,6 +403,19 @@ and [token/context/cache rule pack](specifications/interfaces/token-context-cach
 through the existing registry; #84 owns Alert Center reads/UI/aggregation, and
 #85 owns sanitized export.
 
+The additive Wave 3 compatibility boundary composes one caller-provided,
+already-normalized snapshot with a construction-time registry, configuration,
+evidence resolver, and the existing engine store. It initializes, evaluates,
+and appends before returning a bounded immutable typed outcome with ordered
+receipt IDs, suppression facts, and rejected-match facts; initialization/store busy or
+unavailable, append conflict, and contract rejection are distinct outcomes,
+and an append failure never returns success. A separate additive query store
+enumerates exact receipt bytes with an owner-validated fully typed Alert Center
+projection, plus typed evaluation and suppression metadata, using fixed
+ordering, cursors, and a 1..100 limit. It reads
+only the existing schema-v1 engine tables, adds no migration or source adapter,
+and gives #84 no arbitrary-SQL or provenance authority.
+
 ## Alert lifecycle
 
 Issue #83 freezes the separate `alert_lifecycle` component v1 at
