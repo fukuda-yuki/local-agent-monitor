@@ -116,7 +116,7 @@ Current-source negative fixtures load and validate the exact committed Issue
 #61 manifests rather than selecting only a `source_surface` string. The frozen
 fixture revisions are:
 
-| Source surface | Manifest | SHA-256 |
+| Source surface | Manifest | Repository-canonical SHA-256 |
 | --- | --- | --- |
 | `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd` |
 | `github-copilot-cli` | `contracts/source-capabilities/v1/manifests/github-copilot-cli.json` | `3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419` |
@@ -133,6 +133,14 @@ source-neutral formulas and never claim live producer capability. For each of
 the five applicable source surfaces and each rule, the synthetic matrix freezes
 a fully available sufficient-sample no-alert row plus exact warning and
 critical boundary rows.
+
+Repository-canonical manifest bytes are strict UTF-8 text with every CRLF or
+lone CR line ending normalized to LF before SHA-256. No other byte-equivalent
+transformation is allowed: JSON content, indentation, trailing whitespace,
+final-newline, BOM, or other whitespace changes alter the pinned hash, and
+invalid UTF-8 fails the fixture. This keeps the manifest revision stable across
+Git checkout line-ending materialization without weakening content drift
+detection.
 
 ## Rule Registry
 

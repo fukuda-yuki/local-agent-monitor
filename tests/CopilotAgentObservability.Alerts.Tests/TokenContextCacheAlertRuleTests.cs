@@ -7,6 +7,8 @@ namespace CopilotAgentObservability.Alerts.Tests;
 
 public sealed class TokenContextCacheAlertRuleTests
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     [Fact]
     public void Registry_FreezesFiveVersionOneRulesAndStableThresholds()
     {
@@ -468,7 +470,13 @@ public sealed class TokenContextCacheAlertRuleTests
         string expectedSha256)
     {
         var manifestBytes = File.ReadAllBytes(SourceManifestPath(manifestFile));
-        Assert.Equal(expectedSha256, Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant());
+        Assert.Equal(expectedSha256, RepositoryCanonicalManifestSha256(manifestBytes));
+        var manifestText = StrictUtf8.GetString(manifestBytes);
+        var explicitCrLfCopy = StrictUtf8.GetBytes(
+            manifestText.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\r", "\n", StringComparison.Ordinal)
+                .Replace("\n", "\r\n", StringComparison.Ordinal));
+        Assert.Equal(expectedSha256, RepositoryCanonicalManifestSha256(explicitCrLfCopy));
         using var manifest = JsonDocument.Parse(manifestBytes);
         Assert.Equal("v1", manifest.RootElement.GetProperty("contract_version").GetString());
         Assert.Equal(sourceSurface, manifest.RootElement.GetProperty("source_surface").GetString());
@@ -490,6 +498,26 @@ public sealed class TokenContextCacheAlertRuleTests
             Assert.Equal("missing_required_capability", suppression.Code);
             Assert.NotEmpty(suppression.MissingCapabilities);
         }
+    }
+
+    [Fact]
+    public void RepositoryCanonicalManifestSha256_NormalizesOnlyLineEndings()
+    {
+        var lfBytes = Encoding.UTF8.GetBytes("{\n  \"key\": \"value\"\n}\n");
+        var expected = Convert.ToHexString(SHA256.HashData(lfBytes)).ToLowerInvariant();
+
+        Assert.Equal(expected, RepositoryCanonicalManifestSha256(lfBytes));
+        Assert.Equal(expected, RepositoryCanonicalManifestSha256(Encoding.UTF8.GetBytes("{\r\n  \"key\": \"value\"\r\n}\r\n")));
+        Assert.Equal(expected, RepositoryCanonicalManifestSha256(Encoding.UTF8.GetBytes("{\r  \"key\": \"value\"\r}\r")));
+        Assert.NotEqual(expected, RepositoryCanonicalManifestSha256(Encoding.UTF8.GetBytes("{\n   \"key\": \"value\"\n}\n")));
+        Assert.NotEqual(expected, RepositoryCanonicalManifestSha256(Encoding.UTF8.GetBytes("{\n  \"key\": \"changed\"\n}\n")));
+        Assert.NotEqual(expected, RepositoryCanonicalManifestSha256(Encoding.UTF8.GetBytes("{\n  \"key\": \"value\"\n}")));
+    }
+
+    [Fact]
+    public void RepositoryCanonicalManifestSha256_RejectsInvalidUtf8()
+    {
+        Assert.Throws<DecoderFallbackException>(() => RepositoryCanonicalManifestSha256([0xc3, 0x28]));
     }
 
     [Theory]
@@ -693,6 +721,14 @@ public sealed class TokenContextCacheAlertRuleTests
         "v1",
         "manifests",
         manifestFile);
+
+    private static string RepositoryCanonicalManifestSha256(byte[] checkoutBytes)
+    {
+        // Git may materialize text-file line endings differently per checkout; every other manifest byte remains revision-significant.
+        var text = StrictUtf8.GetString(checkoutBytes);
+        var canonicalText = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        return Convert.ToHexString(SHA256.HashData(StrictUtf8.GetBytes(canonicalText))).ToLowerInvariant();
+    }
 
     private static string RepositoryRoot()
     {
