@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.SanitizedExport\CopilotAgentObservability.SanitizedExport.csproj" />
   </ItemGroup>
 
   <ItemGroup>

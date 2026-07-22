@@ -53,6 +53,22 @@ Repository に保存してはいけないもの:
 - 利用者周知。
 - `dashboard-data.json` に raw content、credential、sensitive bundle path が含まれていないこと。
 
+## Sanitized evidence を共有する
+
+共有用 bundle は、まず synthetic または sanitized source-neutral request
+を preview し、scanner が拒否しないことを確認してから生成します。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --request <request.json>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export export --request <request.json> --output <bundle.zip>
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export result --bundle <bundle.zip>
+```
+
+`result` の成功は frozen v1 contract、entry inventory、checksum、scanner
+の検証を示しますが、共有先の access control、retention、削除方法、
+利用者周知を代替しません。失敗した bundle や `.partial` file を共有せず、
+raw prompt、tool body、credential、PII、local path を request に含めないでください。
+
 ## 実データが混入した場合
 
 1. 対象 raw payload を削除する。

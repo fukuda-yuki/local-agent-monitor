@@ -221,7 +221,8 @@ internal static class MonitorHost
         app.Use(async (context, next) =>
         {
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
-            if (retentionPath)
+            var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -230,6 +231,10 @@ internal static class MonitorHost
                 if (retentionPath)
                 {
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (sanitizedExportPath)
+                {
+                    await SanitizedExportRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (DoctorUiRoutes.IsDoctorUiPath(context.Request.Path))
                 {
@@ -255,6 +260,7 @@ internal static class MonitorHost
         DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
+        SanitizedExportRoutes.Map(app, options.DatabasePath);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;

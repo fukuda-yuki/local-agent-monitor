@@ -1105,6 +1105,25 @@ Claude forwarding is suppressed silently rather than inventing provenance.
 Any supplied invalid provenance value invalidates the command. Argument values
 and rejected payloads are never logged or echoed.
 
+## Sanitized Evidence Export Boundary
+
+Issue #85 exports only explicit sanitized projections and exact canonical
+receipt bytes from one immutable source-neutral snapshot. Selection and exact
+dependency closure run before a bounded fail-closed scanner. Raw OTLP, prompts,
+responses, system prompts, tool bodies, source/file bodies, raw analysis,
+credentials, authorization values, PII, and local absolute paths are forbidden.
+Missing optional producers remain explicit unavailable capabilities; the export
+does not infer or synthesize their evidence.
+
+The Config CLI publishes through a same-directory partial file and atomic
+rename only after complete in-memory validation. Local Monitor export routes
+retain loopback/Host validation, same-origin, CSRF on writes, JSON-only input,
+bounded requests, and `no-store`; the request cannot name a server output path.
+The server returns an opaque archive hash and relative route, never a local path.
+The v1 surface does not upload, sign, encrypt, import, replay, back up, restore,
+or persist new database state. The complete contract is canonical in
+[`interfaces/sanitized-evidence-export.md`](interfaces/sanitized-evidence-export.md).
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:
