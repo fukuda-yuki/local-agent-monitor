@@ -78,12 +78,12 @@
           "compatibility_basis": "The tests execute the exact repository corpus, scanner, manifest validator, archive inspector, and publication implementation at the validation SHA."
         }
       ],
-      "actual_result": "The exact candidate rejected every declared corpus transformation and bounded raw, credential, PII, path, malformed UTF-8, noncanonical manifest, non-store ZIP, size, checksum, and publication failure case.",
-      "classification": "passed",
-      "severity": "none",
-      "blocker": null,
-      "retry_condition": null,
-      "unverified_capability": null,
+      "actual_result": "Independent review rejected the candidate: arbitrary caller bytes and markers could mint repository_safe_validation=passed without an accepted producer contract, and archive, dependency, path, inventory, bounds, preview, and stored-download negative cases were incomplete.",
+      "classification": "failed",
+      "severity": "high",
+      "blocker": "The candidate did not establish producer-authorized sanitized evidence and therefore could not support its repository-safe validation claim.",
+      "retry_condition": "Freeze a closed producer/profile grammar, add the corrected negative matrix first, pass exact producer/canonical-envelope validation plus strict archive/inventory/bounds/download checks at one implementation SHA, and rerun the Issue #91 scanner corpus before promotion.",
+      "unverified_capability": "Producer-authorized canonical carrier validation and the corrected fail-closed negative matrix.",
       "owner": "Issue #85 sanitized evidence export",
       "validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
       "validation_date": "2026-07-22",

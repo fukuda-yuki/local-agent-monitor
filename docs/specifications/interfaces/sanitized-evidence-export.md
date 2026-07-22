@@ -15,9 +15,18 @@ remain separate profiles and implementations.
 | archive | `sanitized-evidence-zip-store.v1` |
 | checksum | `sha256.v1` |
 | scanner | `repository-safe-scanner.v1` |
+| producer validation | `sanitized-evidence-producers.v1` |
 | compatibility | reader major `1` through `1` |
 | maximum archive entries | 256, including `manifest.json` |
 | maximum total uncompressed bytes | 134,217,728, including `manifest.json` |
+| maximum request or bundle read | 134,217,728 bytes |
+| maximum canonical carrier | 8,388,608 bytes |
+| maximum records | 255 |
+| maximum dependencies per record | 256 |
+| maximum values per selection list | 256 |
+| maximum agent or processing versions | 256 each |
+| maximum forbidden markers | 64 |
+| maximum identifier / marker length | 256 / 4,096 UTF-16 code units |
 
 The bounds are conservative fixed limits. Writers do not expose configuration
 for them in v1.
@@ -26,9 +35,11 @@ for them in v1.
 
 The shared service consumes one immutable `SanitizedExportRequest`: an explicit
 UTC creation time, an immutable source snapshot, selection filters, and source
-body markers for the fail-closed scanner. Every candidate record carries its
-exact canonical bytes. The service does not deserialize and reserialize #59 or
-#80 receipts.
+body markers for a supplemental fail-closed creation scan. Every candidate
+record carries its exact canonical bytes. Preview and create both validate the
+same request, dependency closure, producer contract, scanner, manifest, and
+size rules and return the same deterministic rejection for the same invalid
+request.
 
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
@@ -41,8 +52,45 @@ state, and the following explicit receipt capabilities:
 - `historical_efficiency_analysis` (#74);
 - `alert_center` (#84).
 
-Capability values are `available`, `missing`, or `unavailable`. An absent #73,
-#74, or #84 producer is never inferred or represented as available.
+Capability values are `available`, `missing`, or `unavailable`.
+`instruction_findings` and `alert_receipts` may be `available` only when the
+snapshot contains at least one corresponding valid carrier; a present carrier
+requires `available`. Historical instruction analysis (#73), historical
+efficiency analysis (#74), and Alert Center (#84) are not v1 carriers and their
+capabilities must be exactly `unavailable`. Caller assertions never authorize
+an absent or future producer.
+
+## Closed producer carriers
+
+V1 accepts only canonical JSON and the following exact record types. Unknown
+record types, versions, profiles, fields, property order, encodings, or path
+forms fail before selection succeeds. Arbitrary JSON, free text, CSV, HTML, and
+future #73/#74/#84 carriers are not accepted.
+
+| `record_type` | exact path | exact producer contract |
+|---|---|---|
+| `repository_metadata_projection` | `repository-metadata/{record_id}.json` | `repository-metadata-projection.v1`, the #58 repository-safe projection below |
+| `instruction_finding_handoff` | `instruction-findings/{record_id}.json` | #59 `instruction-finding-handoff.v1`, including canonical findings, candidate association, derived IDs, templates, safe references, and ordering |
+| `alert_receipt` | `alert-receipts/{record_id}.json` | #80 `alert.receipt.v1` with `sanitized-alert-receipt.v1`, validated and byte-compared with `alert.canonical-json.v1` |
+
+The #58 projection has the exact canonical property order
+`schema_version`, `record_id`, `session_id`, `trace_id`, `source_surface`,
+`repository_name`, `workspace_label`, `repo_snapshot`, `observed_at`,
+`completeness`, `content_state`, `retention_state`. Its schema version is
+`repository-metadata-projection.v1`; `record_id`, `session_id`, and
+`source_surface` are nonempty safe tokens; `trace_id`, `repository_name`,
+`workspace_label`, and `repo_snapshot` are nullable safe tokens; and
+`observed_at` is canonical UTC. Every value after `schema_version` must exactly
+equal the corresponding record-envelope value.
+
+For #59, the envelope `record_id` is the invariant decimal
+`analysis_run_id`; fields that the carrier does not represent (`session_id`,
+`trace_id`, `source_surface`, and all three repository labels) must be null. For
+#80, envelope `record_id`, session, trace, source surface, and observation time
+must equal `alert_id`, `session_id`, `trace_id`, `source_surface`, and
+`last_observed_at`; the three repository labels must be null. These rules make
+the public envelope a selector over producer-authorized carriers, not an
+independent authority that can contradict them.
 
 ## Selection and dependency resolution
 
@@ -53,25 +101,34 @@ IDs form one exact-ID union. Records are ordered by observation time, record
 type, and record ID using ordinal comparison.
 
 Dependencies resolve only by the exact `(record_type, record_id)` pair in the
-same immutable snapshot. Resolved dependencies are included even when outside
-the initial filter. An unresolved required dependency is `missing`; an explicit
-external dependency is `external`. Repository, workspace, path, time proximity,
-or another ID is never used to resolve it.
+same immutable snapshot. Resolved required dependencies are included even when
+outside the initial filter. An unresolved required dependency is `missing`. An
+explicit external dependency is always `external`, even when a matching
+snapshot identity exists, and is never added to the bundle. Repository,
+workspace, path, time proximity, or another ID is never used to resolve it.
+Selected rows, dependency closure, and manifest rows are joined only by exact
+`(record_type, record_id)` identity; duplicate selected, excluded, or dependency
+paths fail deterministically.
 
 ## Archive and checksum conventions
 
 The archive is ZIP with no compression. `manifest.json` is the first entry;
 payload entries follow in ordinal path order. Every entry uses the fixed DOS
 timestamp `1980-01-01 00:00:00` and zero external attributes. Entry paths are
-relative, forward-slash separated, unique, and limited to the allowlisted
-record-type prefixes and `.json`, `.csv`, or `.html` extensions.
+relative, forward-slash separated, unique, and exactly match the closed
+record-type prefix plus `.json` grammar above.
 
 `files` lists every payload entry in ordinal path order with its exact byte
 length and lowercase SHA-256. `manifest.json` is intentionally excluded from
 `files`, so the manifest has no self-checksum. The result separately reports the
 lowercase SHA-256 of the complete archive. Consumers verify the exact file set,
-entry order, timestamps, storage method, sizes, and checksums before accepting
-the artifact.
+entry order, local and central ZIP names, timestamps, storage method, sizes,
+checksums, and record identities before accepting the artifact. A ZIP preamble,
+end-of-central-directory comment, local or central extra field, per-entry
+comment, data descriptor, multi-disk field, or trailing byte is invalid.
+Inspection recomputes `record_counts`, total uncompressed bytes, and unique
+`(record_type, record_id)` inventory from verified entries and cross-checks the
+manifest.
 
 All time values are canonical UTC with seven fractional digits. Input ordering
 does not affect canonical arrays or object members. `created_at` is the only
@@ -86,13 +143,22 @@ Before manifest creation, every selected and dependency entry is scanned for:
   tool argument/result, source/file body, and raw analysis fields;
 - authorization, credential, token, password, secret, API key, and private-key
   patterns;
-- email identity and recognized Windows-drive, UNC/device, WSL-mounted,
-  common Unix home/system, and file-URI path forms;
+- email identity and absolute POSIX roots, recognized Windows-drive,
+  backslash or forward-slash UNC/device, WSL-mounted, common Unix home/system,
+  and file-URI path forms;
 - source-supplied forbidden body markers in plain, JSON-escaped, HTML-entity,
   percent-encoded, Base64 UTF-8, and lowercase SHA-256-prefix-12 forms;
 - invalid canonical JSON and unexpected/duplicate entries.
 
-This is a bounded negative scanner, not an enterprise DLP claim. Any match or
+Marker comparison is ordinal case-insensitive. Marker transformations and
+their total expansion are bounded by the v1 marker count and length limits.
+Markers supplement producer and generic scanner validation during preview and
+create only; they never establish repository safety. They are not persisted,
+so later inspection does not claim to repeat or independently prove that scan.
+
+Exact producer validation plus the generic versioned scanner are the
+repeatable authorities recorded in `repository_safe_validation`. This is a
+bounded negative scanner, not an enterprise DLP claim. Any match or
 scanner error fails the operation before archive success. File publication
 writes a same-directory `.partial` file and atomically renames it only after the
 complete in-memory archive passes. Failure removes the partial file and never
@@ -116,8 +182,10 @@ config-cli sanitized-export export --request <request.json> --output <bundle.zip
 config-cli sanitized-export result --bundle <bundle.zip>
 ```
 
-CLI `result` verifies the frozen archive/profile/schema/inventory/checksum and
-scanner contract. CLI output paths are explicit local operator inputs.
+CLI `result` verifies the frozen producer/profile/archive/schema/inventory/
+checksum and generic scanner contract. CLI request and bundle reads reject a
+sentinel byte beyond the fixed limit before allocation. CLI output paths are
+explicit local operator inputs.
 
 The Local Monitor exposes synchronous routes:
 
@@ -143,6 +211,10 @@ field. The server publishes under the database sibling `sanitized-exports`
 directory and exposes only the SHA-256 export ID and a relative download route.
 Status is process-local and synchronous; no persistence schema or migration is
 added. An archive left after restart is not rediscovered as a current result.
+Before download, the server performs a bounded stored-file read, verifies the
+expected length and complete-archive SHA-256 kept in process state, and reruns
+strict inspection. A changed, oversized, truncated, or invalid stored file is
+not returned.
 
 HTTP status mapping is fixed: successful preview/result/download is `200`,
 successful create is `201`, malformed JSON is `400`, cross-site or missing CSRF
@@ -152,11 +224,10 @@ is `403`, missing result is `404`, oversized input is `413`, non-JSON input is
 
 ## Allowed and forbidden content
 
-Allowed record types are sanitized Session projection, normalized measurement
-dataset, exact #59 handoff bytes, optional exact #80 receipt bytes, sanitized
-candidate/driver receipts when their owning contracts exist, and sanitized
-dashboard data. The manifest, checksums, IDs/evidence references, nullable #58
-labels, versions, state distributions, counts, and date range are allowed.
+Allowed record types are only the exact #58 repository metadata projection,
+#59 handoff, and #80 sanitized alert receipt described above. The manifest,
+checksums, producer-authorized IDs/evidence references, nullable #58 labels,
+versions, state distributions, counts, and date range are allowed.
 
 Raw OTLP, raw Session content, prompt/response/system prompt, tool bodies,
 source/file bodies, credentials, authorization values, PII, local sensitive

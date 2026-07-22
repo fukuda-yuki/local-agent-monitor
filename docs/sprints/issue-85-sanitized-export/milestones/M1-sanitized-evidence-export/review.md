@@ -1,4 +1,11 @@
-# Issue #85 M1 — Self-Review
+# Issue #85 M1 — Rejected Candidate Review
+
+This record is superseded as pass evidence. Independent review rejected the
+candidate because arbitrary caller bytes and caller markers could establish a
+`repository_safe_validation=passed` claim without exact accepted producer
+validation. Matrix row `91-S-085` is temporarily `failed` / high severity and
+the release remains blocked until the corrected negative matrix passes at a new
+implementation SHA.
 
 Scope: shared sanitized-export service and contracts, Config CLI commands,
 Local Monitor loopback routes, canonical schema/golden fixtures, focused tests,
