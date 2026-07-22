@@ -21,16 +21,22 @@ internal static partial class SanitizedExportScanner
     internal static string? Scan(SanitizedExportRecord record, IReadOnlyList<string> forbiddenMarkers)
     {
         if (!SanitizedExportEntryPolicy.IsAllowed(record)) return "unexpected_entry";
-        if (record.CanonicalBytes.Length == 0) return "invalid_canonical_content";
+        return ScanBytes(record.CanonicalBytes, forbiddenMarkers);
+    }
+
+    private static string? ScanBytes(byte[] bytes, IReadOnlyList<string> forbiddenMarkers)
+    {
+        if (bytes.Length == 0) return "invalid_canonical_content";
 
         string text;
-        try { text = StrictUtf8.GetString(record.CanonicalBytes); }
+        try { text = StrictUtf8.GetString(bytes); }
         catch (DecoderFallbackException) { return "invalid_canonical_content"; }
-        if (record.EntryPath.EndsWith(".json", StringComparison.Ordinal))
+        if (text.AsSpan().TrimStart().StartsWith("{".AsSpan(), StringComparison.Ordinal)
+            || text.AsSpan().TrimStart().StartsWith("[".AsSpan(), StringComparison.Ordinal))
         {
             try
             {
-                using var document = JsonDocument.Parse(record.CanonicalBytes, new JsonDocumentOptions
+                using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
                 {
                     AllowTrailingCommas = false,
                     CommentHandling = JsonCommentHandling.Disallow,
@@ -44,12 +50,11 @@ internal static partial class SanitizedExportScanner
             }
         }
 
-        if (record.EntryPath.EndsWith(".csv", StringComparison.Ordinal) && ContainsForbiddenCsvHeader(text)
-            || record.EntryPath.EndsWith(".html", StringComparison.Ordinal) && RawFieldPattern().IsMatch(text)) return "forbidden_field";
+        if (ContainsForbiddenCsvHeader(text) || RawFieldPattern().IsMatch(text)) return "forbidden_field";
         if (CredentialPattern().IsMatch(text)) return "credential_pattern";
         if (LocalPathPattern().IsMatch(text)) return "local_path";
         if (EmailPattern().IsMatch(text)) return "pii_pattern";
-        if (forbiddenMarkers.Any(marker => MarkerVariants(marker).Any(variant => text.Contains(variant, StringComparison.Ordinal))))
+        if (forbiddenMarkers.Any(marker => MarkerVariants(marker).Any(variant => text.Contains(variant, StringComparison.OrdinalIgnoreCase))))
             return "forbidden_marker";
 
         return null;
@@ -65,20 +70,23 @@ internal static partial class SanitizedExportScanner
     internal static string? ScanMetadata(IEnumerable<string?> values, IReadOnlyList<string> forbiddenMarkers)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { values = values.Where(value => value is not null).ToArray() });
-        return Scan(new SanitizedExportRecord(
-            "sessions/metadata.json", "session_projection", "metadata", null, null, null, null, null, null,
-            DateTimeOffset.UnixEpoch, bytes, []), forbiddenMarkers);
+        return ScanBytes(bytes, forbiddenMarkers);
     }
+
+    internal static string? ScanCanonicalJson(byte[] bytes) => ScanBytes(bytes, []);
 
     private static IEnumerable<string> MarkerVariants(string marker)
     {
         if (string.IsNullOrEmpty(marker)) yield break;
-        yield return marker;
-        yield return JsonSerializer.Serialize(marker)[1..^1];
-        yield return System.Net.WebUtility.HtmlEncode(marker);
-        yield return Uri.EscapeDataString(marker);
-        yield return Convert.ToBase64String(Encoding.UTF8.GetBytes(marker));
-        yield return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(marker))).ToLowerInvariant()[..12];
+        foreach (var spelling in new[] { marker, marker.ToUpperInvariant(), marker.ToLowerInvariant() }.Distinct(StringComparer.Ordinal))
+        {
+            yield return spelling;
+            yield return JsonSerializer.Serialize(spelling)[1..^1];
+            yield return System.Net.WebUtility.HtmlEncode(spelling);
+            yield return Uri.EscapeDataString(spelling);
+            yield return Convert.ToBase64String(Encoding.UTF8.GetBytes(spelling));
+            yield return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spelling))).ToLowerInvariant()[..12];
+        }
     }
 
     private static bool ContainsForbiddenField(JsonElement element)
@@ -103,7 +111,7 @@ internal static partial class SanitizedExportScanner
     [GeneratedRegex("(?i)(authorization\\s*[:=]\\s*(bearer|basic)|-----BEGIN (?:(?:RSA |EC |OPENSSH )?PRIVATE KEY|CERTIFICATE)-----|(?:api[_-]?key|password|secret|token)\\s*[:=]\\s*[^\\s,;}{]{4,}|(?:gh[pousr]|github_pat)_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})", RegexOptions.CultureInvariant)]
     private static partial Regex CredentialPattern();
 
-    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/][^\\s\\\"']+|\\\\\\\\(?:\\?\\\\)?[^\\s\\\\]+\\\\|file:(?:/{2,3})?|/mnt/[a-z]/[^\\s\\\"']+|/(?:users|home|etc|var)/(?:[^\\s\\\"']+))", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/][^\\s\\\"']+|(?:\\\\\\\\|//)(?:\\?[\\\\/])?[^\\s\\\\/]+[\\\\/]|file:(?:/{2,3})?|(?<![:/])/(?:[a-z0-9._-]+/)+[^\\s\\\"']+)", RegexOptions.CultureInvariant)]
     private static partial Regex LocalPathPattern();
 
     [GeneratedRegex("(?i)(?<![a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?![a-z0-9-])", RegexOptions.CultureInvariant)]
@@ -117,13 +125,9 @@ internal static class SanitizedExportEntryPolicy
 {
     private static readonly IReadOnlyDictionary<string, string> Prefixes = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        ["session_projection"] = "sessions/",
-        ["measurement_dataset"] = "measurements/",
-        ["instruction_finding_handoff"] = "receipts/",
-        ["alert_receipt"] = "receipts/",
-        ["candidate_receipt"] = "receipts/",
-        ["driver_receipt"] = "receipts/",
-        ["dashboard_dataset"] = "dashboard/",
+        ["repository_metadata_projection"] = "repository-metadata/",
+        ["instruction_finding_handoff"] = "instruction-findings/",
+        ["alert_receipt"] = "alert-receipts/",
     };
 
     internal static bool IsAllowed(SanitizedExportRecord record)
@@ -133,9 +137,8 @@ internal static class SanitizedExportEntryPolicy
             || record.EntryPath.StartsWith("/", StringComparison.Ordinal)
             || record.EntryPath.Contains('\\')
             || record.EntryPath.Split('/').Any(segment => segment is "" or "." or "..")
-            || !(record.EntryPath.EndsWith(".json", StringComparison.Ordinal)
-                || record.EntryPath.EndsWith(".csv", StringComparison.Ordinal)
-                || record.EntryPath.EndsWith(".html", StringComparison.Ordinal)))
+            || !record.EntryPath.EndsWith($"/{record.RecordId}.json", StringComparison.Ordinal)
+            || record.RecordId.Length is 0 or > SanitizedExportLimits.MaximumIdentifierLength)
             return false;
         return true;
     }

@@ -21,13 +21,13 @@ internal static class SanitizedExportManifestValidator
             || !Fixed(root, "bundle_schema_version", SanitizedExportContractVersions.BundleSchema)
             || !Fixed(root, "bundle_profile", SanitizedExportContractVersions.BundleProfile)) return "schema_unsupported";
         if (!CanonicalTimestamp(root.GetProperty("created_at"))
-            || !NonemptyString(root.GetProperty("snapshot_id"))
-            || !NonemptyString(root.GetProperty("source_local_monitor_version"))) return "manifest_invalid";
+            || !Identifier(root.GetProperty("snapshot_id"))
+            || !Identifier(root.GetProperty("source_local_monitor_version"))) return "manifest_invalid";
         if (!AgentVersions(root.GetProperty("source_agent_versions"))
             || !Selection(root.GetProperty("selection"))
             || !DateRange(root.GetProperty("date_range"))
             || !SourceLabels(root.GetProperty("source_labels"))
-            || !CountMap(root.GetProperty("record_counts"))
+            || !RecordCountMap(root.GetProperty("record_counts"))
             || !Unresolved(root.GetProperty("known_missing_evidence"))
             || !Capabilities(root.GetProperty("capabilities"))
             || !CountMap(root.GetProperty("completeness_distribution"))
@@ -40,36 +40,37 @@ internal static class SanitizedExportManifestValidator
         var validation = root.GetProperty("repository_safe_validation");
         if (!HasExactProperties(serialization, "canonical_json", "archive", "checksum")
             || !HasExactProperties(compatibility, "minimum_reader_major", "maximum_reader_major")
-            || !HasExactProperties(validation, "profile", "result")) return "manifest_invalid";
+            || !HasExactProperties(validation, "producer_profile", "scanner_profile", "result")) return "manifest_invalid";
         if (!Fixed(serialization, "canonical_json", SanitizedExportContractVersions.CanonicalJson)
             || !Fixed(serialization, "archive", SanitizedExportContractVersions.Archive)
             || !Fixed(serialization, "checksum", SanitizedExportContractVersions.Checksum)
             || !Fixed(compatibility, "minimum_reader_major", SanitizedExportContractVersions.CompatibilityMinimum)
             || !Fixed(compatibility, "maximum_reader_major", SanitizedExportContractVersions.CompatibilityMaximum)
-            || !Fixed(validation, "profile", SanitizedExportContractVersions.Scanner)
+            || !Fixed(validation, "producer_profile", SanitizedExportContractVersions.ProducerValidation)
+            || !Fixed(validation, "scanner_profile", SanitizedExportContractVersions.Scanner)
             || !Fixed(validation, "result", "passed")) return "schema_unsupported";
         return Files(root.GetProperty("files")) ? null : "manifest_invalid";
     }
 
     private static bool AgentVersions(JsonElement value)
     {
-        if (value.ValueKind != JsonValueKind.Array) return false;
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > SanitizedExportLimits.MaximumVersions) return false;
         var keys = new List<string>();
         foreach (var item in value.EnumerateArray())
         {
             if (!HasExactProperties(item, "source_surface", "version")
-                || !NonemptyString(item.GetProperty("source_surface"))
-                || !NonemptyString(item.GetProperty("version"))) return false;
+                || !Identifier(item.GetProperty("source_surface"))
+                || !Identifier(item.GetProperty("version"))) return false;
             keys.Add($"{item.GetProperty("source_surface").GetString()}\0{item.GetProperty("version").GetString()}");
         }
-        return IsOrdinal(keys);
+        return IsOrdinal(keys) && keys.Distinct(StringComparer.Ordinal).Count() == keys.Count;
     }
 
     private static bool Selection(JsonElement value)
     {
         if (!HasExactProperties(value, "session_ids", "trace_ids", "source_surfaces", "repository_names", "workspace_labels", "receipt_types", "start_inclusive", "end_exclusive")) return false;
         foreach (var name in new[] { "session_ids", "trace_ids", "source_surfaces", "repository_names", "workspace_labels", "receipt_types" })
-            if (!SortedStrings(value.GetProperty(name))) return false;
+            if (!SortedStrings(value.GetProperty(name)) || value.GetProperty(name).GetArrayLength() > SanitizedExportLimits.MaximumListValues) return false;
         var start = value.GetProperty("start_inclusive");
         var end = value.GetProperty("end_exclusive");
         if (!NullableTimestamp(start) || !NullableTimestamp(end)) return false;
@@ -88,39 +89,49 @@ internal static class SanitizedExportManifestValidator
 
     private static bool SourceLabels(JsonElement value)
     {
-        if (value.ValueKind != JsonValueKind.Array) return false;
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > SanitizedExportLimits.MaximumRecords) return false;
         var keys = new List<string>();
         foreach (var item in value.EnumerateArray())
         {
             if (!HasExactProperties(item, "repository_name", "workspace_label", "repo_snapshot")) return false;
             var parts = new[] { item.GetProperty("repository_name"), item.GetProperty("workspace_label"), item.GetProperty("repo_snapshot") };
-            if (parts.Any(part => part.ValueKind != JsonValueKind.Null && !NonemptyString(part))) return false;
+            if (parts.Any(part => part.ValueKind != JsonValueKind.Null && !Identifier(part))) return false;
             keys.Add(string.Join('\0', parts.Select(part => part.ValueKind == JsonValueKind.Null ? string.Empty : part.GetString())));
         }
         return IsOrdinal(keys) && keys.Distinct(StringComparer.Ordinal).Count() == keys.Count;
     }
 
-    private static bool CountMap(JsonElement value) => StringMap(value, requireNonnegativeInteger: true);
-    private static bool StringMap(JsonElement value) => StringMap(value, requireNonnegativeInteger: false);
+    private static bool RecordCountMap(JsonElement value) => IntegerMap(value, 3, 1, SanitizedExportProducerValidator.AllowedType);
+    private static bool CountMap(JsonElement value) => IntegerMap(value, SanitizedExportLimits.MaximumRecords, 0, Identifier);
+    private static bool StringMap(JsonElement value) => StringMap(value, SanitizedExportLimits.MaximumVersions);
 
-    private static bool StringMap(JsonElement value, bool requireNonnegativeInteger)
+    private static bool IntegerMap(JsonElement value, int maximumProperties, int minimumValue, Func<string, bool> validName)
     {
         if (value.ValueKind != JsonValueKind.Object) return false;
         var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        if (!IsOrdinal(names) || names.Any(string.IsNullOrWhiteSpace)) return false;
-        return value.EnumerateObject().All(property => requireNonnegativeInteger
-            ? property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt64(out var count) && count >= 0
-            : NonemptyString(property.Value));
+        if (!IsOrdinal(names) || names.Length > maximumProperties
+            || names.Any(name => !validName(name))) return false;
+        return value.EnumerateObject().All(property => property.Value.ValueKind == JsonValueKind.Number
+            && property.Value.TryGetInt32(out var count) && count >= minimumValue && count <= SanitizedExportLimits.MaximumRecords);
+    }
+
+    private static bool StringMap(JsonElement value, int maximumProperties)
+    {
+        if (value.ValueKind != JsonValueKind.Object) return false;
+        var names = value.EnumerateObject().Select(property => property.Name).ToArray();
+        return IsOrdinal(names) && names.Length <= maximumProperties && names.All(Identifier)
+            && value.EnumerateObject().All(property => Identifier(property.Value));
     }
 
     private static bool Unresolved(JsonElement value)
     {
-        if (value.ValueKind != JsonValueKind.Array) return false;
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > SanitizedExportLimits.MaximumRecords) return false;
         var keys = new List<string>();
         foreach (var item in value.EnumerateArray())
         {
             if (!HasExactProperties(item, "record_type", "record_id", "state")
-                || !NonemptyString(item.GetProperty("record_type")) || !NonemptyString(item.GetProperty("record_id"))
+                || item.GetProperty("record_type").GetString() is not { } recordType
+                || !SanitizedExportProducerValidator.AllowedType(recordType) || !Identifier(item.GetProperty("record_id"))
                 || item.GetProperty("state").GetString() is not ("missing" or "external")) return false;
             keys.Add($"{item.GetProperty("record_type").GetString()}\0{item.GetProperty("record_id").GetString()}");
         }
@@ -130,29 +141,40 @@ internal static class SanitizedExportManifestValidator
     private static bool Capabilities(JsonElement value)
     {
         if (!HasExactProperties(value, "instruction_findings", "alert_receipts", "historical_instruction_analysis", "historical_efficiency_analysis", "alert_center")) return false;
-        return value.EnumerateObject().All(property => property.Value.GetString() is "available" or "missing" or "unavailable");
+        return value.GetProperty("instruction_findings").GetString() is "available" or "missing" or "unavailable"
+            && value.GetProperty("alert_receipts").GetString() is "available" or "missing" or "unavailable"
+            && value.GetProperty("historical_instruction_analysis").GetString() == "unavailable"
+            && value.GetProperty("historical_efficiency_analysis").GetString() == "unavailable"
+            && value.GetProperty("alert_center").GetString() == "unavailable";
     }
 
     private static bool Files(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > SanitizedExportLimits.MaximumArchiveEntries - 1) return false;
+        var paths = new List<string>();
+        var identities = new HashSet<(string?, string?)>();
         foreach (var item in value.EnumerateArray())
         {
             if (!HasExactProperties(item, "path", "record_type", "record_id", "size", "sha256")
-                || !NonemptyString(item.GetProperty("path")) || !NonemptyString(item.GetProperty("record_type"))
-                || !NonemptyString(item.GetProperty("record_id"))
-                || !item.GetProperty("size").TryGetInt64(out var size) || size < 1
+                || !BoundedString(item.GetProperty("path"), 320) || !Identifier(item.GetProperty("record_type"))
+                || !Identifier(item.GetProperty("record_id"))
+                || !item.GetProperty("size").TryGetInt64(out var size) || size is < 1 or > SanitizedExportLimits.MaximumRecordBytes
                 || item.GetProperty("sha256").GetString() is not { Length: 64 } hash
                 || hash.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))) return false;
+            var path = item.GetProperty("path").GetString()!;
+            var type = item.GetProperty("record_type").GetString();
+            var id = item.GetProperty("record_id").GetString();
+            if (!identities.Add((type, id)) || path != ExpectedPath(type!, id!)) return false;
+            paths.Add(path);
         }
-        return true;
+        return IsOrdinal(paths) && paths.Distinct(StringComparer.Ordinal).Count() == paths.Count;
     }
 
     private static bool SortedStrings(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Array) return false;
         var values = value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String ? item.GetString() : null).ToArray();
-        return values.All(item => !string.IsNullOrEmpty(item))
+        return values.All(item => item is not null && Identifier(item))
             && IsOrdinal(values!)
             && values.Distinct(StringComparer.Ordinal).Count() == values.Length;
     }
@@ -164,7 +186,18 @@ internal static class SanitizedExportManifestValidator
     private static bool Fixed(JsonElement value, string name, string expected) =>
         value.GetProperty(name).ValueKind == JsonValueKind.String && value.GetProperty(name).GetString() == expected;
 
-    private static bool NonemptyString(JsonElement value) => value.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(value.GetString());
+    private static bool Identifier(JsonElement value) => value.ValueKind == JsonValueKind.String && Identifier(value.GetString());
+    private static bool Identifier(string? value) => value is { Length: > 0 and <= SanitizedExportLimits.MaximumIdentifierLength }
+        && !value.Any(character => char.IsControl(character) || character is '/' or '\\' or '?' or '#');
+    private static bool BoundedString(JsonElement value, int maximumLength) => value.ValueKind == JsonValueKind.String
+        && value.GetString() is { Length: > 0 } text && text.Length <= maximumLength && !text.Any(char.IsControl);
+    private static string? ExpectedPath(string type, string id) => type switch
+    {
+        "repository_metadata_projection" => $"repository-metadata/{id}.json",
+        "instruction_finding_handoff" => $"instruction-findings/{id}.json",
+        "alert_receipt" => $"alert-receipts/{id}.json",
+        _ => null,
+    };
     private static bool NullableTimestamp(JsonElement value) => value.ValueKind == JsonValueKind.Null || CanonicalTimestamp(value);
     private static bool CanonicalTimestamp(JsonElement value) => value.ValueKind == JsonValueKind.String && ParseTimestamp(value) is not null;
     private static DateTimeOffset? ParseTimestamp(JsonElement value) =>

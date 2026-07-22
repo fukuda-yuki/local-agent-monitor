@@ -31,15 +31,23 @@ remain separate profiles and implementations.
 The bounds are conservative fixed limits. Writers do not expose configuration
 for them in v1.
 
-## Source-neutral request
+## Authority boundary and control request
 
-The shared service consumes one immutable `SanitizedExportRequest`: an explicit
-UTC creation time, an immutable source snapshot, selection filters, and source
-body markers for a supplemental fail-closed creation scan. Every candidate
-record carries its exact canonical bytes. Preview and create both validate the
-same request, dependency closure, producer contract, scanner, manifest, and
-size rules and return the same deterministic rejection for the same invalid
-request.
+The public CLI and HTTP surfaces consume one strict
+`SanitizedExportControlRequest`: an explicit UTC creation time, selection
+filters, and source-body markers for a supplemental fail-closed creation scan.
+The public request has no snapshot, records, canonical bytes, capabilities, or
+dependency fields. Unknown fields are rejected, so a caller cannot inject a
+carrier into creation.
+
+Preview and create capture one immutable snapshot through the application-wired
+`ISanitizedExportSnapshotProvider`. Only the owning local stores may implement
+that provider. Its snapshot includes the producer-owned canonical bytes and is
+passed to the pure selection/bundle service as `SanitizedExportRequest`.
+Preview and create validate the same snapshot, dependency closure, producer
+contract, scanner, manifest, and size rules. A missing provider fails closed as
+`snapshot_provider_unavailable`; syntax-valid bytes alone never establish
+owner/store provenance.
 
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
@@ -59,6 +67,11 @@ requires `available`. Historical instruction analysis (#73), historical
 efficiency analysis (#74), and Alert Center (#84) are not v1 carriers and their
 capabilities must be exactly `unavailable`. Caller assertions never authorize
 an absent or future producer.
+
+The authority-provided capability states describe the complete captured snapshot. The
+manifest and preview capability states describe the selected dependency closure:
+an included #59/#80 carrier is `available`, an absent one is `missing`, and all
+three future capabilities remain `unavailable`.
 
 ## Closed producer carriers
 
@@ -116,7 +129,8 @@ The archive is ZIP with no compression. `manifest.json` is the first entry;
 payload entries follow in ordinal path order. Every entry uses the fixed DOS
 timestamp `1980-01-01 00:00:00` and zero external attributes. Entry paths are
 relative, forward-slash separated, unique, and exactly match the closed
-record-type prefix plus `.json` grammar above.
+record-type prefix plus `.json` grammar above. ZIP version fields are `2.0`;
+flags are zero except the UTF-8 filename bit when required.
 
 `files` lists every payload entry in ordinal path order with its exact byte
 length and lowercase SHA-256. `manifest.json` is intentionally excluded from
@@ -174,7 +188,7 @@ not privacy, legal, or secure-erasure certification.
 
 ## CLI and HTTP surfaces
 
-The Config CLI uses the shared request and result DTOs:
+The Config CLI uses the shared control request and result DTOs:
 
 ```text
 config-cli sanitized-export preview --request <request.json>
@@ -185,7 +199,10 @@ config-cli sanitized-export result --bundle <bundle.zip>
 CLI `result` verifies the frozen producer/profile/archive/schema/inventory/
 checksum and generic scanner contract. CLI request and bundle reads reject a
 sentinel byte beyond the fixed limit before allocation. CLI output paths are
-explicit local operator inputs.
+explicit local operator inputs. `preview` and `export` require a trusted
+snapshot provider wired by the host application; without one they fail as
+`snapshot_provider_unavailable`. `result` does not require a provider and does
+not claim source/store provenance.
 
 The Local Monitor exposes synchronous routes:
 
@@ -196,13 +213,12 @@ GET  /api/sanitized-export/v1/exports/{export_id}
 GET  /api/sanitized-export/v1/exports/{export_id}/archive
 ```
 
-These foundation routes accept the immutable source snapshot in the request;
-they do not select or rediscover records from the Local Monitor database. The
-host database path is used only to derive the server-controlled sibling export
-directory. Snapshot construction and source authorization remain caller-owned
-until a later source adapter is specified; v1 therefore guarantees deterministic
-selection and validation of supplied canonical records, not independent proof
-that the caller supplied a complete database snapshot.
+These foundation routes accept only the control request. The host must wire a
+trusted owner/store provider that captures one stable snapshot for each preview
+or export operation. The database path is otherwise used only to derive the
+server-controlled sibling export directory. Until the #58/#59/#80 owners expose
+and wire their producer/store adapters, production composition uses the
+fail-closed unavailable provider and does not publish a bundle.
 
 POST routes require JSON, same-origin context, and `x-monitor-csrf`. Reads reject
 cross-site requests. Existing loopback binding and Host validation apply. Every
@@ -219,8 +235,9 @@ not returned.
 HTTP status mapping is fixed: successful preview/result/download is `200`,
 successful create is `201`, malformed JSON is `400`, cross-site or missing CSRF
 is `403`, missing result is `404`, oversized input is `413`, non-JSON input is
-`415`, scanner/selection/contract rejection is `422`, and publication failure is
-`503`. Error bodies contain only `{"error":"<fixed_code>"}`.
+`415`, scanner/selection/contract rejection is `422`, and publication or
+snapshot-provider unavailability is `503`. Error bodies contain only
+`{"error":"<fixed_code>"}`.
 
 ## Allowed and forbidden content
 

@@ -8,13 +8,15 @@ namespace CopilotAgentObservability.LocalMonitor;
 
 internal static class SanitizedExportRoutes
 {
-    private const int MaximumRequestBytes = 192 * 1024 * 1024;
+    private const int MaximumRequestBytes = (int)SanitizedExportLimits.MaximumUncompressedBytes;
 
     internal static bool IsPath(PathString path) => path.StartsWithSegments("/api/sanitized-export/v1");
 
-    internal static void Map(WebApplication app, string databasePath)
+    internal static void Map(WebApplication app, string databasePath, ISanitizedExportSnapshotProvider? snapshotProvider = null)
     {
-        var application = new Application(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "sanitized-exports"));
+        var application = new Application(
+            Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "sanitized-exports"),
+            snapshotProvider ?? new UnavailableSanitizedExportSnapshotProvider());
         app.MapPost("/api/sanitized-export/v1/previews", context => PreviewAsync(context, application));
         app.MapPost("/api/sanitized-export/v1/exports", context => CreateAsync(context, application));
         app.MapGet("/api/sanitized-export/v1/exports/{exportId}", (string exportId, HttpContext context) => ResultAsync(context, application, exportId));
@@ -33,7 +35,11 @@ internal static class SanitizedExportRoutes
         var request = await AuthorizeAndReadAsync(context);
         if (request is null) return;
         var result = application.Preview(request);
-        if (!result.Success) { await ErrorAsync(context, StatusCodes.Status422UnprocessableEntity, result.ErrorCode!); return; }
+        if (!result.Success)
+        {
+            await ErrorAsync(context, Status(result.ErrorCode!), result.ErrorCode!);
+            return;
+        }
         await JsonAsync(context, StatusCodes.Status200OK, result);
     }
 
@@ -44,10 +50,7 @@ internal static class SanitizedExportRoutes
         var result = application.Create(request);
         if (result.ErrorCode is not null)
         {
-            var status = result.ErrorCode is "publish_failed" or "output_exists"
-                ? StatusCodes.Status503ServiceUnavailable
-                : StatusCodes.Status422UnprocessableEntity;
-            await ErrorAsync(context, status, result.ErrorCode);
+            await ErrorAsync(context, Status(result.ErrorCode), result.ErrorCode);
             return;
         }
         context.Response.Headers.Location = $"/api/sanitized-export/v1/exports/{result.ExportId}";
@@ -71,7 +74,7 @@ internal static class SanitizedExportRoutes
         await context.Response.Body.WriteAsync(bytes, context.RequestAborted);
     }
 
-    private static async Task<SanitizedExportRequest?> AuthorizeAndReadAsync(HttpContext context)
+    private static async Task<SanitizedExportControlRequest?> AuthorizeAndReadAsync(HttpContext context)
     {
         Prepare(context.Response, "application/json");
         if (!AuthorizeRead(context)) { await ErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden"); return null; }
@@ -89,11 +92,15 @@ internal static class SanitizedExportRoutes
             if (total > MaximumRequestBytes) { await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "request_too_large"); return null; }
             await buffer.WriteAsync(chunk.AsMemory(0, read), context.RequestAborted);
         }
-        try { return SanitizedExportJson.DeserializeRequest(buffer.ToArray()); }
+        try { return SanitizedExportJson.DeserializeControlRequest(buffer.ToArray()); }
         catch (JsonException) { await ErrorAsync(context, StatusCodes.Status400BadRequest, "request_invalid"); return null; }
     }
 
     private static bool AuthorizeRead(HttpContext context) => !MonitorHost.IsCrossSiteRequest(context);
+
+    private static int Status(string errorCode) => errorCode is "publish_failed" or "output_exists" or "snapshot_provider_unavailable"
+        ? StatusCodes.Status503ServiceUnavailable
+        : StatusCodes.Status422UnprocessableEntity;
 
     private static async Task JsonAsync<T>(HttpContext context, int status, T value)
     {
@@ -108,50 +115,101 @@ internal static class SanitizedExportRoutes
         response.ContentType = contentType;
     }
 
-    private sealed class Application(string outputDirectory)
+    private sealed class Application(string outputDirectory, ISanitizedExportSnapshotProvider snapshotProvider)
     {
-        private readonly SanitizedExportService service = new();
+        private readonly SanitizedExportAuthorizedService authorizedService = new(snapshotProvider);
+        private readonly SanitizedExportBundleInspector inspectionService = new();
         private readonly ConcurrentDictionary<string, ExportApiResult> results = new(StringComparer.Ordinal);
 
-        internal SanitizedExportPreview Preview(SanitizedExportRequest request) => service.Preview(request);
+        internal SanitizedExportPreview Preview(SanitizedExportControlRequest request) => authorizedService.Preview(request);
 
-        internal ExportApiResult Create(SanitizedExportRequest request)
+        internal ExportApiResult Create(SanitizedExportControlRequest request)
         {
             try
             {
-                var created = service.Create(request);
+                var created = authorizedService.Create(request);
                 if (!created.Success) return new(null, created.ErrorCode, null, null, null);
                 var exportId = created.ArchiveSha256!;
                 Directory.CreateDirectory(outputDirectory);
                 var path = Path.Combine(outputDirectory, $"{exportId}.zip");
                 if (File.Exists(path))
                 {
-                    if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(created.ArchiveBytes)) return new(null, "publish_failed", null, null, null);
+                    if (!TryReadBounded(path, out var existing) || existing.LongLength != created.ArchiveBytes!.LongLength
+                        || !existing.AsSpan().SequenceEqual(created.ArchiveBytes)
+                        || !inspectionService.Inspect(existing).Success) return new(null, "publish_failed", null, null, null);
                 }
                 else
                 {
-                    var published = service.CreateAndPublish(request, path);
-                    if (!published.Success) return new(null, published.ErrorCode, null, null, null);
+                    if (!TryPublish(path, created.ArchiveBytes!)) return new(null, "publish_failed", null, null, null);
                 }
-                var result = new ExportApiResult(exportId, null, created.ArchiveSha256, created.Preview, $"/api/sanitized-export/v1/exports/{exportId}/archive");
+                var result = new ExportApiResult(exportId, null, created.ArchiveSha256, created.ArchiveBytes!.LongLength, created.Preview, $"/api/sanitized-export/v1/exports/{exportId}/archive");
                 results[exportId] = result;
                 return result;
             }
             catch (IOException) { return new(null, "publish_failed", null, null, null); }
             catch (UnauthorizedAccessException) { return new(null, "publish_failed", null, null, null); }
+            catch (System.Security.SecurityException) { return new(null, "publish_failed", null, null, null); }
         }
 
         internal bool TryGet(string exportId, out ExportApiResult result) => results.TryGetValue(exportId, out result!);
         internal bool TryReadArchive(string exportId, out byte[] bytes)
         {
             bytes = [];
-            if (!results.ContainsKey(exportId)) return false;
-            var path = Path.Combine(outputDirectory, $"{exportId}.zip");
-            if (!File.Exists(path)) return false;
-            bytes = File.ReadAllBytes(path);
+            try
+            {
+                if (!results.TryGetValue(exportId, out var expected)) return false;
+                var path = Path.Combine(outputDirectory, $"{exportId}.zip");
+                if (!File.Exists(path)) return false;
+                if (!TryReadBounded(path, out bytes) || bytes.LongLength != expected.ArchiveLength
+                    || Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant() != expected.ArchiveSha256
+                    || !inspectionService.Inspect(bytes).Success) { bytes = []; return false; }
+                return true;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (System.Security.SecurityException) { return false; }
+        }
+
+        private static bool TryReadBounded(string path, out byte[] bytes)
+        {
+            bytes = [];
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (stream.Length > SanitizedExportLimits.MaximumUncompressedBytes) return false;
+            using var output = new MemoryStream((int)stream.Length);
+            var buffer = new byte[8192];
+            long total = 0;
+            int read;
+            while ((read = stream.Read(buffer)) > 0)
+            {
+                total += read;
+                if (total > SanitizedExportLimits.MaximumUncompressedBytes) return false;
+                output.Write(buffer, 0, read);
+            }
+            bytes = output.ToArray();
             return true;
+        }
+
+        private static bool TryPublish(string path, byte[] bytes)
+        {
+            var temporaryPath = $"{path}.{Guid.NewGuid():N}.partial";
+            try
+            {
+                if (File.Exists(path)) return false;
+                File.WriteAllBytes(temporaryPath, bytes);
+                File.Move(temporaryPath, path, overwrite: false);
+                return true;
+            }
+            finally
+            {
+                try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+            }
         }
     }
 
-    private sealed record ExportApiResult(string? ExportId, string? ErrorCode, string? ArchiveSha256, SanitizedExportPreview? Preview, string? DownloadPath);
+    private sealed record ExportApiResult(string? ExportId, string? ErrorCode, string? ArchiveSha256, [property: System.Text.Json.Serialization.JsonIgnore] long ArchiveLength, SanitizedExportPreview? Preview, string? DownloadPath)
+    {
+        internal ExportApiResult(string? exportId, string? errorCode, string? archiveSha256, SanitizedExportPreview? preview, string? downloadPath)
+            : this(exportId, errorCode, archiveSha256, 0, preview, downloadPath) { }
+    }
 }

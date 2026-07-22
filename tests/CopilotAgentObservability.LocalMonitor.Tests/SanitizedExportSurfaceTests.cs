@@ -11,16 +11,37 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SanitizedExportSurfaceTests
 {
     [Fact]
-    public void Cli_PreviewExportAndResultUseTheSharedRequestAndResultContract()
+    public async Task Api_PreviewFailsClosedWithoutTrustedSnapshotProvider()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartRetentionCleanupWorker = false,
+        });
+
+        using var response = await host.Client.SendAsync(Post(
+            "/api/sanitized-export/v1/previews", SanitizedExportJson.SerializeControlRequest(Control())));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("{\"error\":\"snapshot_provider_unavailable\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public void Cli_PreviewExportAndResultUseTrustedSnapshotProvider()
     {
         using var temp = new MonitorTempDirectory();
         var requestPath = Path.Combine(temp.Path, "request.json");
         var bundlePath = Path.Combine(temp.Path, "bundle.zip");
-        File.WriteAllBytes(requestPath, SanitizedExportJson.SerializeRequest(Request()));
+        File.WriteAllBytes(requestPath, SanitizedExportJson.SerializeControlRequest(Control()));
+        var provider = new Provider(Snapshot());
 
         using var previewOutput = new StringWriter();
         using var previewError = new StringWriter();
-        var previewExit = CliApplication.Run(["sanitized-export", "preview", "--request", requestPath], previewOutput, previewError);
+        var previewExit = SanitizedExportCli.Run(["preview", "--request", requestPath], previewOutput, previewError, provider);
         Assert.Equal(0, previewExit);
         Assert.Equal(string.Empty, previewError.ToString());
         using var preview = JsonDocument.Parse(previewOutput.ToString());
@@ -32,7 +53,7 @@ public sealed class SanitizedExportSurfaceTests
 
         using var createOutput = new StringWriter();
         using var createError = new StringWriter();
-        var createExit = CliApplication.Run(["sanitized-export", "export", "--request", requestPath, "--output", bundlePath], createOutput, createError);
+        var createExit = SanitizedExportCli.Run(["export", "--request", requestPath, "--output", bundlePath], createOutput, createError, provider);
         Assert.Equal(0, createExit);
         Assert.True(File.Exists(bundlePath));
         Assert.Equal(string.Empty, createError.ToString());
@@ -42,7 +63,7 @@ public sealed class SanitizedExportSurfaceTests
 
         using var resultOutput = new StringWriter();
         using var resultError = new StringWriter();
-        var resultExit = CliApplication.Run(["sanitized-export", "result", "--bundle", bundlePath], resultOutput, resultError);
+        var resultExit = SanitizedExportCli.Run(["result", "--bundle", bundlePath], resultOutput, resultError, provider);
         Assert.Equal(0, resultExit);
         Assert.Equal(string.Empty, resultError.ToString());
         using var inspected = JsonDocument.Parse(resultOutput.ToString());
@@ -64,8 +85,9 @@ public sealed class SanitizedExportSurfaceTests
             StartSessionWriter = false,
             StartSessionOtelEnrichment = false,
             StartRetentionCleanupWorker = false,
+            SanitizedExportSnapshotProvider = new Provider(Snapshot()),
         });
-        var body = SanitizedExportJson.SerializeRequest(Request());
+        var body = SanitizedExportJson.SerializeControlRequest(Control());
 
         using var missingCsrf = await host.Client.PostAsync("/api/sanitized-export/v1/previews", Json(body));
         Assert.Equal(HttpStatusCode.Forbidden, missingCsrf.StatusCode);
@@ -81,12 +103,12 @@ public sealed class SanitizedExportSurfaceTests
         Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
         Assert.Equal("{\"error\":\"request_invalid\"}", await unknownField.Content.ReadAsStringAsync());
 
-        var nullSnapshotBody = JsonNode.Parse(body)!;
-        nullSnapshotBody["snapshot"] = null;
-        using var nullSnapshotRequest = Post("/api/sanitized-export/v1/previews", Encoding.UTF8.GetBytes(nullSnapshotBody.ToJsonString()));
-        using var nullSnapshot = await host.Client.SendAsync(nullSnapshotRequest);
-        Assert.Equal(HttpStatusCode.BadRequest, nullSnapshot.StatusCode);
-        Assert.Equal("{\"error\":\"request_invalid\"}", await nullSnapshot.Content.ReadAsStringAsync());
+        var injectedSnapshotBody = JsonNode.Parse(body)!;
+        injectedSnapshotBody["snapshot"] = JsonNode.Parse("{\"records\":[]}");
+        using var injectedSnapshotRequest = Post("/api/sanitized-export/v1/previews", Encoding.UTF8.GetBytes(injectedSnapshotBody.ToJsonString()));
+        using var injectedSnapshot = await host.Client.SendAsync(injectedSnapshotRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, injectedSnapshot.StatusCode);
+        Assert.Equal("{\"error\":\"request_invalid\"}", await injectedSnapshot.Content.ReadAsStringAsync());
 
         using var previewRequest = Post("/api/sanitized-export/v1/previews", body);
         using var preview = await host.Client.SendAsync(previewRequest);
@@ -115,6 +137,12 @@ public sealed class SanitizedExportSurfaceTests
         Assert.Equal("no-store", download.Headers.CacheControl?.ToString());
         Assert.NotEmpty(await download.Content.ReadAsByteArrayAsync());
 
+        var storedPath = Path.Combine(temp.Path, "sanitized-exports", $"{exportId}.zip");
+        await File.AppendAllTextAsync(storedPath, "changed");
+        using var changedDownload = await host.Client.GetAsync($"/api/sanitized-export/v1/exports/{exportId}/archive");
+        Assert.Equal(HttpStatusCode.NotFound, changedDownload.StatusCode);
+        Assert.Equal("{\"error\":\"export_not_found\"}", await changedDownload.Content.ReadAsStringAsync());
+
         using var invalidHostRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/sanitized-export/v1/exports/{exportId}");
         invalidHostRequest.Headers.Host = "example.invalid";
         using var invalidHost = await host.Client.SendAsync(invalidHostRequest);
@@ -126,6 +154,10 @@ public sealed class SanitizedExportSurfaceTests
     public async Task Api_CreateScannerFailurePublishesNoArtifactOrResult()
     {
         using var temp = new MonitorTempDirectory();
+        var unsafeSnapshot = Snapshot() with
+        {
+            Records = [Snapshot().Records[0] with { CanonicalBytes = Encoding.UTF8.GetBytes("{\"prompt\":\"blocked\"}") }],
+        };
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
@@ -133,16 +165,10 @@ public sealed class SanitizedExportSurfaceTests
             StartSessionWriter = false,
             StartSessionOtelEnrichment = false,
             StartRetentionCleanupWorker = false,
+            SanitizedExportSnapshotProvider = new Provider(unsafeSnapshot),
         });
-        var unsafeRequest = Request() with
-        {
-            Snapshot = Request().Snapshot with
-            {
-                Records = [Request().Snapshot.Records[0] with { CanonicalBytes = Encoding.UTF8.GetBytes("{\"prompt\":\"blocked\"}") }],
-            },
-        };
 
-        using var createRequest = Post("/api/sanitized-export/v1/exports", SanitizedExportJson.SerializeRequest(unsafeRequest));
+        using var createRequest = Post("/api/sanitized-export/v1/exports", SanitizedExportJson.SerializeControlRequest(Control()));
         using var create = await host.Client.SendAsync(createRequest);
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
@@ -151,18 +177,19 @@ public sealed class SanitizedExportSurfaceTests
         Assert.False(Directory.Exists(exportDirectory) && Directory.EnumerateFiles(exportDirectory).Any());
     }
 
-    private static SanitizedExportRequest Request()
+    private static SanitizedExportControlRequest Control() => new(
+        new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]), []);
+
+    private static SanitizedExportSourceSnapshot Snapshot()
     {
         var observedAt = new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero);
         return new(
-            observedAt,
-            new(
-                "snapshot-surface-85",
-                "local-monitor-test",
-                [new("github-copilot-cli", "1.0.73")],
-                [new(
-                    "sessions/session-a.json",
-                    "session_projection",
+            "snapshot-surface-85",
+            "local-monitor-test",
+            [new("github-copilot-cli", "1.0.73")],
+            [new(
+                    "repository-metadata/session-a.json",
+                    "repository_metadata_projection",
                     "session-a",
                     "session-a",
                     "trace-a",
@@ -171,11 +198,9 @@ public sealed class SanitizedExportSurfaceTests
                     "sample-workspace",
                     "sample-snapshot",
                     observedAt,
-                    Encoding.UTF8.GetBytes("{\"schema_version\":\"session-workspace.v1\",\"session_id\":\"session-a\"}"),
+                    Encoding.UTF8.GetBytes("{\"schema_version\":\"repository-metadata-projection.v1\",\"record_id\":\"session-a\",\"session_id\":\"session-a\",\"trace_id\":\"trace-a\",\"source_surface\":\"github-copilot-cli\",\"repository_name\":\"sample-repository\",\"workspace_label\":\"sample-workspace\",\"repo_snapshot\":\"sample-snapshot\",\"observed_at\":\"2026-07-22T00:00:00.0000000Z\",\"completeness\":\"unknown\",\"content_state\":\"unknown\",\"retention_state\":\"unknown\"}"),
                     [])],
-                new("missing", "missing", "unavailable", "unavailable", "unavailable")),
-            new(SessionIds: ["session-a"]),
-            []);
+            new("missing", "missing", "unavailable", "unavailable", "unavailable"));
     }
 
     private static HttpRequestMessage Post(string path, byte[] body)
@@ -190,5 +215,10 @@ public sealed class SanitizedExportSurfaceTests
         var content = new ByteArrayContent(body);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         return content;
+    }
+
+    private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
+    {
+        public SanitizedExportSnapshotCapture Capture() => new(true, null, snapshot);
     }
 }

@@ -7,9 +7,12 @@ public static class SanitizedExportJson
 {
     private static readonly JsonSerializerOptions Options = CreateOptions();
 
-    public static byte[] SerializeRequest(SanitizedExportRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
-    public static SanitizedExportRequest DeserializeRequest(ReadOnlySpan<byte> bytes) =>
+    internal static byte[] SerializeRequest(SanitizedExportRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
+    internal static SanitizedExportRequest DeserializeRequest(ReadOnlySpan<byte> bytes) =>
         JsonSerializer.Deserialize<SanitizedExportRequest>(bytes, Options) ?? throw new JsonException();
+    public static byte[] SerializeControlRequest(SanitizedExportControlRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
+    public static SanitizedExportControlRequest DeserializeControlRequest(ReadOnlySpan<byte> bytes) =>
+        JsonSerializer.Deserialize<SanitizedExportControlRequest>(bytes, Options) ?? throw new JsonException();
     public static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Options);
 
     private static JsonSerializerOptions CreateOptions()

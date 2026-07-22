@@ -3,7 +3,7 @@
   "surface_id": "sanitized-evidence-export",
   "owner_issue": 85,
   "future_registry_state_at_kickoff": "not_available",
-  "production_surface_state": "active",
+  "production_surface_state": "blocked_owner_providers",
   "active_row_ids": [
     "91-E-085",
     "91-S-085"
@@ -15,6 +15,7 @@
     "scanner-failure"
   ],
   "automated_test_filters": [
+    "FullyQualifiedName~SanitizedExportAuthorizationTests",
     "FullyQualifiedName~SanitizedExportServiceTests",
     "FullyQualifiedName~SanitizedExportSurfaceTests",
     "FullyQualifiedName~SanitizedExportCliTests"

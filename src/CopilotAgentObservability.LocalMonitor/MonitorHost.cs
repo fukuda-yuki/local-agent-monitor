@@ -13,6 +13,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
@@ -260,7 +261,7 @@ internal static class MonitorHost
         DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
-        SanitizedExportRoutes.Map(app, options.DatabasePath);
+        SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1663,6 +1664,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
+
     public Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? RetentionMutationApplicationFactory { get; init; }
 
     public IDoctorHttpApplication? DoctorApplication { get; init; }

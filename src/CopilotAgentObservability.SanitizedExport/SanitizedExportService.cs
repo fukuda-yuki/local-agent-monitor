@@ -5,7 +5,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.SanitizedExport;
 
-public sealed class SanitizedExportService
+internal sealed class SanitizedExportService
 {
     private static readonly DateTimeOffset ArchiveTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
@@ -27,7 +27,12 @@ public sealed class SanitizedExportService
             included.Add(record);
             foreach (var dependency in record.Dependencies.OrderBy(item => item.RecordType, StringComparer.Ordinal).ThenBy(item => item.RecordId, StringComparer.Ordinal))
             {
-                if (byIdentity.TryGetValue((dependency.RecordType, dependency.RecordId), out var resolved))
+                if (dependency.Disposition == SanitizedExportDependencyDisposition.External)
+                {
+                    var identity = (dependency.RecordType, dependency.RecordId);
+                    if (!unresolved.ContainsKey(identity)) unresolved[identity] = "external";
+                }
+                else if (byIdentity.TryGetValue((dependency.RecordType, dependency.RecordId), out var resolved))
                 {
                     queue.Enqueue(resolved);
                 }
@@ -64,8 +69,17 @@ public sealed class SanitizedExportService
                 Hash(record.CanonicalBytes))).ToArray();
         var missing = unresolved.OrderBy(item => item.Key.Item1, StringComparer.Ordinal).ThenBy(item => item.Key.Item2, StringComparer.Ordinal)
             .Select(item => new SanitizedExportUnresolvedDependency(item.Key.Item1, item.Key.Item2, item.Value)).ToArray();
-        var preview = new SanitizedExportPreview(true, null, entries, missing, entries.Sum(entry => entry.Size), request.Snapshot.Capabilities, SanitizedExportContractVersions.Scanner);
-        var totalUncompressedBytes = preview.EstimatedUncompressedBytes + SanitizedExportManifestWriter.Write(request, preview).LongLength;
+        var bundleCapabilities = new SanitizedExportCapabilityStates(
+            entries.Any(entry => entry.RecordType == "instruction_finding_handoff") ? "available" : "missing",
+            entries.Any(entry => entry.RecordType == "alert_receipt") ? "available" : "missing",
+            "unavailable", "unavailable", "unavailable");
+        var preview = new SanitizedExportPreview(true, null, entries, missing, entries.Sum(entry => entry.Size), bundleCapabilities, SanitizedExportContractVersions.Scanner);
+        var manifest = SanitizedExportManifestWriter.Write(request, preview);
+        var manifestError = ValidateManifestBytes(manifest);
+        if (manifestError is not null) return FailurePreview(request, manifestError);
+        var manifestScan = SanitizedExportScanner.ScanCanonicalJson(manifest);
+        if (manifestScan is not null) return FailurePreview(request, manifestScan);
+        var totalUncompressedBytes = preview.EstimatedUncompressedBytes + manifest.LongLength;
         if (totalUncompressedBytes > SanitizedExportLimits.MaximumUncompressedBytes)
             return FailurePreview(request, "uncompressed_size_limit_exceeded");
         return preview with { EstimatedUncompressedBytes = totalUncompressedBytes };
@@ -89,6 +103,8 @@ public sealed class SanitizedExportService
                 WriteEntry(archive, entry.Path, recordsByIdentity[(entry.RecordType, entry.RecordId)].CanonicalBytes);
         }
         var bytes = output.ToArray();
+        if (bytes.LongLength > SanitizedExportLimits.MaximumUncompressedBytes)
+            return new(false, "bundle_too_large", FailurePreview(request, "bundle_too_large"), null, null, null);
         var inspection = Inspect(bytes);
         if (!inspection.Success)
             return new(false, inspection.ErrorCode, preview, null, null, null);
@@ -128,6 +144,8 @@ public sealed class SanitizedExportService
     public SanitizedExportInspectionResult Inspect(byte[] archiveBytes)
     {
         ArgumentNullException.ThrowIfNull(archiveBytes);
+        if (archiveBytes.LongLength > SanitizedExportLimits.MaximumUncompressedBytes)
+            return InspectionFailure("bundle_too_large");
         try
         {
             using var archive = new ZipArchive(new MemoryStream(archiveBytes, writable: false), ZipArchiveMode.Read);
@@ -149,9 +167,7 @@ public sealed class SanitizedExportService
             if (manifestEntry is null || archive.Entries[0] != manifestEntry) return InspectionFailure("manifest_missing");
             var manifestBytes = ReadEntry(manifestEntry);
             if (manifestBytes is null) return InspectionFailure("archive_invalid");
-            var manifestScan = SanitizedExportScanner.Scan(new SanitizedExportRecord(
-                "sessions/manifest-metadata.json", "session_projection", "manifest-metadata", null, null, null, null, null, null,
-                DateTimeOffset.UnixEpoch, manifestBytes, []), []);
+            var manifestScan = SanitizedExportScanner.ScanCanonicalJson(manifestBytes);
             if (manifestScan is not null) return InspectionFailure(manifestScan);
             using var manifest = JsonDocument.Parse(manifestBytes);
             var root = manifest.RootElement;
@@ -167,6 +183,19 @@ public sealed class SanitizedExportService
             if (!manifestPaths.SequenceEqual(archivePaths, StringComparer.Ordinal)
                 || !archivePaths.SequenceEqual(archivePaths.Order(StringComparer.Ordinal), StringComparer.Ordinal))
                 return InspectionFailure("entry_order_invalid");
+            if (files.GroupBy(file => (file.GetProperty("record_type").GetString(), file.GetProperty("record_id").GetString())).Any(group => group.Count() != 1))
+                return InspectionFailure("file_inventory_invalid");
+            var actualCounts = files.GroupBy(file => file.GetProperty("record_type").GetString()!, StringComparer.Ordinal)
+                .OrderBy(group => group.Key, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            var declaredCounts = root.GetProperty("record_counts").EnumerateObject().ToDictionary(property => property.Name, property => property.Value.GetInt32(), StringComparer.Ordinal);
+            if (!actualCounts.OrderBy(item => item.Key, StringComparer.Ordinal).SequenceEqual(declaredCounts.OrderBy(item => item.Key, StringComparer.Ordinal)))
+                return InspectionFailure("file_inventory_invalid");
+            var capabilities = root.GetProperty("capabilities");
+            if (capabilities.GetProperty("instruction_findings").GetString()
+                    != (actualCounts.ContainsKey("instruction_finding_handoff") ? "available" : "missing")
+                || capabilities.GetProperty("alert_receipts").GetString()
+                    != (actualCounts.ContainsKey("alert_receipt") ? "available" : "missing"))
+                return InspectionFailure("file_inventory_invalid");
             foreach (var file in files)
             {
                 var path = file.GetProperty("path").GetString()!;
@@ -178,7 +207,11 @@ public sealed class SanitizedExportService
                 var record = new SanitizedExportRecord(path, file.GetProperty("record_type").GetString()!, file.GetProperty("record_id").GetString()!, null, null, null, null, null, null, DateTimeOffset.UnixEpoch, bytes, []);
                 var scanError = SanitizedExportScanner.Scan(record, []);
                 if (scanError is not null) return InspectionFailure(scanError);
+                var producerError = SanitizedExportProducerValidator.Validate(record, requireEnvelope: false);
+                if (producerError is not null) return InspectionFailure(producerError);
             }
+            if (totalUncompressedBytes != manifestBytes.LongLength + files.Sum(file => file.GetProperty("size").GetInt64()))
+                return InspectionFailure("file_inventory_invalid");
             return new(
                 true,
                 null,
@@ -193,24 +226,56 @@ public sealed class SanitizedExportService
         catch (JsonException) { return InspectionFailure("manifest_invalid"); }
         catch (InvalidOperationException) { return InspectionFailure("manifest_invalid"); }
         catch (KeyNotFoundException) { return InspectionFailure("manifest_invalid"); }
+        catch (ArgumentOutOfRangeException) { return InspectionFailure("archive_invalid"); }
+        catch (OverflowException) { return InspectionFailure("archive_invalid"); }
     }
 
     private static string? ValidateRequest(SanitizedExportRequest request)
     {
-        if (request.CreatedAt.Offset != TimeSpan.Zero || string.IsNullOrWhiteSpace(request.Snapshot.SnapshotId)
-            || string.IsNullOrWhiteSpace(request.Snapshot.LocalMonitorVersion)) return "invalid_request";
+        if (request.CreatedAt.Offset != TimeSpan.Zero || InvalidIdentifier(request.Snapshot.SnapshotId)
+            || request.Snapshot.Records.Count > SanitizedExportLimits.MaximumRecords
+            || request.Snapshot.AgentVersions.Count > SanitizedExportLimits.MaximumVersions
+            || request.Snapshot.ProcessingVersions?.Count > SanitizedExportLimits.MaximumVersions
+            || request.ForbiddenMarkers.Count > SanitizedExportLimits.MaximumForbiddenMarkers
+            || request.ForbiddenMarkers.Any(marker => string.IsNullOrEmpty(marker) || marker.Length > SanitizedExportLimits.MaximumMarkerLength)
+            || InvalidBoundedText(request.Snapshot.LocalMonitorVersion)
+            || request.Snapshot.AgentVersions.Any(item => InvalidBoundedText(item.SourceSurface) || InvalidBoundedText(item.Version))
+            || request.Snapshot.AgentVersions.GroupBy(item => (item.SourceSurface, item.Version)).Any(group => group.Count() > 1)
+            || request.Snapshot.ProcessingVersions?.Any(item => InvalidBoundedText(item.Key) || InvalidBoundedText(item.Value)) == true)
+            return "invalid_request";
         if (request.Selection.StartInclusive is { } start && start.Offset != TimeSpan.Zero
             || request.Selection.EndExclusive is { } end && end.Offset != TimeSpan.Zero
             || request.Selection.StartInclusive >= request.Selection.EndExclusive) return "invalid_selection";
         if (request.Snapshot.Records.GroupBy(record => (record.RecordType, record.RecordId)).Any(group => group.Count() > 1))
             return "duplicate_record_identity";
+        if (request.Snapshot.Records.GroupBy(record => record.EntryPath, StringComparer.Ordinal).Any(group => group.Count() > 1))
+            return "duplicate_entry";
+        if (request.Snapshot.Records.Any(record => record.Dependencies.Count > SanitizedExportLimits.MaximumDependenciesPerRecord)
+            || SelectionLists(request.Selection).Any(list => list is { Count: > SanitizedExportLimits.MaximumListValues })) return "invalid_request";
+        if (request.Snapshot.Records.SelectMany(record => record.Dependencies).Any(dependency => !SanitizedExportProducerValidator.AllowedType(dependency.RecordType)))
+            return "unsupported_record_type";
+        if (request.Selection.ReceiptTypes?.Any(type => !SanitizedExportProducerValidator.AllowedType(type)) == true)
+            return "unsupported_record_type";
         var capabilities = request.Snapshot.Capabilities;
         if (!ValidCapability(capabilities.InstructionFindings)
             || !ValidCapability(capabilities.AlertReceipts)
             || !ValidCapability(capabilities.HistoricalInstructionAnalysis)
             || !ValidCapability(capabilities.HistoricalEfficiencyAnalysis)
             || !ValidCapability(capabilities.AlertCenter)) return "invalid_capability_state";
-        if (request.Snapshot.Records.Any(record => InvalidToken(record.EntryPath) || InvalidToken(record.RecordType) || InvalidToken(record.RecordId)))
+        if (capabilities.HistoricalInstructionAnalysis != "unavailable" || capabilities.HistoricalEfficiencyAnalysis != "unavailable" || capabilities.AlertCenter != "unavailable")
+            return "invalid_capability_state";
+        var hasInstruction = request.Snapshot.Records.Any(record => record.RecordType == "instruction_finding_handoff");
+        var hasAlert = request.Snapshot.Records.Any(record => record.RecordType == "alert_receipt");
+        if ((capabilities.InstructionFindings == "available") != hasInstruction || (capabilities.AlertReceipts == "available") != hasAlert)
+            return "invalid_capability_state";
+        if (request.Snapshot.Records.Any(record => record.EntryPath.Length is 0 or > 320 || record.EntryPath.Any(char.IsControl)
+            || InvalidBoundedText(record.RecordType) || InvalidBoundedText(record.RecordId)
+            || InvalidNullableText(record.SessionId) || InvalidNullableText(record.TraceId) || InvalidNullableText(record.SourceSurface)
+            || InvalidNullableText(record.RepositoryName) || InvalidNullableText(record.WorkspaceLabel) || InvalidNullableText(record.RepoSnapshot)
+            || InvalidBoundedText(record.Completeness) || InvalidBoundedText(record.ContentState) || InvalidBoundedText(record.RetentionState)
+            || record.Dependencies.Any(dependency => InvalidBoundedText(dependency.RecordType) || InvalidBoundedText(dependency.RecordId)))
+            || SelectionValues(request.Selection).Any(InvalidNullableText)
+            || SelectionLists(request.Selection).Any(list => list?.Distinct(StringComparer.Ordinal).Count() != list?.Count))
             return "invalid_request";
         var metadata = new List<string?>
         {
@@ -228,11 +293,33 @@ public sealed class SanitizedExportService
         metadata.AddRange(SelectionValues(request.Selection));
         var metadataError = SanitizedExportScanner.ScanMetadata(metadata, request.ForbiddenMarkers);
         if (metadataError is not null) return metadataError;
+        var manifestIdentifiers = request.Snapshot.AgentVersions.SelectMany(item => new[] { item.SourceSurface, item.Version })
+            .Concat(request.Snapshot.ProcessingVersions?.SelectMany(item => new[] { item.Key, item.Value }) ?? [])
+            .Concat(request.Snapshot.Records.SelectMany(record => new[]
+            {
+                record.RecordType, record.RecordId, record.SessionId, record.TraceId, record.SourceSurface,
+                record.RepositoryName, record.WorkspaceLabel, record.RepoSnapshot, record.Completeness, record.ContentState, record.RetentionState,
+            }))
+            .Concat(request.Snapshot.Records.SelectMany(record => record.Dependencies).SelectMany(item => new[] { item.RecordType, item.RecordId }))
+            .Concat(SelectionValues(request.Selection));
+        if (InvalidIdentifier(request.Snapshot.LocalMonitorVersion)
+            || manifestIdentifiers.Any(value => value is not null && InvalidIdentifier(value))) return "invalid_request";
+        foreach (var record in request.Snapshot.Records)
+        {
+            var scanError = SanitizedExportScanner.Scan(record, request.ForbiddenMarkers);
+            if (scanError is not null && scanError != "unexpected_entry") return scanError;
+            var producerError = SanitizedExportProducerValidator.Validate(record);
+            if (producerError is not null) return producerError;
+        }
         return null;
     }
 
     private static bool ValidCapability(string value) => value is "available" or "missing" or "unavailable";
-    private static bool InvalidToken(string? value) => string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.Any(char.IsControl);
+    private static bool InvalidBoundedText(string? value) => string.IsNullOrWhiteSpace(value) || value.Length > SanitizedExportLimits.MaximumIdentifierLength || value.Any(char.IsControl);
+    private static bool InvalidNullableText(string? value) => value is not null && InvalidBoundedText(value);
+    private static bool InvalidIdentifier(string? value) => string.IsNullOrWhiteSpace(value) || value.Length > SanitizedExportLimits.MaximumIdentifierLength || value.Any(character => char.IsControl(character) || character is '/' or '\\' or '?' or '#');
+    private static IEnumerable<IReadOnlyList<string>?> SelectionLists(SanitizedExportSelection selection) =>
+        [selection.SessionIds, selection.TraceIds, selection.SourceSurfaces, selection.RepositoryNames, selection.WorkspaceLabels, selection.ReceiptTypes];
 
     private static IEnumerable<string?> SelectionValues(SanitizedExportSelection selection) =>
         (selection.SessionIds ?? []).Cast<string?>()
@@ -306,7 +393,7 @@ public sealed class SanitizedExportService
         var totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(end[10..12]);
         var centralSize = BinaryPrimitives.ReadUInt32LittleEndian(end[12..16]);
         var centralOffset = BinaryPrimitives.ReadUInt32LittleEndian(end[16..20]);
-        if (endOffset + 22 + commentLength != bytes.Length
+        if (commentLength != 0 || endOffset + 22 != bytes.Length
             || BinaryPrimitives.ReadUInt16LittleEndian(end[4..6]) != 0
             || BinaryPrimitives.ReadUInt16LittleEndian(end[6..8]) != 0
             || entriesOnDisk != expectedEntries || totalEntries != expectedEntries
@@ -314,6 +401,7 @@ public sealed class SanitizedExportService
             || (long)centralOffset + centralSize != endOffset) return "archive_invalid";
 
         var cursor = (int)centralOffset;
+        var expectedLocalOffset = 0;
         for (var entryIndex = 0; entryIndex < expectedEntries; entryIndex++)
         {
             if (cursor < 0 || cursor > endOffset - 46
@@ -321,20 +409,53 @@ public sealed class SanitizedExportService
                 return "archive_invalid";
             var central = bytes.AsSpan(cursor, 46);
             var localOffset = BinaryPrimitives.ReadUInt32LittleEndian(central[42..46]);
-            if (localOffset > int.MaxValue || localOffset > bytes.Length - 30
+            if (localOffset > int.MaxValue || localOffset != expectedLocalOffset || localOffset > bytes.Length - 30
                 || BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan((int)localOffset, 4)) != localSignature)
                 return "archive_invalid";
             var centralMethod = BinaryPrimitives.ReadUInt16LittleEndian(central[10..12]);
             var localMethod = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan((int)localOffset + 8, 2));
             if (centralMethod != 0 || localMethod != 0) return "compression_not_allowed";
+            if (BinaryPrimitives.ReadUInt16LittleEndian(central[4..6]) != 20
+                || BinaryPrimitives.ReadUInt16LittleEndian(central[6..8]) != 20
+                || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan((int)localOffset + 4, 2)) != 20)
+                return "archive_invalid";
             var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(central[28..30]);
             var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(central[30..32]);
             var entryCommentLength = BinaryPrimitives.ReadUInt16LittleEndian(central[32..34]);
+            var local = bytes.AsSpan((int)localOffset, 30);
+            var localNameLength = BinaryPrimitives.ReadUInt16LittleEndian(local[26..28]);
+            var localExtraLength = BinaryPrimitives.ReadUInt16LittleEndian(local[28..30]);
+            var compressedSize = BinaryPrimitives.ReadUInt32LittleEndian(local[18..22]);
+            if (extraLength != 0 || entryCommentLength != 0 || localExtraLength != 0
+                || BinaryPrimitives.ReadUInt16LittleEndian(central[34..36]) != 0
+                || BinaryPrimitives.ReadUInt16LittleEndian(central[36..38]) != 0
+                || BinaryPrimitives.ReadUInt16LittleEndian(central[8..10]) is var centralFlags && (centralFlags & ~0x0800) != 0
+                || BinaryPrimitives.ReadUInt16LittleEndian(local[6..8]) != centralFlags
+                || !central[12..28].SequenceEqual(local[10..26])
+                || localNameLength != nameLength) return "archive_invalid";
+            var centralName = bytes.AsSpan(cursor + 46, nameLength);
+            var localName = bytes.AsSpan((int)localOffset + 30, localNameLength);
+            if (!centralName.SequenceEqual(localName)) return "archive_invalid";
+            var nextLocal = (long)localOffset + 30 + localNameLength + compressedSize;
+            if (nextLocal > centralOffset) return "archive_invalid";
+            expectedLocalOffset = (int)nextLocal;
             var next = (long)cursor + 46 + nameLength + extraLength + entryCommentLength;
             if (next > endOffset) return "archive_invalid";
             cursor = (int)next;
         }
-        return cursor == endOffset ? null : "archive_invalid";
+        return cursor == endOffset && expectedLocalOffset == centralOffset ? null : "archive_invalid";
+    }
+
+    private static string? ValidateManifestBytes(byte[] bytes)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(bytes);
+            var error = SanitizedExportManifestValidator.Validate(document.RootElement);
+            if (error is not null) return error;
+            return bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(document.RootElement)) ? null : "manifest_not_canonical";
+        }
+        catch (JsonException) { return "manifest_invalid"; }
     }
 
     private static SanitizedExportResult PublicationFailure(SanitizedExportResult result, string code) =>
@@ -362,7 +483,7 @@ internal static class SanitizedExportManifestWriter
     internal static byte[] Write(SanitizedExportRequest request, SanitizedExportPreview preview)
     {
         var selectedRecords = preview.Entries
-            .Select(entry => request.Snapshot.Records.Single(record => string.Equals(record.EntryPath, entry.Path, StringComparison.Ordinal)))
+            .Select(entry => request.Snapshot.Records.Single(record => record.RecordType == entry.RecordType && record.RecordId == entry.RecordId))
             .ToArray();
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -414,7 +535,7 @@ internal static class SanitizedExportManifestWriter
                 writer.WriteStartObject(); writer.WriteString("record_type", missing.RecordType); writer.WriteString("record_id", missing.RecordId); writer.WriteString("state", missing.State); writer.WriteEndObject();
             }
             writer.WriteEndArray();
-            writer.WritePropertyName("capabilities"); JsonSerializer.Serialize(writer, request.Snapshot.Capabilities, JsonOptions);
+            writer.WritePropertyName("capabilities"); JsonSerializer.Serialize(writer, preview.Capabilities, JsonOptions);
             Distribution(writer, "completeness_distribution", selectedRecords.Select(record => record.Completeness));
             Distribution(writer, "content_state_distribution", selectedRecords.Select(record => record.ContentState));
             Distribution(writer, "retention_state_distribution", selectedRecords.Select(record => record.RetentionState));
@@ -432,7 +553,8 @@ internal static class SanitizedExportManifestWriter
             writer.WriteString("maximum_reader_major", SanitizedExportContractVersions.CompatibilityMaximum);
             writer.WriteEndObject();
             writer.WritePropertyName("repository_safe_validation"); writer.WriteStartObject();
-            writer.WriteString("profile", SanitizedExportContractVersions.Scanner); writer.WriteString("result", "passed"); writer.WriteEndObject();
+            writer.WriteString("producer_profile", SanitizedExportContractVersions.ProducerValidation);
+            writer.WriteString("scanner_profile", SanitizedExportContractVersions.Scanner); writer.WriteString("result", "passed"); writer.WriteEndObject();
             writer.WritePropertyName("files"); writer.WriteStartArray();
             foreach (var entry in preview.Entries.OrderBy(item => item.Path, StringComparer.Ordinal))
             {

@@ -9,6 +9,7 @@ public static class SanitizedExportContractVersions
     public const string Archive = "sanitized-evidence-zip-store.v1";
     public const string Checksum = "sha256.v1";
     public const string Scanner = "repository-safe-scanner.v1";
+    public const string ProducerValidation = "sanitized-evidence-producers.v1";
     public const string CompatibilityMinimum = "1";
     public const string CompatibilityMaximum = "1";
 }
@@ -17,6 +18,14 @@ public static class SanitizedExportLimits
 {
     public const int MaximumArchiveEntries = 256;
     public const long MaximumUncompressedBytes = 128L * 1024 * 1024;
+    public const int MaximumRecordBytes = 8 * 1024 * 1024;
+    public const int MaximumRecords = MaximumArchiveEntries - 1;
+    public const int MaximumDependenciesPerRecord = 256;
+    public const int MaximumListValues = 256;
+    public const int MaximumVersions = 256;
+    public const int MaximumForbiddenMarkers = 64;
+    public const int MaximumIdentifierLength = 256;
+    public const int MaximumMarkerLength = 4096;
 }
 
 public enum SanitizedExportDependencyDisposition
@@ -74,11 +83,26 @@ public sealed record SanitizedExportSelection(
     DateTimeOffset? EndExclusive = null,
     IReadOnlyList<string>? ReceiptTypes = null);
 
-public sealed record SanitizedExportRequest(
+internal sealed record SanitizedExportRequest(
     DateTimeOffset CreatedAt,
     SanitizedExportSourceSnapshot Snapshot,
     SanitizedExportSelection Selection,
     IReadOnlyList<string> ForbiddenMarkers);
+
+public sealed record SanitizedExportControlRequest(
+    DateTimeOffset CreatedAt,
+    SanitizedExportSelection Selection,
+    IReadOnlyList<string> ForbiddenMarkers);
+
+public sealed record SanitizedExportSnapshotCapture(
+    bool Success,
+    string? ErrorCode,
+    SanitizedExportSourceSnapshot? Snapshot);
+
+public interface ISanitizedExportSnapshotProvider
+{
+    SanitizedExportSnapshotCapture Capture();
+}
 
 public sealed record SanitizedExportPreviewEntry(string Path, string RecordType, string RecordId, long Size, string Sha256);
 
@@ -95,6 +119,7 @@ public sealed record SanitizedExportPreview(
 {
     public string BundleSchemaVersion => SanitizedExportContractVersions.BundleSchema;
     public string BundleProfile => SanitizedExportContractVersions.BundleProfile;
+    public string ProducerValidationProfile => SanitizedExportContractVersions.ProducerValidation;
     public int RecordCount => Entries.Count;
 }
 

@@ -5,26 +5,28 @@ namespace CopilotAgentObservability.ConfigCli;
 
 internal static class SanitizedExportCli
 {
-    internal static int Run(string[] args, TextWriter output, TextWriter error)
+    internal static int Run(string[] args, TextWriter output, TextWriter error, ISanitizedExportSnapshotProvider? snapshotProvider = null)
     {
         if (args.Length < 1) return Error(error, "invalid_arguments");
-        var service = new SanitizedExportService();
+        var inspector = new SanitizedExportBundleInspector();
+        var authorizedService = new SanitizedExportAuthorizedService(snapshotProvider ?? new UnavailableSanitizedExportSnapshotProvider());
         try
         {
             return args[0] switch
             {
-                "preview" => Preview(args, service, output, error),
-                "export" => Export(args, service, output, error),
-                "result" => Result(args, service, output, error),
+                "preview" => Preview(args, authorizedService, output, error),
+                "export" => Export(args, authorizedService, output, error),
+                "result" => Result(args, inspector, output, error),
                 _ => Error(error, "invalid_arguments"),
             };
         }
         catch (JsonException) { return Error(error, "request_invalid"); }
+        catch (SanitizedExportSizeException exception) { return Error(error, exception.Code); }
         catch (IOException) { return Error(error, "io_failed"); }
         catch (UnauthorizedAccessException) { return Error(error, "io_failed"); }
     }
 
-    private static int Preview(string[] args, SanitizedExportService service, TextWriter output, TextWriter error)
+    private static int Preview(string[] args, SanitizedExportAuthorizedService service, TextWriter output, TextWriter error)
     {
         if (!TrySingleOption(args, "--request", out var requestPath)) return Error(error, "invalid_arguments");
         var result = service.Preview(ReadRequest(requestPath));
@@ -32,7 +34,7 @@ internal static class SanitizedExportCli
         return result.Success ? 0 : Error(error, result.ErrorCode!);
     }
 
-    private static int Export(string[] args, SanitizedExportService service, TextWriter output, TextWriter error)
+    private static int Export(string[] args, SanitizedExportAuthorizedService service, TextWriter output, TextWriter error)
     {
         if (!TryOptionPair(args, "--request", "--output", out var requestPath, out var outputPath)) return Error(error, "invalid_arguments");
         var result = service.CreateAndPublish(ReadRequest(requestPath), outputPath);
@@ -40,15 +42,33 @@ internal static class SanitizedExportCli
         return result.Success ? 0 : Error(error, result.ErrorCode!);
     }
 
-    private static int Result(string[] args, SanitizedExportService service, TextWriter output, TextWriter error)
+    private static int Result(string[] args, SanitizedExportBundleInspector service, TextWriter output, TextWriter error)
     {
         if (!TrySingleOption(args, "--bundle", out var bundlePath)) return Error(error, "invalid_arguments");
-        var result = service.Inspect(File.ReadAllBytes(bundlePath));
+        var result = service.Inspect(ReadBounded(bundlePath, "bundle_too_large"));
         output.WriteLine(System.Text.Encoding.UTF8.GetString(SanitizedExportJson.Serialize(result)));
         return result.Success ? 0 : Error(error, result.ErrorCode!);
     }
 
-    private static SanitizedExportRequest ReadRequest(string path) => SanitizedExportJson.DeserializeRequest(File.ReadAllBytes(path));
+    private static SanitizedExportControlRequest ReadRequest(string path) => SanitizedExportJson.DeserializeControlRequest(ReadBounded(path, "request_too_large"));
+
+    private static byte[] ReadBounded(string path, string errorCode)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > SanitizedExportLimits.MaximumUncompressedBytes) throw new SanitizedExportSizeException(errorCode);
+        using var output = new MemoryStream((int)stream.Length);
+        var buffer = new byte[8192];
+        var remaining = SanitizedExportLimits.MaximumUncompressedBytes + 1;
+        while (remaining > 0)
+        {
+            var read = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+            if (read == 0) break;
+            output.Write(buffer, 0, read);
+            remaining -= read;
+        }
+        if (stream.ReadByte() != -1 || output.Length > SanitizedExportLimits.MaximumUncompressedBytes) throw new SanitizedExportSizeException(errorCode);
+        return output.ToArray();
+    }
 
     private static bool TrySingleOption(string[] args, string name, out string value)
     {
@@ -74,4 +94,9 @@ internal static class SanitizedExportCli
         error.WriteLine(code);
         return 2;
     }
+}
+
+internal sealed class SanitizedExportSizeException(string code) : Exception(code)
+{
+    internal string Code { get; } = code;
 }

@@ -22,8 +22,8 @@
     "selection": { "$ref": "#/$defs/selection" },
     "date_range": { "$ref": "#/$defs/date_range" },
     "source_labels": { "type": "array", "maxItems": 255, "items": { "$ref": "#/$defs/source_label" } },
-    "record_counts": { "$ref": "#/$defs/count_map" },
-    "known_missing_evidence": { "type": "array", "items": { "$ref": "#/$defs/unresolved" } },
+    "record_counts": { "$ref": "#/$defs/record_count_map" },
+    "known_missing_evidence": { "type": "array", "maxItems": 255, "items": { "$ref": "#/$defs/unresolved" } },
     "capabilities": { "$ref": "#/$defs/capabilities" },
     "completeness_distribution": { "$ref": "#/$defs/count_map" },
     "content_state_distribution": { "$ref": "#/$defs/count_map" },
@@ -68,7 +68,7 @@
       "properties": {
         "session_ids": { "$ref": "#/$defs/string_array" }, "trace_ids": { "$ref": "#/$defs/string_array" },
         "source_surfaces": { "$ref": "#/$defs/string_array" }, "repository_names": { "$ref": "#/$defs/string_array" },
-        "workspace_labels": { "$ref": "#/$defs/string_array" }, "receipt_types": { "$ref": "#/$defs/string_array" },
+        "workspace_labels": { "$ref": "#/$defs/string_array" }, "receipt_types": { "$ref": "#/$defs/record_type_array" },
         "start_inclusive": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "end_exclusive": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
       }
     },
@@ -80,7 +80,8 @@
       "type": "object", "additionalProperties": false, "required": ["repository_name", "workspace_label", "repo_snapshot"],
       "properties": { "repository_name": { "$ref": "#/$defs/nullable_id" }, "workspace_label": { "$ref": "#/$defs/nullable_id" }, "repo_snapshot": { "$ref": "#/$defs/nullable_id" } }
     },
-    "count_map": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "count_map": { "type": "object", "maxProperties": 255, "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 255 } },
+    "record_count_map": { "type": "object", "maxProperties": 3, "propertyNames": { "$ref": "#/$defs/record_type" }, "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 255 } },
     "capability_state": { "enum": ["available", "missing", "unavailable"] },
     "capabilities": {
       "type": "object", "additionalProperties": false,
@@ -101,9 +102,15 @@
         "path": { "type": "string", "maxLength": 320, "pattern": "^(repository-metadata|instruction-findings|alert-receipts)/[^/\\\\?#\\x00-\\x1f\\x7f]{1,256}\\.json$" }, "record_type": { "$ref": "#/$defs/record_type" },
         "record_id": { "$ref": "#/$defs/id" }, "size": { "type": "integer", "minimum": 1, "maximum": 8388608 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-      }
+      },
+      "oneOf": [
+        { "properties": { "path": { "pattern": "^repository-metadata/" }, "record_type": { "const": "repository_metadata_projection" } } },
+        { "properties": { "path": { "pattern": "^instruction-findings/" }, "record_type": { "const": "instruction_finding_handoff" } } },
+        { "properties": { "path": { "pattern": "^alert-receipts/" }, "record_type": { "const": "alert_receipt" } } }
+      ]
     },
     "record_type": { "enum": ["repository_metadata_projection", "instruction_finding_handoff", "alert_receipt"] },
-    "string_array": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/id" } }
+    "record_type_array": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "$ref": "#/$defs/record_type" } },
+    "string_array": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
   }
 }
