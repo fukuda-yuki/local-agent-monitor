@@ -30,12 +30,6 @@ internal sealed record ClaudeHistoricalProbeRequest(
 internal interface IClaudeHistoricalFileSystem
 {
     ClaudeTranscriptReferenceInspection InspectExactReference(string exactReference);
-
-    Stream OpenTranscriptBody(string exactReference);
-
-    IEnumerable<string> EnumerateReferences(string root);
-
-    void Write(string path, ReadOnlySpan<byte> content);
 }
 
 internal sealed class ClaudeHistoricalAdapterResult

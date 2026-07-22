@@ -21,12 +21,4 @@ internal sealed class SystemClaudeHistoricalFileSystem : IClaudeHistoricalFileSy
         }
     }
 
-    public Stream OpenTranscriptBody(string exactReference) =>
-        throw new NotSupportedException("The unsupported Claude history profile cannot read transcript content.");
-
-    public IEnumerable<string> EnumerateReferences(string root) =>
-        throw new NotSupportedException("The Claude history adapter does not scan for transcripts.");
-
-    public void Write(string path, ReadOnlySpan<byte> content) =>
-        throw new NotSupportedException("The Claude history detector has no write authority.");
 }

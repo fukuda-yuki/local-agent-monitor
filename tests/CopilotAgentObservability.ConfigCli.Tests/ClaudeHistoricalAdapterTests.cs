@@ -20,6 +20,16 @@ public sealed class ClaudeHistoricalAdapterTests
     }
 
     [Fact]
+    public void Detector_filesystem_boundary_exposes_exact_reference_inspection_only()
+    {
+        var methods = typeof(IClaudeHistoricalFileSystem)
+            .GetMethods()
+            .Select(method => method.Name);
+
+        Assert.Equal(["InspectExactReference"], methods);
+    }
+
+    [Fact]
     public void Missing_consent_returns_reference_required_without_filesystem_io()
     {
         var fileSystem = new RecordingFileSystem();
@@ -120,9 +130,6 @@ public sealed class ClaudeHistoricalAdapterTests
         var result = adapter.Probe(AuthorizedRequest(kind, exactReference));
 
         Assert.Equal([exactReference], fileSystem.InspectedReferences);
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
         Assert.Equal("detected", result.DetectionState);
         Assert.Equal("provided", result.SourceReferenceState);
         Assert.Equal("2.1.215", result.SourceApplicationVersion);
@@ -148,9 +155,6 @@ public sealed class ClaudeHistoricalAdapterTests
             "C:/private/transcript.jsonl"));
 
         Assert.Equal(["historical_source_malformed"], result.Diagnostics);
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
         AssertMatchesGolden(
             adapter.ProbeUtf8(AuthorizedRequest(
                 ClaudeTranscriptReferenceKind.ExplicitUserSelection,
@@ -176,9 +180,6 @@ public sealed class ClaudeHistoricalAdapterTests
             .GetProperty("diagnostics")[0].GetString());
         Assert.DoesNotContain(sensitiveReference, json, StringComparison.Ordinal);
         Assert.DoesNotContain(failure.Message, json, StringComparison.Ordinal);
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
     }
 
     [Theory]
@@ -201,9 +202,6 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal("not_read", result.RootElement.GetProperty("content_risk").GetString());
         Assert.DoesNotContain(failure.Message, json, StringComparison.Ordinal);
         Assert.DoesNotContain("transcript.jsonl", json, StringComparison.Ordinal);
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
         AssertMatchesGolden(
             resultBytes,
             "malformed-source.json",
@@ -276,9 +274,6 @@ public sealed class ClaudeHistoricalAdapterTests
             Assert.DoesNotContain(forbidden, combined, StringComparison.OrdinalIgnoreCase);
         }
 
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
     }
 
     public static TheoryData<Exception> SanitizedInspectionFailures() => new()
@@ -323,9 +318,6 @@ public sealed class ClaudeHistoricalAdapterTests
     private static void AssertNoFileSystemIo(RecordingFileSystem fileSystem)
     {
         Assert.Empty(fileSystem.InspectedReferences);
-        Assert.Equal(0, fileSystem.BodyReadCount);
-        Assert.Equal(0, fileSystem.EnumerationCount);
-        Assert.Equal(0, fileSystem.WriteCount);
     }
 
     private static void AssertExactUnsupportedResult(byte[] utf8)
@@ -384,9 +376,6 @@ public sealed class ClaudeHistoricalAdapterTests
             ClaudeTranscriptReferenceInspection.RegularFile;
         public Exception? InspectionFailure { get; init; }
         public List<string> InspectedReferences { get; } = [];
-        public int BodyReadCount { get; private set; }
-        public int EnumerationCount { get; private set; }
-        public int WriteCount { get; private set; }
 
         public ClaudeTranscriptReferenceInspection InspectExactReference(string exactReference)
         {
@@ -395,22 +384,5 @@ public sealed class ClaudeHistoricalAdapterTests
             return Inspection;
         }
 
-        public Stream OpenTranscriptBody(string exactReference)
-        {
-            BodyReadCount++;
-            throw new InvalidOperationException("Unsupported profile must not read transcript content.");
-        }
-
-        public IEnumerable<string> EnumerateReferences(string root)
-        {
-            EnumerationCount++;
-            throw new InvalidOperationException("Claude adapter must not scan roots or adjacent storage.");
-        }
-
-        public void Write(string path, ReadOnlySpan<byte> content)
-        {
-            WriteCount++;
-            throw new InvalidOperationException("Claude detector has no write authority.");
-        }
     }
 }
