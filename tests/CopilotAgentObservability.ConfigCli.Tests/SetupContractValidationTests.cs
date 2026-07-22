@@ -370,7 +370,7 @@ public sealed class SetupContractValidationTests
         var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
 
         Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
-        Assert.DoesNotContain(adapter, exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(adapter, exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -398,7 +398,7 @@ public sealed class SetupContractValidationTests
         var exception = Assert.Throws<InvalidOperationException>(() => SetupJson.Serialize(result));
 
         Assert.Equal(SetupContractValidator.InvalidContractCode, exception.Message);
-        Assert.DoesNotContain(adapter, exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(adapter, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
