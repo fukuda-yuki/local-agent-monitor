@@ -412,7 +412,9 @@ unavailable, append conflict, and contract rejection are distinct outcomes,
 and an append failure never returns success. A separate additive query store
 enumerates exact receipt bytes with an owner-validated fully typed Alert Center
 projection, plus typed evaluation and suppression metadata, using fixed
-ordering, cursors, and a 1..100 limit. It reads
+ordering, cursors, and a 1..100 limit. Evaluation metadata is emitted only after
+strict canonical reconstruction, exact byte comparison, and agreement with its
+SQLite scalar identities and child counts. It reads
 only the existing schema-v1 engine tables, adds no migration or source adapter,
 and gives #84 no arbitrary-SQL or provenance authority.
 

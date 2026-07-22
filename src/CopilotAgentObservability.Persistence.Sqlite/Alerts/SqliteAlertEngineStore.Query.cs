@@ -85,7 +85,7 @@ public sealed partial class SqliteAlertEngineStore
                 connection,
                 null,
                 """
-                SELECT e.evaluation_id,e.schema_version,e.input_hash,e.configuration_version,e.configuration_hash,
+                SELECT e.evaluation_id,e.schema_version,e.input_hash,e.configuration_version,e.configuration_hash,e.canonical_json,
                        (SELECT COUNT(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id),
                        (SELECT COUNT(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id)
                 FROM alert_evaluations e
@@ -105,15 +105,16 @@ public sealed partial class SqliteAlertEngineStore
                 var inputHash = reader.GetString(2);
                 var configurationVersion = reader.GetString(3);
                 var configurationHash = reader.GetString(4);
-                var receiptCount = reader.GetInt64(5);
-                var suppressionCount = reader.GetInt64(6);
-                if (!CanonicalHash(evaluationId)
+                var evaluation = AlertEvaluationConsumerV1.Validate(Encoding.UTF8.GetBytes(reader.GetString(5)));
+                var receiptCount = reader.GetInt64(6);
+                var suppressionCount = reader.GetInt64(7);
+                if (evaluation.EvaluationId != evaluationId
                     || schemaVersion != AlertContractVersions.Evaluation
-                    || !CanonicalHash(inputHash)
-                    || !CanonicalToken(configurationVersion)
-                    || !CanonicalHash(configurationHash)
-                    || receiptCount < 0
-                    || suppressionCount < 0)
+                    || evaluation.InputHash != inputHash
+                    || evaluation.ConfigurationVersion != configurationVersion
+                    || evaluation.ConfigurationHash != configurationHash
+                    || evaluation.ReceiptCount != receiptCount
+                    || evaluation.SuppressionCount != suppressionCount)
                 {
                     return UnavailableEvaluations();
                 }
@@ -124,13 +125,7 @@ public sealed partial class SqliteAlertEngineStore
                     break;
                 }
 
-                items.Add(new AlertEvaluationProjectionV1(
-                    evaluationId,
-                    inputHash,
-                    configurationVersion,
-                    configurationHash,
-                    receiptCount,
-                    suppressionCount));
+                items.Add(evaluation);
             }
 
             return new(
@@ -237,10 +232,6 @@ public sealed partial class SqliteAlertEngineStore
     }
 
     private static bool ValidPage(int limit) => limit is >= 1 and <= AlertEngineQueryLimits.MaximumPageSize;
-
-    private static bool CanonicalToken(string? value) =>
-        value is { Length: >= 1 and <= 128 }
-        && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
 
     private static bool IsNonFatalQueryFailure(Exception exception) =>
         exception is not OutOfMemoryException and not StackOverflowException and not AccessViolationException;

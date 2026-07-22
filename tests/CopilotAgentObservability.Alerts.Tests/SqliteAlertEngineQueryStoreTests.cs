@@ -73,6 +73,68 @@ public sealed class SqliteAlertEngineQueryStoreTests : IDisposable
     }
 
     [Fact]
+    public void ListEvaluations_TamperedCanonicalJson_FailsWholePageWithoutLeak()
+    {
+        var store = InitializedStore();
+        var first = SuppressedEvaluation(1);
+        var second = SuppressedEvaluation(2);
+        store.Append(first);
+        store.Append(second);
+        var validJson = Encoding.UTF8.GetString(AlertCanonicalJson.SerializeEvaluation(second));
+        var hostileJson = validJson[..^1] + ",\"private_path\":\"C:\\\\Users\\\\secret\"}";
+        using (var connection = Open())
+        {
+            Execute(connection, "UPDATE alert_evaluations SET canonical_json=$json WHERE evaluation_id=$id;", ("$json", hostileJson), ("$id", second.EvaluationId));
+        }
+
+        var result = store.ListEvaluations(null, 100);
+
+        AssertUnavailable(result.Status, result.Code, result.Items, result.NextCursor);
+        Assert.DoesNotContain("private", result.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(".fixture-v1")]
+    [InlineData("_fixture-v1")]
+    [InlineData("-fixture-v1")]
+    public void ListEvaluations_InvalidLeadingConfigurationToken_FailsClosed(string configurationVersion)
+    {
+        var store = InitializedStore();
+        var evaluation = SuppressedEvaluation(1);
+        store.Append(evaluation);
+        var tampered = evaluation with { ConfigurationVersion = configurationVersion };
+        using (var connection = Open())
+        {
+            Execute(
+                connection,
+                "UPDATE alert_evaluations SET configuration_version=$version,canonical_json=$json WHERE evaluation_id=$id;",
+                ("$version", tampered.ConfigurationVersion),
+                ("$json", Encoding.UTF8.GetString(AlertCanonicalJson.SerializeEvaluation(tampered))),
+                ("$id", evaluation.EvaluationId));
+        }
+
+        var result = store.ListEvaluations(null, 100);
+
+        AssertUnavailable(result.Status, result.Code, result.Items, result.NextCursor);
+    }
+
+    [Fact]
+    public void ListEvaluations_ChildCountDiffersFromCanonicalEvaluation_FailsClosed()
+    {
+        var store = InitializedStore();
+        var evaluation = SuppressedEvaluation(1);
+        store.Append(evaluation);
+        using (var connection = Open())
+        {
+            Execute(connection, "DELETE FROM alert_suppressions WHERE evaluation_id=$id;", ("$id", evaluation.EvaluationId));
+        }
+
+        var result = store.ListEvaluations(null, 100);
+
+        AssertUnavailable(result.Status, result.Code, result.Items, result.NextCursor);
+    }
+
+    [Fact]
     public void ListSuppressions_ReturnsExactBytesAndTypedProjectionOrBoundedNotFound()
     {
         var store = InitializedStore();
@@ -97,6 +159,27 @@ public sealed class SqliteAlertEngineQueryStoreTests : IDisposable
         Assert.Equal("alert_not_found", missing.Code);
         Assert.Empty(missing.Items);
         Assert.Null(missing.NextCursor);
+    }
+
+    [Fact]
+    public void ListSuppressions_CursorPagesBySuppressionOrdinal()
+    {
+        var store = InitializedStore();
+        var evaluation = Evaluate(1, available: false, ruleCount: 2);
+        store.Append(evaluation);
+
+        var first = store.ListSuppressions(evaluation.EvaluationId, null, 1);
+        var second = store.ListSuppressions(evaluation.EvaluationId, first.NextCursor, 1);
+
+        Assert.Equal(AlertEngineQueryStatus.Success, first.Status);
+        Assert.Equal(0, Assert.Single(first.Items).SuppressionOrdinal);
+        Assert.Equal(0, first.NextCursor);
+        Assert.Equal(AlertEngineQueryStatus.Success, second.Status);
+        Assert.Equal(1, Assert.Single(second.Items).SuppressionOrdinal);
+        Assert.Null(second.NextCursor);
+        Assert.Equal(
+            evaluation.Suppressions.Select(item => item.RuleId),
+            first.Items.Concat(second.Items).Select(item => item.Suppression.RuleId));
     }
 
     [Theory]
@@ -157,6 +240,31 @@ public sealed class SqliteAlertEngineQueryStoreTests : IDisposable
         AssertUnavailable(result.Status, result.Code, result.Items, result.NextCursor);
     }
 
+    [Fact]
+    public void ListReceipts_AggregateByteCapReturnsWholeRecordAndDeterministicCursor()
+    {
+        var store = InitializedStore();
+        var evaluations = new[]
+        {
+            Evaluate(10, available: true, evidenceCount: 22_000),
+            Evaluate(11, available: true, evidenceCount: 22_000),
+        };
+        foreach (var evaluation in evaluations) store.Append(evaluation);
+        var expected = evaluations.SelectMany(item => item.Receipts).OrderBy(item => item.AlertId, StringComparer.Ordinal).ToArray();
+        Assert.All(expected, receipt => Assert.InRange(
+            AlertCanonicalJson.SerializeReceipt(receipt).Length,
+            AlertEngineQueryLimits.MaximumPageBytes / 2 + 1,
+            AlertEngineQueryLimits.MaximumPageBytes));
+
+        var first = store.ListReceipts(null, 2);
+        var second = store.ListReceipts(first.NextCursor, 2);
+
+        Assert.Equal(expected[0].AlertId, Assert.Single(first.Items).Receipt.AlertId);
+        Assert.Equal(expected[0].AlertId, first.NextCursor);
+        Assert.Equal(expected[1].AlertId, Assert.Single(second.Items).Receipt.AlertId);
+        Assert.Null(second.NextCursor);
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
@@ -205,21 +313,25 @@ public sealed class SqliteAlertEngineQueryStoreTests : IDisposable
 
     private static AlertEvaluationResult SuppressedEvaluation(int discriminator) => Evaluate(discriminator, available: false);
 
-    private static AlertEvaluationResult Evaluate(int discriminator, bool available)
+    private static AlertEvaluationResult Evaluate(
+        int discriminator,
+        bool available,
+        int ruleCount = 1,
+        int evidenceCount = 1)
     {
         var observed = new DateTimeOffset(2026, 7, 23, 1, 2, discriminator, TimeSpan.Zero);
         var sessionId = $"session-{discriminator}";
         var traceId = $"trace-{discriminator}";
-        var evidence = new AlertEvidenceReference(
+        var evidence = Enumerable.Range(0, evidenceCount).Select(index => new AlertEvidenceReference(
             AlertEvidenceKind.ToolCall,
-            $"evidence-{discriminator}",
+            $"evidence-{index:D5}",
             sessionId,
             traceId,
-            $"span-{discriminator}",
+            $"span-{index:D5}",
             null,
-            $"event-{discriminator}",
-            $"tool-call-{discriminator}",
-            observed);
+            $"event-{index:D5}",
+            $"tool-call-{index:D5}",
+            observed)).ToArray();
         var snapshot = new AlertNormalizedSnapshot(
             AlertContractVersions.Snapshot,
             "github-copilot",
@@ -231,27 +343,41 @@ public sealed class SqliteAlertEngineQueryStoreTests : IDisposable
             observed,
             observed.AddSeconds(1),
             [new("tool-events", available ? AlertCapabilityAvailability.Available : AlertCapabilityAvailability.Unknown)],
-            [new($"signal-{discriminator}", AlertSignalKind.ToolCall, 1, observed, null, AlertSignalStatus.Error, [], [], evidence)]);
-        var descriptor = new AlertRuleDescriptor(
-            "fixture-rule",
-            "1",
-            "Fixture summary",
-            "Fixture description",
-            ["tool-events"],
-            AlertRuleScope.Trace,
-            [],
-            "trace",
-            [],
-            ["missing_required_capability", "rule_disabled", "source_not_applicable"],
-            ["github-copilot"]);
+            evidence.Select((item, index) => new AlertSignal(
+                $"signal-{index:D5}",
+                AlertSignalKind.ToolCall,
+                index + 1,
+                observed,
+                null,
+                AlertSignalStatus.Error,
+                [],
+                [],
+                item)).ToArray());
         var match = new AlertRuleMatch(
             AlertSeverity.Warning,
             [new("count", "calls", discriminator)],
-            [evidence],
+            evidence,
             observed,
             observed.AddSeconds(1));
+        var rules = Enumerable.Range(0, ruleCount).Select(index =>
+        {
+            var ruleId = ruleCount == 1 ? "fixture-rule" : $"fixture-rule-{index}";
+            var descriptor = new AlertRuleDescriptor(
+                ruleId,
+                "1",
+                "Fixture summary",
+                "Fixture description",
+                ["tool-events"],
+                AlertRuleScope.Trace,
+                [],
+                "trace",
+                [],
+                ["missing_required_capability", "rule_disabled", "source_not_applicable"],
+                ["github-copilot"]);
+            return (IAlertRule)new FixedRule(descriptor, match);
+        }).ToArray();
         return new AlertEvaluationEngine(
-            new AlertRuleRegistry([new FixedRule(descriptor, match)]),
+            new AlertRuleRegistry(rules),
             new Resolver()).Evaluate(
                 snapshot,
                 new AlertEngineConfiguration(AlertContractVersions.Configuration, "fixture-v1", []));

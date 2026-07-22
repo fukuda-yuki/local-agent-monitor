@@ -725,9 +725,12 @@ fully typed #80-owned Alert Center projection; #84 does not parse it again. One
 invalid receipt, schema mismatch, newer component, decode failure, or malformed
 suppression makes the complete page unavailable with no partial items, cursor,
 database text, input value, or exception detail. Evaluation metadata is a
-closed projection of engine-owned IDs/hashes/version and row counts, while
-suppression metadata is reconstructed from canonical engine bytes. The query
-does not read raw/content tables, accept SQL, infer source/evidence facts, or
+closed projection of a strictly reconstructed canonical evaluation. Its exact
+bytes, canonical token grammar, nested receipt/suppression/rejected-match
+contracts, scalar columns, and correlated child row counts must all agree; a
+single mismatch fails the whole page without returning data. Suppression
+metadata is reconstructed from canonical engine bytes. The query does not read
+raw/content tables, accept SQL, infer source/evidence facts, or
 claim signing, authorization, producer identity, or store provenance beyond
 the caller's explicit use of the trusted local SQLite store.
 

@@ -370,15 +370,23 @@ evaluation with no remaining suppressions returns an empty successful page.
 
 `SqliteAlertEngineStore` implements both interfaces using only fixed,
 parameterized statements over `alert_evaluations`, `alert_receipts`, and
-`alert_suppressions`. Every receipt is converted back to exact UTF-8 and passed
-through the shared strict authority used by
+`alert_suppressions`. Every evaluation is converted back to exact UTF-8 and
+passed through `AlertEvaluationConsumerV1`, which strictly reconstructs its
+receipts, suppressions, and rejected matches through the #80 authorities,
+byte-compares the full value with `SerializeEvaluation`, and projects only
+validated identity fields and child counts. SQLite scalar identity fields and
+correlated receipt/suppression counts must exactly match that projection;
+otherwise the whole page is unavailable. Configuration versions use the same
+`^[a-z0-9][a-z0-9._-]{0,127}$` token authority as engine configuration and may
+not begin with punctuation. Every receipt is converted back to exact UTF-8 and
+passed through the shared strict authority used by
 `AlertCenterReceiptConsumerV1`; a receipt query item carries those bytes and the
 sealed fully typed Alert Center projection. Suppression JSON is
 strict-reconstructed by the #80-owned
 `AlertSuppressionConsumerV1.Validate(ReadOnlySpan<byte>)`, byte-compared with
 `AlertCanonicalJson.SerializeSuppression`, and projected as evaluation ID,
 rule ID/version, code, and a read-only canonical missing-capability list. Its
-query item carries those bytes and sealed typed projection. Both consumers use
+query item carries those bytes and sealed typed projection. All three consumers use
 the same 8 MiB/no-leak rejection posture. One invalid row,
 invalid/newer/broken schema,
 decode or conversion failure makes the whole page unavailable with no items or
@@ -487,9 +495,10 @@ public receipt-consumer compatibility boundary. The Wave 3 repair additionally
 proves fresh/identical/conflicting application execution, append failure and
 contract-rejection mapping, appended missing/unresolved evidence outcomes,
 receipt/evaluation/suppression pagination and page-byte bounds, owner-validated
-fully typed receipt/suppression projections, invalid/newer schema no-leak
-refusal, and unchanged v1 table inventory, existing five-field API, and golden
-hashes.
+fully typed receipt/evaluation/suppression projections, canonical-evaluation
+tamper and child-count mismatch refusal, aggregate two-record byte-cap cursor
+behavior, suppression-ordinal cursor behavior, invalid/newer schema no-leak
+refusal, and unchanged v1 table inventory, existing five-field API, and golden hashes.
 
 Handoffs:
 

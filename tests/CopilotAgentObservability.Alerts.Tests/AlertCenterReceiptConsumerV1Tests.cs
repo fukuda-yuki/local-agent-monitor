@@ -127,7 +127,37 @@ public sealed class AlertCenterReceiptConsumerV1Tests
         Assert.Null(exception.InnerException);
     }
 
-    private static AlertReceipt EngineReceipt()
+    [Fact]
+    public void EvaluationValidate_ExactCanonicalBytes_ReturnsTypedProjectionAndCounts()
+    {
+        var evaluation = EngineEvaluation();
+
+        var projection = AlertEvaluationConsumerV1.Validate(AlertCanonicalJson.SerializeEvaluation(evaluation));
+
+        Assert.Equal(evaluation.EvaluationId, projection.EvaluationId);
+        Assert.Equal(evaluation.InputHash, projection.InputHash);
+        Assert.Equal(evaluation.ConfigurationVersion, projection.ConfigurationVersion);
+        Assert.Equal(evaluation.ConfigurationHash, projection.ConfigurationHash);
+        Assert.Equal(evaluation.Receipts.Count, projection.ReceiptCount);
+        Assert.Equal(evaluation.Suppressions.Count, projection.SuppressionCount);
+    }
+
+    [Fact]
+    public void EvaluationValidate_UnknownField_UsesFixedNoLeakFailure()
+    {
+        var json = Encoding.UTF8.GetString(AlertCanonicalJson.SerializeEvaluation(EngineEvaluation()));
+        var bytes = Encoding.UTF8.GetBytes(json[..^1] + ",\"private_path\":\"C:\\\\Users\\\\secret\"}");
+
+        var exception = Assert.Throws<AlertEvaluationConsumerException>(() => AlertEvaluationConsumerV1.Validate(bytes));
+
+        Assert.Equal("invalid_alert_evaluation", exception.Code);
+        Assert.Equal("Alert evaluation is invalid.", exception.Message);
+        Assert.Null(exception.InnerException);
+    }
+
+    private static AlertReceipt EngineReceipt() => Assert.Single(EngineEvaluation().Receipts);
+
+    private static AlertEvaluationResult EngineEvaluation()
     {
         var observed = new DateTimeOffset(2026, 7, 23, 1, 2, 3, TimeSpan.Zero);
         var evidence = new AlertEvidenceReference(
@@ -170,12 +200,11 @@ public sealed class AlertCenterReceiptConsumerV1Tests
             [evidence],
             observed,
             observed.AddSeconds(1));
-        var result = new AlertEvaluationEngine(
+        return new AlertEvaluationEngine(
             new AlertRuleRegistry([new FixedRule(descriptor, match)]),
             new ExistingEvidenceResolver()).Evaluate(
                 snapshot,
                 new AlertEngineConfiguration(AlertContractVersions.Configuration, "fixture-v1", []));
-        return Assert.Single(result.Receipts);
     }
 
     private sealed class FixedRule(AlertRuleDescriptor descriptor, AlertRuleMatch match) : IAlertRule

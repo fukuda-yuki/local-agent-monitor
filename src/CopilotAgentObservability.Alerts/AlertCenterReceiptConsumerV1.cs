@@ -67,7 +67,10 @@ public static class AlertSuppressionConsumerV1
     private static readonly string[] Properties =
         ["evaluation_id", "rule_id", "rule_version", "code", "missing_capabilities"];
 
-    public static AlertSuppressionProjectionV1 Validate(ReadOnlySpan<byte> canonicalSuppression)
+    public static AlertSuppressionProjectionV1 Validate(ReadOnlySpan<byte> canonicalSuppression) =>
+        new(ValidateCanonicalSuppression(canonicalSuppression));
+
+    internal static AlertSuppression ValidateCanonicalSuppression(ReadOnlySpan<byte> canonicalSuppression)
     {
         if (canonicalSuppression.Length is 0 or > MaximumCanonicalBytes)
         {
@@ -110,7 +113,7 @@ public static class AlertSuppressionConsumerV1
                 throw new AlertSuppressionFormatException();
             }
 
-            return new AlertSuppressionProjectionV1(suppression);
+            return suppression;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException and not AccessViolationException)
         {
