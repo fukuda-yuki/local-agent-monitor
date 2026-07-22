@@ -60,14 +60,15 @@ all four findings with regression coverage:
 
 - snapshot ambiguity is based on distinct session identities, so multiple
   surface rows for the same session/trace remain exportable;
-- the public control-request parser enforces the 1 MiB bound before request
-  byte allocation or JSON materialization;
+- the public control-request parser enforces the 1 MiB bound before its own
+  `ToArray()` copy or JSON materialization;
 - all control timestamps use and accept only the exact seven-fraction-digit UTC
   `Z` form; equivalent offsets and variable fractions are rejected before
   snapshot capture;
 - repository-safe path scanning detects one-segment and nested POSIX absolute
-  paths, including synthetic roots, without treating URLs or relative paths as
-  absolute paths.
+  paths, including synthetic roots; relative forms such as `docs/file`,
+  `./file`, and `../file` do not match, while HTTP(S) URLs fail closed as
+  `local_path` through the existing `//` path branch.
 
 Provider selection, deterministic snapshots, unique record identity, surface
 selection, CLI/API status mapping, schema patterns, exact golden request bytes,
