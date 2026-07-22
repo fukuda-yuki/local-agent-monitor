@@ -24,7 +24,7 @@ not become defaults.
 | Type | Fixed names and values |
 | --- | --- |
 | capability | `canonical-tool-arguments`, `explicit-retry-classification`, `stable-tool-ordering`, `tool-name`, `tool-ownership`, `tool-call-key`, `tool-call-ordering`, `tool-call-status`, `tool-retry-attempt`, `explicit-permission-duration`, `file-access-key`, `file-operation-type`, `file-access-ordering` |
-| comparable key | `argument-hash`, `tool-name`, `ownership-key`, `retry-kind`, `tool-key`, `retry-chain-key`, `file-key`, `operation-type`, `range-key` |
+| comparable key | `argument-hash`, `tool-name`, `ownership-key`, `retry-kind`, `tool-key`, `retry-chain-key`, `file-key`, `operation-type`, optional `range-key` |
 | comparable value | `retry-kind`: `none` or `explicit`; `operation-type`: `read`, `search`, `edit`, `watch`, or `poll` |
 | metric | `retry-attempt` / `attempts`; `wait-duration` / `seconds` |
 
@@ -127,15 +127,23 @@ authoritative denominator, `historical_summary_only` or `ingest_gap` uses
 Only `permission` signals with one finite non-negative `wait-duration` metric in
 seconds participate; missing start/end is not inferred. Evaluation requires an
 exact snapshot trace ID and totals waits across that trace, never across the
-Session. The observed values are `maximum-wait` / `seconds` and `total-wait` /
-`seconds`. Severity is critical when either critical threshold is met, warning
-when either warning threshold is met. Exact evidence is every permission wait
-that contributes to the triggering maximum or total. An individual threshold
-crossing remains conclusive in an incomplete interval; a total-only conclusion
-requires a complete interval. Each exact duration is bounded to 0..86400
-seconds and the exact trace total to 0..604800 seconds. A value or accumulation
-outside those bounds uses `duration-out-of-range`; arithmetic never wraps or
-escapes as an evaluator exception.
+Session. The observed values always include exact `maximum-wait` / `seconds`.
+They include exact `total-wait` / `seconds` when the non-negative decimal sum is
+representable. If exact addition would overflow, they instead include
+`total-wait-lower-bound` / `seconds`, equal to the deterministic sum proven
+before the first unrepresentable addition or the exact maximum individual wait,
+whichever is greater. These total names are mutually exclusive. Severity is
+critical when either effective critical threshold is met, and warning when
+either effective warning threshold is met. With the defaults, an exact
+individual wait at or above 120 seconds is critical. The inclusive maxima in
+the threshold schema bound configuration, not observations. A positive exact
+duration is never suppressed for being large, and an unrepresentable positive
+total never suppresses an already conclusive critical match. Negative duration
+uses `duration-out-of-range`. Exact evidence is every permission wait that
+contributes to the triggering maximum or total.
+An individual threshold crossing remains conclusive in an incomplete interval;
+a total-only conclusion requires a complete interval. Arithmetic never wraps
+or escapes as an evaluator exception.
 
 ## `repeated-file-read-or-search` Version 1
 
@@ -148,15 +156,17 @@ escapes as an evaluator exception.
 - rule suppression: `incomplete-signal-facts`
 
 Only `file_access` signals with exact `file-key` and `operation-type=read` or
-  `search` participate. `watch` and `poll` are excluded. Exact `range-key` is
-mandatory for reads/searches and is part of the group, so distinct
-ranges/chunks never combine.
+  `search` participate. `watch` and `poll` are excluded. When present, exact
+`range-key` is part of the group, so distinct ranges/chunks never combine. Its
+absence is an authoritative whole-file/no-range group, not an incomplete fact.
 An exact `operation-type=edit` for the same `file-key` resets every read/search
 segment for that file at that sequence; edits for other files do not reset it.
 Each segment/group at or above warning creates one match containing only that
-group's exact evidence. A missing file, operation, or read/search range fact is
-incomplete rather than a near-match and suppresses the whole trace evaluation,
-because the missing signal could be an intervening edit. Likewise,
+group's exact evidence. A missing file or operation fact is incomplete rather
+than a near-match and suppresses the whole trace evaluation, because the
+missing signal could be an intervening edit. An absent `range-key` is valid, but
+a present `range-key` with any representation other than `sensitive_hmac` is an
+incomplete signal fact. Likewise,
 `historical_summary_only` or `ingest_gap` can hide an intervening edit and
 always suppresses this rule, even when the observed count reaches a threshold.
 

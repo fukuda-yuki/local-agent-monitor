@@ -169,6 +169,17 @@ public sealed class ToolAlertRuleTests
         Assert.Empty(result.Suppressions);
     }
 
+    [Fact]
+    public void RulePack_ExplicitRetryChain_IsOwnedOnlyByRetryRule()
+    {
+        var result = Evaluate(
+            ToolAlertRulePack.CreateRules(),
+            Snapshot(signals: RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error, AlertSignalStatus.Error)));
+
+        var receipt = Assert.Single(result.Receipts);
+        Assert.Equal("unrecovered-retry-chain", receipt.RuleId);
+    }
+
     [Theory]
     [InlineData(AlertSignalStatus.Unknown)]
     [InlineData(AlertSignalStatus.Cancelled)]
@@ -357,14 +368,50 @@ public sealed class ToolAlertRuleTests
     }
 
     [Fact]
-    public void ExcessivePermissionWait_ExtremeDuration_SuppressesWithoutOverflow()
+    public void ExcessivePermissionWait_IndividualAboveThresholdSchemaMaximum_RemainsExactCritical()
     {
-        var snapshot = Snapshot(signals: [Permission(1, decimal.MaxValue), Permission(2, decimal.MaxValue)]);
+        var snapshot = Snapshot(signals: [Permission(1, 86_401)]);
 
-        var result = Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot);
+        var receipt = Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot).Receipts);
 
-        Assert.Empty(result.Receipts);
-        Assert.Equal("duration-out-of-range", Assert.Single(result.Suppressions).Code);
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(86_401m, Observed(receipt, "maximum-wait"));
+        Assert.Equal(86_401m, Observed(receipt, "total-wait"));
+    }
+
+    [Fact]
+    public void ExcessivePermissionWait_ExactTotalAboveThresholdSchemaMaximum_RemainsCritical()
+    {
+        var snapshot = Snapshot(signals: [Permission(1, 250_000), Permission(2, 250_000), Permission(3, 250_000)]);
+
+        var receipt = Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot).Receipts);
+
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(750_000m, Observed(receipt, "total-wait"));
+    }
+
+    [Fact]
+    public void ExcessivePermissionWait_DecimalMaximumSingleWait_RemainsExactCritical()
+    {
+        var snapshot = Snapshot(signals: [Permission(1, decimal.MaxValue)]);
+
+        var receipt = Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot).Receipts);
+
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(decimal.MaxValue, Observed(receipt, "maximum-wait"));
+        Assert.Equal(decimal.MaxValue, Observed(receipt, "total-wait"));
+    }
+
+    [Fact]
+    public void ExcessivePermissionWait_OverflowingPositiveTotal_EmitsCriticalWithHonestLowerBound()
+    {
+        var snapshot = Snapshot(signals: [Permission(1, 1), Permission(2, decimal.MaxValue)]);
+
+        var receipt = Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot).Receipts);
+
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(decimal.MaxValue, Observed(receipt, "total-wait-lower-bound"));
+        Assert.DoesNotContain(receipt.ObservedValues, value => value.Name == "total-wait");
     }
 
     [Theory]
@@ -442,7 +489,6 @@ public sealed class ToolAlertRuleTests
     [Theory]
     [InlineData("file-key")]
     [InlineData("operation-type")]
-    [InlineData("range-key")]
     public void RepeatedFileReadOrSearch_MissingSameFileFact_CouldHideEditAndSuppresses(string missingKey)
     {
         var signals = FileAccesses(4).ToArray();
@@ -455,11 +501,50 @@ public sealed class ToolAlertRuleTests
     }
 
     [Fact]
-    public void RulePack_MissingCapability_IsSuppressedByFrozenEngineContract()
+    public void RepeatedFileReadOrSearch_AbsentRanges_GroupAsWholeFileAccess()
     {
-        var snapshot = Snapshot(capabilities: [new("tool-call-status", AlertCapabilityAvailability.Unknown)]);
+        var signals = Enumerable.Range(1, 3).Select(index => File(index, Hmac('f')));
+
+        var receipt = Assert.Single(Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals)).Receipts);
+
+        Assert.Equal(AlertSeverity.Warning, receipt.Severity);
+        Assert.Equal(3m, Observed(receipt, "access-count"));
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_PresentRangeWithWrongKind_Suppresses()
+    {
+        var signals = Enumerable.Range(1, 3).Select(index => File(index, Hmac('f'))).ToArray();
+        signals[1] = signals[1] with
+        {
+            ComparableKeys = signals[1].ComparableKeys.Append(new("range-key", AlertComparableKeyKind.MetadataToken, "whole-file")).ToArray(),
+        };
+
+        var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
+    [InlineData(AlertCapabilityAvailability.Unknown)]
+    [InlineData(AlertCapabilityAvailability.Unavailable)]
+    public void RulePack_NonAvailableCapability_IsSuppressedByFrozenEngineContract(AlertCapabilityAvailability availability)
+    {
+        var snapshot = Snapshot(capabilities: [new("tool-call-status", availability)]);
 
         var result = Evaluate(new HighToolFailureRatioAlertRule(), snapshot);
+
+        Assert.Empty(result.Receipts);
+        var suppression = Assert.Single(result.Suppressions);
+        Assert.Equal("missing_required_capability", suppression.Code);
+        Assert.Equal(["tool-call-status"], suppression.MissingCapabilities);
+    }
+
+    [Fact]
+    public void RulePack_AbsentCapability_IsSuppressedByFrozenEngineContract()
+    {
+        var result = Evaluate(new HighToolFailureRatioAlertRule(), Snapshot(capabilities: []));
 
         Assert.Empty(result.Receipts);
         var suppression = Assert.Single(result.Suppressions);
@@ -613,7 +698,7 @@ public sealed class ToolAlertRuleTests
         Enumerable.Range(1, count).Select(index => Tool(index));
 
     private static IEnumerable<AlertSignal> RetryChain(params AlertSignalStatus[] statuses) =>
-        statuses.Select((status, index) => Tool(index + 1, status: status, retryChain: Hmac('r'), retryAttempt: index + 1));
+        statuses.Select((status, index) => Tool(index + 1, retryKind: "explicit", status: status, retryChain: Hmac('r'), retryAttempt: index + 1));
 
     private static IEnumerable<AlertSignal> StatusCalls(int errors, int successes) =>
         Enumerable.Range(1, errors).Select(index => Tool(index, status: AlertSignalStatus.Error))

@@ -276,7 +276,7 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
                 incomplete = true;
                 continue;
             }
-            if (duration < 0 || duration > 86_400)
+            if (duration < 0)
             {
                 durationOutOfRange = true;
                 continue;
@@ -299,11 +299,14 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
 
         var maximum = waits.Max(item => item.Seconds);
         var total = 0m;
+        var exactTotal = true;
         foreach (var wait in waits)
         {
-            if (wait.Seconds > 604_800 - total)
+            if (wait.Seconds > decimal.MaxValue - total)
             {
-                return ToolAlertRuleSupport.Outcome([], "duration-out-of-range");
+                exactTotal = false;
+                total = Math.Max(total, maximum);
+                break;
             }
             total += wait.Seconds;
         }
@@ -324,9 +327,13 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
         var evidence = totalWarning
             ? waits.Select(item => item.Signal)
             : waits.Where(item => item.Seconds == maximum).Select(item => item.Signal);
+        var observed = new List<AlertObservedValue> { new("maximum-wait", "seconds", maximum) };
+        observed.Add(exactTotal
+            ? new("total-wait", "seconds", total)
+            : new("total-wait-lower-bound", "seconds", total));
         var match = ToolAlertRuleSupport.Match(
             individualCritical || totalCritical ? AlertSeverity.Critical : AlertSeverity.Warning,
-            [new("maximum-wait", "seconds", maximum), new("total-wait", "seconds", total)],
+            observed,
             evidence);
         return ToolAlertRuleSupport.Outcome([match], incomplete ? "incomplete-signal-facts" : null);
     }
@@ -379,11 +386,13 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
             }
 
             var range = ToolAlertRuleSupport.Key(signal, "range-key", AlertComparableKeyKind.SensitiveHmac);
-            if (range is null)
+            if (range is null && signal.ComparableKeys.Any(key => key.Name == "range-key"))
             {
                 incomplete = true;
                 continue;
             }
+
+            range ??= string.Empty;
             candidates.Add((signal, file, operation, range, segment));
         }
 
