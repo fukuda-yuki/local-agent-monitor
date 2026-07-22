@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CopilotAgentObservability.InstructionFindings;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
@@ -11,11 +12,17 @@ internal static class InstructionFindingJsonV1
     internal static byte[] Serialize(InstructionFindingHandoffV1 handoff)
     {
         InstructionFindingPipelineV1.ValidateHandoff(handoff);
-        return JsonSerializer.SerializeToUtf8Bytes(handoff, Options);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(handoff, Options);
+        if (bytes.Length > InstructionFindingHandoffConsumerV1.MaxPayloadBytes)
+            throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidSerialization);
+        return bytes;
     }
 
     internal static InstructionFindingHandoffV1 Deserialize(ReadOnlySpan<byte> bytes)
     {
+        if (bytes.IsEmpty || bytes.Length > InstructionFindingHandoffConsumerV1.MaxPayloadBytes)
+            throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidSerialization);
+
         InstructionFindingHandoffV1? handoff;
         try
         {
@@ -33,6 +40,9 @@ internal static class InstructionFindingJsonV1
         if (handoff is null)
             throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidSerialization);
         InstructionFindingPipelineV1.ValidateHandoff(handoff);
+        var canonicalBytes = JsonSerializer.SerializeToUtf8Bytes(handoff, Options);
+        if (!bytes.SequenceEqual(canonicalBytes))
+            throw new InstructionFindingValidationException(InstructionFindingValidationCodeV1.InvalidSerialization);
         return handoff;
     }
 
@@ -63,6 +73,7 @@ internal static class InstructionFindingJsonV1
             DictionaryKeyPolicy = JsonNamingPolicy.SnakeCaseLower,
             PropertyNameCaseInsensitive = false,
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+            MaxDepth = InstructionFindingHandoffConsumerV1.MaxJsonDepth,
             WriteIndented = false,
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false));

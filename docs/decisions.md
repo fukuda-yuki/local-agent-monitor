@@ -2276,6 +2276,39 @@ rather than redefine v1; the handoff grants no effect, apply, export, file, or
 promotion authority. The canonical contract is
 [instruction diagnosis analysis](specifications/interfaces/instruction-diagnosis-analysis.md).
 
+Compatibility update (Issue #59, 2026-07-22): the unchanged v1 producer and
+all downstream consumers use one source-neutral validation authority. Its
+public surface accepts only canonical UTF-8 carriers at or below 1048576 bytes
+and JSON depth 16, validates the closed schema plus every derived identity,
+template, association, order, and reference token, and returns only the
+positive analysis-run identity. It neither reads raw data nor grants capture,
+export, effect, apply, or promotion authority. This additive API does not
+change any v1 schema string, field, byte, ID, template, order, or persistence
+schema; copied consumer-side hash/template validators are prohibited.
+
+The validator establishes only canonical structure and semantic
+self-consistency. Deterministic tokens/hashes/templates are not provenance or
+authenticity evidence, so the caller still acquires bytes from a trusted
+owner/store and only the producer pipeline may claim pre-tokenization raw
+reference resolution. The 1048576-byte/depth-16 envelope, single-pass JSON
+read, and finite reconstruction are the complete consumer work/cardinality
+bound; the closed categories yield at most eight reconstructed candidates.
+Frozen v1 has no per-draft/finding/evidence-ref ceiling and explicitly supports
+duplicate collapse, so this compatibility repair intentionally leaves those
+collections and producer draft admission unchanged rather than silently
+rejecting previously reachable carriers.
+
+The accepted byte golden is the unchanged owner serializer output (default
+`System.Text.Json` non-ASCII escaping), pinned as SHA-256
+`ede92634f2a3417e7cac1a8d841fa77dfbd34a2cb39cb9c85adb20a72ca08821` in an
+immutable base64 wire resource. The older literal JSON fixture remains an
+unchanged semantic/JSON-Schema example; its literal Japanese bytes and terminal
+newline have SHA-256
+`b6a632df8d2a33e743dcf359bad7ee522e6c549b1287af695b62a406fc150987`, were
+not the accepted serializer output, and are noncanonical at the strict public
+boundary. Tests may not conceal this distinction by
+parse/reserializing the semantic fixture into expected bytes.
+
 ## D066: Historical source import is profile-bound, consented, and fail-closed
 
 Status: Accepted (2026-07-22)

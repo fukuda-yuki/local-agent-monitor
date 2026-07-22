@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using Microsoft.Data.Sqlite;
@@ -66,6 +67,33 @@ public class InstructionFindingHandoffStoreTests
         var exception = Assert.Throws<InstructionFindingValidationException>(() => store.Get(43));
 
         Assert.Equal(InstructionFindingValidationCodeV1.InvalidPersistence, exception.Code);
+    }
+
+    [Fact]
+    public void Get_NoncanonicalPayloadWithMatchingChecksum_RejectsPersistedCarrier()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteInstructionFindingHandoffStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Save(CreateHandoff(44, InstructionFindingCategoryV1.GoalClarity), DateTimeOffset.UnixEpoch);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var read = connection.CreateCommand();
+            read.CommandText = "SELECT payload_json FROM instruction_finding_handoffs WHERE analysis_run_id = 44;";
+            var noncanonicalPayload = Assert.IsType<string>(read.ExecuteScalar()) + " ";
+            var checksum = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(noncanonicalPayload))).ToLowerInvariant();
+
+            using var update = connection.CreateCommand();
+            update.CommandText = "UPDATE instruction_finding_handoffs SET payload_json = $payload_json, payload_sha256 = $payload_sha256 WHERE analysis_run_id = 44;";
+            update.Parameters.AddWithValue("$payload_json", noncanonicalPayload);
+            update.Parameters.AddWithValue("$payload_sha256", checksum);
+            Assert.Equal(1, update.ExecuteNonQuery());
+        }
+
+        var exception = Assert.Throws<InstructionFindingValidationException>(() => store.Get(44));
+
+        Assert.Equal(InstructionFindingValidationCodeV1.InvalidSerialization, exception.Code);
     }
 
     [Fact]

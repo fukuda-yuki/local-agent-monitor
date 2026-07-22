@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\CopilotAgentObservability.LocalMonitor\Analysis\InstructionFindingContracts.cs"
+             Link="Contract\InstructionFindingContracts.cs" />
+    <Compile Include="..\CopilotAgentObservability.LocalMonitor\Analysis\InstructionFindingJson.cs"
+             Link="Contract\InstructionFindingJson.cs" />
+    <Compile Include="..\CopilotAgentObservability.LocalMonitor\Analysis\InstructionFindingPipeline.cs"
+             Link="Contract\InstructionFindingPipeline.cs" />
+  </ItemGroup>
+
+</Project>

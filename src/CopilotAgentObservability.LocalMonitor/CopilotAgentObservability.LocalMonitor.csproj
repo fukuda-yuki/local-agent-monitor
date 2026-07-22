@@ -13,6 +13,13 @@
     <ProjectReference Include="..\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Analysis\InstructionFindingContracts.cs" />
+    <Compile Remove="Analysis\InstructionFindingJson.cs" />
+    <Compile Remove="Analysis\InstructionFindingPipeline.cs" />
   </ItemGroup>
 
   <ItemGroup>

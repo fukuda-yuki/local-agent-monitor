@@ -702,6 +702,27 @@ projections, not raw-analysis results. They may contain only:
 - deterministic IDs and deduplication keys;
 - fixed taxonomy-owned Japanese summaries and instruction-rule templates.
 
+Every cross-component consumer must pass the exact carrier bytes through the
+source-neutral v1 consumer validator before using or exporting them. The
+validator reads no raw store or source path: it accepts at most 1048576 bytes,
+limits JSON depth to 16, requires exact canonical UTF-8 bytes, revalidates all
+derived identities, templates, associations, ordering, and kind-specific
+opaque reference tokens, and returns only the positive analysis-run identity.
+Validation failures expose no input fragment, local path, or field value. A
+downstream component may not substitute a copied schema/hash/template parser
+or treat successful validation as raw-read, capture, export, effect, apply, or
+promotion authority.
+
+This is an integrity/self-consistency check, not an authenticity check.
+Opaque tokens, hashes, and templates can be reproduced by an untrusted caller;
+therefore validation does not prove producer/store provenance or historical
+raw-reference resolution. Callers must acquire the exact bytes from a trusted
+owner/store, and only the producer's pre-tokenization evidence-index check may
+claim raw-reference resolution. The byte/depth envelope bounds consumer work;
+candidate reconstruction is semantically capped at the eight closed
+categories. No new per-collection ceiling is imposed on frozen v1, and
+producer draft admission remains unchanged.
+
 They must never accept, serialize, or persist producer/model-supplied summary,
 instruction, title, target, or rule text. This fixed-template construction is
 what prevents copying raw prompt/response/tool content, observed source code or

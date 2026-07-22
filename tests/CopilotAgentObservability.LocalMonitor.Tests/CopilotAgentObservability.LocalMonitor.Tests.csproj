@@ -27,6 +27,7 @@
     <Compile Include="..\TestSupport\OtlpProtobufTestPayload.cs" Link="TestSupport\OtlpProtobufTestPayload.cs" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.LocalMonitor\CopilotAgentObservability.LocalMonitor.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.ConfigCli\CopilotAgentObservability.ConfigCli.csproj" />
+    <ProjectReference Include="..\..\src\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
     <ProjectReference Include="..\..\src\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
   </ItemGroup>
@@ -44,6 +45,12 @@
     <None Include="TestData\InstructionFindings\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.schema.json"
           Link="TestData\InstructionFindings\instruction-finding-handoff.schema.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.canonical.base64"
+          Link="TestData\InstructionFindings\instruction-finding-handoff.canonical.base64"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.canonical.sha256"
+          Link="TestData\InstructionFindings\instruction-finding-handoff.canonical.sha256"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
