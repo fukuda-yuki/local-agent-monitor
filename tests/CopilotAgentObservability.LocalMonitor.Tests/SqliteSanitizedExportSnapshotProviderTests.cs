@@ -56,7 +56,26 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     }
 
     [Fact]
-    public void Capture_FailsClosedOnAmbiguousExactSessionBindings()
+    public void Capture_PreservesSameSessionTraceProvenanceAcrossSourceSurfaces()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute("INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES('run-b','session-a','claude-code','trace-a','completed');");
+        var provider = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath);
+
+        var first = provider.Capture(new(TraceIds: ["trace-a"]));
+        var second = provider.Capture(new(TraceIds: ["trace-a"]));
+        var selectedSurface = provider.Capture(new(TraceIds: ["trace-a"], SourceSurfaces: ["claude-code"]));
+
+        Assert.True(first.Success, first.ErrorCode);
+        Assert.Equal(["claude-code", "copilot-cli"], first.Snapshot!.Records.Select(record => record.SourceSurface).Order(StringComparer.Ordinal));
+        Assert.Equal(2, first.Snapshot.Records.Select(record => record.RecordId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(first.Snapshot.SnapshotId, second.Snapshot!.SnapshotId);
+        Assert.Equal("claude-code", Assert.Single(selectedSurface.Snapshot!.Records).SourceSurface);
+    }
+
+    [Fact]
+    public void Capture_FailsClosedWhenTraceBindsDistinctSessions()
     {
         using var fixture = new Fixture();
         fixture.SeedTraceAndSession();

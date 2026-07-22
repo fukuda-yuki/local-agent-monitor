@@ -93,7 +93,7 @@ internal static partial class SanitizedExportScanner
     [GeneratedRegex("(?i)(authorization\\s*[:=]\\s*(bearer|basic)|-----BEGIN (?:(?:RSA |EC |OPENSSH )?PRIVATE KEY|CERTIFICATE)-----|(?:api[_-]?key|password|secret|token)\\s*[:=]\\s*[^\\s,;}{]{4,}|(?:gh[pousr]|github_pat)_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})", RegexOptions.CultureInvariant)]
     private static partial Regex CredentialPattern();
 
-    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/][^\\s\\\"']+|(?:\\\\\\\\|//)(?:\\?[\\\\/])?[^\\s\\\\/]+[\\\\/]|file:(?:/{2,3})?|(?<![:/])/(?:[a-z0-9._-]+/)+[^\\s\\\"']+)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("(?i)(?:[a-z]:[\\\\/][^\\s\\\"']+|(?:\\\\\\\\|//)(?:\\?[\\\\/])?[^\\s\\\\/]+[\\\\/]|file:(?:/{2,3})?|(?<![a-z0-9._~:/-])/[a-z0-9._-]+(?:/[^\\s\\\"']+)*)", RegexOptions.CultureInvariant)]
     private static partial Regex LocalPathPattern();
 
     [GeneratedRegex("(?i)(?<![a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?![a-z0-9-])", RegexOptions.CultureInvariant)]

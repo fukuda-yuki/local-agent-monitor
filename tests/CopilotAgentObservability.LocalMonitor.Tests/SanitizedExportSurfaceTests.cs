@@ -32,6 +32,41 @@ public sealed class SanitizedExportSurfaceTests
     }
 
     [Fact]
+    public async Task Api_RejectsNoncanonicalOrOversizedControlBeforeProviderCapture()
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = new Provider(Snapshot());
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartRetentionCleanupWorker = false,
+            SanitizedExportSnapshotProvider = provider,
+        });
+        string[] timestamps =
+        [
+            "2026-07-22T00:00:00+00:00",
+            "2026-07-22T00:00:00Z",
+            "2026-07-22T00:00:00.123Z",
+            "2026-07-22T00:00:00.12345678Z",
+        ];
+
+        foreach (var timestamp in timestamps)
+        {
+            using var response = await host.Client.SendAsync(Post("/api/sanitized-export/v1/previews", ControlJson(timestamp)));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("{\"error\":\"request_invalid\"}", await response.Content.ReadAsStringAsync());
+        }
+        using var oversized = await host.Client.SendAsync(Post(
+            "/api/sanitized-export/v1/previews", new byte[SanitizedExportLimits.MaximumControlRequestBytes + 1]));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversized.StatusCode);
+        Assert.Equal("{\"error\":\"request_too_large\"}", await oversized.Content.ReadAsStringAsync());
+        Assert.Equal(0, provider.CaptureCount);
+    }
+
+    [Fact]
     public void Cli_PreviewExportAndResultUseTrustedSnapshotProvider()
     {
         using var temp = new MonitorTempDirectory();
@@ -181,6 +216,9 @@ public sealed class SanitizedExportSurfaceTests
     private static SanitizedExportControlRequest Control() => new(
         "sanitized-export-control.v1", new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]));
 
+    private static byte[] ControlJson(string createdAt) => Encoding.UTF8.GetBytes(
+        $"{{\"schema_version\":\"sanitized-export-control.v1\",\"created_at\":{JsonSerializer.Serialize(createdAt)},\"selection\":{{\"session_ids\":[\"session-a\"],\"trace_ids\":null,\"source_surfaces\":null,\"repository_names\":null,\"workspace_labels\":null,\"start_inclusive\":null,\"end_exclusive\":null,\"receipt_types\":null}}}}");
+
     private static SanitizedExportSourceSnapshot Snapshot()
     {
         var observedAt = new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero);
@@ -220,6 +258,12 @@ public sealed class SanitizedExportSurfaceTests
 
     private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
     {
-        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection) => new(true, null, snapshot);
+        internal int CaptureCount { get; private set; }
+
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection)
+        {
+            CaptureCount++;
+            return new(true, null, snapshot);
+        }
     }
 }

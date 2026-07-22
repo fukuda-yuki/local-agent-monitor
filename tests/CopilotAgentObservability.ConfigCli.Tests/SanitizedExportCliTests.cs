@@ -80,8 +80,46 @@ public sealed class SanitizedExportCliTests
         Assert.Equal("request_invalid" + Environment.NewLine, result.Error);
     }
 
+    [Theory]
+    [InlineData("2026-07-22T00:00:00+00:00")]
+    [InlineData("2026-07-22T00:00:00Z")]
+    [InlineData("2026-07-22T00:00:00.123Z")]
+    [InlineData("2026-07-22T00:00:00.12345678Z")]
+    public void Preview_RejectsNoncanonicalControlTimeBeforeProviderCapture(string timestamp)
+    {
+        using var temp = new TempDirectory();
+        var requestPath = Path.Combine(temp.Path, "request.json");
+        File.WriteAllBytes(requestPath, ControlJson(timestamp));
+        var provider = new Provider(Snapshot());
+
+        var result = Run(["preview", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", requestPath], provider);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal("request_invalid" + Environment.NewLine, result.Error);
+        Assert.Equal(0, provider.CaptureCount);
+    }
+
+    [Fact]
+    public void Preview_RejectsControlOverOneMiBBeforeProviderCapture()
+    {
+        using var temp = new TempDirectory();
+        var requestPath = Path.Combine(temp.Path, "request.json");
+        using (var stream = new FileStream(requestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            stream.SetLength(SanitizedExportLimits.MaximumControlRequestBytes + 1L);
+        var provider = new Provider(Snapshot());
+
+        var result = Run(["preview", "--database", Path.Combine(temp.Path, "monitor.db"), "--request", requestPath], provider);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Equal("request_too_large" + Environment.NewLine, result.Error);
+        Assert.Equal(0, provider.CaptureCount);
+    }
+
     private static SanitizedExportControlRequest Control() => new(
         "sanitized-export-control.v1", new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero), new(SessionIds: ["session-a"]));
+
+    private static byte[] ControlJson(string createdAt) => Encoding.UTF8.GetBytes(
+        $"{{\"schema_version\":\"sanitized-export-control.v1\",\"created_at\":{JsonSerializer.Serialize(createdAt)},\"selection\":{{\"session_ids\":[\"session-a\"],\"trace_ids\":null,\"source_surfaces\":null,\"repository_names\":null,\"workspace_labels\":null,\"start_inclusive\":null,\"end_exclusive\":null,\"receipt_types\":null}}}}");
 
     private static SanitizedExportRequest Request() => new(Control().CreatedAt, Snapshot(), Control().Selection);
 
@@ -111,7 +149,13 @@ public sealed class SanitizedExportCliTests
 
     private sealed class Provider(SanitizedExportSourceSnapshot snapshot) : ISanitizedExportSnapshotProvider
     {
-        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection) => new(true, null, snapshot);
+        internal int CaptureCount { get; private set; }
+
+        public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection)
+        {
+            CaptureCount++;
+            return new(true, null, snapshot);
+        }
     }
 
     private sealed class TempDirectory : IDisposable

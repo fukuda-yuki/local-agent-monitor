@@ -197,7 +197,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
         }
         if (result.Where(item => item.Type == "repository_metadata_projection" && item.SessionId is not null)
             .GroupBy(item => item.TraceId, StringComparer.Ordinal)
-            .Any(group => group.Select(item => (item.SessionId, item.SourceSurface)).Distinct().Skip(1).Any()))
+            .Any(group => group.Select(item => item.SessionId).Distinct(StringComparer.Ordinal).Skip(1).Any()))
             throw new InvalidOperationException();
         return result;
     }

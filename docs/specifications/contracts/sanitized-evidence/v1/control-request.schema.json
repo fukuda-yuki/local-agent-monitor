@@ -7,7 +7,7 @@
   "required": ["schema_version", "created_at", "selection"],
   "properties": {
     "schema_version": { "const": "sanitized-export-control.v1" },
-    "created_at": { "type": "string", "format": "date-time" },
+    "created_at": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$" },
     "selection": { "$ref": "#/$defs/selection" }
   },
   "$defs": {
@@ -23,8 +23,8 @@
         "source_surfaces": { "$ref": "#/$defs/ids" },
         "repository_names": { "$ref": "#/$defs/ids" },
         "workspace_labels": { "$ref": "#/$defs/ids" },
-        "start_inclusive": { "type": ["string", "null"], "format": "date-time" },
-        "end_exclusive": { "type": ["string", "null"], "format": "date-time" },
+        "start_inclusive": { "type": ["string", "null"], "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$" },
+        "end_exclusive": { "type": ["string", "null"], "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$" },
         "receipt_types": {
           "type": ["array", "null"],
           "maxItems": 256,

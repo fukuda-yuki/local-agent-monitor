@@ -110,6 +110,67 @@ public sealed class SanitizedExportAuthorizationTests
     }
 
     [Fact]
+    public void ControlRequestJson_WritesAndAcceptsOnlyCanonicalUtcTimestampLexemes()
+    {
+        var control = new SanitizedExportControlRequest(
+            SanitizedExportContractVersions.ControlRequest,
+            ObservedAt,
+            new(StartInclusive: ObservedAt, EndExclusive: ObservedAt.AddHours(1)));
+
+        var bytes = SanitizedExportJson.SerializeControlRequest(control);
+
+        var json = Encoding.UTF8.GetString(bytes);
+        Assert.Contains("\"created_at\":\"2026-07-22T00:00:00.0000000Z\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"start_inclusive\":\"2026-07-22T00:00:00.0000000Z\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"end_exclusive\":\"2026-07-22T01:00:00.0000000Z\"", json, StringComparison.Ordinal);
+        Assert.Equal(control, SanitizedExportJson.DeserializeControlRequest(bytes));
+    }
+
+    [Theory]
+    [InlineData("created_at", "2026-07-22T00:00:00+00:00")]
+    [InlineData("created_at", "2026-07-22T00:00:00Z")]
+    [InlineData("created_at", "2026-07-22T00:00:00.123Z")]
+    [InlineData("created_at", "2026-07-22T00:00:00.12345678Z")]
+    [InlineData("start_inclusive", "2026-07-22T00:00:00+00:00")]
+    [InlineData("end_exclusive", "2026-07-22T01:00:00.123Z")]
+    public void InvalidControlTimestampLexemes_FailBeforeSnapshotCapture(string field, string value)
+    {
+        var provider = new CountingProvider(Request([RepositoryRecord("owner")]).Snapshot);
+        var service = new SanitizedExportAuthorizedService(provider);
+        var bytes = field switch
+        {
+            "start_inclusive" => ControlJson("2026-07-22T00:00:00.0000000Z", value, null),
+            "end_exclusive" => ControlJson("2026-07-22T00:00:00.0000000Z", null, value),
+            _ => ControlJson(value, null, null),
+        };
+
+        var exception = Xunit.Record.Exception(() => service.Preview(SanitizedExportJson.DeserializeControlRequest(bytes)));
+
+        Assert.IsType<JsonException>(exception);
+        Assert.Equal(0, provider.CaptureCount);
+    }
+
+    [Fact]
+    public void DeserializeControlRequest_EnforcesOneMiBBeforeMaterialization()
+    {
+        var valid = ControlJson("2026-07-22T00:00:00.0000000Z", null, null);
+        var maximum = new byte[SanitizedExportLimits.MaximumControlRequestBytes];
+        valid.CopyTo(maximum, 0);
+        maximum.AsSpan(valid.Length).Fill((byte)' ');
+        var oversized = new byte[maximum.Length + 1];
+        maximum.CopyTo(oversized, 0);
+        oversized[^1] = (byte)' ';
+        var provider = new CountingProvider(Request([RepositoryRecord("owner")]).Snapshot);
+        var service = new SanitizedExportAuthorizedService(provider);
+
+        Assert.Equal(SanitizedExportContractVersions.ControlRequest, SanitizedExportJson.DeserializeControlRequest(maximum).SchemaVersion);
+        var exception = Xunit.Record.Exception(() => service.Preview(SanitizedExportJson.DeserializeControlRequest(oversized)));
+
+        Assert.IsType<JsonException>(exception);
+        Assert.Equal(0, provider.CaptureCount);
+    }
+
+    [Fact]
     public void AuthorizedPreview_RejectsNonUtcControlAndSelectionBeforeCapture()
     {
         var provider = new CountingProvider(Request([RepositoryRecord("owner")]).Snapshot);
@@ -361,6 +422,9 @@ public sealed class SanitizedExportAuthorizationTests
             if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index, 4)) == signature) return index;
         throw new InvalidDataException();
     }
+
+    private static byte[] ControlJson(string createdAt, string? startInclusive, string? endExclusive) => Encoding.UTF8.GetBytes(
+        $"{{\"schema_version\":\"sanitized-export-control.v1\",\"created_at\":{JsonSerializer.Serialize(createdAt)},\"selection\":{{\"session_ids\":null,\"trace_ids\":null,\"source_surfaces\":null,\"repository_names\":null,\"workspace_labels\":null,\"start_inclusive\":{JsonSerializer.Serialize(startInclusive)},\"end_exclusive\":{JsonSerializer.Serialize(endExclusive)},\"receipt_types\":null}}}}");
 
     private static string FindRepositoryRoot()
     {

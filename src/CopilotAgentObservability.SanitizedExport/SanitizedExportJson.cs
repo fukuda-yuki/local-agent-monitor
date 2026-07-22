@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -19,6 +20,7 @@ public static class SanitizedExportJson
     public static byte[] SerializeControlRequest(SanitizedExportControlRequest request) => JsonSerializer.SerializeToUtf8Bytes(request, Options);
     public static SanitizedExportControlRequest DeserializeControlRequest(ReadOnlySpan<byte> bytes)
     {
+        if (bytes.Length > SanitizedExportLimits.MaximumControlRequestBytes) throw new JsonException();
         using var document = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions
         {
             AllowTrailingCommas = false,
@@ -42,6 +44,7 @@ public static class SanitizedExportJson
             RespectNullableAnnotations = true,
             WriteIndented = false,
         };
+        options.Converters.Add(new CanonicalDateTimeOffsetConverter());
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false));
         return options;
     }
@@ -53,6 +56,26 @@ public static class SanitizedExportJson
         if (actual.Length != expected.Count || actual.Distinct(StringComparer.Ordinal).Count() != actual.Length
             || expected.Any(name => !actual.Contains(name, StringComparer.Ordinal)))
             throw new JsonException();
+    }
+
+    private sealed class CanonicalDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
+    {
+        private const string Format = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+
+        public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.String
+                || !DateTimeOffset.TryParseExact(reader.GetString(), Format, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var value))
+                throw new JsonException();
+            return value;
+        }
+
+        public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
+        {
+            if (value.Offset != TimeSpan.Zero) throw new JsonException();
+            writer.WriteStringValue(value.ToString(Format, CultureInfo.InvariantCulture));
+        }
     }
 }
 

@@ -92,6 +92,10 @@ public sealed class SanitizedExportServiceTests
     [InlineData("{\"value\":\"+1 202-555-0123\"}", "pii_pattern")]
     [InlineData("{\"value\":\"123-45-6789\"}", "pii_pattern")]
     [InlineData("{\"value\":\"123 Main Street\"}", "pii_pattern")]
+    [InlineData("{\"value\":\"/tmp\"}", "local_path")]
+    [InlineData("{\"value\":\"/etc\"}", "local_path")]
+    [InlineData("{\"value\":\"/synthetic-root-85\"}", "local_path")]
+    [InlineData("{\"value\":\"/synthetic-root-85/private/item.txt\"}", "local_path")]
     public void Create_RejectsGenericScannerViolationsBeforeProducerAuthorization(string json, string expected)
     {
         var invalid = RepositoryRecord("session-a") with { CanonicalBytes = Encoding.UTF8.GetBytes(json) };
@@ -139,6 +143,11 @@ public sealed class SanitizedExportServiceTests
         using var handoff = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(contractRoot, "issue-91-validation-handoff.json")));
         Assert.Equal("sanitized-evidence-producers.v1", schema.RootElement.GetProperty("properties").GetProperty("repository_safe_validation").GetProperty("properties").GetProperty("producer_profile").GetProperty("const").GetString());
         Assert.Equal("sanitized-export-control.v1", control.RootElement.GetProperty("properties").GetProperty("schema_version").GetProperty("const").GetString());
+        const string timestampPattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$";
+        Assert.Equal(timestampPattern, control.RootElement.GetProperty("properties").GetProperty("created_at").GetProperty("pattern").GetString());
+        var selectionProperties = control.RootElement.GetProperty("$defs").GetProperty("selection").GetProperty("properties");
+        Assert.Equal(timestampPattern, selectionProperties.GetProperty("start_inclusive").GetProperty("pattern").GetString());
+        Assert.Equal(timestampPattern, selectionProperties.GetProperty("end_exclusive").GetProperty("pattern").GetString());
         Assert.False(control.RootElement.GetProperty("properties").TryGetProperty("forbidden_markers", out _));
         Assert.Equal("implemented_candidate", handoff.RootElement.GetProperty("production_surface_state").GetString());
     }

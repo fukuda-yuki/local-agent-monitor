@@ -39,6 +39,11 @@ The public CLI and HTTP surfaces consume one strict
 creation time, and selection filters. The selection object must explicitly
 carry all eight v1 members (nullable values are represented as JSON `null`);
 missing, duplicate, or unknown members fail before snapshot capture.
+The shared public deserializer rejects an input longer than 1,048,576 bytes
+before copying or parsing it. `created_at`, `start_inclusive`, and
+`end_exclusive` strings are accepted only in exact
+`yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'` form; `+00:00`, other offsets, and variable
+fractional precision are noncanonical.
 The public request has no snapshot, records, canonical bytes, capabilities, or
 dependency fields. Unknown fields are rejected, so a caller cannot inject a
 carrier into creation.
@@ -66,7 +71,9 @@ fails closed as `selection_limit_exceeded` even when later carrier-derived
 filters might exclude rows. Within the bound, exact-ID fetch plus the public
 #80 validator supplies selector metadata, and capabilities are computed only
 from the final selected inventory. A trace bound to more than one distinct
-Session/source identity is unavailable rather than exported ambiguously.
+non-null Session ID is unavailable rather than exported ambiguously. Multiple
+source-surface provenance rows for the same exact Session/trace remain separate
+`(session_id, trace_id, source_surface)` projections.
 
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source

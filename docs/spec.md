@@ -382,7 +382,11 @@ projection and the public #59/#80 consumer validators. Its public control is
 `sanitized-export-control.v1` (`schema_version`, UTC `created_at`, `selection`),
 and production snapshot capture is read-only, selection-aware, bounded, and
 anchored to one SQLite transaction without reading raw/content tables. The
-complete interface, archive, scanner, error, and no-provenance inspection
+public parser enforces its 1 MiB bound before materialization and accepts time
+lexemes only as UTC `Z` with exactly seven fractional digits. Exact trace
+ambiguity is defined by distinct Session IDs, while multiple source-surface
+provenance rows for one Session/trace remain valid.
+The complete interface, archive, scanner, error, and no-provenance inspection
 contract is frozen in `docs/specifications/interfaces/sanitized-evidence-export.md`.
 
 Downstream components validate exact canonical receipt bytes through the
