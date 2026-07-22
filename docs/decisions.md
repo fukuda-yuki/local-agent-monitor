@@ -2500,3 +2500,39 @@ raw store kinds, create no retention catalog items, and are not Issue #90
 mutation targets. Raw replay, backup restore, heuristic conflict resolution,
 origin attestation, and new carriers remain separate concerns. The interface
 is [sanitized evidence import](specifications/interfaces/sanitized-evidence-import.md).
+
+## D071: Runtime restore uses a strict SQLite restore unit and authoritative tombstone reconciliation
+
+Status: Accepted (2026-07-23)
+
+Issue #88 defines `local-runtime-backup` as a raw-bearing private profile,
+separate from sanitized evidence export. A live database is captured only by
+SQLite's online backup API. One canonical manifest and the closed snapshot are
+the only stored ZIP members; strict byte-level layout, checksums, SQLite
+integrity, schema vectors, and retention summaries are validated before atomic
+publication or extraction.
+
+SQLite is the v1 restore unit. Product-owned state outside it is never silently
+assumed: active external raw stores and proposal-apply private files block a DB-
+only backup, setup ownership is reported as a host-bound prerequisite, and
+ephemeral runtime state is excluded. Operator-selected backup files remain
+outside #89 cleanup and always carry `retention_backup_not_purged`; no sixth
+Retention kind or backup inventory/purge claim is created.
+
+Restore is offline CLI only. It read-only preflights every component/version
+before invoking a production migrator, stages and migrates a candidate,
+reconciles current tombstones/read denial plus exact raw-source removal and
+audit state, creates a pre-restore backup by default, atomically replaces the
+target, revalidates readiness and Doctor storage, and restores the exact old
+database on failure. Confirmation can never drop a current tombstone and
+applies only to a bound non-terminal missing-source reintroduction. Restore
+never resets capture, policy, expiry, deletion, or TTL timestamps.
+`runtime_backup` component v1 stores only sanitized path-free receipts. The
+receipt DDL and row validator require canonical UUIDv7/UTC/SHA types, bounded
+counters, and backup/restore cross-field consistency. Raw snapshot, partial,
+and inspection transients use a separate fixed-content path-free owner marker;
+bounded recovery deletes only its exact nonce-derived sibling and leaves
+unmarked/malformed/active owners untouched. The restore crash journal remains
+the sole owner of restore staging outside the database being swapped. The canonical
+interface is
+[runtime backup and restore](specifications/interfaces/runtime-backup-restore.md).

@@ -20,6 +20,7 @@ using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.RawReplay;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -45,6 +46,28 @@ internal static class MonitorHost
     }
 
     internal static WebApplication Build(MonitorOptions options, MonitorHostTestOptions? testOptions)
+    {
+        var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
+        var runtimeBackupService = new SqliteRuntimeBackupService(timeProvider);
+        var initialization = runtimeBackupService.InitializeForMonitor(options.DatabasePath);
+        if (!initialization.Result.Success) throw new InvalidOperationException(initialization.Result.ErrorCode);
+        var monitorLease = initialization.Lease!;
+        try
+        {
+            return BuildCore(options, testOptions, runtimeBackupService, monitorLease);
+        }
+        catch
+        {
+            monitorLease.Dispose();
+            throw;
+        }
+    }
+
+    private static WebApplication BuildCore(
+        MonitorOptions options,
+        MonitorHostTestOptions? testOptions,
+        SqliteRuntimeBackupService runtimeBackupService,
+        RuntimeBackupMonitorLease monitorLease)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -90,8 +113,15 @@ internal static class MonitorHost
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
+        builder.Services.AddSingleton<RuntimeBackupMonitorLease>(_ => monitorLease);
+        var databaseExisted = File.Exists(options.DatabasePath);
         var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
         builder.Services.AddSingleton(retentionContext);
+        if (!databaseExisted)
+        {
+            var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
+            if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
+        }
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
@@ -244,6 +274,7 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
 
         var app = builder.Build();
+        _ = app.Services.GetRequiredService<RuntimeBackupMonitorLease>();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
         {
             var result = await projectionStore.ListRawRecordsByTraceIdAsync(row.TraceId, 200, RetentionReadKind.Access, cancellationToken);
@@ -320,6 +351,21 @@ internal static class MonitorHost
                         tooLarge ? "request_too_large" : "raw_replay_unavailable");
                     return;
                 }
+                if (!options.SanitizedOnly
+                    && RuntimeBackupRoutes.IsPath(context.Request.Path)
+                    && exception is BadHttpRequestException runtimeBodyException)
+                {
+                    var status = runtimeBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge
+                        ? StatusCodes.Status413PayloadTooLarge
+                        : StatusCodes.Status400BadRequest;
+                    await RuntimeBackupRoutes.ErrorAsync(context, status, status == StatusCodes.Status413PayloadTooLarge ? "request_too_large" : "request_invalid");
+                    return;
+                }
+                if (!options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path))
+                {
+                    await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status503ServiceUnavailable, RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
+                    return;
+                }
                 if (exception is BadHttpRequestException badRequestException
                     && badRequestException.StatusCode == StatusCodes.Status413PayloadTooLarge)
                 {
@@ -332,6 +378,12 @@ internal static class MonitorHost
         });
         app.Use(async (context, next) =>
         {
+            if (options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
             var rawReplayPath = RawReplayRoutes.IsPath(context.Request.Path);
@@ -339,7 +391,9 @@ internal static class MonitorHost
             var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
             var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
             var sanitizedImportPath = SanitizedImportRoutes.IsPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath || rawReplayPath || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath)
+            var runtimeBackupPath = !options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
+                || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -364,6 +418,10 @@ internal static class MonitorHost
                 else if (rawReplayPath)
                 {
                     await RawReplayRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (runtimeBackupPath)
+                {
+                    await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (alertPath)
                 {
@@ -407,6 +465,10 @@ internal static class MonitorHost
             testOptions?.RawReplaySnapshotProvider,
             testOptions?.RawReplayTransientLimits);
         SanitizedImportRoutes.Map(app, sanitizedImportStore);
+        if (!options.SanitizedOnly)
+        {
+            RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
+        }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);

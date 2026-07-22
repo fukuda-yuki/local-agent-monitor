@@ -287,6 +287,26 @@ conflict, or changed-preview failure; exit `3` denotes filesystem or store
 unavailability. Stderr contains only a fixed code and never an input path or
 exception text. Full behavior is canonical in
 [sanitized-evidence-import.md](sanitized-evidence-import.md).
+## Runtime Backup Commands
+
+```text
+config-cli runtime-backup create --database <monitor.db> --output <bundle.zip>
+config-cli runtime-backup inspect --bundle <bundle.zip>
+config-cli runtime-backup preview --bundle <bundle.zip> --database <monitor.db>
+config-cli runtime-backup restore --bundle <bundle.zip> --database <monitor.db> [--pre-restore-output <bundle.zip>] [--allow-resurrection --confirmation <digest>]
+```
+
+`create` uses SQLite online backup and publishes a validated raw-bearing
+`local-runtime-backup` bundle atomically without overwrite. `inspect` is an
+untrusted archive check. `preview` compares versions, prerequisites, current
+tombstone/read-denial reconciliation, and the separately confirmable
+non-terminal missing-source reintroduction set without mutation. `restore` is
+offline-only, requires exclusive database ownership, preflights versions before
+any migrator, stages/migrates/reconciles, creates a pre-restore backup by
+default, and atomically swaps or rolls back. Confirmation never authorizes
+dropping a tombstone. Stdout is one no-path canonical JSON result and stderr is
+one fixed code. The complete command, exit, archive, and error contract is
+canonical in [runtime-backup-restore.md](runtime-backup-restore.md).
 
 ## Raw Data Commands
 

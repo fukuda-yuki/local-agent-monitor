@@ -665,6 +665,33 @@ are canonical-sorted. HTTP transient archive/preview bytes have fixed
 count/byte/TTL limits with idle sweeping, provider errors cross a closed mapping,
 and unsupported request media types return HTTP 415 with the serialized JSON
 error code `unsupported_media_type`.
+## Runtime backup and restore
+
+Issue #88 defines the raw-bearing `local-runtime-backup` profile separately from
+sanitized evidence export. A live WAL database is captured with SQLite's online
+backup API into one closed snapshot; one canonical manifest and that database
+are the only stored ZIP members. The manifest pins checksums, component
+versions, counts/cursors, original retention clocks/tombstones, warnings, and a
+bounded external-state/prerequisite inventory. Operator-selected backup files
+are outside Retention cleanup and always warn
+`retention_backup_not_purged`.
+
+Raw snapshot/partial/inspection transients are created only after a flushed
+path-free exact owner marker. Startup or the next operation in an arbitrary
+caller-selected directory performs bounded no-follow cleanup of that exact
+marker-derived basename; malformed, active, nonregular, or unmarked lookalikes
+are preserved and fail closed. Archive bytes are durably flushed around atomic
+publication. Read-only compatibility also rejects executable indexes/generated
+columns, undeclared component namespaces, malformed receipt rows, and native or
+lexical device paths before migration.
+
+Restore is offline CLI only. It strictly inspects untrusted input, validates and
+migrates a sibling staging database, carries current tombstones/read denial and
+exact raw-source removal forward, creates a pre-restore backup by default, and
+uses atomic replacement with exact rollback. Confirmation can never discard a
+tombstone; it is accepted only for a bound non-terminal source reintroduction.
+HTTP/UI can create or preview but cannot restore. The complete contract is
+[runtime backup and restore](specifications/interfaces/runtime-backup-restore.md).
 
 ## Source schema drift and Claude Code P0
 
@@ -717,6 +744,7 @@ sanitized. The canonical contract is
 | Sanitized evidence export interface | [specifications/interfaces/sanitized-evidence-export.md](specifications/interfaces/sanitized-evidence-export.md) |
 | Raw local replay interface | [specifications/interfaces/raw-local-replay.md](specifications/interfaces/raw-local-replay.md) |
 | Sanitized evidence import interface | [specifications/interfaces/sanitized-evidence-import.md](specifications/interfaces/sanitized-evidence-import.md) |
+| Runtime backup and restore interface | [specifications/interfaces/runtime-backup-restore.md](specifications/interfaces/runtime-backup-restore.md) |
 | Source schema drift and Claude Code interface | [specifications/interfaces/source-schema-drift-claude-code.md](specifications/interfaces/source-schema-drift-claude-code.md) |
 | Canvas Session workspace interface | [specifications/interfaces/canvas-session-workspace.md](specifications/interfaces/canvas-session-workspace.md) |
 | Canvas Session Evidence interface | [specifications/interfaces/canvas-session-evidence.md](specifications/interfaces/canvas-session-evidence.md) |
@@ -845,6 +873,16 @@ Publicly documented interfaces are:
   bounded `application/zip` archive; commit requires
   `X-Sanitized-Import-Preview-Digest`. Routes are same-origin, Host/CSRF
   protected as applicable, and `no-store`.
+- Runtime backup CLI commands:
+  `runtime-backup create --database <monitor.db> --output <bundle.zip>`,
+  `runtime-backup inspect --bundle <bundle.zip>`,
+  `runtime-backup preview --bundle <bundle.zip> --database <monitor.db>`, and
+  offline `runtime-backup restore`. Local Monitor exposes online create,
+  result/download, and bounded preview routes under
+  `/api/runtime-backup/v1/`, but no HTTP restore route. Restore uses staging,
+  supported component migration, authoritative tombstone reconciliation,
+  default pre-restore backup, atomic swap/rollback, and post-install
+  readiness/Doctor checks.
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および ダッシュボード（`/`）と トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route / raw section を除去（raw-detail route は `404`、dashboard / traces の prompt ラベルは省略し短縮 TraceId にフォールバック）、PII は除外。prompt ラベルは `/api/monitor/*` と SSE には含めない。full-payload JSON raw API は提供しない。Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
 - Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 

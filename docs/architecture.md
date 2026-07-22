@@ -699,6 +699,46 @@ history or repository-safe output.
 Candidate/source-record keys remain internal. The component stores no source
 body and creates no raw retention item in workflow v1.
 
+## Runtime backup and restore
+
+Issue #88 adds a separate `runtime_backup` SQLite component v1 after the #79
+and #86 component migrations. It owns sanitized path-free operation receipts
+only and does not change Monitor 7, Session 13, Retention 1, or the five raw
+store kinds.
+
+```text
+live WAL database
+  -> SQLite online backup API -> closed snapshot database
+  -> integrity/version/count/retention projection
+  -> canonical manifest + stored ZIP -> atomic caller-selected publish
+
+untrusted ZIP
+  -> strict byte-level archive inspection -> sibling staging database
+  -> checksum/schema/migration/tombstone/Doctor validation
+  -> default pre-restore backup -> atomic database replace
+  -> installed validation -> commit receipt
+                         \-> failure -> atomic old-database rollback
+```
+
+The snapshot, archive partial, and non-restore inspection database each have a
+same-directory flushed `runtime-backup-transient-owner.v1` marker created first.
+Bounded startup/next-operation recovery derives only the exact random basename
+from that marker, removes SQLite sidecars/raw bytes, and deletes the marker last;
+it never sweeps unmarked paths. The restore staging database remains exclusively
+owned by `runtime-restore-journal.v2`, so transient cleanup does not create a
+second restore authority.
+
+SQLite is the restore unit. The manifest inventories bounded external runtime
+preconditions rather than silently losing them. Active DB-external raw stores
+or proposal-apply private files block backup; setup ownership remains
+host-bound and must be re-established on another machine. Current terminal
+tombstones/read denial are reconciled into staging and cannot be waived by
+confirmation. PID/state/log files, credentials, executables, and operator
+backup files are excluded by contract. The HTTP/UI surface can create and
+inspect but never restores a live database; restore authority is offline CLI
+only. Details are canonical in
+[Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md).
+
 ## 5. Aspire AppHost Boundary
 
 The Aspire AppHost is retained only as historical local dashboard connectivity background and build coverage.

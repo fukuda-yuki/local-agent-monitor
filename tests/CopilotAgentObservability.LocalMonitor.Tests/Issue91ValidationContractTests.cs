@@ -42,7 +42,7 @@ public sealed class Issue91ValidationContractTests
         Assert.Equal("validation-future-surfaces.v1", registry.RootElement.GetProperty("schema_version").GetString());
 
         var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        Assert.Equal([75, 88, 93],
+        Assert.Equal([75, 93],
             entries.Select(entry => entry.GetProperty("owner_issue").GetInt32()));
         Assert.All(entries, entry =>
         {
@@ -107,6 +107,47 @@ public sealed class Issue91ValidationContractTests
             Assert.Contains(row.GetProperty("requirement_level").GetString(), new[] { "required", "optional" });
             Assert.Contains(row.GetProperty("applicability").GetString(), new[] { "applicable", "not_applicable" });
         });
+    }
+
+    [Fact]
+    public void RuntimeBackupIssue91HandoffAndPreparationMatrixStayCoherent()
+    {
+        var handoffPath = Path.Combine(RepositoryRoot, "docs", "specifications", "contracts", "runtime-backup", "v1", "issue-91-validation-handoff.json");
+        var matrixPath = Path.Combine(RepositoryRoot, "docs", "sprints", "issue-88-backup-restore", "validation-matrix.json");
+        var ledgerPath = Path.Combine(RepositoryRoot, "docs", "sprints", "issue-88-backup-restore", "README.md");
+        Assert.True(File.Exists(handoffPath));
+        Assert.True(File.Exists(matrixPath));
+        Assert.True(File.Exists(ledgerPath));
+        using var handoff = JsonDocument.Parse(File.ReadAllText(handoffPath));
+        using var matrix = JsonDocument.Parse(File.ReadAllText(matrixPath));
+        using var registry = JsonDocument.Parse(File.ReadAllText(Path.Combine(ContractRoot, "future-surface-registry.json")));
+
+        Assert.Equal("backup-restore", handoff.RootElement.GetProperty("surface_id").GetString());
+        Assert.Equal(88, handoff.RootElement.GetProperty("owner_issue").GetInt32());
+        Assert.Equal(
+            ["91-B-088", "91-S-088", "91-L-088"],
+            handoff.RootElement.GetProperty("active_row_ids").EnumerateArray().Select(item => item.GetString()));
+        var filters = handoff.RootElement.GetProperty("automated_test_filters").EnumerateArray().Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("FullyQualifiedName~RuntimeBackupManifestValidationTests", filters);
+        Assert.Contains("FullyQualifiedName~RuntimeBackupPlaywrightTests", filters);
+        Assert.Contains("FullyQualifiedName~RuntimeRestoreDocumentationUsesPackagedConditionalRestartSequence", filters);
+        Assert.Contains("FullyQualifiedName~PublishedStartWaitReady", filters);
+        Assert.DoesNotContain(registry.RootElement.GetProperty("entries").EnumerateArray(), entry => entry.GetProperty("owner_issue").GetInt32() == 88);
+
+        const string preparationSha = "c02c10ab18553acef1619ce12ec630f4f6f5aa5f";
+        Assert.Equal(preparationSha, matrix.RootElement.GetProperty("matrix_prep_sha").GetString());
+        Assert.Equal(preparationSha, matrix.RootElement.GetProperty("final_validation_sha").GetString());
+        var rows = matrix.RootElement.GetProperty("active_rows").EnumerateArray().ToArray();
+        Assert.Equal(["91-B-088", "91-S-088", "91-L-088"], rows.Select(row => row.GetProperty("row_id").GetString()));
+        Assert.Equal(["not_attempted", "not_attempted", "blocked_external"], rows.Select(row => row.GetProperty("classification").GetString()));
+        Assert.All(rows, row => Assert.Equal(preparationSha, row.GetProperty("validation_sha").GetString()));
+        Assert.NotEmpty(rows[2].GetProperty("evidence").EnumerateArray());
+        var blocker = matrix.RootElement.GetProperty("release_decision").GetProperty("external_blockers").EnumerateArray().Single();
+        foreach (var property in new[] { "severity", "blocker", "retry_condition", "unverified_capability" })
+            Assert.Equal(rows[2].GetProperty(property).GetString(), blocker.GetProperty(property).GetString());
+        Assert.Contains(
+            "docs/sprints/issue-88-backup-restore/README.md",
+            matrix.RootElement.GetProperty("evidence_ledger_refs").EnumerateArray().Select(item => item.GetString()));
     }
 
     [Fact]

@@ -29,6 +29,31 @@ Initialize-LocalMonitorRuntime -DbPath $DbPath
 
 $live = Test-LocalMonitorHealth -Url $Url -Path '/health/live'
 if ($null -ne $live -and [int] $live.StatusCode -eq 200) {
+    if ($WaitReady) {
+        $readyDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            $ready = Test-LocalMonitorHealth -Url $Url -Path '/health/ready'
+            if ($null -ne $ready) {
+                $readyBody = $ready.Content | ConvertFrom-Json
+                if ($readyBody.status -eq 'ready' -or $readyBody.status -eq 'degraded') {
+                    Write-LocalMonitorLog "already_running url=$Url readiness=$($readyBody.status)"
+                    Write-Output "already_running"
+                    exit 0
+                }
+
+                Write-LocalMonitorLog "health_ready_not_ready status=$($readyBody.status)"
+                Write-Error 'health_ready_not_ready'
+                exit 2
+            }
+
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $readyDeadline)
+
+        Write-LocalMonitorLog "monitor_start_timeout url=$Url"
+        Write-Error 'monitor_start_timeout'
+        exit 1
+    }
+
     Write-LocalMonitorLog "already_running url=$Url"
     Write-Output "already_running"
     exit 0

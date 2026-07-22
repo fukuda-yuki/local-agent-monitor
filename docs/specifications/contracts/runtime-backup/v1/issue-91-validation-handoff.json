@@ -1,0 +1,32 @@
+{
+  "schema_version": "runtime-backup-validation-handoff.v1",
+  "surface_id": "backup-restore",
+  "owner_issue": 88,
+  "future_registry_state_at_kickoff": "not_available",
+  "production_surface_state": "implemented_candidate",
+  "active_row_ids": [
+    "91-B-088",
+    "91-S-088",
+    "91-L-088"
+  ],
+  "required_profiles": [
+    "local-runtime-backup",
+    "raw-content-warning",
+    "retention-deleted",
+    "restore-compatible",
+    "restore-incompatible"
+  ],
+  "automated_test_filters": [
+    "FullyQualifiedName~RuntimeBackupManifestValidationTests",
+    "FullyQualifiedName~RuntimeBackupArchiveTests",
+    "FullyQualifiedName~RuntimeBackupRestoreTests",
+    "FullyQualifiedName~RuntimeBackupSurfaceTests",
+    "FullyQualifiedName~RuntimeBackupPlaywrightTests",
+    "FullyQualifiedName~RuntimeBackupCliTests",
+    "FullyQualifiedName~RuntimeRestoreDocumentationUsesPackagedConditionalRestartSequence",
+    "FullyQualifiedName~PublishedStartWaitReady",
+    "FullyQualifiedName~LocalMonitorScriptTests"
+  ],
+  "expected_evidence_location": "docs/sprints/issue-88-backup-restore/validation-matrix.json",
+  "canonical_transition": "The backup-restore placeholder is removed only when the Issue #88 production candidate, executable automated evidence, and active validation rows exist. Automated synthetic directory separation is not cross-machine evidence. Row 91-L-088 remains blocked_external until a genuine second-machine restore, restart readiness, and Doctor run is recorded; no pass is inherited from the future placeholder."
+}

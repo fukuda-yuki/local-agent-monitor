@@ -342,6 +342,36 @@ Local Monitor Copilot raw analysis は Canvas adapter とは別の local raw-ana
 共有環境、実データ、社内サーバー、生成済み dashboard artifact の共有を扱う場合は、アクセス権、保持期間、削除方法、masking / redaction、利用者周知を先に決める。
 remote managed Langfuse / Collector endpoint を使う場合は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を確認する。
 
+Local Monitor の runtime backup は `local-runtime-backup` profile とし、
+SQLite online backup API で WAL 稼働中にも一貫した snapshot を作る。
+bundle は raw content を含む private local artifact であり repository-safe
+ではない。manifest、database checksum、component version、record count、
+projection cursor、元の capture / policy / expiry、tombstone、外部 runtime
+state の前提条件を固定形式で記録する。backup file は利用者所有で Retention
+catalog の cleanup 対象に追加せず、常に `retention_backup_not_purged` を警告する。
+raw-bearing snapshot / partial / inspection stage は raw 作成前に path-free な
+exact owner marker を durable 化し、startup または同じ caller-selected directory を
+次に使う操作が bounded / no-follow で exact marker-bound bytes だけを回収する。
+marker のない lookalike、malformed / active / nonregular owner は削除せず fail closed とする。
+
+Restore は停止済み Local Monitor に対する offline CLI だけが実行できる。
+untrusted archive を bounded に検査し、staging で checksum / schema /
+migration / integrity / foreign key / Doctor を検証し、既定の pre-restore
+backup 後に atomic swap する。失敗時は元 DB を復元し、partial restore を成功扱い
+しない。現在の tombstone と irreversible read denial は staged DB へ exact に
+reconcile し、raw source の除去と lifecycle / revision / audit を保持する。
+確認操作で tombstone を捨てたり raw を復活させてはならない。確認を許すのは、
+current catalog が non-terminal/readable のまま exact source だけが欠落している
+場合の再導入に限り、archive と current comparison set に bind する。
+capture timestamp、policy/version、TTL clock を restore 時刻へ変更してはならない。
+read-only preflight は generated column、expression/partial index、undeclared
+component namespace collision、invalid `runtime_backup` receipt row、reparse/
+device/FIFO/socket/DOS-device path を production migrator と target write より前に拒否する。
+DB 外 raw store または proposal-apply private state を伴って DB だけでは一貫しない
+場合は fail-closed とする。完全な contract は
+[Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md)
+を正本とする。
+
 ## 9. Dashboard Requirements
 
 Static HTML dashboard は Agent workflow 改善判断のための aggregate view とする。

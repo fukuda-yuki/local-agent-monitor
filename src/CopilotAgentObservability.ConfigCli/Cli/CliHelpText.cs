@@ -51,6 +51,10 @@ internal static class CliHelpText
           config-cli sanitized-import preview --database <monitor.db> --bundle <bundle.zip>
           config-cli sanitized-import import --database <monitor.db> --bundle <bundle.zip> --preview-digest <sha256>
           config-cli sanitized-import history --database <monitor.db> [--limit <1..100>]
+          config-cli runtime-backup create --database <monitor.db> --output <bundle.zip>
+          config-cli runtime-backup inspect --bundle <bundle.zip>
+          config-cli runtime-backup preview --bundle <bundle.zip> --database <monitor.db>
+          config-cli runtime-backup restore --bundle <bundle.zip> --database <monitor.db> [--pre-restore-output <bundle.zip>] [--allow-resurrection --confirmation <digest>]
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]

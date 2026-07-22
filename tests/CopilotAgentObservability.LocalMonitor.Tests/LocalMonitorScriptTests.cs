@@ -120,12 +120,75 @@ public class LocalMonitorScriptTests
         Assert.Contains("install-session-hooks.ps1", package, StringComparison.Ordinal);
         Assert.Contains("uninstall-session-hooks.ps1", package, StringComparison.Ordinal);
         Assert.Contains("first-trace.ps1", package, StringComparison.Ordinal);
+        Assert.Contains("'start.ps1'", package, StringComparison.Ordinal);
+        Assert.Contains("'stop.ps1'", package, StringComparison.Ordinal);
+        Assert.Contains("scripts\\local-monitor\\README.md", package, StringComparison.Ordinal);
         Assert.Contains("Compress-Archive", package, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", package, StringComparison.Ordinal);
         Assert.Contains("dotnet_publish_failed", package, StringComparison.Ordinal);
         Assert.Contains("Join-Path $OutputDirectory 'artifacts'", package, StringComparison.Ordinal);
         Assert.Equal(2, package.Split("--artifacts-path $artifactsDirectory", StringSplitOptions.None).Length - 1);
         Assert.Equal(2, package.Split("--disable-build-servers", StringSplitOptions.None).Length - 1);
+    }
+
+    [Theory]
+    [InlineData("scripts", "local-monitor", "README.md")]
+    [InlineData("docs", "user-guide", "local-monitor.md")]
+    public void RuntimeRestoreDocumentationUsesPackagedConditionalRestartSequence(
+        string directory,
+        string subdirectory,
+        string fileName)
+    {
+        var documentation = File.ReadAllText(Path.Combine(RepositoryRoot, directory, subdirectory, fileName))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains("app\\config-cli\\CopilotAgentObservability.ConfigCli.exe", documentation, StringComparison.Ordinal);
+        Assert.Contains("Mode = 'Published'", documentation, StringComparison.Ordinal);
+        Assert.Contains("Url = $monitorUrl", documentation, StringComparison.Ordinal);
+        Assert.Contains("DbPath = $db", documentation, StringComparison.Ordinal);
+        Assert.Contains("InstallRoot = $installRoot", documentation, StringComparison.Ordinal);
+        Assert.Contains("SanitizedOnly = $sanitizedOnly", documentation, StringComparison.Ordinal);
+        Assert.Contains("WaitReady = $true", documentation, StringComparison.Ordinal);
+        Assert.Contains(
+            "& $stopScript -Force\n" +
+            "$stopExitCode = $LASTEXITCODE\n" +
+            "if ($stopExitCode -ne 0) {\n" +
+            "    exit $stopExitCode\n" +
+            "}",
+            documentation,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "& $cli runtime-backup restore --bundle C:\\private\\local-monitor-backup.zip --database $db\n" +
+            "$restoreExitCode = $LASTEXITCODE\n" +
+            "if ($restoreExitCode -ne 0) {\n" +
+            "    exit $restoreExitCode\n" +
+            "}",
+            documentation,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "& $startScript @startParameters\n" +
+            "$startExitCode = $LASTEXITCODE\n" +
+            "if ($startExitCode -ne 0) {\n" +
+            "    exit $startExitCode\n" +
+            "}",
+            documentation,
+            StringComparison.Ordinal);
+
+        var stopIndex = documentation.IndexOf("& $stopScript -Force", StringComparison.Ordinal);
+        var stopExitCaptureIndex = documentation.IndexOf("$stopExitCode = $LASTEXITCODE", StringComparison.Ordinal);
+        var stopGuardIndex = documentation.IndexOf("if ($stopExitCode -ne 0)", StringComparison.Ordinal);
+        var stopExitIndex = documentation.IndexOf("exit $stopExitCode", StringComparison.Ordinal);
+        var restoreIndex = documentation.IndexOf("& $cli runtime-backup restore", StringComparison.Ordinal);
+        var restoreExitCaptureIndex = documentation.IndexOf("$restoreExitCode = $LASTEXITCODE", StringComparison.Ordinal);
+        var restoreGuardIndex = documentation.IndexOf("if ($restoreExitCode -ne 0)", StringComparison.Ordinal);
+        var restoreExitIndex = documentation.IndexOf("exit $restoreExitCode", StringComparison.Ordinal);
+        var startIndex = documentation.IndexOf("& $startScript @startParameters", StringComparison.Ordinal);
+
+        Assert.True(stopIndex >= 0, "The documented sequence must stop Local Monitor first.");
+        Assert.True(stopIndex < stopExitCaptureIndex && stopExitCaptureIndex < stopGuardIndex && stopGuardIndex < stopExitIndex);
+        Assert.True(stopExitIndex < restoreIndex, "Restore must not run when stop fails.");
+        Assert.True(restoreIndex < restoreExitCaptureIndex && restoreExitCaptureIndex < restoreGuardIndex);
+        Assert.True(restoreGuardIndex < restoreExitIndex && restoreExitIndex < startIndex, "Published restart must occur only after restore exit 0.");
     }
 
     [Fact]
@@ -232,9 +295,14 @@ public class LocalMonitorScriptTests
             var staging = Path.Combine(outputDirectory, "staging");
             var packagedSetup = Path.Combine(staging, "scripts", "setup.ps1");
             var packagedFirstTrace = Path.Combine(staging, "scripts", "first-trace.ps1");
+            var packagedStart = Path.Combine(staging, "scripts", "start.ps1");
+            var packagedStop = Path.Combine(staging, "scripts", "stop.ps1");
             var packagedCli = Path.Combine(staging, "app", "config-cli", "CopilotAgentObservability.ConfigCli.exe");
             Assert.True(File.Exists(packagedSetup), "The release layout is missing scripts/setup.ps1.");
             Assert.True(File.Exists(packagedFirstTrace), "The release layout is missing scripts/first-trace.ps1.");
+            Assert.True(File.Exists(packagedStart), "The release layout is missing scripts/start.ps1.");
+            Assert.True(File.Exists(packagedStop), "The release layout is missing scripts/stop.ps1.");
+            Assert.True(File.Exists(Path.Combine(staging, "README.md")), "The release layout is missing its operator README.");
             Assert.True(File.Exists(packagedCli), "The release layout is missing the self-contained Config CLI executable.");
             Assert.True(File.Exists(Path.ChangeExtension(packagedCli, ".runtimeconfig.json")), "The Config CLI runtime configuration is missing.");
 
@@ -244,6 +312,9 @@ public class LocalMonitorScriptTests
             {
                 Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/setup.ps1");
                 Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/first-trace.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/start.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "scripts/stop.ps1");
+                Assert.Contains(archive.Entries, entry => entry.FullName == "README.md");
                 Assert.Contains(archive.Entries, entry => entry.FullName == "app/config-cli/CopilotAgentObservability.ConfigCli.exe");
             }
 
@@ -785,6 +856,68 @@ public class LocalMonitorScriptTests
         Assert.Contains("Mode 'published'", start, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("ready")]
+    [InlineData("degraded")]
+    public void PublishedStartWaitReadyAcceptsOnlyDocumentedSuccessStates(string healthStatus)
+    {
+        var result = RunPublishedStartWithHealth(healthStatus);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains($"started {healthStatus}", result.Output, StringComparison.Ordinal);
+        Assert.Empty(result.Error);
+    }
+
+    [Theory]
+    [InlineData("not_ready", 2, "health_ready_not_ready")]
+    [InlineData("unreachable", 1, "monitor_start_timeout")]
+    public void PublishedStartWaitReadyFailsWhenReadinessIsNotAcceptedOrUnreachable(
+        string healthStatus,
+        int expectedExitCode,
+        string expectedError)
+    {
+        var result = RunPublishedStartWithHealth(healthStatus);
+
+        Assert.Equal(expectedExitCode, result.ExitCode);
+        Assert.DoesNotContain("started", result.Output, StringComparison.Ordinal);
+        Assert.Contains(expectedError, result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PublishedStartWaitReadyDoesNotTreatLiveOnlyExistingProcessAsReady()
+    {
+        var result = RunPublishedStartWithHealth("existing_not_ready");
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.DoesNotContain("already_running", result.Output, StringComparison.Ordinal);
+        Assert.Contains("health_ready_not_ready", result.Error, StringComparison.Ordinal);
+        Assert.True(result.ReadyProbeObserved, "An already-live process must still be readiness-probed.");
+    }
+
+    [Theory]
+    [InlineData("ready")]
+    [InlineData("degraded")]
+    public void PublishedStartWaitReadyAcceptsReadyExistingProcessAfterReadinessProbe(string healthStatus)
+    {
+        var result = RunPublishedStartWithHealth($"existing_{healthStatus}");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("already_running", result.Output, StringComparison.Ordinal);
+        Assert.Empty(result.Error);
+        Assert.True(result.ReadyProbeObserved, "An already-live process must still be readiness-probed.");
+    }
+
+    [Fact]
+    public void PublishedStartWaitReadyFailsWhenExistingProcessReadinessIsUnreachable()
+    {
+        var result = RunPublishedStartWithHealth("existing_unreachable");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.DoesNotContain("already_running", result.Output, StringComparison.Ordinal);
+        Assert.Contains("monitor_start_timeout", result.Error, StringComparison.Ordinal);
+        Assert.True(result.ReadyProbeObserved, "An already-live process must still be readiness-probed.");
+    }
+
     [Fact]
     public void UninstallKeepsDataByDefaultAndRemovesRuntimeOnlyWithRemoveData()
     {
@@ -1010,6 +1143,93 @@ public class LocalMonitorScriptTests
     private static void AssertScriptContains(string script, string expected)
     {
         Assert.Contains(expected, File.ReadAllText(ScriptPath(script)), StringComparison.Ordinal);
+    }
+
+    private static (int ExitCode, string Output, string Error, bool ReadyProbeObserved) RunPublishedStartWithHealth(string healthStatus)
+    {
+        var root = CreateTemporaryDirectory("cao-published-readiness");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var logs = Directory.CreateDirectory(Path.Combine(root, "logs")).FullName;
+            var database = Path.Combine(root, "raw-store.db");
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var executable = Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe");
+            File.WriteAllText(executable, string.Empty);
+            var readyProbeMarker = Path.Combine(root, "ready-probed");
+            var start = Path.Combine(scripts, "start.ps1");
+            File.Copy(ScriptPath("start.ps1"), start);
+            var readyStatus = healthStatus.StartsWith("existing_", StringComparison.Ordinal)
+                ? healthStatus["existing_".Length..]
+                : healthStatus;
+            var timeoutSeconds = readyStatus is "ready" or "degraded" ? "2" : "0";
+            var readyContent = JsonSerializer.Serialize(new { status = readyStatus });
+            File.WriteAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = '{{database.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LiveProbeCount = 0
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) return $true }
+                function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    if ('{{healthStatus}}' -eq 'unreachable') { return $null }
+                    if ('{{healthStatus}}'.StartsWith('existing_') -and $Path -eq '/health/live') {
+                        return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+                    }
+                    if ($Path -eq '/health/live') {
+                        $script:LiveProbeCount++
+                        if ($script:LiveProbeCount -eq 1) { return $null }
+                        return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+                    }
+                    [System.IO.File]::WriteAllText('{{readyProbeMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'probed')
+                    if ('{{readyStatus}}' -eq 'unreachable') { return $null }
+                    return [pscustomobject]@{ StatusCode = 200; Content = '{{readyContent.Replace("'", "''", StringComparison.Ordinal)}}' }
+                }
+                function Test-LocalMonitorPortInUse { param([string] $Url) return $false }
+                function Get-LocalMonitorDefaultInstallRoot { return '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorPublishedExePath { param([string] $InstallRoot) return '{{executable.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Start-Process {
+                    param(
+                        [string] $FilePath,
+                        [object[]] $ArgumentList,
+                        [string] $WorkingDirectory,
+                        [string] $WindowStyle,
+                        [string] $RedirectStandardOutput,
+                        [string] $RedirectStandardError,
+                        [switch] $PassThru)
+                    return [pscustomobject]@{ Id = 4242 }
+                }
+                function Save-LocalMonitorState {
+                    param(
+                        [int] $ProcessId,
+                        [string] $Url,
+                        [string] $DbPath,
+                        [string] $Mode,
+                        [string] $RepoRoot,
+                        [string] $InstallRoot,
+                        [string] $ExecutablePath,
+                        [switch] $SanitizedOnly)
+                }
+                function Write-LocalMonitorLog { param([string] $Message) }
+                """);
+
+            var result = RunPowerShellScript(
+                start,
+                "-Mode", "Published",
+                "-Url", "http://127.0.0.1:4320",
+                "-DbPath", database,
+                "-InstallRoot", installRoot,
+                "-NoBrowser",
+                "-WaitReady",
+                "-TimeoutSeconds", timeoutSeconds);
+            return (result.ExitCode, result.Output, result.Error, File.Exists(readyProbeMarker));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static string ScriptPath(string fileName)

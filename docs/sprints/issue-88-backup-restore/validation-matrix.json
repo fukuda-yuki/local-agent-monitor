@@ -1,0 +1,140 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "inventory_date": "2026-07-23",
+  "environment_boundary": "Preparation baseline SHA only. The Issue #88 implementation is an uncommitted worktree candidate and has not yet reached the required frozen-SHA build, Playwright, focused, full-suite, replay, migration, security, or cross-machine gates.",
+  "active_rows": [
+    {
+      "row_id": "91-B-088",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "runtime-backup",
+      "operation": "online SQLite backup, canonical manifest/archive publication, inspect, preview, and offline restore",
+      "profiles": {
+        "collection": ["config-cli", "local-monitor-http", "local-monitor-ui"],
+        "content_access": ["raw-content-warning"],
+        "compatibility": ["local-runtime-backup.v1", "restore-compatible", "restore-incompatible"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-snapshot"],
+        "restart": ["offline-restore"],
+        "retention": ["original-clock-preserved"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "local-runtime-backup.v1",
+        "manifest": "local-runtime-backup-manifest.v1",
+        "archive": "local-runtime-backup-zip-store.v1",
+        "checksum": "sha256.v1"
+      },
+      "expected_invariant": "A consistent online SQLite snapshot is durably published as the strict raw local profile; exact warnings, manifest facts, checksums, preview, migration, and offline restore remain deterministic without path or raw-content disclosure in results.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #88 runtime backup and restore",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Frozen-candidate execution is pending; the preparation SHA does not claim the current uncommitted implementation."
+    },
+    {
+      "row_id": "91-S-088",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "runtime-backup-security-and-recovery",
+      "operation": "archive attack rejection, retention/tombstone reconciliation, explicit reintroduction, transient cleanup, atomic swap, rollback, and no-leak controls",
+      "profiles": {
+        "collection": ["bundle-create", "bundle-inspect", "bundle-restore", "loopback-api"],
+        "content_access": ["raw-local", "sanitized-result-only"],
+        "compatibility": ["malformed", "future-component", "schema-drift", "archive-attack"],
+        "hook": [],
+        "otel": [],
+        "binding": ["owner-marker", "restore-journal", "exact-retention-identity"],
+        "restart": ["pre-swap", "post-swap", "committed-recovery"],
+        "retention": ["deleted", "read-denied", "non-terminal-reintroduction"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "restore_journal": "runtime-restore-journal.v2",
+        "transient_owner": "runtime-backup-transient-owner.v1",
+        "runtime_backup_component": 1
+      },
+      "expected_invariant": "Untrusted archives, executable schema, namespace collisions, malformed receipts, external raw state, reparse/device paths, and retention conflicts fail before unsafe mutation; crash recovery deletes only exact owned artifacts and rollback restores the exact prior database.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #88 runtime backup and restore",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Frozen-candidate security, migration, browser, and full-suite execution is pending; no raw backup bytes are repository evidence."
+    },
+    {
+      "row_id": "91-L-088",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "runtime-backup-cross-machine",
+      "operation": "genuine second-machine archive transfer, offline restore, Local Monitor restart readiness, and Doctor verification",
+      "profiles": {
+        "collection": ["second-machine"],
+        "content_access": ["private-raw-backup"],
+        "compatibility": ["supported-cross-machine-runtime"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-archive-sha256"],
+        "restart": ["stop", "restore", "start", "readiness", "doctor"],
+        "retention": ["original-clock-preserved"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "local-runtime-backup.v1",
+        "restore_result": "local-runtime-restore-result.v1"
+      },
+      "expected_invariant": "A raw local backup created on one machine restores on a genuinely distinct compatible machine, preserves the original policy/timestamps, and reaches accepted Local Monitor readiness plus Doctor without treating synthetic directory separation as live evidence.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "No genuine second-machine run was executed for the Issue #88 candidate.",
+          "compatibility_basis": "The canonical Issue #88 contract explicitly forbids classifying same-machine synthetic source/destination directories as cross-machine evidence."
+        }
+      ],
+      "actual_result": "Cross-machine restore, restart readiness, and Doctor remain unverified because no genuine second machine was available in the authorized local execution boundary.",
+      "classification": "blocked_external",
+      "severity": "medium",
+      "blocker": "A genuine compatible second machine for transferring and restoring the private raw runtime backup was not available.",
+      "retry_condition": "On a genuine second machine, transfer the private archive outside the repository, verify its SHA-256, run the documented stop/restore/start sequence, and record accepted readiness plus Doctor evidence against the frozen candidate.",
+      "unverified_capability": "Cross-machine restore interoperability, post-restore restart readiness, and Doctor on the final Issue #88 candidate.",
+      "owner": "Issue #88 runtime backup and restore",
+      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "No raw archive was copied into the repository and no second-machine claim was made; only the exact blocked_external boundary is recorded."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/specifications/contracts/runtime-backup/v1/issue-91-validation-handoff.json",
+    "docs/sprints/issue-88-backup-restore/README.md"
+  ],
+  "release_decision": {
+    "decision": "release_blocked",
+    "external_blockers": [
+      {
+        "row_id": "91-L-088",
+        "severity": "medium",
+        "blocker": "A genuine compatible second machine for transferring and restoring the private raw runtime backup was not available.",
+        "retry_condition": "On a genuine second machine, transfer the private archive outside the repository, verify its SHA-256, run the documented stop/restore/start sequence, and record accepted readiness plus Doctor evidence against the frozen candidate.",
+        "unverified_capability": "Cross-machine restore interoperability, post-restore restart readiness, and Doctor on the final Issue #88 candidate."
+      }
+    ]
+  }
+}

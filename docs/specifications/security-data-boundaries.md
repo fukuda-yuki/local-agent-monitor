@@ -1364,6 +1364,52 @@ source/provenance details use the same inert-text path. A received fixed HTTP
 rejection is reported as known not committed; only a transport or malformed-
 response outcome is described as ambiguous. The complete contract is canonical
 in [`interfaces/sanitized-evidence-import.md`](interfaces/sanitized-evidence-import.md).
+## Runtime Backup And Restore Boundary
+
+`local-runtime-backup` is deliberately outside the repository-safe boundary.
+It can contain raw OTLP, prompts, responses, tool bodies, PII, retention
+ownership state, and tombstones. It must not enter git, Issues/PRs, docs, CI
+artifacts/logs, static dashboards, sanitized export bundles, or validation
+evidence. Every UI/CLI/API projection warns `raw_content_included`,
+`not_repository_safe`, and `retention_backup_not_purged` without returning raw
+bytes, private locators, or absolute paths.
+
+The backup API and UI are raw-bearing surfaces. Under `--sanitized-only`, the
+entire `/api/runtime-backup/v1/*` family and `/backup-restore` page are absent
+and return `404` before request-body handling or backup-store access. The
+overview omits its backup/restore entry, and this feature does not add a third
+permanent sidebar item to the canonical two-item Local Monitor navigation.
+
+Archive input is untrusted. Validation is bounded and precedes extraction:
+exact two-member stored ZIP, no traversal/absolute/duplicate/reparse-attributed/
+extra members, canonical manifest, SHA-256, size ceilings, SQLite quick/foreign-
+key checks, and supported component vectors. A read-only version/shape preflight
+occurs before any production migrator. Staging and publication stay in a known
+sibling directory; archive names never select a filesystem target.
+Generated columns, expression/partial indexes, undeclared component namespace
+collisions, SQLite-reserved-name schema objects outside the exact built-in
+allowlist, malformed or replace-colliding receipt rows, native devices/FIFOs/sockets, DOS device
+aliases, and reparse ancestors fail read-only before migration or target
+mutation.
+
+Raw-bearing online snapshots, archive partials, and inspection databases use an
+exact flushed same-directory owner marker before raw creation. Startup or the
+next operation in a caller-selected directory performs bounded no-follow
+recovery of only that marker-derived basename and its SQLite sidecars, deleting
+the marker last. Unmarked lookalikes, malformed markers, and active/nonregular
+owners are retained and fail closed. Completed archive bytes are durably flushed
+before and after no-overwrite rename; a crash residue is never treated as an
+operator backup or repository evidence.
+
+Restore has no HTTP endpoint and cannot run while the Local Monitor owns the
+database. Offline CLI uses an outside-DB crash journal, pre-restore backup,
+atomic replacement, retained rollback file, and installed validation. Current
+tombstones/read denial are reconciled into staging and confirmation cannot
+discard them; only a bound non-terminal missing-source reintroduction can be
+confirmed. Same-origin/Host-header/CSRF/no-store controls apply to online backup
+creation and preview; downloads are only process-produced, revalidated
+archives. The complete contract is canonical in
+[`interfaces/runtime-backup-restore.md`](interfaces/runtime-backup-restore.md).
 
 ## Shared Use Preconditions
 

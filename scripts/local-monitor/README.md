@@ -122,6 +122,80 @@ Remove runtime data only when explicitly intended:
 .\scripts\uninstall-startup-task.ps1 -StopRunning -RemoveData -Force
 ```
 
+## Runtime backup and offline restore
+
+The loopback page `http://127.0.0.1:4320/backup-restore` creates an online
+SQLite backup and inspects a selected archive. It intentionally cannot restore
+the live database. Runtime backup ZIPs may contain raw prompts, responses, tool
+arguments, results, and PII. They are not repository-safe and are not purged by
+retention cleanup; `retention_backup_not_purged` records that operator-owned
+file boundary.
+
+For an extracted release, run the packaged Config CLI directly:
+
+```powershell
+$cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
+$db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-store.db'
+& $cli runtime-backup create --database $db --output C:\private\local-monitor-backup.zip
+& $cli runtime-backup inspect --bundle C:\private\local-monitor-backup.zip
+& $cli runtime-backup preview --bundle C:\private\local-monitor-backup.zip --database $db
+```
+
+Restore is an offline operation. Set the start parameters to the intended
+installed instance before stopping it; `stop.ps1` removes ephemeral process
+state and must not be used as the source of restart configuration.
+
+```powershell
+$cli = '.\app\config-cli\CopilotAgentObservability.ConfigCli.exe'
+$stopScript = '.\scripts\stop.ps1'
+$startScript = '.\scripts\start.ps1'
+$monitorUrl = 'http://127.0.0.1:4320'
+$db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-store.db'
+$installRoot = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\app'
+$sanitizedOnly = $false # Use $true only when restoring the metadata-only instance.
+$startParameters = @{
+    Mode = 'Published'
+    Url = $monitorUrl
+    DbPath = $db
+    InstallRoot = $installRoot
+    SanitizedOnly = $sanitizedOnly
+    NoBrowser = $true
+    WaitReady = $true
+}
+
+& $stopScript -Force
+$stopExitCode = $LASTEXITCODE
+if ($stopExitCode -ne 0) {
+    exit $stopExitCode
+}
+
+& $cli runtime-backup restore --bundle C:\private\local-monitor-backup.zip --database $db
+$restoreExitCode = $LASTEXITCODE
+if ($restoreExitCode -ne 0) {
+    exit $restoreExitCode
+}
+
+& $startScript @startParameters
+$startExitCode = $LASTEXITCODE
+if ($startExitCode -ne 0) {
+    exit $startExitCode
+}
+```
+
+Capture `$LASTEXITCODE` immediately after each command as shown. In particular,
+never invoke `start.ps1` after a failed restore. With `-WaitReady`, the Published
+start succeeds only after `/health/ready` reports canonical `ready` or accepted
+`degraded`; `not_ready` or an unreachable endpoint is a failure.
+
+An existing destination gets a validated pre-restore backup by default. If
+preview reports a non-terminal missing source that would be reintroduced, add
+`--allow-resurrection --confirmation <digest>` to the restore invocation only
+after reviewing that exact archive-bound digest. Confirmation never removes a
+current tombstone or read denial. A different machine must have a compatible
+release installed and must rerun setup after restore because setup ownership,
+credentials, executables, PID/state, and logs are excluded as host-bound or
+ephemeral state.
+
 ## Repository Development Usage
 
 ```powershell

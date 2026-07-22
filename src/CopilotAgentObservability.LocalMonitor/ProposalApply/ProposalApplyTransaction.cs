@@ -227,7 +227,7 @@ internal sealed class ProposalApplyTransaction
             resolved.Add(root with { RootId = rootId });
             if (existing is null) saved.Add(new RootMapEntry(rootId, root.Kind, root.CanonicalPath));
         }
-        WriteRootMap(mapPath, saved);
+        if (saved.Count > 0) WriteRootMap(mapPath, saved);
         return resolved;
     }
 

@@ -661,7 +661,13 @@ public sealed partial class RetentionCatalogStore
         if (TableExists(c,t,"monitor_analysis_runs")) { using var q=c.CreateCommand();q.Transaction=t;q.CommandText="SELECT id,requested_at,raw_record_id,span_id,retention_owner_token FROM monitor_analysis_runs WHERE result_markdown IS NOT NULL OR error_message IS NOT NULL OR EXISTS(SELECT 1 FROM monitor_analysis_events e WHERE e.run_id=monitor_analysis_runs.id);";using var r=q.ExecuteReader();while(r.Read()) AddAnalysis(c,t,store,r,now); }
     }
 
-    private static void ValidateBackfill(SqliteConnection connection, SqliteTransaction transaction)
+    internal static void ValidateBackfill(SqliteConnection connection, SqliteTransaction transaction)
+        => ValidateCoverage(connection, transaction, allowMissingCatalogSources: false);
+
+    internal static void ValidateRestorableCoverage(SqliteConnection connection, SqliteTransaction transaction)
+        => ValidateCoverage(connection, transaction, allowMissingCatalogSources: true);
+
+    private static void ValidateCoverage(SqliteConnection connection, SqliteTransaction transaction, bool allowMissingCatalogSources)
     {
         foreach (var kind in new[] { RetentionStoreKind.SessionEventContent, RetentionStoreKind.RawRecord, RetentionStoreKind.AnalysisRunRaw })
         {
@@ -674,7 +680,8 @@ public sealed partial class RetentionCatalogStore
                     sourceBackedCatalogCount++;
                     continue;
                 }
-                if (proof != SourceReceiptProof.Missing || !IsFinalizedDeletedItem(connection, transaction, key))
+                if (proof != SourceReceiptProof.Missing
+                    || !allowMissingCatalogSources && !IsFinalizedDeletedItem(connection, transaction, key))
                     throw new RetentionMigrationBlockedException();
             }
 

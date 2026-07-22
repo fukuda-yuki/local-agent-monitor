@@ -30,6 +30,10 @@
             <h2 class="overview-title">概要</h2>
             <span class="overview-date">@today</span>
         </div>
+        @if (Model.RawAvailable)
+        {
+            <a class="panel-link" id="runtime-backup-link" href="/backup-restore">バックアップと復元 →</a>
+        }
         <div class="period-toggle" id="period-toggle" role="group" aria-label="集計期間">
             <button type="button" class="period-btn active" data-period="today">今日</button>
             <button type="button" class="period-btn" data-period="7d">7日</button>
