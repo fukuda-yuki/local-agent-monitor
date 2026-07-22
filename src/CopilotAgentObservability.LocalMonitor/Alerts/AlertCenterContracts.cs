@@ -56,6 +56,8 @@ internal sealed record AlertCenterSnapshot(
     AlertCenterQueryDto Query,
     string SnapshotState,
     long? OmittedReceiptCount,
+    string CoverageState,
+    long? OmittedCoverageFactCount,
     long TotalCount,
     IReadOnlyList<AlertCenterAlert> Alerts,
     IReadOnlyList<AlertCenterRecurringGroup> RecurringGroups,
@@ -87,7 +89,20 @@ internal sealed record AlertCenterLifecycle(
     string State,
     long Revision,
     string? LastOccurredAt,
-    IReadOnlyList<string> AllowedActions);
+    IReadOnlyList<string> AllowedActions,
+    IReadOnlyList<AlertCenterLifecycleTransition> History);
+
+internal sealed record AlertCenterLifecycleTransition(
+    long Revision,
+    string Action,
+    string PreviousState,
+    string State,
+    string OccurredAt,
+    string Actor,
+    string ReasonCode,
+    string? OldAlertId,
+    string? NewAlertId,
+    string ResultCode);
 
 internal sealed record AlertCenterRule(
     string RuleId,

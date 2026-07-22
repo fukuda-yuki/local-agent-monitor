@@ -189,10 +189,10 @@
 
   /* ── TOP5 from /api/monitor/trace-list (prompt labels only when raw-default) ── */
 
-  async function promptLabel(traceId) {
+  async function promptLabel(traceId, signal) {
     if (!rawAvailable) return null;
     try {
-      const resp = await fetch(`/traces/${encodeURIComponent(traceId)}/prompt-label`, { cache: "no-store" });
+      const resp = await fetch(`/traces/${encodeURIComponent(traceId)}/prompt-label`, { cache: "no-store", signal });
       if (!resp.ok) return null;
       const body = await resp.json();
       return body.prompt_label ?? null;
@@ -201,12 +201,13 @@
     }
   }
 
-  async function renderTopTraces(period) {
+  async function renderTopTraces(period, generation, signal) {
     const list = document.getElementById("top-traces");
     if (!list) return;
-    const resp = await fetch(`/api/monitor/trace-list?period=${period}&limit=5`, { cache: "no-store" });
+    const resp = await fetch(`/api/monitor/trace-list?period=${period}&limit=5`, { cache: "no-store", signal });
     if (!resp.ok) return;
     const page = await resp.json();
+    if (generation !== refreshGeneration) return;
     const items = page.items.filter((item) => item.total_tokens !== null && item.total_tokens > 0);
     list.replaceChildren();
     if (items.length === 0) {
@@ -215,7 +216,8 @@
     }
 
     const max = Math.max(1, ...items.map((item) => item.total_tokens));
-    const labels = await Promise.all(items.map((item) => promptLabel(item.trace_id)));
+    const labels = await Promise.all(items.map((item) => promptLabel(item.trace_id, signal)));
+    if (generation !== refreshGeneration) return;
     items.forEach((item, index) => {
       const row = document.createElement("li");
       row.className = "top-trace-row";
@@ -245,23 +247,68 @@
     });
   }
 
-  /* ── Latest critical alert from the sanitized Alert Center DTO ── */
+  /* ── Bounded Alert Center summary from sanitized snapshot DTOs ── */
 
-  async function renderAlertOverview(period) {
+  function countSources(alerts) {
+    const counts = new Map();
+    for (const alert of alerts) {
+      const key = `${alert.source.surface}@${alert.source.version}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  }
+
+  async function renderAlertOverview(period, generation, signal) {
     const body = document.getElementById("overview-alert-body");
     const heading = document.getElementById("overview-alert-title");
     const allLink = document.querySelector("#overview-alert-card .panel-link");
     if (!body) return;
-    if (allLink) allLink.href = `/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}`;
+    if (heading) heading.textContent = `Alert Center · ${PERIOD_LABEL[period]}`;
+    if (allLink) allLink.href = `/alerts?state=open&period=${encodeURIComponent(period)}`;
     body.replaceChildren(emptyState("アラートを読み込んでいます。"));
     try {
-      const response = await fetch(`/api/alert-center/v1/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}&limit=1`, { cache: "no-store" });
-      if (!response.ok) throw new Error("alert-center");
-      const snapshot = await response.json();
-      const alert = snapshot.alerts?.[0];
-      const incomplete = snapshot.snapshot_state === "incomplete";
-      if (heading) heading.textContent = incomplete ? "取得範囲の critical alert" : "最新の critical alert";
+      const options = { cache: "no-store", signal };
+      const [openResponse, criticalResponse, warningResponse] = await Promise.all([
+        fetch(`/api/alert-center/v1/alerts?state=open&period=${encodeURIComponent(period)}&limit=100`, options),
+        fetch(`/api/alert-center/v1/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}&limit=1`, options),
+        fetch(`/api/alert-center/v1/alerts?severity=warning&state=open&period=${encodeURIComponent(period)}&limit=1`, options),
+      ]);
+      if (!openResponse.ok || !criticalResponse.ok || !warningResponse.ok) throw new Error("alert-center");
+      const [openSnapshot, criticalSnapshot, warningSnapshot] = await Promise.all([
+        openResponse.json(), criticalResponse.json(), warningResponse.json(),
+      ]);
+      if (generation !== refreshGeneration) return;
+
+      const alert = criticalSnapshot.alerts?.[0];
+      const incomplete = [openSnapshot, criticalSnapshot, warningSnapshot]
+        .some(snapshot => snapshot.snapshot_state === "incomplete");
+      const visibleOnly = openSnapshot.alerts.length < openSnapshot.total_count;
       body.replaceChildren();
+
+      const summary = document.createElement("div");
+      summary.className = "overview-alert-summary";
+      const openCount = document.createElement("p");
+      openCount.className = "overview-alert-counts";
+      openCount.textContent = incomplete
+        ? `取得範囲の open ${openSnapshot.total_count} · critical ${criticalSnapshot.total_count} · warning ${warningSnapshot.total_count}（全体件数は不明）`
+        : `open ${openSnapshot.total_count} · critical ${criticalSnapshot.total_count} · warning ${warningSnapshot.total_count}`;
+      const sources = document.createElement("p");
+      sources.className = "monitor-subtle overview-alert-sources";
+      const sourceText = countSources(openSnapshot.alerts).map(([source, count]) => `${source} ${count}`).join(" · ");
+      sources.textContent = `${visibleOnly || incomplete ? "表示範囲の source" : "source"} · ${sourceText || "none"}`;
+      const recurring = document.createElement("p");
+      recurring.className = "monitor-subtle overview-alert-recurring";
+      const topRecurring = incomplete
+        ? null
+        : openSnapshot.recurring_groups?.find(group => group.aggregation_state === "supported");
+      recurring.textContent = incomplete
+        ? "incomplete snapshot のため top recurring rule は確定できません"
+        : topRecurring
+          ? `top recurring · ${topRecurring.rule_id}@${topRecurring.rule_version} · ${topRecurring.distinct_session_count} Sessions`
+          : "top recurring · none";
+      summary.append(openCount, sources, recurring);
+      body.append(summary);
+
       if (!alert) {
         body.append(emptyState(incomplete
           ? "不完全なスナップショットの取得範囲では open の critical alert は見つかりませんでした。全体として 0 件とは断定できません。"
@@ -270,9 +317,9 @@
       }
 
       const link = document.createElement("a");
-      link.href = `/alerts?alert=${encodeURIComponent(alert.alert_id)}`;
+      link.href = `/alerts?alert=${encodeURIComponent(alert.alert_id)}&period=${encodeURIComponent(period)}`;
       const alertTitle = document.createElement("strong");
-      alertTitle.textContent = alert.rule.title ?? alert.rule.rule_id;
+      alertTitle.textContent = `${incomplete ? "取得範囲の critical" : "latest critical"} · ${alert.rule.title ?? alert.rule.rule_id}`;
       const alertState = document.createElement("span");
       alertState.className = "monitor-subtle";
       alertState.textContent = `${alert.severity} · ${alert.lifecycle.state} · ${alert.source.surface}@${alert.source.version}`;
@@ -283,8 +330,8 @@
         : `最終観測 ${formatTime(alert.last_observed_at)}`;
       link.append(alertTitle, alertState, timing);
       body.append(link);
-    } catch {
-      if (heading) heading.textContent = "critical alert";
+    } catch (caught) {
+      if (generation !== refreshGeneration || caught?.name === "AbortError") return;
       body.replaceChildren(emptyState("Alert Center を読み込めませんでした。"));
     }
   }
@@ -292,24 +339,36 @@
   /* ── Period toggle ── */
 
   let currentPeriod = "today";
+  let refreshGeneration = 0;
+  let refreshController = null;
 
   async function applyPeriod(period) {
     currentPeriod = period;
+    const generation = ++refreshGeneration;
+    refreshController?.abort();
+    const controller = new AbortController();
+    refreshController = controller;
     for (const button of document.querySelectorAll("#period-toggle .period-btn")) {
       button.classList.toggle("active", button.dataset.period === period);
     }
 
-    const alertRefresh = renderAlertOverview(period);
+    const alertRefresh = renderAlertOverview(period, generation, controller.signal);
     try {
-      const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store" });
+      const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store", signal: controller.signal });
       if (!resp.ok) return;
       const overview = await resp.json();
+      if (generation !== refreshGeneration) return;
       renderKpi(overview, period);
       renderModels(overview);
       renderHourly(overview);
-      await renderTopTraces(period);
+      await renderTopTraces(period, generation, controller.signal);
+    } catch (caught) {
+      if (generation === refreshGeneration && caught?.name !== "AbortError") {
+        /* Server-rendered overview remains visible on refresh failure. */
+      }
     } finally {
       await alertRefresh;
+      if (generation === refreshGeneration) refreshController = null;
     }
   }
 
@@ -322,5 +381,5 @@
 
   // New projections arriving over SSE refresh the current period in place.
   document.addEventListener("cao-monitor-refresh", () => applyPeriod(currentPeriod));
-  renderAlertOverview(currentPeriod);
+  applyPeriod(currentPeriod);
 })();

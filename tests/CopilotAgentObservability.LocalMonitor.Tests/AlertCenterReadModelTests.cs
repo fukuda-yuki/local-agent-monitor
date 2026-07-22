@@ -81,11 +81,49 @@ public sealed class AlertCenterReadModelTests
         var snapshot = Assert.IsType<AlertCenterSnapshot>(result.Snapshot);
         Assert.Empty(snapshot.Alerts);
         Assert.Equal(100, snapshot.Coverage.Count);
+        Assert.Equal("incomplete", snapshot.CoverageState);
+        Assert.Null(snapshot.OmittedCoverageFactCount);
         Assert.Equal("coverage-rule-000", snapshot.Coverage[0].RuleId);
         Assert.Equal("coverage-rule-099", snapshot.Coverage[^1].RuleId);
         Assert.All(snapshot.Coverage, item => Assert.Equal("unknown", item.ContextState));
         Assert.Equal(4, ownerStore.SuppressionQueryCount);
         Assert.Equal(0, lifecycleStore.GetCount);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(100)]
+    public void Read_BoundsZeroSuppressionEvaluationHistoryAndReportsUnknownOmission(int maximumItemsPerPage)
+    {
+        using var temp = new MonitorTempDirectory
+        {
+            TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)),
+        };
+        var ownerStore = new ZeroSuppressionCoverageQueryStore(2_001, maximumItemsPerPage);
+
+        var result = ReadModel(temp, ownerStore, ownerStore, new OpenLifecycleStore()).Read(Query());
+
+        Assert.Equal(AlertCenterReadStatus.Success, result.Status);
+        var snapshot = Assert.IsType<AlertCenterSnapshot>(result.Snapshot);
+        Assert.Empty(snapshot.Coverage);
+        Assert.Equal("incomplete", snapshot.CoverageState);
+        Assert.Null(snapshot.OmittedCoverageFactCount);
+        Assert.Equal(20, ownerStore.EvaluationQueryCount);
+    }
+
+    [Fact]
+    public void Read_FailsClosedWhenLifecycleHistoryIsNotTheBoundedContiguousChain()
+    {
+        using var temp = new MonitorTempDirectory
+        {
+            TimeProvider = new MutableTimeProvider(new DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)),
+        };
+        var ownerStore = new OwnerQueryStore(ReceiptItems(1));
+
+        var result = ReadModel(temp, ownerStore, ownerStore, new TruncatedLifecycleStore()).Read(Query());
+
+        Assert.Equal(AlertCenterReadStatus.Unavailable, result.Status);
+        Assert.Null(result.Snapshot);
     }
 
     private static SqliteAlertCenterReadModel ReadModel(
@@ -310,6 +348,47 @@ public sealed class AlertCenterReadModelTests
         public AlertStoreListResult ListSuppressions(string requestedEvaluationId) => throw new NotSupportedException();
     }
 
+    private sealed class ZeroSuppressionCoverageQueryStore(int evaluationCount, int maximumItemsPerPage)
+        : IAlertEngineStore, IAlertEngineQueryStore
+    {
+        private readonly IReadOnlyList<AlertEvaluationProjectionV1> evaluations = Enumerable.Range(0, evaluationCount)
+            .Select(index => new AlertEvaluationProjectionV1(
+                index.ToString("x64"),
+                new string('b', 64),
+                "zero-suppression-fixture-v1",
+                new string('c', 64),
+                0,
+                0))
+            .ToArray();
+
+        internal int EvaluationQueryCount { get; private set; }
+
+        public AlertStoreResult Initialize() => new(AlertStoreStatus.Success);
+
+        public AlertReceiptQueryPage ListReceipts(string? afterAlertId, int limit) =>
+            new(AlertEngineQueryStatus.Success, []);
+
+        public AlertEvaluationQueryPage ListEvaluations(string? afterEvaluationId, int limit)
+        {
+            EvaluationQueryCount++;
+            var start = afterEvaluationId is null
+                ? 0
+                : evaluations.Select((item, index) => (item, index))
+                    .Single(pair => pair.item.EvaluationId == afterEvaluationId).index + 1;
+            var items = evaluations.Skip(start).Take(Math.Min(limit, maximumItemsPerPage)).ToArray();
+            var next = start + items.Length < evaluations.Count ? items[^1].EvaluationId : null;
+            return new(AlertEngineQueryStatus.Success, items, next);
+        }
+
+        public AlertSuppressionQueryPage ListSuppressions(string evaluationId, long? afterSuppressionOrdinal, int limit) =>
+            throw new InvalidOperationException("Zero-suppression evaluations must not query suppression rows.");
+
+        public AlertStoreResult Append(AlertEvaluationResult evaluation) => throw new NotSupportedException();
+        public AlertStoreReadResult GetEvaluation(string evaluationId) => throw new NotSupportedException();
+        public AlertStoreReadResult GetReceipt(string alertId) => throw new NotSupportedException();
+        public AlertStoreListResult ListSuppressions(string evaluationId) => throw new NotSupportedException();
+    }
+
     private sealed class OpenLifecycleStore : IAlertLifecycleStore
     {
         internal int GetCount { get; private set; }
@@ -331,6 +410,52 @@ public sealed class AlertCenterReadModelTests
 
         public AlertLifecycleHistoryResult History(string alertId, int limit = 50) =>
             new(AlertLifecycleStoreStatus.Success, []);
+
+        public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) => throw new NotSupportedException();
+        public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => throw new NotSupportedException();
+        public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => throw new NotSupportedException();
+        public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => throw new NotSupportedException();
+    }
+
+    private sealed class TruncatedLifecycleStore : IAlertLifecycleStore
+    {
+        private string? alertId;
+        private static readonly DateTimeOffset OccurredAt = new(2026, 7, 23, 11, 0, 0, TimeSpan.Zero);
+
+        public AlertLifecycleStoreResult Initialize() => new(AlertLifecycleStoreStatus.Success);
+
+        public AlertLifecycleStoreResult Get(string requestedAlertId)
+        {
+            alertId = requestedAlertId;
+            return new(
+                AlertLifecycleStoreStatus.Success,
+                Lifecycle: new(
+                    AlertLifecycleContractVersions.Lifecycle,
+                    requestedAlertId,
+                    AlertLifecycleState.Dismissed,
+                    2,
+                    OccurredAt));
+        }
+
+        public AlertLifecycleHistoryResult History(string requestedAlertId, int limit = 50) => new(
+            AlertLifecycleStoreStatus.Success,
+            [new(
+                AlertLifecycleContractVersions.Lifecycle,
+                new string('e', 64),
+                alertId ?? requestedAlertId,
+                2,
+                1,
+                AlertLifecycleAction.Dismiss,
+                AlertLifecycleState.Acknowledged,
+                AlertLifecycleState.Dismissed,
+                OccurredAt,
+                "local_user",
+                "user_reviewed",
+                "bounded-private-comment",
+                "aid1_" + new string('a', 43),
+                null,
+                null,
+                "alert_lifecycle_updated")]);
 
         public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) => throw new NotSupportedException();
         public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => throw new NotSupportedException();

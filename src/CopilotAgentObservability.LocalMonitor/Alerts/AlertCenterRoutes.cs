@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.LocalMonitor.Alerts;
 
@@ -269,10 +270,51 @@ internal static class AlertCenterRoutes
         && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
         && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
     private static bool OpaqueId(string value) => value.Length is >= 1 and <= 256 && !value.Any(character => char.IsWhiteSpace(character) || char.IsControl(character) || character is '/' or '\\' or '?' or '#');
-    private static bool Label(string value) => value.Length is >= 1 and <= 256 && !value.Any(char.IsControl);
+    private static bool Label(string value) => AlertCenterLabelGuard.Accepts(value);
     private static void Prepare(HttpResponse response)
     {
         response.ContentType = "application/json";
         response.Headers.CacheControl = "no-store";
     }
+}
+
+internal static class AlertCenterLabelGuard
+{
+    internal static bool Accepts(string? value) => value is { Length: >= 1 and <= 256 }
+        && !string.IsNullOrWhiteSpace(value)
+        && !value.Any(char.IsControl)
+        && string.Equals(MeasurementSanitizer.SanitizeFreeFormName(value), value, StringComparison.Ordinal)
+        && !LooksLikePathOrCredential(value);
+
+    private static bool LooksLikePathOrCredential(string value) =>
+        value.Contains('/')
+        || value.Contains('\\')
+        || value.StartsWith("~", StringComparison.Ordinal)
+        || value.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+        || value.Length >= 2 && IsAsciiLetter(value[0]) && value[1] == ':'
+        || ContainsSensitiveMarker(value, "authorization")
+        || ContainsSensitiveMarker(value, "credential")
+        || ContainsSensitiveMarker(value, "token")
+        || ContainsSensitiveMarker(value, "api-key")
+        || ContainsSensitiveMarker(value, "apikey");
+
+    private static bool ContainsSensitiveMarker(string value, string marker)
+    {
+        var start = 0;
+        while (start < value.Length)
+        {
+            var index = value.IndexOf(marker, start, StringComparison.OrdinalIgnoreCase);
+            if (index < 0) return false;
+            var end = index + marker.Length;
+            if ((index == 0 || !char.IsLetterOrDigit(value[index - 1]))
+                && (end == value.Length || !char.IsLetterOrDigit(value[end])))
+            {
+                return true;
+            }
+            start = index + 1;
+        }
+        return false;
+    }
+
+    private static bool IsAsciiLetter(char value) => value is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
 }

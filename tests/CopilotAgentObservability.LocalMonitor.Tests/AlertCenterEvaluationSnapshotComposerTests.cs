@@ -334,6 +334,156 @@ public sealed class AlertCenterEvaluationSnapshotComposerTests
     }
 
     [Fact]
+    public void EvidenceResolver_ResolvesOpaqueEventEvidenceByExactEventIdentityAndTuple()
+    {
+        using var temp = NewTemp();
+        var sessionId = Guid.CreateVersion7();
+        var traceId = "generic-event-trace";
+        var detail = Detail(sessionId, traceId, SessionSourceSurface.VisualStudioCode, "github-copilot-vscode-otel", "1.2.3");
+        var exactEvent = Assert.Single(detail.Events);
+        var sessionStore = Store(temp, detail);
+        var projection = new ComposerProjectionStore();
+        projection.Add(traceId);
+        var resolver = new AlertCenterEvidenceResolver(sessionStore, projection, new ComposerCompatibilityStore());
+        var reference = new AlertEvidenceReference(
+            AlertEvidenceKind.Event,
+            "opaque-event-evidence",
+            sessionId.ToString("D"),
+            traceId,
+            null,
+            null,
+            exactEvent.EventId.ToString("D"),
+            null,
+            exactEvent.OccurredAt);
+
+        var resolved = resolver.ResolveForReceipt(reference, "github-copilot-vscode", "1.2.3");
+
+        Assert.Equal(AlertCenterEvidenceAvailability.Available, resolved.Availability);
+        Assert.Equal("not_captured", resolved.ContentState);
+        Assert.Equal($"/diagnostics?session_id={sessionId:D}", resolved.Href);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Missing,
+            resolver.Resolve(reference with { EventId = Guid.CreateVersion7().ToString("D") }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { TraceId = "foreign-trace" }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { ObservedAt = exactEvent.OccurredAt.AddTicks(1) }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.ResolveForReceipt(reference, "github-copilot-cli", "1.2.3").Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with
+            {
+                EvidenceId = $"session-event-row-v1:{Guid.CreateVersion7():D}",
+            }).Availability);
+    }
+
+    [Fact]
+    public void EvidenceResolver_ResolvesGenericSessionWithOptionalTraceAndRetentionState()
+    {
+        using var temp = NewTemp();
+        var sessionId = Guid.CreateVersion7();
+        var traceId = "generic-session-trace";
+        var detail = Detail(sessionId, traceId, SessionSourceSurface.VisualStudioCode, "github-copilot-vscode-otel", "1.2.3");
+        detail = detail with { Session = detail.Session with { RawRetentionState = SessionRawRetentionState.Expiring } };
+        var sessionStore = Store(temp, detail);
+        var projection = new ComposerProjectionStore();
+        projection.Add(traceId);
+        var resolver = new AlertCenterEvidenceResolver(sessionStore, projection, new ComposerCompatibilityStore());
+        var reference = new AlertEvidenceReference(
+            AlertEvidenceKind.Session,
+            "opaque-session-evidence",
+            sessionId.ToString("D"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            detail.Session.LastSeenAt);
+
+        var available = resolver.ResolveForReceipt(reference, "unrelated-source", "9.9.9");
+
+        Assert.Equal(AlertCenterEvidenceAvailability.Available, available.Availability);
+        Assert.Equal("available", available.ContentState);
+        Assert.Equal($"/diagnostics?session_id={sessionId:D}", available.Href);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Available,
+            resolver.ResolveForReceipt(reference with { TraceId = traceId }, "github-copilot-vscode", "1.2.3").Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.ResolveForReceipt(reference with { TraceId = traceId }, "github-copilot-cli", "1.2.3").Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { TraceId = "foreign-trace" }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { EventId = "unverified-child" }).Availability);
+
+        var expiredStore = Store(temp, detail with
+        {
+            Session = detail.Session with { RawRetentionState = SessionRawRetentionState.ExpiredPendingDeletion },
+        });
+        var expired = new AlertCenterEvidenceResolver(expiredStore, projection, new ComposerCompatibilityStore()).Resolve(reference);
+        Assert.Equal(AlertCenterEvidenceAvailability.Expired, expired.Availability);
+        Assert.Equal("expired", expired.ContentState);
+        Assert.Equal($"/diagnostics?session_id={sessionId:D}", expired.Href);
+
+        using var missingTemp = NewTemp();
+        var missing = new AlertCenterEvidenceResolver(Store(missingTemp), projection, new ComposerCompatibilityStore()).Resolve(reference);
+        Assert.Equal(AlertCenterEvidenceAvailability.Missing, missing.Availability);
+        Assert.Equal(AlertCenterEvidenceAvailability.Unknown, resolver.Resolve(reference with { SessionId = "not-a-canonical-uuid" }).Availability);
+    }
+
+    [Fact]
+    public void EvidenceResolver_ResolvesGenericTraceOnlyThroughExactProjectionOwnershipAndPartition()
+    {
+        using var temp = NewTemp();
+        var sessionId = Guid.CreateVersion7();
+        var traceId = "generic-trace";
+        var detail = Detail(sessionId, traceId, SessionSourceSurface.VisualStudioCode, "github-copilot-vscode-otel", "1.2.3");
+        var sessionStore = Store(temp, detail);
+        var projection = new ComposerProjectionStore();
+        projection.Add(traceId);
+        var resolver = new AlertCenterEvidenceResolver(sessionStore, projection, new ComposerCompatibilityStore());
+        var reference = new AlertEvidenceReference(
+            AlertEvidenceKind.Trace,
+            "arbitrary-opaque-trace-evidence",
+            sessionId.ToString("D"),
+            traceId,
+            null,
+            null,
+            null,
+            null,
+            detail.Session.LastSeenAt);
+
+        var available = resolver.ResolveForReceipt(reference, "github-copilot-vscode", "1.2.3");
+
+        Assert.Equal(AlertCenterEvidenceAvailability.Available, available.Availability);
+        Assert.Equal($"/traces/{traceId}", available.Href);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.ResolveForReceipt(reference, "github-copilot-vscode", "9.9.9").Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { TraceId = "not-owned" }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { SpanId = "unverified-child" }).Availability);
+        Assert.Equal(
+            AlertCenterEvidenceAvailability.Unknown,
+            resolver.Resolve(reference with { EvidenceId = "source-observation-row-v1:01" }).Availability);
+
+        var missingProjection = new AlertCenterEvidenceResolver(
+            sessionStore,
+            new ComposerProjectionStore(),
+            new ComposerCompatibilityStore());
+        Assert.Equal(AlertCenterEvidenceAvailability.Missing, missingProjection.Resolve(reference).Availability);
+    }
+
+    [Fact]
     public void Compose_SeparatesBusyFromUnavailableStoreFailures()
     {
         using var temp = NewTemp();

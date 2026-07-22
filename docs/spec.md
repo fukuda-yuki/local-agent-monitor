@@ -509,8 +509,14 @@ as a consumer of #80 typed bounded receipt/evaluation/suppression projections,
 #81/#82 descriptors, #83 lifecycle, exact Session records, sanitized monitor
 rows, and #61 source-compatibility observations. `GET
 /api/alert-center/v1/alerts` provides a bounded filterable snapshot and
-`/alerts` renders its list/detail, exact evidence state, lifecycle actions,
-coverage facts, and recurring groups. Recurrence requires at least two exact
+`/alerts` renders its list/detail, exact evidence state, bounded sanitized
+lifecycle transition history/actions, coverage facts, and recurring groups.
+Repository/workspace query values pass the existing sanitized free-form guard
+plus #84 path/credential/token checks before they can be reflected into the
+exact query DTO. Persisted scope values pass the same guard, and one unsafe
+value fails the whole scope to unknown/null. Rule/source facets retain
+the union of the current page, filter-independent bounded coverage facts, and
+the active value, including a zero-result active filter. Recurrence requires at least two exact
 distinct Sessions under the same rule/version, exact repository/workspace,
 source/version, and UTC observation date. A snapshot that reaches the 2,000
 receipt acquisition ceiling is explicitly incomplete and does not estimate the
@@ -529,6 +535,16 @@ facts bind the input hash as unknown-status row references but do not promote
 any current semantic capability. There is no evaluation on ingestion, startup,
 GET, page navigation, or in browser code; no second alert state store, custom
 receipt parser, notification, or recommendation surface is introduced. The
+Overview consumes the same bounded snapshot DTO to show the active period's
+open count, critical/warning breakdown, source breakdown, top supported
+recurring rule, and latest critical alert, with explicit bounded/incomplete
+wording. Coverage has independent 20-page / 2,000-evaluation / 100-fact bounds
+and reports capped omission as unknown instead of claiming no suppressions.
+Generic Session-event evidence resolves through its exact event UUID even when
+the receipt evidence ID is an independent opaque value. Browser loads use
+monotonic generations so an older filter, page,
+lifecycle, period, or SSE response cannot replace newer state; custom dates are
+validated as two ordered inclusive endpoints spanning at most 366 days. The
 metadata-only surface remains available under `--sanitized-only`. D042's
 two-item sidebar remains unchanged; Overview, trace detail, and exact Session
 diagnostics provide contextual links.

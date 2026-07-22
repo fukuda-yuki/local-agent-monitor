@@ -161,15 +161,20 @@ Allowed query members are:
 | `state` | `open`, `acknowledged`, `dismissed`, `resolved`, or `superseded` |
 | `rule_id` | exact rule token |
 | `source_surface` | exact source token |
-| `repository` | exact repository label |
-| `workspace` | exact workspace label |
+| `repository` | exact repository label accepted unchanged by the existing sanitized free-form guard |
+| `workspace` | exact workspace label accepted unchanged by the existing sanitized free-form guard |
 | `completeness` | `unbound`, `partial`, `rich`, or `full` |
 | `period` | `today`, `7d`, or `30d`; default `30d` |
 | `from`, `to` | inclusive UTC dates in `yyyy-MM-dd`; both required together and mutually exclusive with `period`; maximum 366 days |
 | `offset` | integer `0..1000000`; default `0` |
 | `limit` | integer `1..100`; default `50` |
 
-Unknown, repeated, malformed, or conflicting query members return `400` with
+Repository/workspace values are logical labels, not paths, and are not
+truncated or rewritten. Any `/` or `\` separator, home-relative `~` prefix,
+local/device-relative path form, email-like PII, or Bearer/credential/token-like
+string fails the #84 guard, returns the fixed invalid query error, and is never
+reflected in `snapshot.query`. Unknown, repeated,
+malformed, or conflicting query members return `400` with
 `alert_center_invalid_query`. `from` and `to` are converted to an exact
 half-open UTC interval and echoed as inclusive dates. Filtering is ordinal and
 exact. Unknown scope does not match a repository/workspace filter.
@@ -188,6 +193,8 @@ Successful responses have this conceptual shape:
   },
   "snapshot_state": "complete",
   "omitted_receipt_count": 0,
+  "coverage_state": "complete",
+  "omitted_coverage_fact_count": 0,
   "total_count": 1,
   "alerts": [],
   "recurring_groups": [],
@@ -206,6 +213,15 @@ supported recurring result. An invalid or non-canonical stored receipt fails
 the complete request closed with `503 alert_center_store_unavailable`; it is
 never silently omitted.
 
+Coverage acquisition is independently bounded to at most 20 owner evaluation
+pages, 2,000 evaluation projections, and 100 suppression facts. Reaching the
+fact bound is conservatively incomplete; reaching a page/evaluation bound is
+incomplete when the owner cursor has more data. Either case sets
+`coverage_state` to `incomplete` and `omitted_coverage_fact_count` to null; a
+bounded empty list is therefore never presented as proof that no suppressions
+exist. A fully exhausted owner cursor uses `complete` and zero. These coverage
+fields do not change receipt `snapshot_state`.
+
 ## Alert item
 
 Each alert item contains these bounded sanitized fields:
@@ -213,7 +229,11 @@ Each alert item contains these bounded sanitized fields:
 - `alert_id`, `severity`, `initial_state`, `first_observed_at`,
   `last_observed_at`, and `summary` copied from the accepted receipt;
 - `lifecycle` copied from #83 with `state`, `revision`,
-  `last_occurred_at`, and the allowed local-user actions for that exact state;
+  `last_occurred_at`, the allowed local-user actions for that exact state, and
+  at most 100 transition projections in #83 revision-descending order. Each
+  transition contains only revision, action, previous/state, occurred time,
+  actor, reason code, optional old/new alert IDs, and result code. Lifecycle
+  comments and idempotency keys are never copied into the Alert Center DTO;
 - `rule` with receipt `rule_id`/`rule_version`, registry contract state,
   title, description, evaluation window, scope, required capabilities, and
   descriptor thresholds;
@@ -233,6 +253,12 @@ Each alert item contains these bounded sanitized fields:
 If an exact rule ID/version is not registered, `rule.contract_state` is
 `unknown_version` and presentation metadata is null. Receipt facts remain
 visible and no nearest-version fallback is allowed.
+
+Every persisted trace/Session repository and workspace value passes the same
+#84 label guard as query input before projection. If any present scope value is
+path-, PII-, credential-, or token-like, the whole scope projection is
+`state: unknown` with every repository/workspace member null; the unsafe value
+is never normalized, echoed, or used for filtering/recurrence.
 
 Lifecycle actions are state-specific:
 
@@ -268,6 +294,22 @@ scope.
 
 Evidence navigation is based only on exact receipt references:
 
+- a Session reference resolves only from a canonical UUID `session_id` and an
+  exact persisted Session. It may omit `trace_id`; when a trace is present it
+  must be owned by the Session, and receipt source-partition checking applies
+  only to that exact trace. Session raw-retention state supplies the bounded
+  content/expired state while the diagnostics link remains metadata-only;
+- a generic trace reference with any accepted opaque evidence ID resolves only
+  when its exact trace projection exists, its canonical UUID Session exists and
+  owns it, and the receipt source partition agrees. The stricter
+  `source-observation-row-v1:{row_id}` path remains supported and additionally
+  verifies its exact persisted source row;
+- a Session-event reference uses its canonical UUID `event_id` as the persisted
+  identity even when `evidence_id` is an independent accepted opaque value. The
+  exact Session, optional trace ownership, receipt source partition, event time,
+  and child-ID tuple must all agree. The stricter
+  `session-event-row-v1:{event_uuid}` evidence ID remains accepted only when its
+  UUID is canonical and equals `event_id`;
 - a span reference resolves through its persisted monitor-row identity; the
   resolved row and its `raw_record_id` source observation must also match the
   receipt Session, trace, span, source partition, and timestamp tuple before it
@@ -335,10 +377,12 @@ separate members. Otherwise those source/session/date members are null and
 `context_state: unknown`. No repository, source, date, or Session is inferred
 for a suppression-only evaluation.
 
-Coverage facts are a separate bounded list (maximum 100) acquired in stable
-#80 evaluation-ID and suppression-ordinal order; the contract does not infer
-recency because a suppression has no timestamp. Coverage is not altered by
-alert filters. The UI labels this explicitly. It distinguishes
+Coverage facts are a separate bounded list acquired in stable #80 evaluation-ID
+and suppression-ordinal order under the 20-page / 2,000-evaluation / 100-fact
+limits above; the contract does not infer recency because a suppression has no
+timestamp. Coverage is not altered by alert filters. The UI labels this
+explicitly and announces incomplete acquisition without turning a capped empty
+list into a no-suppression claim. It distinguishes
 missing capability, source-not-applicable, rule-disabled, minimum-sample,
 incomplete, and other frozen suppression codes without calling them alerts.
 
@@ -350,6 +394,10 @@ incomplete, and other frozen suppression codes without calling them alerts.
 - 100-item previous/next pagination that preserves the active filters, exposes
   the visible range and total count, and resets to the first page when a filter
   changes;
+- rule/source choices derived from the union of current-page alert facts,
+  filter-independent bounded coverage facts, and the active URL value. An
+  active value remains selected when it yields zero rows or exists only beyond
+  the current 100-item page;
 - an alert table with severity/state, rule title/version, Session/trace,
   observed values versus effective thresholds, source/version/completeness,
   first/last observation, evidence count, and coverage note;
@@ -361,6 +409,14 @@ incomplete, and other frozen suppression codes without calling them alerts.
 - distinct loading, empty, API error, stale-revision, weak/incomplete,
   missing/expired/unknown evidence, mixed completeness, sanitized-only, and
   unsupported source/capability states.
+
+A custom period requires both UTC dates, `from <= to`, and an inclusive span of
+at most 366 days before the browser changes the URL or starts a read. Validation
+is announced and the UI does not silently issue a default 30-day request while
+the control says custom. Server and client use the same inclusive range rule.
+Every filter, page, post-mutation refresh, and initial load has a monotonic
+generation; a superseded response or failure cannot overwrite the newer URL,
+selection, lifecycle, pagination, or status.
 
 An `incomplete` snapshot is never rendered as a definitive zero-result or
 latest-result claim. Its empty states say only that no match exists in the
@@ -374,10 +430,16 @@ selection, form controls have labels, status updates use an atomic live region,
 and severity/state are never communicated by color alone. Captured values are
 inserted as text; no live markup rendering is permitted.
 
-The overview page shows the latest critical alert by rendering the same alert
-item DTO from this API and links to its exact Alert Center selection. It does
-not change `/api/monitor/overview`. Exact trace and Session views link to
-filtered Alert Center URLs without changing their existing DTOs.
+For the active overview period, the overview page uses only bounded Alert Center
+snapshot DTO reads to show the open alert count, critical/warning count
+breakdown, source breakdown, top supported recurring rule, and latest critical
+alert, with a link to its exact Alert Center selection. A source breakdown over
+only the returned 100-item page is labeled as a visible-range breakdown. An
+`incomplete` acquisition never claims an exact global count, zero, top, or
+latest value. Period-toggle and SSE refreshes have a monotonic generation, so a
+response for an older period cannot replace the current card title, values, or
+links. This does not change `/api/monitor/overview`. Exact trace and Session
+views link to filtered Alert Center URLs without changing their existing DTOs.
 
 ## Errors and security
 

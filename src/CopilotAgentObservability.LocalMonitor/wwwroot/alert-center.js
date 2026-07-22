@@ -20,6 +20,8 @@
   const pageInfo = document.getElementById("alert-page-info");
   let snapshot = null;
   let selectedAlertId = null;
+  let loadGeneration = 0;
+  let loadController = null;
 
   function node(tag, className, text) {
     const value = document.createElement(tag);
@@ -52,6 +54,7 @@
     const params = currentUrl().searchParams;
     const mappings = [
       ["alert-filter-severity", "severity"], ["alert-filter-state", "state"],
+      ["alert-filter-rule", "rule_id"], ["alert-filter-source", "source_surface"],
       ["alert-filter-completeness", "completeness"], ["alert-filter-repository", "repository"],
       ["alert-filter-workspace", "workspace"],
     ];
@@ -62,10 +65,10 @@
     const period = document.getElementById("alert-filter-period");
     const from = document.getElementById("alert-filter-from");
     const to = document.getElementById("alert-filter-to");
-    if (params.has("from") && params.has("to")) {
+    if (params.has("from") || params.has("to")) {
       period.value = "custom";
-      from.value = params.get("from");
-      to.value = params.get("to");
+      from.value = params.get("from") ?? "";
+      to.value = params.get("to") ?? "";
     } else {
       period.value = params.get("period") ?? "30d";
     }
@@ -77,7 +80,46 @@
     for (const label of document.querySelectorAll(".alert-custom-date")) label.hidden = !custom;
   }
 
+  function dateNumber(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const [year, month, day] = value.split("-").map(Number);
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day
+      ? parsed.valueOf() / 86_400_000
+      : null;
+  }
+
+  function validateCustomPeriod(announceFailure = false) {
+    const from = document.getElementById("alert-filter-from");
+    const to = document.getElementById("alert-filter-to");
+    from.setCustomValidity("");
+    to.setCustomValidity("");
+    if (document.getElementById("alert-filter-period").value !== "custom") return true;
+
+    let message = "";
+    const fromDay = dateNumber(from.value);
+    const toDay = dateNumber(to.value);
+    if (fromDay === null || toDay === null) {
+      message = "指定期間には開始日と終了日の両方が必要です。";
+    } else if (fromDay > toDay) {
+      message = "開始日は終了日以前にしてください。";
+    } else if (toDay - fromDay >= 366) {
+      message = "指定期間は開始日と終了日を含めて 366 日以内にしてください。";
+    }
+    if (!message) return true;
+
+    to.setCustomValidity(message);
+    if (announceFailure) {
+      status.hidden = false;
+      status.textContent = message;
+      announce(message);
+      form.reportValidity();
+    }
+    return false;
+  }
+
   function updateUrlFromFilters() {
+    if (!validateCustomPeriod(true)) return false;
     const url = currentUrl();
     const params = url.searchParams;
     const mappings = [
@@ -87,7 +129,8 @@
       ["alert-filter-workspace", "workspace"],
     ];
     for (const [id, key] of mappings) {
-      const value = document.getElementById(id).value.trim();
+      const rawValue = document.getElementById(id).value;
+      const value = key === "repository" || key === "workspace" ? rawValue : rawValue.trim();
       if (value) params.set(key, value); else params.delete(key);
     }
     const period = document.getElementById("alert-filter-period").value;
@@ -105,6 +148,7 @@
     params.delete("alert");
     params.delete("offset");
     window.history.replaceState(null, "", `${url.pathname}?${params.toString()}`);
+    return true;
   }
 
   function apiParameters() {
@@ -125,17 +169,19 @@
     const all = node("option", null, label);
     all.value = "";
     select.append(all);
-    for (const value of [...new Set(values.filter(Boolean))].sort()) {
+    const options = new Set(values.filter(Boolean));
+    if (selected) options.add(selected);
+    for (const value of [...options].sort()) {
       const option = node("option", null, value);
       option.value = value;
       select.append(option);
     }
-    if ([...select.options].some(option => option.value === selected)) select.value = selected;
+    select.value = selected;
   }
 
   function valuesText(alert) {
     const observed = alert.observed_values.map(value => `${value.name} ${value.value} ${value.unit}`).join(" · ");
-    const thresholds = alert.effective_thresholds.map(value => `${value.name} ${value.value}`).join(" · ");
+    const thresholds = alert.effective_thresholds.map(value => `${value.name} ${value.value} ${value.unit}`).join(" · ");
     return `${observed || "観測値なし"} / ${thresholds || "閾値なし"}`;
   }
 
@@ -255,7 +301,22 @@
       ["Revision", String(alert.lifecycle.revision)],
     ]));
 
-    detailBody.append(badges, summary, formula, measurements, provenance, evidenceSection, relationships);
+    const history = node("section", "alert-detail-section");
+    history.append(node("h4", null, "Lifecycle history"));
+    const historyList = node("ol", "alert-lifecycle-history");
+    for (const transition of alert.lifecycle.history ?? []) {
+      const relationship = transition.old_alert_id || transition.new_alert_id
+        ? ` · old ${transition.old_alert_id ?? "none"} / new ${transition.new_alert_id ?? "none"}`
+        : "";
+      historyList.append(node(
+        "li",
+        null,
+        `revision ${transition.revision} · ${transition.action} · ${transition.previous_state} → ${transition.state} · ${formatTime(transition.occurred_at)} · ${transition.actor} / ${transition.reason_code} · ${transition.result_code}${relationship}`));
+    }
+    if (!alert.lifecycle.history?.length) historyList.append(node("li", "empty-state", "lifecycle transition はありません。"));
+    history.append(historyList);
+
+    detailBody.append(badges, summary, formula, measurements, provenance, evidenceSection, relationships, history);
     renderActions(alert);
   }
 
@@ -348,11 +409,16 @@
     recurring.append(list);
   }
 
-  function renderCoverage(facts) {
+  function renderCoverage(facts, coverageState) {
     coverage.replaceChildren();
     coverage.append(node("p", "monitor-subtle retention-diagnostics-help", "以下の suppression fact はアラートではありません。"));
+    if (coverageState === "incomplete") {
+      coverage.append(node("p", "monitor-subtle", "coverage の取得上限に達しました。省略件数は不明です。"));
+    }
     if (facts.length === 0) {
-      coverage.append(node("p", "empty-state", "suppression fact はありません。"));
+      coverage.append(node("p", "empty-state", coverageState === "incomplete"
+        ? "取得範囲で suppression fact は確認できません。0 件とは断定できません。"
+        : "suppression fact はありません。"));
       return;
     }
     const list = node("ul", "alert-coverage-list");
@@ -444,16 +510,28 @@
   }
 
   async function load(announceSelection = false) {
+    const generation = ++loadGeneration;
+    loadController?.abort();
+    const controller = new AbortController();
+    loadController = controller;
     status.hidden = false;
     status.textContent = "アラートを読み込んでいます。";
     error.hidden = true;
     empty.hidden = true;
     try {
-      const response = await fetch(`/api/alert-center/v1/alerts?${apiParameters().toString()}`, { cache: "no-store" });
+      const response = await fetch(`/api/alert-center/v1/alerts?${apiParameters().toString()}`, { cache: "no-store", signal: controller.signal });
       if (!response.ok) throw new Error("api");
-      snapshot = await response.json();
-      setDynamicOptions("alert-filter-rule", snapshot.alerts.map(item => item.rule.rule_id), "すべて");
-      setDynamicOptions("alert-filter-source", snapshot.alerts.map(item => item.source.surface), "すべて");
+      const value = await response.json();
+      if (generation !== loadGeneration) return false;
+      snapshot = value;
+      setDynamicOptions("alert-filter-rule", [
+        ...snapshot.alerts.map(item => item.rule.rule_id),
+        ...snapshot.coverage.map(item => item.rule_id),
+      ], "すべて");
+      setDynamicOptions("alert-filter-source", [
+        ...snapshot.alerts.map(item => item.source.surface),
+        ...snapshot.coverage.map(item => item.source_surface),
+      ], "すべて");
       renderPagination(snapshot);
       const offset = snapshot.query?.offset ?? 0;
       const first = snapshot.alerts.length === 0 ? 0 : offset + 1;
@@ -463,7 +541,7 @@
         ? `${range} · incomplete · acquired range · omitted unknown`
         : `${range} · complete snapshot`;
       renderRecurring(snapshot.recurring_groups, snapshot.snapshot_state);
-      renderCoverage(snapshot.coverage);
+      renderCoverage(snapshot.coverage, snapshot.coverage_state);
       if (snapshot.alerts.length === 0) {
         rows.replaceChildren();
         detailBody.replaceChildren();
@@ -487,7 +565,8 @@
       selectAlert(selectedAlertId, false, false);
       if (announceSelection) announce("フィルター結果を更新しました。");
       return true;
-    } catch {
+    } catch (caught) {
+      if (generation !== loadGeneration || caught?.name === "AbortError") return false;
       snapshot = null;
       rows.replaceChildren();
       detailBody.replaceChildren();
@@ -501,30 +580,35 @@
       recurring.replaceChildren(node("p", "empty-state", "集計を読み込めませんでした。"));
       coverage.replaceChildren(node("p", "empty-state", "coverage を読み込めませんでした。"));
       return false;
+    } finally {
+      if (generation === loadGeneration) loadController = null;
     }
   }
 
   form.addEventListener("submit", event => {
     event.preventDefault();
-    updateUrlFromFilters();
-    load(true);
+    if (updateUrlFromFilters()) load(true);
   });
   document.getElementById("alert-filter-period").addEventListener("change", () => {
     toggleCustomDates();
     if (document.getElementById("alert-filter-period").value !== "custom") {
-      updateUrlFromFilters();
-      load(true);
+      if (updateUrlFromFilters()) load(true);
     }
   });
+  for (const id of ["alert-filter-from", "alert-filter-to"]) {
+    document.getElementById(id).addEventListener("input", () => {
+      document.getElementById("alert-filter-from").setCustomValidity("");
+      document.getElementById("alert-filter-to").setCustomValidity("");
+    });
+  }
   for (const id of ["alert-filter-severity", "alert-filter-state", "alert-filter-rule", "alert-filter-source", "alert-filter-completeness"]) {
     document.getElementById(id).addEventListener("change", () => {
-      updateUrlFromFilters();
-      load(true);
+      if (updateUrlFromFilters()) load(true);
     });
   }
   previousPage.addEventListener("click", () => setPageOffset(Number(previousPage.dataset.offset)));
   nextPage.addEventListener("click", () => setPageOffset(Number(nextPage.dataset.offset)));
 
   hydrateFilters();
-  load(false);
+  if (validateCustomPeriod(true)) load(false);
 })();

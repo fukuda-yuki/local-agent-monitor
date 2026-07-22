@@ -10,6 +10,8 @@ namespace CopilotAgentObservability.LocalMonitor.Alerts;
 internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
 {
     private const int MaximumReceiptSnapshot = 2_000;
+    private const int MaximumCoverageEvaluationPages = 20;
+    private const int MaximumCoverageEvaluations = 2_000;
     private const int MaximumCoverageFacts = 100;
     private readonly IAlertEngineStore engineStore;
     private readonly IAlertEngineQueryStore queryStore;
@@ -80,14 +82,18 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
                     || lifecycle.Lifecycle is null
                     || lifecycle.Lifecycle.AlertId != receipt.AlertId)
                 {
-                    return Failure(Map(lifecycle.Status));
+                    return Failure(lifecycle.Status == AlertLifecycleStoreStatus.Success
+                        ? AlertCenterReadStatus.Unavailable
+                        : Map(lifecycle.Status));
                 }
 
                 var history = lifecycleStore.History(receipt.AlertId, 100);
                 if (history.Status != AlertLifecycleStoreStatus.Success
-                    || history.Events.Any(item => item.AlertId != receipt.AlertId))
+                    || !ValidHistory(lifecycle.Lifecycle, history.Events))
                 {
-                    return Failure(Map(history.Status));
+                    return Failure(history.Status == AlertLifecycleStoreStatus.Success
+                        ? AlertCenterReadStatus.Unavailable
+                        : Map(history.Status));
                 }
 
                 lifecycles.Add(receipt.AlertId, lifecycle.Lifecycle);
@@ -100,6 +106,7 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
             var allAlerts = acquired.Receipts.Select(receipt => Project(
                 receipt,
                 lifecycles[receipt.AlertId],
+                histories[receipt.AlertId],
                 relationships,
                 traceCache,
                 sessionCache)).ToArray();
@@ -122,6 +129,8 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
                 QueryDto(query),
                 acquired.Incomplete ? "incomplete" : "complete",
                 acquired.Incomplete ? null : 0,
+                coverage.Incomplete ? "incomplete" : "complete",
+                coverage.Incomplete ? null : 0,
                 filtered.LongLength,
                 filtered.Skip(query.Offset).Take(query.Limit).ToArray(),
                 Aggregate(filtered, query, acquired.Incomplete),
@@ -199,17 +208,25 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         var receiptContext = receipts.GroupBy(item => item.EvaluationId, StringComparer.Ordinal)
             .ToDictionary(item => item.Key, item => item.ToArray(), StringComparer.Ordinal);
         var facts = new List<AlertCenterCoverageFact>(MaximumCoverageFacts);
+        var evaluationCount = 0;
+        var pageCount = 0;
         string? cursor = null;
-        while (facts.Count < MaximumCoverageFacts)
+        while (facts.Count < MaximumCoverageFacts
+            && evaluationCount < MaximumCoverageEvaluations
+            && pageCount < MaximumCoverageEvaluationPages)
         {
-            var page = queryStore.ListEvaluations(cursor, AlertEngineQueryLimits.MaximumPageSize);
+            var limit = Math.Min(
+                AlertEngineQueryLimits.MaximumPageSize,
+                MaximumCoverageEvaluations - evaluationCount);
+            var page = queryStore.ListEvaluations(cursor, limit);
+            pageCount++;
             if (page.Status != AlertEngineQueryStatus.Success)
             {
-                return new(Map(page.Status), []);
+                return new(Map(page.Status), [], false);
             }
-            if (page.Items.Count > AlertEngineQueryLimits.MaximumPageSize)
+            if (page.Items.Count > limit)
             {
-                return new(AlertCenterReadStatus.Unavailable, []);
+                return new(AlertCenterReadStatus.Unavailable, [], false);
             }
 
             var last = cursor;
@@ -220,32 +237,38 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
                     || evaluation.SuppressionCount < 0
                     || last is not null && string.CompareOrdinal(evaluation.EvaluationId, last) <= 0)
                 {
-                    return new(AlertCenterReadStatus.Unavailable, []);
+                    return new(AlertCenterReadStatus.Unavailable, [], false);
                 }
                 last = evaluation.EvaluationId;
+                evaluationCount++;
 
                 var suppressions = AcquireSuppressions(evaluation, receiptContext.GetValueOrDefault(evaluation.EvaluationId), facts);
                 if (suppressions != AlertCenterReadStatus.Success)
                 {
-                    return new(suppressions, []);
+                    return new(suppressions, [], false);
                 }
                 if (facts.Count == MaximumCoverageFacts)
                 {
-                    return new(AlertCenterReadStatus.Success, facts);
+                    return new(AlertCenterReadStatus.Success, facts, true);
                 }
             }
 
             if (page.NextCursor is null)
             {
-                return new(AlertCenterReadStatus.Success, facts);
+                return new(AlertCenterReadStatus.Success, facts, false);
             }
             if (page.Items.Count == 0 || !string.Equals(page.NextCursor, last, StringComparison.Ordinal))
             {
-                return new(AlertCenterReadStatus.Unavailable, []);
+                return new(AlertCenterReadStatus.Unavailable, [], false);
+            }
+            if (evaluationCount == MaximumCoverageEvaluations
+                || pageCount == MaximumCoverageEvaluationPages)
+            {
+                return new(AlertCenterReadStatus.Success, facts, true);
             }
             cursor = page.NextCursor;
         }
-        return new(AlertCenterReadStatus.Success, facts);
+        return new(AlertCenterReadStatus.Success, facts, true);
     }
 
     private AlertCenterReadStatus AcquireSuppressions(
@@ -357,6 +380,7 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
     private AlertCenterAlert Project(
         AlertCenterReceiptProjectionV1 receipt,
         AlertLifecycleView lifecycle,
+        IReadOnlyList<AlertLifecycleEvent> history,
         RelationshipIndex relationships,
         Dictionary<string, MonitorTraceRow?> traceCache,
         Dictionary<string, SessionDetail?> sessionCache)
@@ -377,7 +401,8 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
                 LifecycleState(lifecycle.State),
                 lifecycle.Revision,
                 lifecycle.LastOccurredAt is null ? null : Timestamp(lifecycle.LastOccurredAt.Value),
-                AllowedActions(lifecycle.State)),
+                AllowedActions(lifecycle.State),
+                history.Select(History).ToArray()),
             Rule(receipt, descriptor),
             receipt.ObservedValues.Select(Value).ToArray(),
             receipt.EffectiveThresholds.Select(Value).ToArray(),
@@ -453,6 +478,21 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         var traceWorkspace = trace?.WorkspaceLabel;
         var sessionRepository = session?.Session.Repository;
         var sessionWorkspace = session?.Session.Workspace;
+        if (!SafeScopeValue(traceRepository)
+            || !SafeScopeValue(traceWorkspace)
+            || !SafeScopeValue(sessionRepository)
+            || !SafeScopeValue(sessionWorkspace))
+        {
+            return UnknownScope();
+        }
+        var hasScopeValue = traceRepository is not null
+            || traceWorkspace is not null
+            || sessionRepository is not null
+            || sessionWorkspace is not null;
+        if (!hasScopeValue)
+        {
+            return UnknownScope();
+        }
         if (trace is not null && session is not null)
         {
             if (Conflicts(traceRepository, sessionRepository) || Conflicts(traceWorkspace, sessionWorkspace))
@@ -476,8 +516,11 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         {
             return new("exact_session", sessionRepository, sessionWorkspace, null, null, sessionRepository, sessionWorkspace);
         }
-        return new("unknown", null, null, null, null, null, null);
+        return UnknownScope();
     }
+
+    private static bool SafeScopeValue(string? value) => value is null || AlertCenterLabelGuard.Accepts(value);
+    private static AlertCenterScope UnknownScope() => new("unknown", null, null, null, null, null, null);
 
     private static RelationshipIndex Relationships(IEnumerable<IReadOnlyList<AlertLifecycleEvent>> histories)
     {
@@ -503,6 +546,42 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
             }
             items.Add(value);
         }
+    }
+
+    private static bool ValidHistory(
+        AlertLifecycleView lifecycle,
+        IReadOnlyList<AlertLifecycleEvent> history)
+    {
+        if (lifecycle.SchemaVersion != AlertLifecycleContractVersions.Lifecycle
+            || !AlertLifecycleValidation.IsCanonicalAlertId(lifecycle.AlertId)
+            || !Enum.IsDefined(lifecycle.State)
+            || lifecycle.Revision < 0
+            || lifecycle.LastOccurredAt is { } occurredAt && occurredAt.Offset != TimeSpan.Zero
+            || history.Count > 100
+            || history.Any(item => item.AlertId != lifecycle.AlertId || !AlertLifecycleValidation.IsValidEvent(item)))
+        {
+            return false;
+        }
+        if (lifecycle.Revision == 0)
+        {
+            return lifecycle.State == AlertLifecycleState.Open
+                && lifecycle.LastOccurredAt is null
+                && history.Count == 0;
+        }
+        if (history.Count == 0
+            || history.Count != (int)Math.Min(lifecycle.Revision, 100)
+            || history[0].Revision != lifecycle.Revision
+            || history[0].State != lifecycle.State
+            || history[0].OccurredAt != lifecycle.LastOccurredAt)
+        {
+            return false;
+        }
+        return history.Zip(
+                history.Skip(1),
+                (newer, older) => newer.Revision == older.Revision + 1
+                    && newer.PreviousState == older.State)
+            .All(item => item)
+            && (history[^1].Revision != 1 || history[^1].PreviousState == AlertLifecycleState.Open);
     }
 
     private static bool Matches(AlertCenterAlert item, AlertCenterQuery query)
@@ -684,6 +763,27 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
     private static string LifecycleState(AlertLifecycleState value) => value.ToString().ToLowerInvariant();
+    private static string LifecycleAction(AlertLifecycleAction value) => value switch
+    {
+        AlertLifecycleAction.Acknowledge => "acknowledge",
+        AlertLifecycleAction.Dismiss => "dismiss",
+        AlertLifecycleAction.Resolve => "resolve",
+        AlertLifecycleAction.Reopen => "reopen",
+        AlertLifecycleAction.Supersede => "supersede",
+        AlertLifecycleAction.SourceDeleted => "source_deleted",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+    private static AlertCenterLifecycleTransition History(AlertLifecycleEvent value) => new(
+        value.Revision,
+        LifecycleAction(value.Action),
+        LifecycleState(value.PreviousState),
+        LifecycleState(value.State),
+        Timestamp(value.OccurredAt),
+        value.Actor,
+        value.ReasonCode,
+        value.OldAlertId,
+        value.NewAlertId,
+        value.ResultCode);
     private static IReadOnlyList<string> AllowedActions(AlertLifecycleState value) => value switch
     {
         AlertLifecycleState.Open => ["acknowledge", "dismiss", "resolve"],
@@ -713,7 +813,8 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         bool Incomplete);
     private sealed record CoverageAcquisition(
         AlertCenterReadStatus Status,
-        IReadOnlyList<AlertCenterCoverageFact> Facts);
+        IReadOnlyList<AlertCenterCoverageFact> Facts,
+        bool Incomplete);
     private sealed record CoverageContext(
         string SourceSurface,
         string SourceVersion,

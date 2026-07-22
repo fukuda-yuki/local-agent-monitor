@@ -32,11 +32,15 @@ public sealed class AlertCenterRouteTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("private-review-note", responseText, StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(responseText);
         var root = json.RootElement;
         Assert.Equal("alert.center.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal("complete", root.GetProperty("snapshot_state").GetString());
         Assert.Equal(0, root.GetProperty("omitted_receipt_count").GetInt32());
+        Assert.Equal("complete", root.GetProperty("coverage_state").GetString());
+        Assert.Equal(0, root.GetProperty("omitted_coverage_fact_count").GetInt32());
         Assert.Equal(3, root.GetProperty("total_count").GetInt32());
 
         var alerts = root.GetProperty("alerts");
@@ -44,6 +48,15 @@ public sealed class AlertCenterRouteTests
         var acknowledged = alerts.EnumerateArray().Single(item => item.GetProperty("alert_id").GetString() == second);
         Assert.Equal("acknowledged", acknowledged.GetProperty("lifecycle").GetProperty("state").GetString());
         Assert.Equal(["dismiss", "resolve"], acknowledged.GetProperty("lifecycle").GetProperty("allowed_actions").EnumerateArray().Select(item => item.GetString()));
+        var transition = Assert.Single(acknowledged.GetProperty("lifecycle").GetProperty("history").EnumerateArray());
+        Assert.Equal(1, transition.GetProperty("revision").GetInt64());
+        Assert.Equal("acknowledge", transition.GetProperty("action").GetString());
+        Assert.Equal("open", transition.GetProperty("previous_state").GetString());
+        Assert.Equal("acknowledged", transition.GetProperty("state").GetString());
+        Assert.Equal("local_user", transition.GetProperty("actor").GetString());
+        Assert.Equal("user_reviewed", transition.GetProperty("reason_code").GetString());
+        Assert.False(transition.TryGetProperty("comment", out _));
+        Assert.False(transition.TryGetProperty("idempotency_key", out _));
         Assert.Equal("registered", acknowledged.GetProperty("rule").GetProperty("contract_state").GetString());
         Assert.Equal("High tool failure ratio", acknowledged.GetProperty("rule").GetProperty("title").GetString());
         Assert.Equal("trace", acknowledged.GetProperty("rule").GetProperty("evaluation_window").GetString());
@@ -118,6 +131,112 @@ public sealed class AlertCenterRouteTests
             Assert.Equal("unknown", evidence.GetProperty("availability_state").GetString());
             Assert.Equal(JsonValueKind.Null, evidence.GetProperty("href").ValueKind);
         });
+    }
+
+    [Fact]
+    public async Task ReadRoute_ProjectsGenericSessionAndTraceEvidenceThroughExactOwners()
+    {
+        using var temp = NewTemp();
+        var sessionOwner = SeedPersistedTraceAndSession(temp, "generic-session-route", authoritativeToolStatus: true);
+        var traceOwner = SeedPersistedTraceAndSession(temp, "generic-trace-route", authoritativeToolStatus: true);
+        var eventOwner = SeedPersistedTraceAndSession(temp, "generic-event-route", authoritativeToolStatus: true);
+        var sessionOnlyOwner = Guid.CreateVersion7();
+        var expiredSessionOwner = Guid.CreateVersion7();
+        var missingSessionOwner = Guid.CreateVersion7();
+        WriteBareSession(temp, sessionOnlyOwner, SessionRawRetentionState.Expiring);
+        WriteBareSession(temp, expiredSessionOwner, SessionRawRetentionState.ExpiredPendingDeletion);
+        _ = AppendGenericEvidenceAlert(temp, sessionOwner, "generic-session-route", AlertEvidenceKind.Session);
+        _ = AppendGenericEvidenceAlert(temp, traceOwner, "generic-trace-route", AlertEvidenceKind.Trace);
+        _ = AppendGenericEvidenceAlert(temp, eventOwner, "generic-event-route", AlertEvidenceKind.Event);
+        _ = AppendSessionOnlyEvidenceAlert(temp, sessionOnlyOwner);
+        _ = AppendSessionOnlyEvidenceAlert(temp, expiredSessionOwner);
+        _ = AppendSessionOnlyEvidenceAlert(temp, missingSessionOwner);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OptionsForProductionStore());
+
+        using var response = await host.Client.GetAsync("/api/alert-center/v1/alerts?period=30d");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var alerts = json.RootElement.GetProperty("alerts").EnumerateArray().ToArray();
+        var sessionAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == sessionOwner.ToString("D"));
+        Assert.All(sessionAlert.GetProperty("evidence").EnumerateArray(), evidence =>
+        {
+            Assert.Equal("session", evidence.GetProperty("kind").GetString());
+            Assert.Equal("available", evidence.GetProperty("availability_state").GetString());
+            Assert.Equal("not_captured", evidence.GetProperty("content_state").GetString());
+            Assert.Equal($"/diagnostics?session_id={sessionOwner:D}", evidence.GetProperty("href").GetString());
+        });
+        var traceAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == traceOwner.ToString("D"));
+        Assert.All(traceAlert.GetProperty("evidence").EnumerateArray(), evidence =>
+        {
+            Assert.Equal("trace", evidence.GetProperty("kind").GetString());
+            Assert.Equal("available", evidence.GetProperty("availability_state").GetString());
+            Assert.Equal("/traces/generic-trace-route", evidence.GetProperty("href").GetString());
+        });
+        var eventAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == eventOwner.ToString("D"));
+        Assert.All(eventAlert.GetProperty("evidence").EnumerateArray(), evidence =>
+        {
+            Assert.Equal("event", evidence.GetProperty("kind").GetString());
+            Assert.Equal("available", evidence.GetProperty("availability_state").GetString());
+            Assert.Equal("not_captured", evidence.GetProperty("content_state").GetString());
+            Assert.Equal($"/diagnostics?session_id={eventOwner:D}", evidence.GetProperty("href").GetString());
+        });
+        var sessionOnlyAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == sessionOnlyOwner.ToString("D"));
+        var sessionOnlyEvidence = Assert.Single(sessionOnlyAlert.GetProperty("evidence").EnumerateArray());
+        Assert.Equal("available", sessionOnlyEvidence.GetProperty("availability_state").GetString());
+        Assert.Equal("available", sessionOnlyEvidence.GetProperty("content_state").GetString());
+        Assert.Equal($"/diagnostics?session_id={sessionOnlyOwner:D}", sessionOnlyEvidence.GetProperty("href").GetString());
+        var expiredAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == expiredSessionOwner.ToString("D"));
+        var expiredEvidence = Assert.Single(expiredAlert.GetProperty("evidence").EnumerateArray());
+        Assert.Equal("expired", expiredEvidence.GetProperty("availability_state").GetString());
+        Assert.Equal("expired", expiredEvidence.GetProperty("content_state").GetString());
+        Assert.Equal($"/diagnostics?session_id={expiredSessionOwner:D}", expiredEvidence.GetProperty("href").GetString());
+        var missingAlert = Assert.Single(alerts, item => item.GetProperty("session_id").GetString() == missingSessionOwner.ToString("D"));
+        var missingEvidence = Assert.Single(missingAlert.GetProperty("evidence").EnumerateArray());
+        Assert.Equal("missing", missingEvidence.GetProperty("availability_state").GetString());
+        Assert.Equal(JsonValueKind.Null, missingEvidence.GetProperty("href").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("C:/Users/person/private-repository")]
+    [InlineData(@"\Users\person\private-repository")]
+    [InlineData(@"\Device\HarddiskVolume1\private-repository")]
+    [InlineData("private/repository")]
+    [InlineData(@"private\repository")]
+    [InlineData("~/private-repository")]
+    [InlineData("token=private-repository")]
+    public async Task ReadRoute_DropsUnsafePersistedScopeAndNeverCopiesRawPayload(string unsafeRepository)
+    {
+        const string rawMarker = "RAW_ALERT_CENTER_TOOL_ARGUMENT_MARKER";
+        using var temp = NewTemp();
+        var sessionId = SeedPersistedTraceAndSession(
+            temp,
+            "unsafe-scope-route",
+            authoritativeToolStatus: true,
+            rawPayloadMarker: rawMarker,
+            repository: unsafeRepository,
+            workspace: "safe-logical-workspace");
+        _ = AppendPersistedAlert(temp, sessionId, "unsafe-scope-route");
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: OptionsForProductionStore());
+
+        using var response = await host.Client.GetAsync("/api/alert-center/v1/alerts?period=30d");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(rawMarker, responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain(unsafeRepository, responseText, StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(responseText);
+        var scope = Assert.Single(json.RootElement.GetProperty("alerts").EnumerateArray())
+            .GetProperty("scope");
+        Assert.Equal("unknown", scope.GetProperty("state").GetString());
+        foreach (var member in new[]
+        {
+            "repository", "workspace", "trace_repository", "trace_workspace",
+            "session_repository", "session_workspace",
+        })
+        {
+            Assert.Equal(JsonValueKind.Null, scope.GetProperty(member).ValueKind);
+        }
     }
 
     [Fact]
@@ -306,6 +425,51 @@ public sealed class AlertCenterRouteTests
         using var invalidSource = await host.Client.GetAsync("/api/alert-center/v1/alerts?source_surface=-invalid");
         await AssertError(invalidSource, HttpStatusCode.BadRequest, "alert_center_invalid_query");
 
+        foreach (var (member, value) in new[]
+        {
+            ("repository", @"C:\Users\person\private-repository"),
+            ("repository", "C:/Users/person/private-repository"),
+            ("repository", "C:private-repository"),
+            ("repository", @"\Users\person\private-repository"),
+            ("workspace", @"\Device\HarddiskVolume1\private-workspace"),
+            ("repository", "private/repository"),
+            ("workspace", @"private\workspace"),
+            ("repository", "~/private-repository"),
+            ("workspace", "/home/person/private-workspace"),
+            ("workspace", "/Users/person/private-workspace"),
+            ("workspace", "file:///Users/person/private-workspace"),
+            ("repository", "leak-marker@example.com"),
+            ("workspace", "Authorization: Bearer synthetic-token"),
+            ("repository", "credential=synthetic-marker"),
+            ("workspace", "token=synthetic-marker"),
+        })
+        {
+            using var unsafeLabel = await host.Client.GetAsync(
+                $"/api/alert-center/v1/alerts?{member}={Uri.EscapeDataString(value)}");
+            await AssertError(unsafeLabel, HttpStatusCode.BadRequest, "alert_center_invalid_query");
+        }
+
+        foreach (var path in new[]
+        {
+            "/api/alert-center/v1/alerts?from=2026-07-22",
+            "/api/alert-center/v1/alerts?from=2026-07-23&to=2026-07-22",
+            "/api/alert-center/v1/alerts?from=2025-07-22&to=2026-07-23",
+        })
+        {
+            using var invalidPeriod = await host.Client.GetAsync(path);
+            await AssertError(invalidPeriod, HttpStatusCode.BadRequest, "alert_center_invalid_query");
+        }
+        using var maximumPeriod = await host.Client.GetAsync(
+            "/api/alert-center/v1/alerts?from=2025-07-23&to=2026-07-23");
+        Assert.Equal(HttpStatusCode.OK, maximumPeriod.StatusCode);
+
+        const string exactLabel = " exact repository label ";
+        using var exactLabelResponse = await host.Client.GetAsync(
+            $"/api/alert-center/v1/alerts?repository={Uri.EscapeDataString(exactLabel)}&period=30d");
+        Assert.Equal(HttpStatusCode.OK, exactLabelResponse.StatusCode);
+        using var exactLabelJson = JsonDocument.Parse(await exactLabelResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(exactLabel, exactLabelJson.RootElement.GetProperty("query").GetProperty("repository").GetString());
+
         using var crossSiteRequest = new HttpRequestMessage(HttpMethod.Get, "/api/alert-center/v1/alerts");
         crossSiteRequest.Headers.Add("Sec-Fetch-Site", "cross-site");
         using var crossSite = await host.Client.SendAsync(crossSiteRequest);
@@ -352,7 +516,7 @@ public sealed class AlertCenterRouteTests
         ProjectionStore = projection,
     };
 
-    private static MonitorHostTestOptions OptionsForProductionStore() => new()
+    internal static MonitorHostTestOptions OptionsForProductionStore() => new()
     {
         StartWriter = false,
         StartProjectionWorker = false,
@@ -371,12 +535,110 @@ public sealed class AlertCenterRouteTests
         return result.Receipts[0].AlertId;
     }
 
-    private static string AppendPersistedAlert(MonitorTempDirectory temp, Guid sessionId, string traceId)
+    internal static string AppendPersistedAlert(MonitorTempDirectory temp, Guid sessionId, string traceId)
     {
         var result = Engine().Evaluate(PersistedSnapshot(temp, sessionId, traceId), Configuration());
         Assert.Single(result.Receipts);
         Assert.Equal(AlertStoreStatus.Success, Store(temp).Append(result).Status);
         return result.Receipts[0].AlertId;
+    }
+
+    private static string AppendGenericEvidenceAlert(
+        MonitorTempDirectory temp,
+        Guid sessionId,
+        string traceId,
+        AlertEvidenceKind kind)
+    {
+        var snapshot = PersistedSnapshot(temp, sessionId, traceId);
+        var sessionEvent = kind == AlertEvidenceKind.Event
+            ? Assert.Single(new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider)
+                .GetDetail(sessionId)!.Events)
+            : null;
+        snapshot = snapshot with
+        {
+            Signals = snapshot.Signals.Select((signal, index) => signal with
+            {
+                Evidence = new AlertEvidenceReference(
+                    kind,
+                    $"generic-{kind.ToString().ToLowerInvariant()}-{index}",
+                    sessionId.ToString("D"),
+                    traceId,
+                    null,
+                    null,
+                    sessionEvent?.EventId.ToString("D"),
+                    null,
+                    sessionEvent?.OccurredAt ?? signal.ObservedAt),
+            }).ToArray(),
+        };
+        var result = Engine().Evaluate(snapshot, Configuration());
+        Assert.Single(result.Receipts);
+        Assert.Equal(AlertStoreStatus.Success, Store(temp).Append(result).Status);
+        return result.Receipts[0].AlertId;
+    }
+
+    private static string AppendSessionOnlyEvidenceAlert(MonitorTempDirectory temp, Guid sessionId)
+    {
+        var observedAt = new DateTimeOffset(2026, 7, 22, 11, 0, 0, TimeSpan.Zero);
+        var reference = new AlertEvidenceReference(
+            AlertEvidenceKind.Session,
+            $"session-only-{sessionId:D}",
+            sessionId.ToString("D"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            observedAt);
+        var snapshot = new AlertNormalizedSnapshot(
+            AlertContractVersions.Snapshot,
+            "github-copilot-vscode",
+            "1.0.4",
+            sessionId.ToString("D"),
+            null,
+            AlertCompleteness.Partial,
+            [],
+            observedAt,
+            observedAt,
+            [],
+            [new AlertSignal("session-only-signal", AlertSignalKind.SessionEvent, 0, observedAt, null, AlertSignalStatus.Unknown, [], [], reference)]);
+        var result = new AlertEvaluationEngine(
+                new AlertRuleRegistry([new SessionOnlyEvidenceFixtureRule()]),
+                new ExistingEvidenceResolver())
+            .Evaluate(snapshot, new AlertEngineConfiguration(
+                AlertContractVersions.Configuration,
+                "session-only-evidence-fixture-v1",
+                []));
+        Assert.Single(result.Receipts);
+        Assert.Equal(AlertStoreStatus.Success, Store(temp).Append(result).Status);
+        return result.Receipts[0].AlertId;
+    }
+
+    private static void WriteBareSession(
+        MonitorTempDirectory temp,
+        Guid sessionId,
+        SessionRawRetentionState retentionState)
+    {
+        var observedAt = new DateTimeOffset(2026, 7, 22, 11, 0, 0, TimeSpan.Zero);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        store.Write(new SessionWriteBatch(
+            new SessionDetail(
+                new ObservedSession(
+                    sessionId,
+                    ObservedSessionStatus.Completed,
+                    SessionCompleteness.Partial,
+                    "repo-session-only",
+                    "workspace-session-only",
+                    observedAt,
+                    observedAt,
+                    observedAt,
+                    retentionState,
+                    observedAt,
+                    observedAt),
+                [],
+                [],
+                []),
+            []));
     }
 
     private static AlertNormalizedSnapshot PersistedSnapshot(MonitorTempDirectory temp, Guid sessionId, string traceId)
@@ -496,7 +758,7 @@ public sealed class AlertCenterRouteTests
             Action: AlertLifecycleAction.Acknowledge,
             ExpectedRevision: 0,
             ReasonCode: "user_reviewed",
-            Comment: null,
+            Comment: "private-review-note",
             IdempotencyKey: "aid1_" + new string('a', 43)));
         Assert.Equal(AlertLifecycleStoreStatus.Success, result.Status);
     }
@@ -517,10 +779,23 @@ public sealed class AlertCenterRouteTests
         return request;
     }
 
-    private static Guid SeedPersistedTraceAndSession(MonitorTempDirectory temp, string traceId, bool authoritativeToolStatus)
+    internal static Guid SeedPersistedTraceAndSession(
+        MonitorTempDirectory temp,
+        string traceId,
+        bool authoritativeToolStatus,
+        string? rawPayloadMarker = null,
+        string? repository = "repo-persisted",
+        string? workspace = "workspace-persisted")
     {
         var observed = new DateTimeOffset(2026, 7, 22, 10, 0, 0, TimeSpan.Zero);
         var baseNanos = observed.ToUnixTimeMilliseconds() * 1_000_000;
+        var rawMarkerAttribute = rawPayloadMarker is null
+            ? string.Empty
+            : "," + JsonSerializer.Serialize(new
+            {
+                key = "gen_ai.tool.call.arguments",
+                value = new { stringValue = rawPayloadMarker },
+            });
         var spans = string.Join(',', Enumerable.Range(0, 5).Select(index =>
         {
             var status = authoritativeToolStatus
@@ -533,7 +808,7 @@ public sealed class AlertCenterRouteTests
                   {{{status}}}
                   "attributes":[
                     {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
-                    {"key":"gen_ai.tool.name","value":{"stringValue":"fixture-tool"}}
+                    {"key":"gen_ai.tool.name","value":{"stringValue":"fixture-tool"}}{{{rawMarkerAttribute}}}
                   ]
                 }
                 """;
@@ -582,8 +857,8 @@ public sealed class AlertCenterRouteTests
                     sessionId,
                     ObservedSessionStatus.Completed,
                     SessionCompleteness.Rich,
-                    Repository: "repo-persisted",
-                    Workspace: "workspace-persisted",
+                    Repository: repository,
+                    Workspace: workspace,
                     StartedAt: observed,
                     EndedAt: observed.AddMinutes(1),
                     LastSeenAt: observed.AddMinutes(1),
@@ -657,6 +932,35 @@ public sealed class AlertCenterRouteTests
             ["github-copilot-vscode"]);
 
         public AlertRuleOutcome Evaluate(AlertRuleContext context) => throw new InvalidOperationException();
+    }
+
+    private sealed class SessionOnlyEvidenceFixtureRule : IAlertRule
+    {
+        public AlertRuleDescriptor Descriptor { get; } = new(
+            "session-only-evidence-fixture",
+            "1",
+            "Session-only evidence fixture",
+            "Projects one exact Session reference for Alert Center resolver coverage.",
+            [],
+            AlertRuleScope.Session,
+            [],
+            "session",
+            [],
+            ["missing_required_capability", "rule_disabled", "source_not_applicable"],
+            ["github-copilot-vscode"]);
+
+        public AlertRuleOutcome Evaluate(AlertRuleContext context)
+        {
+            var signal = Assert.Single(context.Snapshot.Signals);
+            return new(
+                [new AlertRuleMatch(
+                    AlertSeverity.Info,
+                    [new AlertObservedValue("session-count", "sessions", 1)],
+                    [signal.Evidence],
+                    signal.ObservedAt,
+                    signal.ObservedAt)],
+                []);
+        }
     }
 
     private sealed class ExactProjectionStore : ProjectionStoreTestDouble

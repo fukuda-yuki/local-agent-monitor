@@ -65,29 +65,119 @@ internal sealed class AlertCenterEvidenceResolver(
         {
             return Missing();
         }
-        if (reference.TraceId is null || !OwnsTrace(session, reference.TraceId))
-        {
-            return Unknown();
-        }
-        if (requireReceiptPartition
-            && !ExactReceiptPartition(session, reference.TraceId, sourceSurface!, sourceVersion!))
+        if (session.Session.SessionId != sessionId)
         {
             return Unknown();
         }
 
-        if (TryPositiveRowId(reference.EvidenceId, MonitorSpanPrefix, out var monitorRowId))
+        if (reference.Kind == AlertEvidenceKind.Session)
         {
-            return ResolveMonitorSpan(reference, session, monitorRowId);
+            return ResolveSession(reference, session, sourceSurface, sourceVersion, requireReceiptPartition);
         }
-        if (TryGuidRowId(reference.EvidenceId, SessionEventPrefix, out var eventRowId))
+        if (reference.Kind == AlertEvidenceKind.Trace)
         {
-            return ResolveSessionEvent(reference, session, eventRowId);
+            if (reference.EvidenceId.StartsWith(SourceObservationPrefix, StringComparison.Ordinal))
+            {
+                return TryPositiveRowId(reference.EvidenceId, SourceObservationPrefix, out var observationRowId)
+                    ? ResolveSourceObservation(reference, session, observationRowId, sourceSurface, sourceVersion, requireReceiptPartition)
+                    : Unknown();
+            }
+            return ResolveTrace(reference, session, sourceSurface, sourceVersion, requireReceiptPartition);
         }
-        if (TryPositiveRowId(reference.EvidenceId, SourceObservationPrefix, out var observationRowId))
+        if (reference.Kind == AlertEvidenceKind.Event)
         {
-            return ResolveSourceObservation(reference, session, observationRowId);
+            return ResolveEvent(reference, session, sourceSurface, sourceVersion, requireReceiptPartition);
+        }
+        if (reference.EvidenceId.StartsWith(MonitorSpanPrefix, StringComparison.Ordinal))
+        {
+            return TryPositiveRowId(reference.EvidenceId, MonitorSpanPrefix, out var monitorRowId)
+                ? ResolveMonitorSpan(reference, session, monitorRowId, sourceSurface, sourceVersion, requireReceiptPartition)
+                : Unknown();
+        }
+        if (reference.EvidenceId.StartsWith(SessionEventPrefix, StringComparison.Ordinal))
+        {
+            return TryGuidRowId(reference.EvidenceId, SessionEventPrefix, out var eventRowId)
+                ? ResolveSessionEvent(reference, session, eventRowId, sourceSurface, sourceVersion, requireReceiptPartition)
+                : Unknown();
         }
         return Unknown();
+    }
+
+    private static AlertCenterEvidenceResolution ResolveEvent(
+        AlertEvidenceReference reference,
+        SessionDetail session,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
+    {
+        if (!TryCanonicalGuid(reference.EventId, out var eventId))
+        {
+            return Unknown();
+        }
+        if (reference.EvidenceId.StartsWith(SessionEventPrefix, StringComparison.Ordinal)
+            && (!TryGuidRowId(reference.EvidenceId, SessionEventPrefix, out var prefixedEventId)
+                || prefixedEventId != eventId))
+        {
+            return Unknown();
+        }
+        return ResolveSessionEvent(
+            reference,
+            session,
+            eventId,
+            sourceSurface,
+            sourceVersion,
+            requireReceiptPartition);
+    }
+
+    private static AlertCenterEvidenceResolution ResolveSession(
+        AlertEvidenceReference reference,
+        SessionDetail session,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
+    {
+        if (!HasNoChildIds(reference)
+            || reference.TraceId is not null
+                && (!OwnsTrace(session, reference.TraceId)
+                    || requireReceiptPartition
+                        && !ExactReceiptPartition(session, reference.TraceId, sourceSurface!, sourceVersion!)))
+        {
+            return Unknown();
+        }
+
+        var href = $"/diagnostics?session_id={Uri.EscapeDataString(reference.SessionId)}";
+        return session.Session.RawRetentionState switch
+        {
+            SessionRawRetentionState.Expiring => new(AlertCenterEvidenceAvailability.Available, "available", href),
+            SessionRawRetentionState.NotCaptured => new(AlertCenterEvidenceAvailability.Available, "not_captured", href),
+            SessionRawRetentionState.ExpiredPendingDeletion => new(AlertCenterEvidenceAvailability.Expired, "expired", href),
+            _ => Unknown(),
+        };
+    }
+
+    private AlertCenterEvidenceResolution ResolveTrace(
+        AlertEvidenceReference reference,
+        SessionDetail session,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
+    {
+        if (reference.TraceId is null
+            || !HasNoChildIds(reference)
+            || !OwnsTrace(session, reference.TraceId)
+            || requireReceiptPartition
+                && !ExactReceiptPartition(session, reference.TraceId, sourceSurface!, sourceVersion!))
+        {
+            return Unknown();
+        }
+        var trace = projectionStore.GetMonitorTrace(reference.TraceId);
+        if (trace is null)
+        {
+            return Missing();
+        }
+        return trace.TraceId == reference.TraceId
+            ? Available($"/traces/{Uri.EscapeDataString(reference.TraceId)}")
+            : Unknown();
     }
 
     internal static DateTimeOffset? MonitorObservedAt(MonitorSpanRow row)
@@ -103,14 +193,23 @@ internal sealed class AlertCenterEvidenceResolver(
     private AlertCenterEvidenceResolution ResolveMonitorSpan(
         AlertEvidenceReference reference,
         SessionDetail session,
-        long rowId)
+        long rowId,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
     {
-        var row = projectionStore.GetSpansForTrace(reference.TraceId!)
-            .SingleOrDefault(item => item.Id == rowId);
-        if (row is null)
+        if (!ExactTraceContext(reference, session, sourceSurface, sourceVersion, requireReceiptPartition))
+        {
+            return Unknown();
+        }
+        var matches = projectionStore.GetSpansForTrace(reference.TraceId!)
+            .Where(item => item.Id == rowId).Take(2).ToArray();
+        if (matches.Length == 0)
         {
             return Missing();
         }
+        if (matches.Length != 1) return Unknown();
+        var row = matches[0];
         var observedAt = MonitorObservedAt(row);
         var source = compatibilityStore.GetByRawRecordId(row.RawRecordId);
         if (observedAt is null || source is null || !ExactPartition(session, reference.TraceId!, source)
@@ -118,6 +217,9 @@ internal sealed class AlertCenterEvidenceResolver(
             || reference.Kind != AlertEvidenceKind.Span
             || row.SpanId is null
             || row.SpanId != reference.SpanId
+            || reference.TurnId is not null
+            || reference.EventId is not null
+            || reference.ToolCallId is not null
             || !SameInstant(reference.ObservedAt, observedAt.Value))
         {
             return Unknown();
@@ -128,16 +230,26 @@ internal sealed class AlertCenterEvidenceResolver(
     private static AlertCenterEvidenceResolution ResolveSessionEvent(
         AlertEvidenceReference reference,
         SessionDetail session,
-        Guid rowId)
+        Guid rowId,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
     {
-        var item = session.Events.SingleOrDefault(value => value.EventId == rowId);
-        if (item is null)
+        var matches = session.Events.Where(value => value.EventId == rowId).Take(2).ToArray();
+        if (matches.Length == 0)
         {
             return Missing();
         }
+        if (matches.Length != 1) return Unknown();
+        var item = matches[0];
         if (reference.Kind != AlertEvidenceKind.Event
             || reference.EventId != rowId.ToString("D")
             || item.TraceId != reference.TraceId
+            || reference.SpanId is not null
+            || reference.TurnId is not null
+            || reference.ToolCallId is not null
+            || reference.TraceId is not null && !OwnsTrace(session, reference.TraceId)
+            || requireReceiptPartition && !ExactEventReceiptPartition(item, sourceSurface!, sourceVersion!)
             || !SameInstant(reference.ObservedAt, item.OccurredAt))
         {
             return Unknown();
@@ -152,16 +264,28 @@ internal sealed class AlertCenterEvidenceResolver(
     private AlertCenterEvidenceResolution ResolveSourceObservation(
         AlertEvidenceReference reference,
         SessionDetail session,
-        long rowId)
+        long rowId,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition)
     {
-        var row = compatibilityStore.List(rowId - 1, 1).SingleOrDefault(item => item.Id == rowId);
-        if (row is null)
+        if (!ExactTraceContext(reference, session, sourceSurface, sourceVersion, requireReceiptPartition))
+        {
+            return Unknown();
+        }
+        var matches = compatibilityStore.List(rowId - 1, 1).Where(item => item.Id == rowId).Take(2).ToArray();
+        if (matches.Length == 0)
         {
             return Missing();
         }
+        if (matches.Length != 1) return Unknown();
+        var row = matches[0];
         var rawRecordId = row.RawRecordId;
         if (reference.Kind != AlertEvidenceKind.Trace
             || reference.SpanId is not null
+            || reference.TurnId is not null
+            || reference.EventId is not null
+            || reference.ToolCallId is not null
             || rawRecordId is null
             || !ExactPartition(session, reference.TraceId!, row)
             || !projectionStore.GetSpansForTrace(reference.TraceId!).Any(item => item.RawRecordId == rawRecordId.Value)
@@ -171,6 +295,30 @@ internal sealed class AlertCenterEvidenceResolver(
         }
         return Available($"/traces/{Uri.EscapeDataString(reference.TraceId!)}");
     }
+
+    private static bool ExactTraceContext(
+        AlertEvidenceReference reference,
+        SessionDetail session,
+        string? sourceSurface,
+        string? sourceVersion,
+        bool requireReceiptPartition) =>
+        reference.TraceId is not null
+        && OwnsTrace(session, reference.TraceId)
+        && (!requireReceiptPartition
+            || ExactReceiptPartition(session, reference.TraceId, sourceSurface!, sourceVersion!));
+
+    private static bool ExactEventReceiptPartition(
+        ObservedSessionEvent item,
+        string sourceSurface,
+        string sourceVersion) =>
+        Surface(item.SourceSurface, item.SourceAdapter) == sourceSurface
+        && item.SourceApplicationVersion == sourceVersion;
+
+    private static bool HasNoChildIds(AlertEvidenceReference reference) =>
+        reference.SpanId is null
+        && reference.TurnId is null
+        && reference.EventId is null
+        && reference.ToolCallId is null;
 
     private static bool ExactPartition(SessionDetail session, string traceId, SourceCompatibilityRow source)
     {
@@ -227,7 +375,9 @@ internal sealed class AlertCenterEvidenceResolver(
         session.Runs.Any(item => item.TraceId == traceId)
         || session.Events.Any(item => item.TraceId == traceId);
 
-    private static bool TryCanonicalSession(string value, out Guid id) =>
+    private static bool TryCanonicalSession(string value, out Guid id) => TryCanonicalGuid(value, out id);
+
+    private static bool TryCanonicalGuid(string? value, out Guid id) =>
         Guid.TryParseExact(value, "D", out id)
         && id != Guid.Empty
         && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
