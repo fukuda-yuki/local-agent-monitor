@@ -9,6 +9,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
     private const string ProfileId = "github-copilot-cli-session-state";
     private const string SourceSurface = "github-copilot-cli";
     private const string MetadataOnly = "metadata_only";
+    private const string IncludeContent = "include_content";
     private const string ReferenceRequired = "historical_source_reference_required";
     private const string SourceMalformed = "historical_source_malformed";
     private const string FormatUnsupported = "historical_source_format_unsupported";
@@ -33,18 +34,23 @@ internal sealed class GitHubCopilotHistoricalAdapter
         this.fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
     }
 
-    public GitHubCopilotHistoricalProbe Probe(GitHubCopilotHistoricalProbeRequest request)
+    public GitHubCopilotHistoricalProbe? Probe(GitHubCopilotHistoricalProbeRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        if (!request.ConsentGranted ||
-            string.IsNullOrWhiteSpace(request.SelectedRoot) ||
+        if (!IsValidRequestedCapture(request.RequestedCapture) || !request.ConsentGranted)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.SelectedRoot) ||
             string.IsNullOrWhiteSpace(request.SessionId))
         {
             return CreateProbe(
                 detectionState: "not_evaluated",
                 sourceReferenceState: "missing",
                 sourceApplicationVersion: null,
+                request.RequestedCapture,
                 ReferenceRequired);
         }
 
@@ -54,6 +60,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
                 detectionState: "not_evaluated",
                 sourceReferenceState: "provided",
                 sourceApplicationVersion: null,
+                request.RequestedCapture,
                 SourceMalformed);
         }
 
@@ -73,6 +80,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
                     detectionState: "detected",
                     sourceReferenceState: "provided",
                     request.SourceApplicationVersion,
+                    request.RequestedCapture,
                     SourceMalformed);
             }
 
@@ -80,17 +88,22 @@ internal sealed class GitHubCopilotHistoricalAdapter
                 detectionState: "detected",
                 sourceReferenceState: "provided",
                 request.SourceApplicationVersion,
+                request.RequestedCapture,
                 FormatUnsupported);
         }
-        catch (Exception exception) when (IsMetadataFailure(exception))
+        catch (Exception exception) when (!IsFatal(exception))
         {
             return CreateProbe(
                 detectionState: "detected",
                 sourceReferenceState: "provided",
                 request.SourceApplicationVersion,
+                request.RequestedCapture,
                 SourceMalformed);
         }
     }
+
+    private static bool IsValidRequestedCapture(string requestedCapture) =>
+        requestedCapture is MetadataOnly or IncludeContent;
 
     private static bool IsValidRequest(GitHubCopilotHistoricalProbeRequest request)
     {
@@ -98,8 +111,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
         var sessionId = request.SessionId!;
         var version = request.SourceApplicationVersion;
 
-        return string.Equals(request.RequestedCapture, MetadataOnly, StringComparison.Ordinal) &&
-            selectedRoot.Length <= MaximumSelectedRootCharacters &&
+        return selectedRoot.Length <= MaximumSelectedRootCharacters &&
             IsCanonicalAbsoluteRoot(selectedRoot) &&
             sessionId.Length <= MaximumSessionIdCharacters &&
             sessionId is not ("." or "..") &&
@@ -123,14 +135,14 @@ internal sealed class GitHubCopilotHistoricalAdapter
         }
     }
 
-    private static bool IsMetadataFailure(Exception exception) =>
-        exception is IOException or UnauthorizedAccessException or System.Security.SecurityException or
-            ArgumentException or NotSupportedException;
+    private static bool IsFatal(Exception exception) =>
+        exception is OutOfMemoryException or StackOverflowException or AccessViolationException;
 
     private static GitHubCopilotHistoricalProbe CreateProbe(
         string detectionState,
         string sourceReferenceState,
         string? sourceApplicationVersion,
+        string requestedCapture,
         string diagnostic)
     {
         var adapterResult = new GitHubCopilotHistoricalAdapterResult(
@@ -155,7 +167,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
             ProfileId,
             AdapterId,
             AdapterDiagnostics: adapterResult.Diagnostics,
-            RequestedCapture: MetadataOnly,
+            RequestedCapture: requestedCapture,
             EligibleCandidateCount: 0,
             RejectedCandidateCount: 0,
             CommitAllowed: false,

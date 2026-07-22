@@ -7,6 +7,10 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 public sealed class GitHubCopilotHistoricalAdapterTests
 {
     private const string SelectedRoot = @"C:\selected-copilot-root";
+    private static readonly string ContractRoot = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "docs", "specifications", "contracts", "historical-import", "v1");
 
     [Fact]
     public void Probe_WithoutConsent_DoesNotTouchTheFileSystem()
@@ -22,7 +26,7 @@ public sealed class GitHubCopilotHistoricalAdapterTests
             RequestedCapture: "metadata_only"));
 
         Assert.Empty(fileSystem.InspectedPaths);
-        AssertMissingReference(probe);
+        Assert.Null(probe);
     }
 
     [Theory]
@@ -37,12 +41,12 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         var fileSystem = new RecordingMetadataFileSystem();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
             selectedRoot,
             sessionId,
             "1.0.71",
             ConsentGranted: true,
-            RequestedCapture: "metadata_only"));
+            RequestedCapture: "metadata_only")));
 
         Assert.Empty(fileSystem.InspectedPaths);
         AssertMissingReference(probe);
@@ -67,14 +71,16 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Theory]
-    [InlineData("1.0.71")]
-    [InlineData("1.0.73")]
-    public void Probe_DetectedExactVersion_RemainsUnsupportedWithoutReadingContent(string version)
+    [InlineData("1.0.71", true)]
+    [InlineData("1.0.73", false)]
+    public void Probe_DetectedExactVersion_RemainsUnsupportedWithoutReadingContent(
+        string version,
+        bool observedByProfile)
     {
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = adapter.Probe(ValidRequest(version));
+        var probe = RequireProbe(adapter.Probe(ValidRequest(version)));
 
         Assert.Equal("detected", probe.AdapterResult.DetectionState);
         Assert.Equal("provided", probe.AdapterResult.SourceReferenceState);
@@ -85,6 +91,15 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         Assert.Equal("not_read", probe.AdapterResult.ContentRisk);
         Assert.Equal(["historical_source_format_unsupported"], probe.AdapterResult.Diagnostics);
         Assert.Equal(4, fileSystem.InspectedPaths.Count);
+        using var profile = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            ContractRoot,
+            "profiles",
+            "github-copilot-cli-session-state.json")));
+        Assert.Equal(
+            observedByProfile,
+            profile.RootElement.GetProperty("observed_detector_versions")
+                .EnumerateArray()
+                .Any(item => item.GetString() == version));
     }
 
     [Theory]
@@ -104,17 +119,37 @@ public sealed class GitHubCopilotHistoricalAdapterTests
             ? new GitHubCopilotHistoricalProbeRequest(root, "session-123", value, true, "metadata_only")
             : new GitHubCopilotHistoricalProbeRequest(root, value, "1.0.71", true, "metadata_only");
 
-        var probe = adapter.Probe(request);
+        var probe = RequireProbe(adapter.Probe(request));
 
         Assert.Empty(fileSystem.InspectedPaths);
         AssertMalformed(probe);
     }
 
+    [Fact]
+    public void Probe_IncludeContent_PreservesRequestedCaptureWithoutReadingContent()
+    {
+        var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+            SelectedRoot,
+            "session-123",
+            "1.0.71",
+            true,
+            "include_content")));
+
+        Assert.Equal(4, fileSystem.InspectedPaths.Count);
+        Assert.Equal("include_content", probe.ImportPreview.RequestedCapture);
+        Assert.Equal("not_read", probe.ImportPreview.ContentRisk);
+        Assert.Equal(["historical_source_format_unsupported"], probe.AdapterResult.Diagnostics);
+        AssertZeroCandidate(probe);
+    }
+
     [Theory]
-    [InlineData("include_content")]
     [InlineData("")]
     [InlineData("METADATA_ONLY")]
-    public void Probe_NonMetadataCapture_FailsClosedWithoutIo(string requestedCapture)
+    [InlineData("include-content")]
+    public void Probe_InvalidCapture_ProducesNoSchemaShapedPreviewOrIo(string requestedCapture)
     {
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
@@ -126,8 +161,8 @@ public sealed class GitHubCopilotHistoricalAdapterTests
             true,
             requestedCapture));
 
+        Assert.Null(probe);
         Assert.Empty(fileSystem.InspectedPaths);
-        AssertMalformed(probe);
     }
 
     [Fact]
@@ -136,12 +171,12 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
             SelectedRoot,
             new string('s', 256),
             "1.0.71",
             true,
-            "metadata_only"));
+            "metadata_only")));
 
         Assert.Empty(fileSystem.InspectedPaths);
         AssertMalformed(probe);
@@ -165,7 +200,7 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         fileSystem.Kinds[invalidIndex] = (GitHubCopilotHistoricalPathKind)invalidKindValue;
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = adapter.Probe(ValidRequest("1.0.71"));
+        var probe = RequireProbe(adapter.Probe(ValidRequest("1.0.71")));
 
         AssertMalformed(probe);
         Assert.InRange(fileSystem.InspectedPaths.Count, 1, invalidIndex + 1);
@@ -181,12 +216,12 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         };
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
             SensitivePath,
             "private-session",
             "1.0.73",
             true,
-            "metadata_only"));
+            "metadata_only")));
 
         AssertMalformed(probe);
         var serialized = Encoding.UTF8.GetString(probe.AdapterResultJson);
@@ -196,12 +231,31 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Fact]
+    public void Probe_UnexpectedNonFatalFailure_UsesFixedSanitizedDiagnostic()
+    {
+        const string SensitiveMessage = "secret record body and local path";
+        var fileSystem = new RecordingMetadataFileSystem
+        {
+            Failure = new InvalidOperationException(SensitiveMessage),
+        };
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var probe = RequireProbe(adapter.Probe(ValidRequest("1.0.71")));
+
+        AssertMalformed(probe);
+        var serialized = Encoding.UTF8.GetString(probe.AdapterResultJson) +
+            Encoding.UTF8.GetString(probe.ImportPreviewJson);
+        Assert.DoesNotContain(SensitiveMessage, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("InvalidOperationException", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Probe_ProducesDeterministicContractBytes()
     {
-        var first = new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
-            .Probe(ValidRequest("1.0.71"));
-        var second = new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
-            .Probe(ValidRequest("1.0.71"));
+        var first = RequireProbe(new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
+            .Probe(ValidRequest("1.0.71")));
+        var second = RequireProbe(new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
+            .Probe(ValidRequest("1.0.71")));
 
         Assert.Equal(first.AdapterResultJson, second.AdapterResultJson);
         Assert.Equal(first.ImportPreviewJson, second.ImportPreviewJson);
@@ -213,13 +267,20 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         using var preview = JsonDocument.Parse(first.ImportPreviewJson);
         Assert.Equal("historical-import-preview/v1", preview.RootElement.GetProperty("contract_version").GetString());
         Assert.Equal(11, preview.RootElement.EnumerateObject().Count());
+
+        Assert.Equal(
+            "{\"contract_version\":\"historical-adapter-result/v1\",\"adapter_id\":\"github-copilot-cli-history-v1\",\"profile_id\":\"github-copilot-cli-session-state\",\"source_surface\":\"github-copilot-cli\",\"source_tier\":\"tier_b\",\"detection_state\":\"detected\",\"source_reference_state\":\"provided\",\"source_application_version\":\"1.0.71\",\"support_authorized\":false,\"source_format_profile\":\"none\",\"candidate_count\":0,\"content_risk\":\"not_read\",\"repository_safe\":true,\"diagnostics\":[\"historical_source_format_unsupported\"]}",
+            Encoding.UTF8.GetString(first.AdapterResultJson));
+        Assert.Equal(
+            "{\"contract_version\":\"historical-import-preview/v1\",\"source_surface\":\"github-copilot-cli\",\"profile_id\":\"github-copilot-cli-session-state\",\"adapter_id\":\"github-copilot-cli-history-v1\",\"adapter_diagnostics\":[\"historical_source_format_unsupported\"],\"requested_capture\":\"metadata_only\",\"eligible_candidate_count\":0,\"rejected_candidate_count\":0,\"commit_allowed\":false,\"rejection_code\":\"historical_import_no_eligible_candidates\",\"content_risk\":\"not_read\"}",
+            Encoding.UTF8.GetString(first.ImportPreviewJson));
     }
 
     [Fact]
     public void Probe_AlwaysProducesTheZeroCandidateIssue79PreviewWithoutMutationFields()
     {
-        var probe = new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
-            .Probe(ValidRequest("1.0.73"));
+        var probe = RequireProbe(new GitHubCopilotHistoricalAdapter(RecordingMetadataFileSystem.WithValidContainer())
+            .Probe(ValidRequest("1.0.73")));
 
         Assert.Equal(0, probe.ImportPreview.EligibleCandidateCount);
         Assert.Equal(0, probe.ImportPreview.RejectedCandidateCount);
@@ -240,6 +301,9 @@ public sealed class GitHubCopilotHistoricalAdapterTests
 
     private static GitHubCopilotHistoricalProbeRequest ValidRequest(string version) =>
         new(SelectedRoot, "session-123", version, true, "metadata_only");
+
+    private static GitHubCopilotHistoricalProbe RequireProbe(GitHubCopilotHistoricalProbe? probe) =>
+        Assert.IsType<GitHubCopilotHistoricalProbe>(probe);
 
     private static void AssertMissingReference(GitHubCopilotHistoricalProbe probe)
     {
@@ -265,6 +329,15 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         Assert.False(probe.ImportPreview.CommitAllowed);
         Assert.Equal("historical_import_no_eligible_candidates", probe.ImportPreview.RejectionCode);
         Assert.Equal("not_read", probe.ImportPreview.ContentRisk);
+        AssertSchemaValid("historical-adapter-result.schema.json", probe.AdapterResultJson);
+        AssertSchemaValid("historical-import-preview.schema.json", probe.ImportPreviewJson);
+    }
+
+    private static void AssertSchemaValid(string schemaFileName, byte[] json)
+    {
+        using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(ContractRoot, schemaFileName)));
+        using var value = JsonDocument.Parse(json);
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, value));
     }
 
     private sealed class RecordingMetadataFileSystem : IGitHubCopilotHistoricalMetadataFileSystem
