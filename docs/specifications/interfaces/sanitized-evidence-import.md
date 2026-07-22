@@ -196,6 +196,11 @@ Issue #86 owns the independent SQLite schema component
 inside the same immediate transaction as archive reinspection and import. Fresh
 databases and databases with the supported monitor v7 / Session v13 version
 vector add this component without changing those component versions or data.
+A CreateSchema, preview, or commit transaction ensures and validates
+`historical_import` v1 immediately before `sanitized_import` v1. This is a
+forward `#79 -> #86` guarantee only; it does not add a reverse-order guarantee
+or a shared migration number, and commit never opens a separate historical-
+schema transaction.
 A stale digest, record conflict, integrity failure, invalid structure, or failed
 foreign-key check rolls back component tables, indexes, and version stamp as
 well as import rows. A stamped future version or absent stamp with pre-existing

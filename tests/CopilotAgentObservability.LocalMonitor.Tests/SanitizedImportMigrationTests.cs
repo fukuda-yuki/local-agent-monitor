@@ -1,3 +1,4 @@
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using Microsoft.Data.Sqlite;
 
@@ -6,14 +7,16 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SanitizedImportMigrationTests
 {
     [Fact]
-    public void CreateSchema_FreshDatabaseCreatesIndependentVersionOneComponent()
+    public void CreateSchema_FreshDatabaseCreatesHistoricalThenSanitizedVersionOneComponents()
     {
         using var temp = new MonitorTempDirectory();
         var database = Path.Combine(temp.Path, "fresh-import.sqlite");
 
         new SqliteSanitizedImportStore(database).CreateSchema();
 
+        Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='historical_import';"));
         Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='sanitized_import';"));
+        Assert.Equal(7L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'historical_import_%';"));
         Assert.Equal(6L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'sanitized_import_%';"));
         Assert.Equal(
             ["import_id", "local_node_id", "declared_state"],
@@ -31,8 +34,75 @@ public sealed class SanitizedImportMigrationTests
 
         new SqliteSanitizedImportStore(database).CreateSchema();
 
-        Assert.Equal(["monitor:7", "sanitized_import:1", "session:13"], Rows(database, "SELECT component || ':' || version FROM schema_version ORDER BY component;"));
+        Assert.Equal(["historical_import:1", "monitor:7", "sanitized_import:1", "session:13"], Rows(database, "SELECT component || ':' || version FROM schema_version ORDER BY component;"));
         Assert.Equal("same", Rows(database, "SELECT value FROM kept;").Single());
+    }
+
+    [Fact]
+    public void CreateSchema_RealPreIssue79DatabaseAddsBothComponentsIdempotently()
+    {
+        using var temp = new MonitorTempDirectory();
+        var database = Path.Combine(temp.Path, "pre-issue-79.sqlite");
+        var fixture = Path.Combine(
+            AppContext.BaseDirectory,
+            "TestData",
+            "SchemaMigrations",
+            "session",
+            "session-v10.sqlite");
+        File.Copy(fixture, database);
+        var sessionRows = Scalar(database, "SELECT COUNT(*) FROM sessions;");
+        var store = new SqliteSanitizedImportStore(database);
+
+        store.CreateSchema();
+        store.CreateSchema();
+
+        Assert.Equal(10L, Scalar(database, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='historical_import';"));
+        Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='sanitized_import';"));
+        Assert.Equal(sessionRows, Scalar(database, "SELECT COUNT(*) FROM sessions;"));
+        Assert.Equal(7L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'historical_import_%';"));
+        Assert.Equal(6L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'sanitized_import_%';"));
+    }
+
+    [Fact]
+    public void Preview_PreIssue86HistoricalDatabasePreservesRowsAndAddsSanitizedComponentIdempotently()
+    {
+        using var temp = new MonitorTempDirectory();
+        var database = Path.Combine(temp.Path, "pre-issue-86.sqlite");
+        new SqliteHistoricalImportStore(database).CreateSchema();
+        Execute(database, """
+            INSERT INTO historical_import_previews(
+                preview_id,preview_digest,snapshot_version,snapshot_digest,source_selection_id,
+                private_selection_json,probe_json,candidate_batch_json,preview_json,eligible,expires_at,created_at)
+            VALUES('historical-preview','digest','hsv_1','snapshot','selection',
+                   NULL,NULL,NULL,'{}',0,'2026-07-23T01:00:00.0000000Z','2026-07-23T00:00:00.0000000Z');
+            """);
+        var store = new SqliteSanitizedImportStore(database, temp.TimeProvider);
+        var archive = SanitizedImportServiceTests.GoldenBundle();
+
+        var first = store.Preview(archive);
+        var second = store.Preview(archive);
+
+        Assert.True(first.Success, first.ErrorCode);
+        Assert.True(second.Success, second.ErrorCode);
+        Assert.Equal(first.PreviewDigest, second.PreviewDigest);
+        Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='historical_import';"));
+        Assert.Equal(1L, Scalar(database, "SELECT version FROM schema_version WHERE component='sanitized_import';"));
+        Assert.Equal(["historical-preview"], Rows(database, "SELECT preview_id FROM historical_import_previews;"));
+    }
+
+    [Fact]
+    public void CreateSchema_FutureHistoricalComponentFailsBeforeSanitizedMutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var database = Path.Combine(temp.Path, "future-historical-import.sqlite");
+        Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('historical_import',2);");
+
+        Assert.Throws<InvalidOperationException>(() => new SqliteSanitizedImportStore(database).CreateSchema());
+
+        Assert.Equal(2L, Scalar(database, "SELECT version FROM schema_version WHERE component='historical_import';"));
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM schema_version WHERE component='sanitized_import';"));
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'sanitized_import_%' OR tbl_name LIKE 'sanitized_import_%';"));
     }
 
     [Fact]
@@ -46,6 +116,8 @@ public sealed class SanitizedImportMigrationTests
 
         Assert.Equal(2L, Scalar(database, "SELECT version FROM schema_version WHERE component='sanitized_import';"));
         Assert.Equal("same", Rows(database, "SELECT value FROM kept;").Single());
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM schema_version WHERE component='historical_import';"));
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'historical_import_%' OR tbl_name LIKE 'historical_import_%';"));
         Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'sanitized_import_%';"));
     }
 

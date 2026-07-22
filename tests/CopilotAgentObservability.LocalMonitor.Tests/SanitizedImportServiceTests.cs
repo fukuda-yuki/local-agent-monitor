@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Alerts;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.SanitizedImport;
@@ -694,7 +695,7 @@ public sealed class SanitizedImportServiceTests
     }
 
     [Fact]
-    public void Commit_FreshTargetCreatesSchemaAndReceiptInOneSuccessfulTransaction()
+    public void Commit_FreshTargetCreatesHistoricalThenSanitizedSchemaAndReceiptInOneTransaction()
     {
         using var temp = new MonitorTempDirectory();
         var archive = GoldenBundle();
@@ -708,6 +709,8 @@ public sealed class SanitizedImportServiceTests
             .Commit(archive, preview.PreviewDigest!);
 
         Assert.True(result.Success, result.ErrorCode);
+        Assert.Equal(1L, Scalar(targetDatabase,
+            "SELECT version FROM schema_version WHERE component='historical_import';"));
         Assert.Equal(1L, Scalar(targetDatabase,
             "SELECT version FROM schema_version WHERE component='sanitized_import';"));
         Assert.Equal(1L, Scalar(targetDatabase, "SELECT COUNT(*) FROM sanitized_import_history;"));
@@ -736,6 +739,46 @@ public sealed class SanitizedImportServiceTests
         Assert.Equal(0L, Scalar(targetDatabase, """
             SELECT COUNT(*) FROM sqlite_schema
             WHERE name='schema_version' OR name LIKE 'sanitized_import_%' OR tbl_name LIKE 'sanitized_import_%';
+            """));
+    }
+
+    [Theory]
+    [InlineData("after_records")]
+    [InlineData("after_origins")]
+    [InlineData("after_graph")]
+    public void Commit_PreIssue86FailurePreservesHistoricalRowsAndRollsBackSanitizedComponent(string failingCheckpoint)
+    {
+        using var temp = new MonitorTempDirectory();
+        var archive = GoldenBundle();
+        var previewDatabase = Path.Combine(temp.Path, "preview.sqlite");
+        var targetDatabase = Path.Combine(temp.Path, "pre-issue-86.sqlite");
+        var previewStore = new SqliteSanitizedImportStore(previewDatabase, temp.TimeProvider);
+        previewStore.CreateSchema();
+        var preview = previewStore.Preview(archive);
+        new SqliteHistoricalImportStore(targetDatabase).CreateSchema();
+        Execute(targetDatabase, """
+            INSERT INTO historical_import_previews(
+                preview_id,preview_digest,snapshot_version,snapshot_digest,source_selection_id,
+                private_selection_json,probe_json,candidate_batch_json,preview_json,eligible,expires_at,created_at)
+            VALUES('historical-preview','digest','hsv_1','snapshot','selection',
+                   NULL,NULL,NULL,'{}',0,'2026-07-23T01:00:00.0000000Z','2026-07-23T00:00:00.0000000Z');
+            """);
+        var store = new SqliteSanitizedImportStore(targetDatabase, temp.TimeProvider,
+            checkpoint => { if (checkpoint == failingCheckpoint) throw new InvalidOperationException("synthetic"); });
+
+        var result = store.Commit(archive, preview.PreviewDigest!);
+
+        Assert.False(result.Success);
+        Assert.Equal("import_transaction_failed", result.ErrorCode);
+        Assert.Equal(1L, Scalar(targetDatabase,
+            "SELECT version FROM schema_version WHERE component='historical_import';"));
+        Assert.Equal(1L, Scalar(targetDatabase,
+            "SELECT COUNT(*) FROM historical_import_previews WHERE preview_id='historical-preview';"));
+        Assert.Equal(0L, Scalar(targetDatabase,
+            "SELECT COUNT(*) FROM schema_version WHERE component='sanitized_import';"));
+        Assert.Equal(0L, Scalar(targetDatabase, """
+            SELECT COUNT(*) FROM sqlite_schema
+            WHERE name LIKE 'sanitized_import_%' OR tbl_name LIKE 'sanitized_import_%';
             """));
     }
 

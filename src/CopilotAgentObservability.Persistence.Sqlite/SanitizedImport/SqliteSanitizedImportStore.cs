@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.InstructionFindings;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.SanitizedImport;
 using Microsoft.Data.Sqlite;
@@ -45,7 +46,7 @@ public sealed class SqliteSanitizedImportStore
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
-        SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys);
+        EnsureSchemas(connection, transaction, validateForeignKeys);
         transaction.Commit();
     }
 
@@ -67,7 +68,7 @@ public sealed class SqliteSanitizedImportStore
             EnsureDatabaseDirectory();
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: true);
-            SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys: false);
+            EnsureSchemas(connection, transaction, validateForeignKeys: false);
             StoredHistory? history;
             try
             {
@@ -129,7 +130,7 @@ public sealed class SqliteSanitizedImportStore
             using var transaction = connection.BeginTransaction(deferred: false);
             var read = SanitizedImportBundleReader.Read(archiveSnapshot);
             if (!read.Success) return RollbackWithoutWrite(transaction, ResultFailure(read.ErrorCode!));
-            SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys: false);
+            EnsureSchemas(connection, transaction, validateForeignKeys: false);
             var historyExists = ScalarLong(connection, transaction,
                 "SELECT COUNT(*) FROM sanitized_import_history WHERE import_id=$id;",
                 ("$id", read.Bundle!.ArchiveSha256)) != 0;
@@ -209,6 +210,15 @@ public sealed class SqliteSanitizedImportStore
     {
         var read = SanitizedImportBundleReader.Read(archiveSnapshot);
         return read.Success ? null : read.ErrorCode;
+    }
+
+    private static void EnsureSchemas(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        bool validateForeignKeys)
+    {
+        SqliteHistoricalImportStore.EnsureSchema(connection, transaction);
+        SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys);
     }
 
     private static void ValidateForeignKeysForImport(

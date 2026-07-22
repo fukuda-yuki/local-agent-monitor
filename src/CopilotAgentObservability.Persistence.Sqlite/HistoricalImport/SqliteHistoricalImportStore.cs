@@ -221,6 +221,14 @@ public sealed class SqliteHistoricalImportStore
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        EnsureSchema(connection, transaction);
+        transaction.Commit();
+    }
+
+    internal static void EnsureSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
         Execute(connection, transaction,
             "CREATE TABLE IF NOT EXISTS schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);");
 
@@ -232,7 +240,6 @@ public sealed class SqliteHistoricalImportStore
         {
             if (!SchemaMatches(connection, transaction, existingOwnedObjects))
                 throw new InvalidOperationException("The historical import schema is partial.");
-            transaction.Commit();
             return;
         }
         if (version is not null || existingOwnedObjects.Count != 0)
@@ -244,7 +251,6 @@ public sealed class SqliteHistoricalImportStore
             "INSERT INTO schema_version(component,version) VALUES('historical_import',1);");
         if (!SchemaMatches(connection, transaction, ReadOwnedObjects(connection, transaction)))
             throw new InvalidOperationException("The historical import schema is partial.");
-        transaction.Commit();
     }
 
     internal void SavePreview(HistoricalStoredPreview value)
