@@ -319,7 +319,12 @@ exact-bound Session metadata + sanitized monitor facts + #59 handoffs
   -> coherent bounded historical snapshot
   -> raw-local + repository-safe canonical datasets
   -> insert-or-identical local persistence
-  -> #73 / #74 consumers
+  -> #73 consumer
+
+exact canonical #72 repository-safe dataset
+  -> deterministic #74 efficiency-driver registry
+  -> canonical repository-safe receipt + exact evidence refs
+  -> #75 presentation handoff
 
 immutable #80 alert receipt
   -> append-only #83 lifecycle event

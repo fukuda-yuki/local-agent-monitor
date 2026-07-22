@@ -57,6 +57,10 @@
     <None Include="..\..\docs\specifications\contracts\historical-evidence\v1\historical-evidence-dataset.schema.json"
           Link="TestData\HistoricalEvidence\historical-evidence-dataset.schema.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\HistoricalEfficiency\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\historical-efficiency\v1\historical-efficiency-receipt.schema.json"
+          Link="TestData\HistoricalEfficiency\historical-efficiency-receipt.schema.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

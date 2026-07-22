@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/historical-efficiency/v1/historical-efficiency-receipt.schema.json",
+  "title": "Historical efficiency receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "registry_version",
+    "extraction_id",
+    "extraction_sha256",
+    "state",
+    "coverage",
+    "quality_availability",
+    "comparison_notes",
+    "category_coverage",
+    "drivers"
+  ],
+  "properties": {
+    "schema_version": { "const": "historical-efficiency-receipt.v1" },
+    "receipt_id": { "type": "string", "pattern": "^historical-efficiency-receipt-[0-9a-f]{32}$" },
+    "registry_version": { "const": "historical-efficiency-driver-registry.v1" },
+    "extraction_id": { "type": "string", "pattern": "^historical-extraction-[0-9a-f]{32}$" },
+    "extraction_sha256": { "$ref": "#/$defs/hash" },
+    "state": { "enum": ["succeeded", "zero_drivers"] },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "quality_availability": { "$ref": "#/$defs/qualityAvailability" },
+    "comparison_notes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/comparisonNote" }
+    },
+    "category_coverage": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/categoryCoverage" }
+    },
+    "drivers": {
+      "type": "array",
+      "maxItems": 51200,
+      "items": { "$ref": "#/$defs/driver" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sessionRef": { "type": "string", "pattern": "^session-ref-[0-9a-f]{32}$" },
+    "traceRef": { "type": "string", "pattern": "^trace-ref-[0-9a-f]{32}$" },
+    "spanRef": { "type": "string", "pattern": "^span-ref-[0-9a-f]{32}$" },
+    "category": {
+      "enum": [
+        "token_volume",
+        "context_growth",
+        "cache_inefficiency",
+        "retry_overhead",
+        "tool_call_volume",
+        "tool_failure_overhead",
+        "permission_wait",
+        "subagent_fanout",
+        "duration_outlier",
+        "model_mix_observation"
+      ]
+    },
+    "ruleSource": {
+      "enum": [
+        "historical-efficiency/token-volume@1",
+        "historical-efficiency/context-growth@1",
+        "historical-efficiency/cache-inefficiency@1",
+        "historical-efficiency/retry-overhead@1",
+        "historical-efficiency/tool-call-volume@1",
+        "historical-efficiency/tool-failure-overhead@1",
+        "historical-efficiency/permission-wait@1",
+        "historical-efficiency/subagent-fanout@1",
+        "historical-efficiency/duration-outlier@1",
+        "historical-efficiency/model-mix-observation@1"
+      ]
+    },
+    "formula": {
+      "enum": [
+        "session_total_gt_p75_and_ratio_gte_1_50",
+        "maximal_nondecreasing_input_run_ratio_gte_1_75",
+        "post_first_cache_read_ratio_lt_0_20",
+        "distinct_retry_attempts_minus_one",
+        "exact_repeated_call_count_gte_3",
+        "exact_tool_failure_ratio_unavailable",
+        "maximum_gte_30_or_total_gte_60_seconds",
+        "distinct_exact_ownership_count_gte_2",
+        "session_max_duration_gt_p75_and_ratio_gte_1_50",
+        "distinct_model_ref_count_gte_2"
+      ]
+    },
+    "threshold": {
+      "enum": [
+        "relative_outlier_1_50x_median_above_nearest_rank_p75",
+        "context_growth_ratio_gte_1_75",
+        "cache_read_ratio_lt_0_20_after_10000_input_tokens",
+        "retry_attempt_count_gte_2",
+        "repeated_exact_call_count_gte_3",
+        "unavailable_in_historical_evidence_v1",
+        "individual_wait_gte_30_or_total_wait_gte_60_seconds",
+        "exact_ownership_count_gte_2",
+        "distinct_model_ref_count_gte_2"
+      ]
+    },
+    "qualityAvailability": {
+      "enum": ["unavailable", "partial", "available", "regression_observed"]
+    },
+    "comparisonNote": {
+      "enum": [
+        "truncated_window",
+        "partial_completeness",
+        "historical_summary_present",
+        "mixed_source_surface",
+        "mixed_source_version",
+        "mixed_adapter_version",
+        "mixed_model",
+        "quality_unavailable",
+        "quality_partial",
+        "quality_regression_observed"
+      ]
+    },
+    "coverageReason": {
+      "enum": [
+        "exact_tool_failure_status_unavailable",
+        "missing_required_capability",
+        "missing_required_metric",
+        "mixed_evaluation_dimension",
+        "minimum_sample_unmet",
+        "no_threshold_match"
+      ]
+    },
+    "count": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "count"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "count": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "included_session_count",
+        "excluded_session_count",
+        "truncated_before",
+        "truncated_session_count",
+        "completeness",
+        "source_kinds",
+        "capabilities"
+      ],
+      "properties": {
+        "included_session_count": { "type": "integer", "minimum": 0, "maximum": 200 },
+        "excluded_session_count": { "type": "integer", "minimum": 0, "maximum": 401 },
+        "truncated_before": { "type": "boolean" },
+        "truncated_session_count": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "completeness": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+        "source_kinds": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+        "capabilities": { "type": "array", "items": { "$ref": "#/$defs/count" } }
+      }
+    },
+    "categoryCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "driver_version",
+        "rule_source",
+        "required_capabilities",
+        "formula",
+        "threshold",
+        "state",
+        "eligible_session_count",
+        "observed_sample_count",
+        "minimum_sample",
+        "reasons"
+      ],
+      "properties": {
+        "category": { "$ref": "#/$defs/category" },
+        "driver_version": { "const": 1 },
+        "rule_source": { "$ref": "#/$defs/ruleSource" },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+        },
+        "formula": { "$ref": "#/$defs/formula" },
+        "threshold": { "$ref": "#/$defs/threshold" },
+        "state": { "enum": ["matched", "no_match", "insufficient", "unavailable"] },
+        "eligible_session_count": { "type": "integer", "minimum": 0, "maximum": 200 },
+        "observed_sample_count": { "type": "integer", "minimum": 0, "maximum": 819200 },
+        "minimum_sample": { "type": "integer", "minimum": 0, "maximum": 200 },
+        "reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/coverageReason" }
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "trace_id", "span_id", "turn_index", "relative_position"],
+      "anyOf": [
+        { "properties": { "span_id": { "$ref": "#/$defs/spanRef" } } },
+        { "properties": { "turn_index": { "type": "integer", "minimum": 1 } } }
+      ],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/sessionRef" },
+        "trace_id": { "$ref": "#/$defs/traceRef" },
+        "span_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/spanRef" }] },
+        "turn_index": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }] },
+        "relative_position": { "enum": ["anchor", "previous", "following"] }
+      }
+    },
+    "scalar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "unit"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "value": { "type": "number", "minimum": 0 },
+        "unit": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+      }
+    },
+    "percentile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["percentile", "name", "value", "unit"],
+      "properties": {
+        "percentile": { "const": 75 },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "value": { "type": "number", "minimum": 0 },
+        "unit": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+      }
+    },
+    "sourceDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_surfaces", "source_kinds"],
+      "properties": {
+        "source_surfaces": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+        "source_kinds": { "type": "array", "items": { "$ref": "#/$defs/count" } }
+      }
+    },
+    "mitigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "summary", "evidence_refs"],
+      "properties": {
+        "code": {
+          "enum": [
+            "review_high_token_sessions",
+            "bound_conversation_context",
+            "review_cache_reuse",
+            "review_retry_trigger",
+            "review_repeated_tool_calls",
+            "review_tool_failure_evidence",
+            "review_permission_plan",
+            "review_subagent_scope",
+            "review_duration_outlier",
+            "separate_model_cohorts"
+          ]
+        },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 819200,
+          "items": { "$ref": "#/$defs/reference" }
+        }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "driver_id",
+        "category",
+        "driver_version",
+        "rule_source",
+        "formula",
+        "threshold",
+        "subject_session_id",
+        "source_sessions",
+        "evidence_refs",
+        "quality_evidence_refs",
+        "observed_values",
+        "cohort_median",
+        "cohort_percentile",
+        "source_distribution",
+        "completeness_distribution",
+        "quality_availability",
+        "verdict",
+        "comparison_notes",
+        "summary",
+        "mitigation"
+      ],
+      "properties": {
+        "driver_id": { "type": "string", "pattern": "^historical-efficiency-driver-[0-9a-f]{32}$" },
+        "category": { "$ref": "#/$defs/category" },
+        "driver_version": { "const": 1 },
+        "rule_source": { "$ref": "#/$defs/ruleSource" },
+        "formula": { "$ref": "#/$defs/formula" },
+        "threshold": { "$ref": "#/$defs/threshold" },
+        "subject_session_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sessionRef" }] },
+        "source_sessions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sessionRef" }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 819200,
+          "items": { "$ref": "#/$defs/reference" }
+        },
+        "quality_evidence_refs": {
+          "type": "array",
+          "maxItems": 819200,
+          "items": { "$ref": "#/$defs/reference" }
+        },
+        "observed_values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/scalar" }
+        },
+        "cohort_median": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/scalar" }] },
+        "cohort_percentile": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/percentile" }] },
+        "source_distribution": { "$ref": "#/$defs/sourceDistribution" },
+        "completeness_distribution": { "type": "array", "items": { "$ref": "#/$defs/count" } },
+        "quality_availability": { "$ref": "#/$defs/qualityAvailability" },
+        "verdict": { "enum": ["supported", "weak", "incomplete"] },
+        "comparison_notes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/comparisonNote" }
+        },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "mitigation": { "$ref": "#/$defs/mitigation" }
+      }
+    }
+  }
+}

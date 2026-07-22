@@ -387,6 +387,21 @@ redefining either contract. It adds no source discovery/import, LLM execution,
 HTTP/UI surface, proposal, effect, or apply behavior; #73 and #74 consume the
 persisted v1 forms independently.
 
+## Historical efficiency analysis
+
+Issue #74 freezes the deterministic consumer contract at
+[historical efficiency analysis](specifications/interfaces/historical-efficiency-analysis.md)
+and `specifications/contracts/historical-efficiency/v1/`. The analyzer accepts
+only the exact canonical Issue #72 repository-safe bytes and evaluates the ten
+versioned registry categories without converting missing evidence to zero.
+Comparative rules stay inside exact source/version/adapter/model cohorts;
+quality evidence can downgrade evidence strength but efficiency observations
+never establish quality improvement or an effect verdict. The canonical
+repository-safe receipt carries exact evidence references, complete category
+coverage, quality availability, and fixed mitigations for Issue #75. It adds no
+HTTP/UI surface, database or migration, historical import, monetary field, AI
+narrative, proposal, effect, or apply behavior.
+
 ## Alert-rule engine foundation
 
 Issue #80 defines the source-neutral deterministic alert contract at

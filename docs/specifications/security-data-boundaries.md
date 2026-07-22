@@ -1156,6 +1156,18 @@ existing same-origin/no-store/retention controls; `sanitized_only=true` never
 requests descriptor content. Canonical checksums and persistence validation
 provide integrity, not export authority or provenance attestation.
 
+## Historical Efficiency Receipt Boundary
+
+Issue #74 reads only the exact canonical Issue #72 repository-safe bytes and
+does not inspect the raw-local pair, Session/raw stores, paths, labels, or any
+out-of-band source. Its receipt may contain only opaque #72 tokens, exact safe
+evidence references, fixed registry text/codes, bounded numeric observations,
+and safe distributions. Missing values remain absent; generic error spans are
+not relabeled as tool failures. Raw content, source/model names, PII, paths,
+credentials, price/currency, and monetary values are forbidden. The receipt
+checksum proves byte integrity, not quality improvement, effect, origin, or
+provenance. Issue #75 consumes this safe receipt without formula recomputation.
+
 ## Sanitized Evidence Export Boundary
 
 Issue #85 exports only explicit sanitized projections and exact canonical
