@@ -141,7 +141,8 @@ public sealed partial class RetentionCatalogStore
         MutationCandidate candidate;
         using (var reader = command.ExecuteReader())
         {
-            if (!reader.Read()) return NotFound();
+            if (!reader.Read())
+                return IsSanitizedImportRecord(connection, transaction, itemId) ? NotApplicable() : NotFound();
             candidate = ReadCandidate(reader);
         }
         if (!TryParseStoreKind(candidate.StoreKindWire, out var storeKind)
@@ -249,6 +250,19 @@ public sealed partial class RetentionCatalogStore
 
     private static RetentionMutationTargetResolution NotApplicable() =>
         new(RetentionMutationTargetResolutionOutcome.NotApplicable, RetentionMutationErrorCodes.TargetNotApplicable, null, [], 0, []);
+
+    private static bool IsSanitizedImportRecord(SqliteConnection connection, SqliteTransaction transaction, string itemId)
+    {
+        using var table = connection.CreateCommand();
+        table.Transaction = transaction;
+        table.CommandText = "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sanitized_import_records';";
+        if (table.ExecuteScalar() is null) return false;
+        using var record = connection.CreateCommand();
+        record.Transaction = transaction;
+        record.CommandText = "SELECT 1 FROM sanitized_import_records WHERE local_record_id=$id COLLATE BINARY;";
+        record.Parameters.AddWithValue("$id", itemId);
+        return record.ExecuteScalar() is not null;
+    }
 
     private sealed record MutationCandidate(
         string ItemId,

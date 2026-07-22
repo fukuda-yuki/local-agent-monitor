@@ -10,6 +10,7 @@
     <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
     <Project Path="src/CopilotAgentObservability.RawReplay/CopilotAgentObservability.RawReplay.csproj" />
     <Project Path="src/CopilotAgentObservability.SanitizedExport/CopilotAgentObservability.SanitizedExport.csproj" />
+    <Project Path="src/CopilotAgentObservability.SanitizedImport/CopilotAgentObservability.SanitizedImport.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CopilotAgentObservability.Alerts.Tests/CopilotAgentObservability.Alerts.Tests.csproj" />

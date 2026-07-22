@@ -32,6 +32,14 @@ and a separate `applicable` or `not_applicable` applicability state.
 applicable rows still receive a terminal classification. An unavailable future surface is
 not an active row and appears only in the future registry as `not_available`.
 
+Issue #86 transitions `transactional-sanitized-import` out of that registry.
+Its exact active artifact is
+`docs/sprints/issue-86-sanitized-import/validation-matrix.json` and owns rows
+`91-I-086` (archive/transaction/API/CLI/UI), `91-S-086` (strict security and
+retention boundary), and `91-L-086` (genuine second-machine execution). A
+same-machine database or path relocation is useful automated compatibility
+evidence but cannot classify `91-L-086` as passed.
+
 ## Profile Axes
 
 Rows keep independent axes rather than flattening them into one label:

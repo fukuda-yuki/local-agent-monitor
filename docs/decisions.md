@@ -2465,3 +2465,24 @@ evidence stores and performs zero external-model calls. Same replay ID plus the
 same archive/options/versions is idempotent; differing input is a conflict.
 `--sanitized-only` rejects the whole surface before raw access. The canonical
 interface is [raw local replay](specifications/interfaces/raw-local-replay.md).
+
+## D070: Sanitized import is exact, component-owned, and transactional
+
+Status: Accepted (2026-07-23)
+
+Issue #86 imports only the frozen Issue #85 v1 archive after the exact #85
+strict inspection authority succeeds. It uses exact record identity and exact
+canonical bytes for deduplication, rejects same-ID/different-bytes conflicts,
+and preserves source IDs in a deterministic evidence graph without repository,
+workspace, timestamp, text, or proximity inference. Preview is bound to the
+archive and current imported-record state; commit revalidates it inside one
+transaction and writes records, origins, graph, and history all-or-nothing.
+
+The data belongs to an independent `sanitized_import` schema component v1.
+Using Session v14 was rejected because the frozen carriers do not create or
+change Session identity, and a Session bump would break #85's monitor v7 /
+Session v13 capture anchor. Imported rows are retained sanitized outputs, not
+raw store kinds, create no retention catalog items, and are not Issue #90
+mutation targets. Raw replay, backup restore, heuristic conflict resolution,
+origin attestation, and new carriers remain separate concerns. The interface
+is [sanitized evidence import](specifications/interfaces/sanitized-evidence-import.md).

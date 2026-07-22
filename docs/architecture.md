@@ -391,6 +391,13 @@ The Local Monitor upper adapter alone coordinates isolated replay publication
 with the existing Retention sensitive-bundle store. `RawReplay` never references
 Config CLI or Local Monitor and does not mutate the source SQLite database.
 
+`SanitizedImport` depends on `SanitizedExport` for the frozen archive
+inspection authority and on the #59/#80 public consumer authorities for graph
+projection. `Persistence.Sqlite` owns the independent `sanitized_import` v1
+component and one transactional application boundary. Config CLI and Local
+Monitor call that boundary; they never write Session, monitor, raw, finding,
+alert, or retention-owner tables on behalf of import.
+
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
 - Sprint8 の Local Ingestion Monitor（ASP.NET Core host、M2 以降）はこれらの共有 module を再利用する前提とする。ConfigCli の外部動作・CLI 表面は M1 で変更しない。
@@ -449,6 +456,12 @@ exact Retention-authorized raw/optional Session-content snapshot
   -> strict whole-archive inspection + pinned deterministic replay
   -> isolated existing sensitive_bundle namespace (7-day policy)
   -> existing Retention lease / queue / cleanup / recovery path
+
+frozen #85 archive bytes
+  -> exact #85 inspection + deterministic v1 import projection
+  -> preview digest bound to exact local dedup/conflict state
+  -> one `sanitized_import` transaction for records/origins/graph/history
+  -> bounded CLI or loopback UI/history projection
 ```
 
 The historical, lifecycle, and Alert Center flows do not mutate their parent evidence.

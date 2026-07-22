@@ -19,6 +19,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.RawReplay;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -239,6 +240,8 @@ internal static class MonitorHost
                 alertCenterPolicy.Configuration,
                 alertEvidenceResolver,
                 alertEngineStore));
+        var sanitizedImportStore = new SqliteSanitizedImportStore(options.DatabasePath, timeProvider);
+        sanitizedImportStore.CreateSchema();
 
         var app = builder.Build();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
@@ -261,6 +264,12 @@ internal static class MonitorHost
             errorApp.Run(async context =>
             {
                 var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+                if (SanitizedImportRoutes.IsPath(context.Request.Path))
+                {
+                    var mapped = SanitizedImportRoutes.MapUnhandledException(exception);
+                    await SanitizedImportRoutes.ErrorAsync(context, mapped.Status, mapped.Error);
+                    return;
+                }
                 if (RetentionMutationRoutes.IsRetentionPath(context.Request.Path))
                 {
                     await RetentionMutationRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, RetentionMutationErrorCodes.CatalogUnavailable);
@@ -329,7 +338,8 @@ internal static class MonitorHost
             var alertPath = AlertLifecycleRoutes.IsAlertPath(context.Request.Path);
             var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
             var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath || rawReplayPath || alertPath || historicalImportPath || alertCenterPath)
+            var sanitizedImportPath = SanitizedImportRoutes.IsPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath || rawReplayPath || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -342,6 +352,10 @@ internal static class MonitorHost
                 else if (historicalImportPath)
                 {
                     await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (sanitizedImportPath)
+                {
+                    await SanitizedImportRoutes.ErrorAsync(context, StatusCodes.Status403Forbidden, "invalid_host");
                 }
                 else if (sanitizedExportPath)
                 {
@@ -392,6 +406,7 @@ internal static class MonitorHost
             timeProvider,
             testOptions?.RawReplaySnapshotProvider,
             testOptions?.RawReplayTransientLimits);
+        SanitizedImportRoutes.Map(app, sanitizedImportStore);
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);

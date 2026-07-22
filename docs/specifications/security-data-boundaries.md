@@ -1327,6 +1327,31 @@ owned retained child. Caller archives, the configured parent, siblings,
 pre-existing partial files, and concurrent publisher files are outside its
 authority.
 
+## Sanitized Evidence Import Boundary
+
+Issue #86 accepts only bytes that pass the exact Issue #85 v1 archive,
+manifest, inventory, checksum, canonical producer, and repository-safe scanner
+validation. Traversal/absolute paths, duplicate entries/identities,
+symlink/external attributes, compressed/ratio-bearing members, extra or
+forbidden files, oversize input, malformed content, and future/unknown versions
+fail before persistence. Validation errors are fixed codes and never echo an
+entry, content fragment, credential, or local path.
+
+Preview and commit carry sanitized metadata and hashes only. Commit is bound to
+the preview digest, revalidates the same bounded archive, and writes the
+component-owned record/origin/graph/history set in one transaction. It never
+queries or writes raw/content stores and never changes Session, monitor,
+finding, alert, or retention authority. Imported rows are sanitized retained
+outputs and create zero retention catalog items.
+
+The loopback UI/API preserves Host-header validation, same-origin checks, CSRF
+on archive-bearing POSTs, `application/zip` admission, streaming size bounds,
+disabled CORS, and `Cache-Control: no-store`. The UI uses framework encoding or
+DOM `textContent` for every source-controlled label, ID, error, and history
+value; archive content is never injected or executed. Browser storage is not
+used for archive bytes or preview binding. The complete contract is canonical
+in [`interfaces/sanitized-evidence-import.md`](interfaces/sanitized-evidence-import.md).
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

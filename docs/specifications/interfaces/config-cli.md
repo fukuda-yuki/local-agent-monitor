@@ -269,6 +269,25 @@ emits raw bodies, credentials, private filenames, or local paths in result/error
 output. The full contract is canonical in
 [raw-local-replay.md](raw-local-replay.md).
 
+## Sanitized Import Commands
+
+```text
+config-cli sanitized-import preview --database <monitor.db> --bundle <bundle.zip>
+config-cli sanitized-import import --database <monitor.db> --bundle <bundle.zip> --preview-digest <sha256>
+config-cli sanitized-import history --database <monitor.db> [--limit <1..100>]
+```
+
+These commands accept only the frozen `sanitized-evidence-bundle.v1` archive,
+create or validate the independent `sanitized_import` schema component, and
+emit the shared preview, result, or history JSON contract. `import` requires
+the exact digest returned by preview and revalidates the archive and imported
+state transactionally. Exit `0` denotes success, including a non-committable
+conflict preview; exit `2` denotes invalid arguments, archive validation,
+conflict, or changed-preview failure; exit `3` denotes filesystem or store
+unavailability. Stderr contains only a fixed code and never an input path or
+exception text. Full behavior is canonical in
+[sanitized-evidence-import.md](sanitized-evidence-import.md).
+
 ## Raw Data Commands
 
 ```text

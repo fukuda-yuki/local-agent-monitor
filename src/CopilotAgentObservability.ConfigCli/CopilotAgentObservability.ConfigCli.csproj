@@ -13,6 +13,7 @@
     <ProjectReference Include="..\CopilotAgentObservability.Persistence.Sqlite\CopilotAgentObservability.Persistence.Sqlite.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.RawReplay\CopilotAgentObservability.RawReplay.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.SanitizedExport\CopilotAgentObservability.SanitizedExport.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.SanitizedImport\CopilotAgentObservability.SanitizedImport.csproj" />
   </ItemGroup>
 
   <ItemGroup>

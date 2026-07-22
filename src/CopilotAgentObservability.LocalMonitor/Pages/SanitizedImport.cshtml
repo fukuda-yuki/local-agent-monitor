@@ -1,0 +1,55 @@
+@page "/sanitized-import"
+@model SanitizedImportModel
+
+<section class="sanitized-import-page" id="sanitized-import-root">
+    <nav class="breadcrumb" aria-label="パンくず">
+        <a href="/diagnostics">診断</a>
+        <span class="breadcrumb-sep" aria-hidden="true">/</span>
+        <span class="breadcrumb-current">サニタイズ済み証拠の取り込み</span>
+    </nav>
+
+    <h2 class="monitor-page-title">サニタイズ済み証拠を取り込む</h2>
+    <p class="monitor-subtle">凍結済み v1 バンドルを検証し、変更内容を確認してからトランザクションで取り込みます。raw テレメトリは復元しません。</p>
+
+    <section class="panel sanitized-import-select" aria-labelledby="sanitized-import-select-title">
+        <h3 id="sanitized-import-select-title">1. バンドルを選択</h3>
+        <label for="sanitized-import-file">サニタイズ済み ZIP バンドル</label>
+        <input id="sanitized-import-file" type="file" accept="application/zip,.zip" aria-describedby="sanitized-import-file-help" />
+        <p id="sanitized-import-file-help" class="monitor-subtle">最大 128 MiB。選択したファイルはブラウザー保存領域へ保持しません。</p>
+        <p id="sanitized-import-file-name" class="sanitized-import-file-name"></p>
+        <button class="monitor-btn" id="sanitized-import-preview-button" type="button" disabled>変更内容を確認</button>
+    </section>
+
+    <section class="panel sanitized-import-preview" id="sanitized-import-preview" aria-labelledby="sanitized-import-preview-title" hidden>
+        <div class="sanitized-import-section-head">
+            <h3 id="sanitized-import-preview-title" tabindex="-1">2. 検証結果と変更内容</h3>
+            <span class="monitor-badge" id="sanitized-import-provenance-badge">内部整合性検証済み（出所未証明）</span>
+        </div>
+        <div id="sanitized-import-preview-content"></div>
+        <p class="sanitized-import-caution">競合がなく、表示された preview digest が選択中のファイルと現在の取り込み状態に一致する場合だけ確定できます。</p>
+        <button class="monitor-btn monitor-btn-primary" id="sanitized-import-commit-button" type="button" disabled>この内容を取り込む</button>
+    </section>
+
+    <section class="panel sanitized-import-result" id="sanitized-import-result" aria-labelledby="sanitized-import-result-title" hidden>
+        <h3 id="sanitized-import-result-title" tabindex="-1">取り込み結果</h3>
+        <div id="sanitized-import-result-content"></div>
+    </section>
+
+    <section class="panel sanitized-import-history" aria-labelledby="sanitized-import-history-title">
+        <div class="sanitized-import-section-head">
+            <h3 id="sanitized-import-history-title">取り込み履歴</h3>
+            <button class="monitor-btn" id="sanitized-import-history-refresh" type="button">再取得</button>
+        </div>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table" id="sanitized-import-history">
+                <thead><tr><th>取り込み日時</th><th>Import ID</th><th>新規</th><th>重複</th><th>状態</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <p id="sanitized-import-history-empty" class="monitor-subtle">履歴はありません。</p>
+    </section>
+
+    <p class="sanitized-import-live" id="sanitized-import-live" role="status" aria-live="polite" aria-atomic="true"></p>
+    <p class="sanitized-import-error" id="sanitized-import-error" role="alert" hidden></p>
+</section>
+<script src="/monitor-sanitized-import.js" defer></script>

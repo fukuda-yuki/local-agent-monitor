@@ -12,6 +12,7 @@
     <ProjectReference Include="..\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.RawReplay\CopilotAgentObservability.RawReplay.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.SanitizedExport\CopilotAgentObservability.SanitizedExport.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.SanitizedImport\CopilotAgentObservability.SanitizedImport.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
   </ItemGroup>
 

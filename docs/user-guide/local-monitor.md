@@ -13,7 +13,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 2 項目のみ）、下部に受信ステータスバッジがあり、診断はバッジ → ポップオーバー →
 「詳細診断を開く」の段階的動線で開きます（`/diagnostics` への直接アクセスも可能）。
 
-画面は次の 8 つです。
+画面は次の 10 個です。
 
 | 画面 | 開き方 | 内容 |
 |---|---|---|
@@ -26,6 +26,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 | Alert Center | 概要の最新 critical alert、トレース詳細の「関連 Alert」、または `/alerts` | frozen alert receipt と lifecycle を一覧・絞り込みし、exact evidence、recurring group、suppression coverage を確認。acknowledge / dismiss / resolve / reopen を明示操作 |
 | 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴、リポジトリメタデータ診断 |
 | 履歴インポート | 診断ページの「履歴インポート」カード → `/historical-import` | 明示的に選択した GitHub Copilot CLI / Claude Code の履歴 source を preview し、対応済み source のみ確認後に import。live Session と historical observation は別 tab で表示 |
+| サニタイズ済み証拠の取り込み | `/sanitized-import` へ直接アクセス | frozen v1 ZIP の preview、明示確定、取り込み結果、bounded history。raw telemetry は復元しない |
 
 主な API は次のとおりです。
 
@@ -40,6 +41,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 | `GET /api/alert-center/v1/alerts` | frozen receipt / lifecycle / exact evidence / recurring / suppression coverage の sanitized snapshot |
 | `POST /api/alert-center/v1/evaluations` | exact Session + trace を利用者が明示指定する評価。自動評価ではなく、現行 source manifest では receipt を作らず suppression coverage を記録 |
 | `GET /traces/{traceId}/spans/{spanId}/detail` | スパンインスペクタ用の raw-bearing span 詳細（`--sanitized-only` 時は 404） |
+| `/api/sanitized-import/v1/*` | sanitized bundle の preview / 明示取り込み / history（same-origin、POST は CSRF header 必須） |
 | `/api/doctor/*` | source-independent な Doctor evaluation / verification の 5 route（後述、UI なし） |
 | `/api/historical-import/v1/*` | 履歴 import の preview / confirmation / result / history / observation（sanitized、no-store） |
 
@@ -605,6 +607,19 @@ server に永続化されることはありません。
 <p align="center">
   <img width="900" alt="Local Ingestion Monitor Copilot 解析ドロワー" src="../assets/screenshots/local-monitor-copilot-drawer.png">
 </p>
+
+### サニタイズ済み証拠の取り込み
+
+`/sanitized-import` では、Issue #85 の frozen v1 ZIP bundle を選び、厳密な archive / checksum /
+scanner 検証と現在の database に対する差分を preview してから明示的に確定できます。
+別の file を選ぶと既存 preview は無効になります。競合または stale preview は確定できず、
+既存 record を上書きしません。確定後は bounded な取り込み履歴を同じ画面で確認できます。
+
+この画面は raw telemetry、Session、alert lifecycle、backup を復元せず、#58 / #59 / #80 の
+sanitized carrier と provenance / graph だけを専用 table に保存します。選択した bundle bytes や
+digest を browser storage に保存しません。画面と API は same-origin、`Cache-Control: no-store`、
+Host-header validation を強制し、POST は CSRF header を必要とします。検証成功は archive の内部
+整合性を示しますが、作成者、署名、権限、source store provenance を証明しません。
 
 ### 診断
 
