@@ -112,6 +112,24 @@ decision. Counts use unit `turns`, ratios use unit `ratio`, and utilization uses
 unit `fraction`. Raw prompts, responses, system/tool bodies, model-generated
 text, paths, and comparable-key values never enter a receipt.
 
+Current-source negative fixtures load and validate the exact committed Issue
+#61 manifests rather than selecting only a `source_surface` string. The frozen
+fixture revisions are:
+
+| Source surface | Manifest | SHA-256 |
+| --- | --- | --- |
+| `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd` |
+| `claude-code` | `contracts/source-capabilities/v1/manifests/claude-code.json` | `d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294` |
+
+Manifest drift fails the fixture until the changed capability declaration is
+reviewed and this rule contract is revised. Current negative fixtures derive
+model/input/output/cache capability availability from those manifests and keep
+all adapter-owned classification, semantics, tool-schema, and effective-limit
+facts `unknown` unless a reviewed mapping proves them. Positive warning and
+critical boundary fixtures use source version
+`verified-source-neutral-synthetic-v1`; they demonstrate only the compiled
+source-neutral formulas and never claim live producer capability.
+
 ## Rule Registry
 
 ### `high-initial-context-utilization` version `1`
@@ -122,10 +140,12 @@ Required capabilities are `llm-call-classification`, `input-token-count`,
 `effective-context-limit-version`. Scope is trace and the evaluation window is
 `first-eligible-turn-per-evaluation-dimension`.
 
-Choose the first successful call in the single evaluation dimension with an explicit positive
-limit and complete grouping keys. If that exact first call has no observed
-input metric, the evaluation dimension is unevaluable; a later input must not replace the
-initial turn. Compute `initial-context-utilization = input / limit`.
+Choose the first successful `llm_call` before applying metric or grouping-key
+eligibility. If that exact first successful call has no observed input metric,
+no explicit positive limit, or any missing model, input-semantics,
+limit-authority, or limit-version dimension, the evaluation is unevaluable and
+suppresses with `minimum-sample-unmet`; a later complete call must not replace
+the initial turn. Compute `initial-context-utilization = input / limit`.
 Warning is inclusive at `0.50`; critical is inclusive at `0.80` and takes
 precedence. Evidence is that exact first turn.
 

@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 
 namespace CopilotAgentObservability.Alerts.Tests;
@@ -168,6 +170,25 @@ public sealed class TokenContextCacheAlertRuleTests
     public void HighInitialContextUtilization_DoesNotReplaceMissingFirstInputWithALaterTurn()
     {
         var result = Evaluate("high-initial-context-utilization", [Turn(1, input: null, limit: 100), Turn(2, input: 90, limit: 100)]);
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("minimum-sample-unmet", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Theory]
+    [InlineData("effective-context-limit")]
+    [InlineData("model-id")]
+    [InlineData("input-token-semantics-version")]
+    [InlineData("effective-context-limit-authority")]
+    [InlineData("effective-context-limit-version")]
+    public void HighInitialContextUtilization_DoesNotPromoteLaterCompleteTurnWhenFirstSuccessfulDimensionIsMissing(string missingDimension)
+    {
+        var first = Turn(1, input: 90, limit: 100);
+        first = missingDimension == "effective-context-limit"
+            ? first with { Metrics = first.Metrics.Where(metric => metric.Name != missingDimension).ToArray() }
+            : first with { ComparableKeys = first.ComparableKeys.Where(key => key.Name != missingDimension).ToArray() };
+
+        var result = Evaluate("high-initial-context-utilization", [first, Turn(2, input: 90, limit: 100)]);
 
         Assert.Empty(result.Receipts);
         Assert.Equal("minimum-sample-unmet", Assert.Single(result.Suppressions).Code);
@@ -433,20 +454,55 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Theory]
-    [InlineData("github-copilot-vscode")]
-    [InlineData("claude-code")]
-    public void CurrentRealSourceFixtures_RemainCapabilitySuppressed(string sourceSurface)
+    [InlineData("github-copilot-vscode", "github-copilot-vscode.json", "a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd")]
+    [InlineData("claude-code", "claude-code.json", "d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294")]
+    public void CurrentSourceManifests_ArePinnedAndKeepAllFiveRulesCapabilitySuppressed(
+        string sourceSurface,
+        string manifestFile,
+        string expectedSha256)
     {
-        var result = Evaluate("low-cache-read-ratio", [Turn(1, input: 5000, cache: 0), Turn(2, input: 5000, cache: 0), Turn(3, input: 5000, cache: 0)],
-            sourceSurface: sourceSurface,
-            capabilityOverrides: new Dictionary<string, AlertCapabilityAvailability>
-            {
-                ["input-token-count"] = AlertCapabilityAvailability.Unknown,
-                ["cache-read-token-count"] = AlertCapabilityAvailability.Unknown,
-            });
+        var manifestBytes = File.ReadAllBytes(SourceManifestPath(manifestFile));
+        Assert.Equal(expectedSha256, Convert.ToHexString(SHA256.HashData(manifestBytes)).ToLowerInvariant());
+        using var manifest = JsonDocument.Parse(manifestBytes);
+        Assert.Equal("v1", manifest.RootElement.GetProperty("contract_version").GetString());
+        Assert.Equal(sourceSurface, manifest.RootElement.GetProperty("source_surface").GetString());
+        Assert.All(
+            new[] { "model", "input_tokens", "output_tokens", "cache_tokens" },
+            name => Assert.Equal("unknown", manifest.RootElement.GetProperty("model_tokens").GetProperty(name).GetProperty("availability").GetString()));
 
-        Assert.Empty(result.Receipts);
-        Assert.Equal(["cache-read-token-count", "input-token-count"], Assert.Single(result.Suppressions).MissingCapabilities);
+        foreach (var rule in TokenContextCacheAlertRulePack.CreateRules())
+        {
+            var result = Evaluate(
+                rule.Descriptor.RuleId,
+                PositiveLookingTurns(rule.Descriptor.RuleId),
+                sourceSurface: sourceSurface,
+                capabilityOverrides: CapabilitiesFromManifest(rule.Descriptor, manifest.RootElement),
+                sourceVersion: $"manifest-v1-{expectedSha256[..16]}");
+
+            Assert.Empty(result.Receipts);
+            var suppression = Assert.Single(result.Suppressions);
+            Assert.Equal("missing_required_capability", suppression.Code);
+            Assert.NotEmpty(suppression.MissingCapabilities);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(VerifiedSourceNeutralBoundaryCases))]
+    public void VerifiedSourceNeutralSyntheticInputs_PinWarningAndCriticalBoundaries(
+        string sourceSurface,
+        string ruleId,
+        AlertSeverity expectedSeverity)
+    {
+        var result = Evaluate(
+            ruleId,
+            SyntheticBoundaryTurns(ruleId, expectedSeverity),
+            sourceSurface: sourceSurface,
+            sourceVersion: "verified-source-neutral-synthetic-v1");
+
+        var receipt = Assert.Single(result.Receipts);
+        Assert.Equal(expectedSeverity, receipt.Severity);
+        Assert.Equal(sourceSurface, receipt.SourceSurface);
+        Assert.Equal("verified-source-neutral-synthetic-v1", receipt.SourceVersion);
     }
 
     [Fact]
@@ -485,7 +541,8 @@ public sealed class TokenContextCacheAlertRuleTests
         IReadOnlyList<string>? reasons = null,
         string sourceSurface = "github-copilot-vscode",
         IReadOnlyDictionary<string, AlertCapabilityAvailability>? capabilityOverrides = null,
-        IReadOnlyDictionary<string, decimal>? thresholdOverrides = null)
+        IReadOnlyDictionary<string, decimal>? thresholdOverrides = null,
+        string sourceVersion = "fixture-v1")
     {
         var rule = TokenContextCacheAlertRulePack.CreateRules().Single(item => item.Descriptor.RuleId == ruleId);
         var capabilities = rule.Descriptor.RequiredCapabilities
@@ -495,7 +552,7 @@ public sealed class TokenContextCacheAlertRuleTests
         var snapshot = new AlertNormalizedSnapshot(
             AlertContractVersions.Snapshot,
             sourceSurface,
-            "fixture-v1",
+            sourceVersion,
             "session-1",
             "trace-1",
             completeness,
@@ -507,6 +564,116 @@ public sealed class TokenContextCacheAlertRuleTests
         var engine = new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new ExistsResolver());
         var rules = thresholdOverrides is null ? [] : new[] { new AlertRuleConfiguration(ruleId, "1", true, thresholdOverrides, null) };
         return engine.Evaluate(snapshot, new(AlertContractVersions.Configuration, "token-rules-v1", rules));
+    }
+
+    public static IEnumerable<object[]> VerifiedSourceNeutralBoundaryCases()
+    {
+        foreach (var sourceSurface in new[] { "github-copilot-vscode", "claude-code" })
+        {
+            foreach (var ruleId in new[]
+            {
+                "high-initial-context-utilization",
+                "monotonic-context-growth",
+                "context-growth-with-output-collapse",
+                "low-cache-read-ratio",
+                "near-context-limit-turn",
+            })
+            {
+                yield return [sourceSurface, ruleId, AlertSeverity.Warning];
+                yield return [sourceSurface, ruleId, AlertSeverity.Critical];
+            }
+        }
+    }
+
+    private static IReadOnlyList<AlertSignal> PositiveLookingTurns(string ruleId) => ruleId switch
+    {
+        "high-initial-context-utilization" => [Turn(1, input: 90, limit: 100)],
+        "monotonic-context-growth" => [Turn(1, input: 100), Turn(2, input: 200), Turn(3, input: 300)],
+        "context-growth-with-output-collapse" =>
+        [
+            Turn(1, input: 100, output: 100), Turn(2, input: 100, output: 100),
+            Turn(3, input: 200, output: 0), Turn(4, input: 200, output: 0),
+        ],
+        "low-cache-read-ratio" => [Turn(1, input: 1, cache: 0), Turn(2, input: 5000, cache: 0), Turn(3, input: 5000, cache: 0)],
+        "near-context-limit-turn" => [Turn(1, input: 90, limit: 100)],
+        _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
+    };
+
+    private static IReadOnlyList<AlertSignal> SyntheticBoundaryTurns(string ruleId, AlertSeverity severity) => ruleId switch
+    {
+        "high-initial-context-utilization" => [Turn(1, input: severity == AlertSeverity.Warning ? 50 : 80, limit: 100)],
+        "monotonic-context-growth" =>
+        [
+            Turn(1, input: 100), Turn(2, input: 100),
+            Turn(3, input: severity == AlertSeverity.Warning ? 175 : 250),
+        ],
+        "context-growth-with-output-collapse" => severity == AlertSeverity.Warning
+            ?
+            [
+                Turn(1, input: 100, output: 100), Turn(2, input: 100, output: 100),
+                Turn(3, input: 150, output: 75), Turn(4, input: 150, output: 75),
+            ]
+            :
+            [
+                Turn(1, input: 100, output: 100), Turn(2, input: 100, output: 100),
+                Turn(3, input: 200, output: 60), Turn(4, input: 200, output: 60),
+            ],
+        "low-cache-read-ratio" =>
+        [
+            Turn(1, input: 1, cache: 0),
+            Turn(2, input: 5000, cache: severity == AlertSeverity.Warning ? 995 : 245),
+            Turn(3, input: 5000, cache: severity == AlertSeverity.Warning ? 995 : 245),
+        ],
+        "near-context-limit-turn" => [Turn(1, input: severity == AlertSeverity.Warning ? 75 : 90, limit: 100)],
+        _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
+    };
+
+    private static IReadOnlyDictionary<string, AlertCapabilityAvailability> CapabilitiesFromManifest(
+        AlertRuleDescriptor descriptor,
+        JsonElement manifest)
+    {
+        var capabilities = descriptor.RequiredCapabilities.ToDictionary(
+            name => name,
+            _ => AlertCapabilityAvailability.Unknown,
+            StringComparer.Ordinal);
+        var modelTokens = manifest.GetProperty("model_tokens");
+        Map("model-identity", "model");
+        Map("input-token-count", "input_tokens");
+        Map("output-token-count", "output_tokens");
+        Map("cache-read-token-count", "cache_tokens");
+        return capabilities;
+
+        void Map(string capability, string manifestLeaf)
+        {
+            if (!capabilities.ContainsKey(capability)) return;
+            capabilities[capability] = modelTokens.GetProperty(manifestLeaf).GetProperty("availability").GetString() switch
+            {
+                "available" => AlertCapabilityAvailability.Available,
+                "unavailable" => AlertCapabilityAvailability.Unavailable,
+                "unknown" => AlertCapabilityAvailability.Unknown,
+                _ => throw new InvalidDataException($"Unexpected capability availability for '{manifestLeaf}'."),
+            };
+        }
+    }
+
+    private static string SourceManifestPath(string manifestFile) => Path.Combine(
+        RepositoryRoot(),
+        "docs",
+        "specifications",
+        "contracts",
+        "source-capabilities",
+        "v1",
+        "manifests",
+        manifestFile);
+
+    private static string RepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "CopilotAgentObservability.slnx"))) return directory.FullName;
+        }
+
+        throw new DirectoryNotFoundException("Repository root was not found from the test output directory.");
     }
 
     private static AlertSignal Turn(
