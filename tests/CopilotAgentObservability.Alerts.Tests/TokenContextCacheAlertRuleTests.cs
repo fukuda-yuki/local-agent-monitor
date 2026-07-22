@@ -22,6 +22,11 @@ public sealed class TokenContextCacheAlertRuleTests
         Assert.Equal((0.50m, 0.30m), Defaults(descriptors, "context-growth-with-output-collapse", "output-input-collapse-ratio"));
         Assert.Equal((0.20m, 0.05m), Defaults(descriptors, "low-cache-read-ratio", "cache-read-ratio"));
         Assert.Equal((0.75m, 0.90m), Defaults(descriptors, "near-context-limit-turn", "context-limit-utilization"));
+        var highInitial = descriptors.Single(item => item.RuleId == "high-initial-context-utilization");
+        Assert.Equal("first-successful-llm-call", highInitial.EvaluationWindow);
+        Assert.Equal(
+            "The first successful LLM call uses a high fraction of an explicit effective context limit.",
+            highInitial.Description);
     }
 
     [Theory]
@@ -455,6 +460,7 @@ public sealed class TokenContextCacheAlertRuleTests
 
     [Theory]
     [InlineData("github-copilot-vscode", "github-copilot-vscode.json", "a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd")]
+    [InlineData("github-copilot-cli", "github-copilot-cli.json", "3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419")]
     [InlineData("claude-code", "claude-code.json", "d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294")]
     public void CurrentSourceManifests_ArePinnedAndKeepAllFiveRulesCapabilitySuppressed(
         string sourceSurface,
@@ -487,22 +493,30 @@ public sealed class TokenContextCacheAlertRuleTests
     }
 
     [Theory]
-    [MemberData(nameof(VerifiedSourceNeutralBoundaryCases))]
-    public void VerifiedSourceNeutralSyntheticInputs_PinWarningAndCriticalBoundaries(
+    [MemberData(nameof(VerifiedSourceNeutralOutcomeCases))]
+    public void VerifiedSourceNeutralSyntheticInputs_PinNoAlertWarningAndCriticalOutcomes(
         string sourceSurface,
         string ruleId,
-        AlertSeverity expectedSeverity)
+        AlertSeverity? expectedSeverity)
     {
         var result = Evaluate(
             ruleId,
-            SyntheticBoundaryTurns(ruleId, expectedSeverity),
+            SyntheticOutcomeTurns(ruleId, expectedSeverity),
             sourceSurface: sourceSurface,
             sourceVersion: "verified-source-neutral-synthetic-v1");
 
-        var receipt = Assert.Single(result.Receipts);
-        Assert.Equal(expectedSeverity, receipt.Severity);
-        Assert.Equal(sourceSurface, receipt.SourceSurface);
-        Assert.Equal("verified-source-neutral-synthetic-v1", receipt.SourceVersion);
+        if (expectedSeverity is null)
+        {
+            Assert.Empty(result.Receipts);
+            Assert.Empty(result.Suppressions);
+        }
+        else
+        {
+            var receipt = Assert.Single(result.Receipts);
+            Assert.Equal(expectedSeverity, receipt.Severity);
+            Assert.Equal(sourceSurface, receipt.SourceSurface);
+            Assert.Equal("verified-source-neutral-synthetic-v1", receipt.SourceVersion);
+        }
     }
 
     [Fact]
@@ -566,9 +580,16 @@ public sealed class TokenContextCacheAlertRuleTests
         return engine.Evaluate(snapshot, new(AlertContractVersions.Configuration, "token-rules-v1", rules));
     }
 
-    public static IEnumerable<object[]> VerifiedSourceNeutralBoundaryCases()
+    public static IEnumerable<object[]> VerifiedSourceNeutralOutcomeCases()
     {
-        foreach (var sourceSurface in new[] { "github-copilot-vscode", "claude-code" })
+        foreach (var sourceSurface in new[]
+        {
+            "claude-code",
+            "codex-app",
+            "codex-cli",
+            "github-copilot-cli",
+            "github-copilot-vscode",
+        })
         {
             foreach (var ruleId in new[]
             {
@@ -579,6 +600,7 @@ public sealed class TokenContextCacheAlertRuleTests
                 "near-context-limit-turn",
             })
             {
+                yield return [sourceSurface, ruleId, null!];
                 yield return [sourceSurface, ruleId, AlertSeverity.Warning];
                 yield return [sourceSurface, ruleId, AlertSeverity.Critical];
             }
@@ -599,15 +621,21 @@ public sealed class TokenContextCacheAlertRuleTests
         _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
     };
 
-    private static IReadOnlyList<AlertSignal> SyntheticBoundaryTurns(string ruleId, AlertSeverity severity) => ruleId switch
+    private static IReadOnlyList<AlertSignal> SyntheticOutcomeTurns(string ruleId, AlertSeverity? severity) => ruleId switch
     {
-        "high-initial-context-utilization" => [Turn(1, input: severity == AlertSeverity.Warning ? 50 : 80, limit: 100)],
+        "high-initial-context-utilization" => [Turn(1, input: severity switch { null => 49, AlertSeverity.Warning => 50, _ => 80 }, limit: 100)],
         "monotonic-context-growth" =>
         [
             Turn(1, input: 100), Turn(2, input: 100),
-            Turn(3, input: severity == AlertSeverity.Warning ? 175 : 250),
+            Turn(3, input: severity switch { null => 174, AlertSeverity.Warning => 175, _ => 250 }),
         ],
-        "context-growth-with-output-collapse" => severity == AlertSeverity.Warning
+        "context-growth-with-output-collapse" => severity is null
+            ?
+            [
+                Turn(1, input: 100, output: 100), Turn(2, input: 100, output: 100),
+                Turn(3, input: 149, output: 75), Turn(4, input: 149, output: 75),
+            ]
+            : severity == AlertSeverity.Warning
             ?
             [
                 Turn(1, input: 100, output: 100), Turn(2, input: 100, output: 100),
@@ -621,10 +649,10 @@ public sealed class TokenContextCacheAlertRuleTests
         "low-cache-read-ratio" =>
         [
             Turn(1, input: 1, cache: 0),
-            Turn(2, input: 5000, cache: severity == AlertSeverity.Warning ? 995 : 245),
-            Turn(3, input: 5000, cache: severity == AlertSeverity.Warning ? 995 : 245),
+            Turn(2, input: 5000, cache: severity switch { null => 1000, AlertSeverity.Warning => 995, _ => 245 }),
+            Turn(3, input: 5000, cache: severity switch { null => 1000, AlertSeverity.Warning => 995, _ => 245 }),
         ],
-        "near-context-limit-turn" => [Turn(1, input: severity == AlertSeverity.Warning ? 75 : 90, limit: 100)],
+        "near-context-limit-turn" => [Turn(1, input: severity switch { null => 74, AlertSeverity.Warning => 75, _ => 90 }, limit: 100)],
         _ => throw new ArgumentOutOfRangeException(nameof(ruleId)),
     };
 

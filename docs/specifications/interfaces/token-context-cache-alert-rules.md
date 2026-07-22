@@ -10,7 +10,7 @@ requires a new rule version.
 
 The pack does not map producer fields. An adapter may declare the capabilities
 below only after the Issue #61 source/version manifest establishes the field
-semantics and authority. The current GitHub Copilot VS Code and Claude Code
+semantics and authority. The current GitHub Copilot VS Code/CLI and Claude Code
 manifests declare model/token/cache fields `unknown`, so real snapshots from
 those sources remain capability-suppressed until a separately reviewed adapter
 mapping supplies verified facts. Observed numeric zero is a value; an absent
@@ -119,6 +119,7 @@ fixture revisions are:
 | Source surface | Manifest | SHA-256 |
 | --- | --- | --- |
 | `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd` |
+| `github-copilot-cli` | `contracts/source-capabilities/v1/manifests/github-copilot-cli.json` | `3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419` |
 | `claude-code` | `contracts/source-capabilities/v1/manifests/claude-code.json` | `d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294` |
 
 Manifest drift fails the fixture until the changed capability declaration is
@@ -128,7 +129,10 @@ all adapter-owned classification, semantics, tool-schema, and effective-limit
 facts `unknown` unless a reviewed mapping proves them. Positive warning and
 critical boundary fixtures use source version
 `verified-source-neutral-synthetic-v1`; they demonstrate only the compiled
-source-neutral formulas and never claim live producer capability.
+source-neutral formulas and never claim live producer capability. For each of
+the five applicable source surfaces and each rule, the synthetic matrix freezes
+a fully available sufficient-sample no-alert row plus exact warning and
+critical boundary rows.
 
 ## Rule Registry
 
@@ -138,7 +142,7 @@ Required capabilities are `llm-call-classification`, `input-token-count`,
 `model-identity`, `token-semantics-version`, `effective-context-limit`,
 `effective-context-limit-authority`, and
 `effective-context-limit-version`. Scope is trace and the evaluation window is
-`first-eligible-turn-per-evaluation-dimension`.
+`first-successful-llm-call`.
 
 Choose the first successful `llm_call` before applying metric or grouping-key
 eligibility. If that exact first successful call has no observed input metric,

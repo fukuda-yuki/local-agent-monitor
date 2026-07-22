@@ -6,11 +6,11 @@ internal sealed class HighInitialContextUtilizationRule : IAlertRule
         "high-initial-context-utilization",
         TokenAlertContract.Version,
         "High initial context utilization",
-        "The first eligible LLM call uses a high fraction of an explicit effective context limit.",
+        "The first successful LLM call uses a high fraction of an explicit effective context limit.",
         ["llm-call-classification", "input-token-count", "model-identity", "token-semantics-version", "effective-context-limit", "effective-context-limit-authority", "effective-context-limit-version"],
         AlertRuleScope.Trace,
         ["model-id", "input-token-semantics-version", "effective-context-limit-authority", "effective-context-limit-version", "effective-context-limit"],
-        "first-eligible-turn-per-evaluation-dimension",
+        "first-successful-llm-call",
         [TokenAlertContract.HigherThreshold("initial-context-utilization", TokenAlertContract.Fraction, 0.50m, 0.80m)],
         TokenAlertContract.Suppressions,
         TokenAlertContract.ApplicableSources);
