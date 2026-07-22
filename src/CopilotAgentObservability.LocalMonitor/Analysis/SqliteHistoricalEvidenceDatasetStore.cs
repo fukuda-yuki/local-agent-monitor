@@ -122,7 +122,9 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             var raw = extraction.RawLocal.Sessions[index];
             var safe = extraction.RepositorySafe.Sessions[index];
             if (!Guid.TryParse(raw.SessionId, out var rawId) || SafeSession(rawId) != safe.SessionId
-                || raw.SourceSurface != safe.SourceSurface || raw.SourceVersion != safe.SourceVersion || raw.AdapterVersion != safe.AdapterVersion
+                || raw.SourceSurface != safe.SourceSurface
+                || safe.SourceVersion != HistoricalEvidenceExtractorV1.TokenizeLabel("source-version", raw.SourceVersion)
+                || safe.AdapterVersion != HistoricalEvidenceExtractorV1.TokenizeLabel("adapter-version", raw.AdapterVersion)
                 || raw.Completeness != safe.Completeness || raw.SourceKind != safe.SourceKind || raw.ContentState != safe.ContentState
                 || !raw.CompletenessReasons.SequenceEqual(safe.CompletenessReasons) || raw.DescriptorState != safe.DescriptorState
                 || raw.Capabilities != safe.Capabilities || safe.RawLocalDescriptor is not null
@@ -191,7 +193,11 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             || safe.Workspace != HistoricalEvidenceExtractorV1.TokenizeLabel("workspace", raw.Workspace)
             || raw.StartedAt != safe.StartedAt || raw.EndedAt != safe.EndedAt || raw.LastSeenAt != safe.LastSeenAt
             || !raw.SourceSurfaces.SequenceEqual(safe.SourceSurfaces)
-            || !raw.SourceProvenance.SequenceEqual(safe.SourceProvenance)
+            || !raw.SourceProvenance.Select(value => new HistoricalSourceProvenanceV1(value.SourceSurface,
+                    HistoricalEvidenceExtractorV1.TokenizeLabel("source-version", value.SourceApplicationVersion),
+                    HistoricalEvidenceExtractorV1.TokenizeLabel("adapter-version", value.AdapterVersion)))
+                .OrderBy(value => value.SourceSurface).ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal)
+                .ThenBy(value => value.AdapterVersion, StringComparer.Ordinal).SequenceEqual(safe.SourceProvenance)
             || raw.Completeness != safe.Completeness
             || !raw.CompletenessReasons.SequenceEqual(safe.CompletenessReasons)
             || raw.SourceKind != safe.SourceKind || raw.ContentState != safe.ContentState
@@ -200,7 +206,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             || raw.DurationObservations.Count != safe.DurationObservations.Count)
             return false;
         var expectedModels = raw.ModelObservations.Select(value => new HistoricalModelObservationV1(
-                value.Model, TokenizeReference(value.EvidenceRef, safeSessionId)))
+                HistoricalEvidenceExtractorV1.TokenizeLabel("model", value.Model)!, TokenizeReference(value.EvidenceRef, safeSessionId)))
             .OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef.SessionId, StringComparer.Ordinal)
             .ThenBy(value => value.EvidenceRef.TraceId, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef.SpanId, StringComparer.Ordinal)
             .ThenBy(value => value.EvidenceRef.TurnIndex).ThenBy(value => value.EvidenceRef.RelativePosition).ToArray();

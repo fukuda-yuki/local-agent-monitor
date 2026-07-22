@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Builder;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -372,6 +373,33 @@ public sealed class HistoricalEvidenceProductionTests
     }
 
     [Fact]
+    public async Task HostApplication_PreservesKnownTokenAndCacheComponentsAndExplicitZeroAcrossReopen()
+    {
+        using var temp = new MonitorTempDirectory();
+        using var app = BuildHost(temp.DatabasePath);
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        var now = new DateTimeOffset(2026, 7, 22, 8, 47, 0, TimeSpan.Zero);
+        const string traceId = "e123456789abcdef0123456789abcdee";
+        const string spanId = "e123456789abcdee";
+        var sessionId = WriteExactSession(store, "owner/components", now, traceId, spanId);
+        InsertSpans(temp.DatabasePath, traceId,
+            [Span(1, spanId, operation: "chat", inputTokens: 5, outputTokens: 0, cacheReadTokens: 4, cacheCreationTokens: 0)]);
+        var service = app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>();
+
+        var created = await service.CreateAsync(
+            HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]), CancellationToken.None);
+        var reopened = Assert.IsType<HistoricalEvidenceExtractionV1>(service.Get(created.RawLocal.ExtractionId));
+
+        var tokens = reopened.RawLocal.EvidenceGroups.Where(group => group.Kind == HistoricalEvidenceGroupKindV1.TokenRollup)
+            .Select(group => (group.Unit, group.NumericValue)).OrderBy(value => value.Unit, StringComparer.Ordinal).ToArray();
+        var cache = reopened.RawLocal.EvidenceGroups.Where(group => group.Kind == HistoricalEvidenceGroupKindV1.CacheRollup)
+            .Select(group => (group.Unit, group.NumericValue)).OrderBy(value => value.Unit, StringComparer.Ordinal).ToArray();
+        Assert.Equal([("input_token", 5L), ("output_token", 0L)], tokens);
+        Assert.Equal([("cache_creation_token", 0L), ("cache_read_token", 4L)], cache);
+        Assert.DoesNotContain(tokens, value => value.Unit == "total_token");
+    }
+
+    [Fact]
     public async Task SnapshotSource_DoesNotTreatUnmatchedAdapterNamedEventAsExactOtel()
     {
         using var temp = new MonitorTempDirectory();
@@ -392,6 +420,38 @@ public sealed class HistoricalEvidenceProductionTests
 
         Assert.Empty(result.RawLocal.Sessions);
         Assert.Contains(result.RawLocal.ExcludedSessions, item => item.Reason == HistoricalSessionExclusionReasonV1.MissingEvidenceReference);
+    }
+
+    [Theory]
+    [InlineData("source", "sk-abcdefghijklmnopqrstuv")]
+    [InlineData("adapter", "prompt:steal")]
+    [InlineData("model", "sk-abcdefghijklmnopqrstuv")]
+    public async Task HostApplication_FailsClosedForSensitiveProjectedVersionOrModel(string target, string sensitive)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var app = BuildHost(temp.DatabasePath);
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        var now = new DateTimeOffset(2026, 7, 22, 8, 55, 0, TimeSpan.Zero);
+        var sessionId = Guid.CreateVersion7();
+        var runId = Guid.CreateVersion7();
+        const string traceId = "f123456789abcdef0123456789abcdee";
+        const string spanId = "f123456789abcdee";
+        var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
+            null, null, now, now, now, SessionRawRetentionState.NotCaptured, now, now);
+        var run = new ObservedSessionRun(runId, sessionId, SessionSourceSurface.ClaudeCode, "run", traceId, null,
+            target == "model" ? sensitive : "gpt-5", ObservedSessionStatus.Completed, now, now, null, null, null);
+        var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.ClaudeCode, null,
+            traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now, SessionContentState.NotCaptured,
+            target == "source" ? sensitive : "2.1.215", target == "adapter" ? sensitive : "adapter.v1",
+            MatchKind: SessionMatchKind.ExactNative);
+        store.Write(new(new(session, [], [run], [@event]), []));
+        InsertSpans(temp.DatabasePath, traceId, [Span(1, spanId, operation: "chat")]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() => app.Services
+            .GetRequiredService<HistoricalEvidenceApplicationServiceV1>()
+            .CreateAsync(HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]), CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
     }
 
     [Fact]
@@ -569,6 +629,61 @@ public sealed class HistoricalEvidenceProductionTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SnapshotSource_AnySensitiveDescriptorCandidateVetoesSessionAndPersistsState(bool includeSafe, bool safeFirst)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var app = BuildHost(temp.DatabasePath);
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        var now = new DateTimeOffset(2026, 7, 22, 11, 15, 0, TimeSpan.Zero);
+        var sessionId = Guid.CreateVersion7();
+        const string traceId = "7123456789abcdef0123456789abcdee";
+        var initial = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null,
+            traceId, "ok", "claude-code-otel", $"{traceId}/7123456789abcdee", "user.message", now,
+            SessionContentState.Available, MatchKind: SessionMatchKind.ExactNative);
+        var candidates = new List<(Guid EventId, string Value)> { (Guid.CreateVersion7(), "password=do-not-export") };
+        if (includeSafe) candidates.Add((Guid.CreateVersion7(), "Use focused tests"));
+        if (safeFirst) candidates.Reverse();
+        var events = new List<ObservedSessionEvent> { initial };
+        events.AddRange(candidates.Select((candidate, index) => initial with
+        {
+            EventId = candidate.EventId,
+            SourceEventId = $"{traceId}/{(index + 8):x16}",
+            OccurredAt = now.AddTicks(index + 1),
+        }));
+        var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
+            "owner/repository", null, now, now, now, SessionRawRetentionState.Expiring, now, now);
+        store.Write(new(new(session, [], [], events), candidates.Select(candidate => new SessionEventContent(
+            candidate.EventId, "application/json", JsonSerializer.Serialize(new { text = candidate.Value }), now, now.AddDays(1))).ToArray()));
+        var descriptorValues = candidates.ToDictionary(item => item.EventId, item => item.Value);
+        var reader = new DescriptorMapContentReader(descriptorValues, now);
+        var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
+        var selection = HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]);
+
+        var first = await HistoricalEvidenceExtractorV1.ExtractAsync(selection, source, CancellationToken.None);
+        var repeated = await HistoricalEvidenceExtractorV1.ExtractAsync(selection, source, CancellationToken.None);
+        var projected = Assert.Single(first.RawLocal.Sessions);
+        Assert.Equal(HistoricalDescriptorStateV1.RejectedSensitive, projected.DescriptorState);
+        Assert.Null(projected.RawLocalDescriptor);
+        Assert.DoesNotContain("do-not-export", Encoding.UTF8.GetString(first.RawLocalBytes), StringComparison.Ordinal);
+        Assert.Equal(first.RawLocalBytes, repeated.RawLocalBytes);
+        if (includeSafe)
+        {
+            var safeCandidate = candidates.Single(item => item.Value == "Use focused tests");
+            descriptorValues[safeCandidate.EventId] = "Use targeted tests";
+            var changed = await HistoricalEvidenceExtractorV1.ExtractAsync(selection, source, CancellationToken.None);
+            Assert.Equal(HistoricalDescriptorStateV1.RejectedSensitive, Assert.Single(changed.RawLocal.Sessions).DescriptorState);
+            Assert.NotEqual(first.RawLocal.SnapshotId, changed.RawLocal.SnapshotId);
+        }
+        var datasetStore = new SqliteHistoricalEvidenceDatasetStoreV1(temp.DatabasePath);
+        datasetStore.Save(first, now);
+        var reopened = Assert.IsType<HistoricalEvidenceExtractionV1>(datasetStore.Get(first.RawLocal.ExtractionId));
+        Assert.Equal(HistoricalDescriptorStateV1.RejectedSensitive, Assert.Single(reopened.RawLocal.Sessions).DescriptorState);
+    }
+
+    [Theory]
     [InlineData((int)SessionContentReadDisposition.Denied)]
     [InlineData((int)SessionContentReadDisposition.Busy)]
     public async Task SnapshotSource_DeniedOrBusyCurrentLeaseDoesNotMaterializeDescriptor(int dispositionValue)
@@ -730,6 +845,18 @@ public sealed class HistoricalEvidenceProductionTests
         }
     }
 
+    private sealed class DescriptorMapContentReader(IReadOnlyDictionary<Guid, string> values, DateTimeOffset now)
+        : IHistoricalSessionContentReaderV1
+    {
+        public ValueTask<SessionContentReadResult> ReadContentAsync(Guid sessionId, Guid eventId, CancellationToken cancellationToken)
+        {
+            var content = new SessionEventContent(eventId, "application/json",
+                JsonSerializer.Serialize(new { text = values[eventId] }), now, now.AddDays(1));
+            return ValueTask.FromResult(new SessionContentReadResult(SessionContentReadDisposition.Granted,
+                new SessionContentReadLease(content, () => ValueTask.CompletedTask)));
+        }
+    }
+
     private static Guid WriteExactSession(ISessionStore store, string repository, DateTimeOffset at, string traceId, string spanId)
     {
         var sessionId = Guid.CreateVersion7();
@@ -747,10 +874,10 @@ public sealed class HistoricalEvidenceProductionTests
 
     private static MonitorSpanRow Span(int ordinal, string spanId, string? operation = null, string? category = null,
         string? toolName = null, string? toolType = null, string? parentSpanId = null, string? agentName = null,
-        int? totalTokens = null, int? cacheReadTokens = null, int? cacheCreationTokens = null,
+        int? inputTokens = null, int? outputTokens = null, int? totalTokens = null, int? cacheReadTokens = null, int? cacheCreationTokens = null,
         string? status = null, string? errorType = null, double? durationMs = null) =>
         new(ordinal, ordinal, "unused", spanId, parentSpanId, ordinal, operation, category, toolName, toolType,
-            null, null, agentName, null, null, null, null, totalTokens, null, cacheReadTokens, cacheCreationTokens,
+            null, null, agentName, null, null, inputTokens, outputTokens, totalTokens, null, cacheReadTokens, cacheCreationTokens,
             status, errorType, null, null, durationMs, null, null, "2026-07-22T00:00:00.0000000+00:00");
 
     private static void InsertSpans(string databasePath, string traceId, IReadOnlyList<MonitorSpanRow> spans)
@@ -761,8 +888,8 @@ public sealed class HistoricalEvidenceProductionTests
         {
             using var command = connection.CreateCommand();
             command.CommandText = """
-                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,tool_type,agent_name,total_tokens,cache_read_tokens,cache_creation_tokens,status,error_type,duration_ms,projected_at)
-                VALUES($raw,$trace,$span,$parent,$ordinal,$operation,$category,$tool,$type,$agent,$tokens,$cacheRead,$cacheCreate,$status,$error,$duration,$projected);
+                INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,tool_name,tool_type,agent_name,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_creation_tokens,status,error_type,duration_ms,projected_at)
+                VALUES($raw,$trace,$span,$parent,$ordinal,$operation,$category,$tool,$type,$agent,$inputTokens,$outputTokens,$tokens,$cacheRead,$cacheCreate,$status,$error,$duration,$projected);
                 """;
             command.Parameters.AddWithValue("$raw", span.RawRecordId);
             command.Parameters.AddWithValue("$trace", traceId);
@@ -774,6 +901,8 @@ public sealed class HistoricalEvidenceProductionTests
             command.Parameters.AddWithValue("$tool", (object?)span.ToolName ?? DBNull.Value);
             command.Parameters.AddWithValue("$type", (object?)span.ToolType ?? DBNull.Value);
             command.Parameters.AddWithValue("$agent", (object?)span.AgentName ?? DBNull.Value);
+            command.Parameters.AddWithValue("$inputTokens", (object?)span.InputTokens ?? DBNull.Value);
+            command.Parameters.AddWithValue("$outputTokens", (object?)span.OutputTokens ?? DBNull.Value);
             command.Parameters.AddWithValue("$tokens", (object?)span.TotalTokens ?? DBNull.Value);
             command.Parameters.AddWithValue("$cacheRead", (object?)span.CacheReadTokens ?? DBNull.Value);
             command.Parameters.AddWithValue("$cacheCreate", (object?)span.CacheCreationTokens ?? DBNull.Value);

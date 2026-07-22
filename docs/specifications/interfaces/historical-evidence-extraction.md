@@ -74,8 +74,11 @@ sanitized monitor spans, and 256 objective evaluations per returned Session,
 using `limit + 1` probes inside the same read transaction and
 rejecting overflow before constructing the extra row or reading any body. It
 also reads at most 51,200 Issue #59 handoffs relevant to exact selected trace
-IDs. Evidence-group capacity is checked before descriptor body reads; no later
-`Take` or silent truncation may hide an overflow.
+IDs. Production uses one deterministic, allocation-free boundary gate for the
+exact accepted maxima (51,200 handoffs, 67,108,864 aggregate handoff bytes,
+4,096 spans, and 256 objectives) and every one-over rejection. Evidence-group
+capacity is checked before descriptor body reads; no later `Take` or silent
+truncation may hide an overflow.
 The handoff payload length is inspected before SQLite text materialization.
 Each payload first passes the public Issue #59 consumer's exact 1,048,576-byte
 and JSON-depth-16 limits; aggregate selected handoff bytes remain capped at
@@ -142,9 +145,13 @@ accepted Session event whose `match_kind` is `exact_native` or
 `trace_continuity`, order, repository, and time proximity are not evidence of
 ownership. One exact trace cannot ground two selected Sessions. Within a
 grounded trace, turns use the accepted `operation=chat || category=llm_call`
-predicate and `(raw_record_id, span_ordinal)` ordering. Explicit projected
-token/cache scalars, error status, and the accepted same-tool retry extractor
-produce their corresponding groups. Exact objective-evaluation rows produce
+predicate and `(raw_record_id, span_ordinal)` ordering. Token components are
+separate `total_token`, `input_token`, and `output_token` groups; cache
+components are separate `cache_read_token` and `cache_creation_token` groups.
+A component group exists only when that exact nullable projected value exists,
+so explicit zero remains zero and an unknown component remains absent. No
+component is summed with a zero-filled peer. Error status and the accepted
+same-tool retry extractor produce their corresponding groups. Exact objective-evaluation rows produce
 quality references. Run model/token/duration facts require an exact event
 grounding; run and span durations are omitted unless their milliseconds are
 finite, non-negative, and integral. Span observations use only sanitized
@@ -167,7 +174,11 @@ The closed group kinds are `turn_rollup`, `token_rollup`, `cache_rollup`,
 `source_difference`, and `instruction_finding`.
 
 Every group has a deterministic ID, exactly one included Session, 1..16 exact
-references, and optional allowlisted scalar facts. A source reference may name
+references, and optional bounded scalar facts. Token/cache component units use
+the closed vocabulary above; other `unit` and `status` values are bounded
+uninterpreted ASCII tokens (`[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}`) unless a
+group-kind rule in this version explicitly closes their vocabulary. Exact-ID
+carriers retain the raw identifier grammar (`[A-Za-z0-9][A-Za-z0-9._+-]{0,127}`). A source reference may name
 the Session plus an exact trace and optional span/turn. The reference must
 resolve in that Session's immutable evidence index. Missing trace/span/turn,
 cross-Session references, malformed input, or a missing Issue #59 finding ID
@@ -186,8 +197,13 @@ membership, or parallel historical reference vocabulary is rejected.
 Production extraction reads those bounded, checksum-verified Issue #59
 handoffs in the coherent SQLite snapshot, resolves their opaque references to
 exact selected Session trace/span evidence, and embeds the receipt/candidate;
-reopening the stored extraction performs no out-of-band finding lookup.
-Exact payload bytes pass
+reopening the stored extraction performs no out-of-band finding lookup. The
+historical JSON Schema intentionally treats the owner receipt and candidate
+objects as opaque and cannot establish their validity. After schema validation,
+every read/reopen path reconstructs each complete analysis-run handoff,
+serializes it canonically with the owner serializer, and passes those exact
+bytes to the public validator; schema-only acceptance is never sufficient.
+Exact stored payload bytes pass
 `InstructionFindingHandoffConsumerV1.Validate` before owner deserialization.
 Real nullable-Session span+turn, turn-only, and span-only references resolve
 through an indexed exact-location map; each reference must resolve uniquely and
@@ -222,11 +238,18 @@ The extractor emits two forms from the same validated snapshot:
 When more than one raw descriptor candidate exists, any sensitive candidate
 rejects the descriptor for that Session. Otherwise the extractor selects the
 ordinally smallest distinct bounded first line so producer draft order cannot
-change canonical output.
+change canonical output. Production sanitizes each granted body immediately,
+retains only its body-free candidate state plus an already-bounded safe value,
+and binds the ordered state, safe value, and exact reference for every candidate
+into snapshot identity. Every `rejected_sensitive` state participates in the
+Session-wide veto; production never drops a rejection before extraction.
 
 Raw identifier carriers use closed ASCII grammars; local Session identity is a
 canonical UUIDv7. Repository-safe labels and identifier-like metadata are null,
-fixed allowlisted values, or domain-separated opaque tokens. Relative, device,
+fixed allowlisted values, or domain-separated `source-version-ref-*`,
+`adapter-version-ref-*`, and `model-ref-*` opaque tokens. Credential/PII/path
+shapes in raw source version, adapter version, provenance, or model fields fail
+the complete extraction before either representation is serialized. Relative, device,
 home, UNC, and absolute paths; credentials; PII; and malicious carrier strings
 reject before serialization rather than relying on a permissive blacklist.
 Repository-safe label eligibility reuses the Issue #58 measurement sanitizer,

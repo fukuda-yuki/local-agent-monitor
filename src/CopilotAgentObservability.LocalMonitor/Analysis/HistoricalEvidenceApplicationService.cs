@@ -235,13 +235,14 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                     var read = await contentReader.ReadContentAsync(sessionId, item.EventId, cancellationToken).ConfigureAwait(false);
                     if (read.Disposition != SessionContentReadDisposition.Granted || read.Lease is null) continue;
                     await using var lease = read.Lease;
-                    var descriptor = ReadDescriptor(lease.Content.ContentJson);
                     var reference = TryExactReference(item);
+                    var descriptor = ReadDescriptor(lease.Content.ContentJson);
                     var projected = descriptor is null
                         ? (HistoricalDescriptorStateV1.Unavailable, (string?)null)
                         : HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(false, [descriptor]);
-                    if (projected.Item1 == HistoricalDescriptorStateV1.Available && descriptor is not null && reference is not null)
-                        groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null, descriptor));
+                    if (reference is not null)
+                        groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null,
+                            projected.Item2, DescriptorCandidateState: projected.Item1));
                 }
             }
             result.Add(sessionId, groups);
@@ -289,16 +290,20 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                 var turn = evidence.TurnTokens[index];
                 count++;
                 var span = turnSpans[index];
-                if (span.TotalTokens is not null || span.InputTokens is not null || span.OutputTokens is not null) count++;
-                if (span.CacheReadTokens is not null || span.CacheCreationTokens is not null) count++;
+                if (span.TotalTokens is not null) count++;
+                if (span.InputTokens is not null) count++;
+                if (span.OutputTokens is not null) count++;
+                if (span.CacheReadTokens is not null) count++;
+                if (span.CacheCreationTokens is not null) count++;
             }
-            count += ordered.Count(span => !IsTurn(span) && span.SpanId is not null
-                && (span.CacheReadTokens is not null || span.CacheCreationTokens is not null));
+            count += ordered.Where(span => !IsTurn(span) && span.SpanId is not null)
+                .Sum(span => (span.CacheReadTokens is not null ? 1 : 0) + (span.CacheCreationTokens is not null ? 1 : 0));
             count += ordered.Count(span => span.Status == "error" && span.SpanId is not null);
             count += evidence.RetryChains.Count(chain => chain.SpanIds.Count is > 1 and <= HistoricalEvidenceContractsV1.MaximumReferencesPerGroup && chain.SpanIds.All(id => id is not null));
         }
-        count += detail.Runs.Count(run => run.TotalTokens is not null && !spans.Any(span => span.TraceId == run.TraceId && IsTurn(span))
-            && detail.Events.Where(value => value.RunId == run.RunId).Select(TryExactReference).Any(value => value is not null));
+        count += detail.Runs.Where(run => !spans.Any(span => span.TraceId == run.TraceId && IsTurn(span))
+                && detail.Events.Where(value => value.RunId == run.RunId).Select(TryExactReference).Any(value => value is not null))
+            .Sum(run => (run.TotalTokens is not null ? 1 : 0) + (run.InputTokens is not null ? 1 : 0) + (run.OutputTokens is not null ? 1 : 0));
         var exactTraceIds = ExactLocations(detail, spans).Select(location => location.TraceId).ToHashSet(StringComparer.Ordinal);
         count += objectives.Count(objective => exactTraceIds.Contains(objective.TraceId));
         return count;
@@ -381,8 +386,9 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
             AppendSnapshotFact(hash, "exact-spans", JsonSerializer.SerializeToUtf8Bytes(spans[row.SessionId]));
             AppendSnapshotFact(hash, "objectives", JsonSerializer.SerializeToUtf8Bytes(objectives[row.SessionId]));
             AppendSnapshotFact(hash, "retention", JsonSerializer.SerializeToUtf8Bytes(retention[row.SessionId]));
-            var descriptor = HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(
-                selection.SanitizedOnly, descriptors[row.SessionId].Select(group => group.RawDescriptor).OfType<string>());
+            AppendSnapshotFact(hash, "descriptor-candidates", JsonSerializer.SerializeToUtf8Bytes(descriptors[row.SessionId]
+                .Select(group => new { group.DescriptorCandidateState, group.RawDescriptor, group.References }).ToArray()));
+            var descriptor = HistoricalEvidenceExtractorV1.ProjectDescriptorDrafts(selection.SanitizedOnly, descriptors[row.SessionId]);
             AppendSnapshotFact(hash, "descriptor", JsonSerializer.SerializeToUtf8Bytes(new { descriptor.State, descriptor.Value }));
         }
         foreach (var handoff in handoffs)
@@ -430,14 +436,14 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         long totalBytes = 0;
         while (reader.Read())
         {
-            if (result.Count == HistoricalEvidenceContractsV1.MaximumInstructionFindingHandoffs) throw ChildOverflow();
+            HistoricalEvidenceReadBoundsV1.Validate(result.Count + 1, totalBytes, 0, 0);
             var runId = reader.GetInt64(0);
             var traceId = reader.GetString(1);
             var payloadLength = reader.GetInt64(2);
             if (payloadLength is < 1 or > InstructionFindingHandoffConsumerV1.MaxPayloadBytes) throw ChildOverflow();
             try { totalBytes = checked(totalBytes + payloadLength); }
             catch (OverflowException) { throw ChildOverflow(); }
-            if (totalBytes > HistoricalEvidenceContractsV1.MaximumInstructionFindingTotalBytes) throw ChildOverflow();
+            HistoricalEvidenceReadBoundsV1.Validate(result.Count + 1, totalBytes, 0, 0);
             var payload = Encoding.UTF8.GetBytes(reader.GetString(3));
             if (payload.Length != payloadLength) throw ChildOverflow();
             var checksum = reader.GetString(4);
@@ -626,7 +632,7 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         var result = new List<MonitorSpanRow>();
         while (reader.Read())
         {
-            if (result.Count == HistoricalEvidenceContractsV1.MaximumEventsPerSession) throw ChildOverflow();
+            HistoricalEvidenceReadBoundsV1.Validate(0, 0, result.Count + 1, 0);
             result.Add(new(
                 reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), NullableString(reader, 3), NullableString(reader, 4), reader.GetInt32(5),
                 NullableString(reader, 6), NullableString(reader, 7), NullableString(reader, 8), NullableString(reader, 9), NullableString(reader, 10), NullableString(reader, 11),
@@ -648,7 +654,7 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         var result = new List<SnapshotObjectiveRow>();
         while (reader.Read())
         {
-            if (result.Count == HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
+            HistoricalEvidenceReadBoundsV1.Validate(0, 0, 0, result.Count + 1);
             result.Add(new(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), Timestamp(reader.GetString(3))));
         }
         return result;
@@ -785,17 +791,18 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                     var reference = new HistoricalRawEvidenceReferenceV1(sessionId, trace.Key, turn.SpanId, turn.TurnIndex, HistoricalEvidenceRelativePositionV1.Anchor);
                     Add(groups, new(HistoricalEvidenceGroupKindV1.TurnRollup, [reference], 1, "turn", null, null, null, null, null, null));
                     var span = turnSpans[index];
-                    var tokens = span.TotalTokens is not null ? (long?)span.TotalTokens : span.InputTokens is not null || span.OutputTokens is not null
-                        ? checked((long)(span.InputTokens ?? 0) + (span.OutputTokens ?? 0)) : null;
-                    if (tokens is not null) Add(groups, new(HistoricalEvidenceGroupKindV1.TokenRollup, [reference], tokens, "token", null, null, null, null, null, null));
-                    if (span.CacheReadTokens is not null || span.CacheCreationTokens is not null)
-                        Add(groups, new(HistoricalEvidenceGroupKindV1.CacheRollup, [reference], checked((long)(span.CacheReadTokens ?? 0) + (span.CacheCreationTokens ?? 0)), "cache_token", null, null, null, null, null, null));
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, span.TotalTokens, HistoricalEvidenceScalarUnitsV1.TotalToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, span.InputTokens, HistoricalEvidenceScalarUnitsV1.InputToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, span.OutputTokens, HistoricalEvidenceScalarUnitsV1.OutputToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.CacheRollup, reference, span.CacheReadTokens, HistoricalEvidenceScalarUnitsV1.CacheReadToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.CacheRollup, reference, span.CacheCreationTokens, HistoricalEvidenceScalarUnitsV1.CacheCreationToken);
                 }
-                foreach (var span in ordered.Where(span => !IsTurn(span) && span.SpanId is not null
-                    && (span.CacheReadTokens is not null || span.CacheCreationTokens is not null)))
-                    Add(groups, new(HistoricalEvidenceGroupKindV1.CacheRollup,
-                        [new(sessionId, trace.Key, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor)],
-                        checked((long)(span.CacheReadTokens ?? 0) + (span.CacheCreationTokens ?? 0)), "cache_token", null, null, null, null, null, null));
+                foreach (var span in ordered.Where(span => !IsTurn(span) && span.SpanId is not null))
+                {
+                    var reference = new HistoricalRawEvidenceReferenceV1(sessionId, trace.Key, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.CacheRollup, reference, span.CacheReadTokens, HistoricalEvidenceScalarUnitsV1.CacheReadToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.CacheRollup, reference, span.CacheCreationTokens, HistoricalEvidenceScalarUnitsV1.CacheCreationToken);
+                }
                 foreach (var error in ordered.Where(span => span.Status == "error" && span.SpanId is not null))
                     Add(groups, new(HistoricalEvidenceGroupKindV1.ErrorSpan,
                         [new(sessionId, trace.Key, error.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor)], null, null,
@@ -805,10 +812,15 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                         retry.SpanIds.Select(id => new HistoricalRawEvidenceReferenceV1(sessionId, trace.Key, id, null, HistoricalEvidenceRelativePositionV1.Anchor)).ToArray(),
                         retry.SpanIds.Count, "attempt", retry.FinalOutcome, null, null, null, null, null));
             }
-            foreach (var run in detail.Runs.Where(value => value.TotalTokens is not null && !spans[sessionId].Any(span => span.TraceId == value.TraceId && IsTurn(span))))
+            foreach (var run in detail.Runs.Where(value => !spans[sessionId].Any(span => span.TraceId == value.TraceId && IsTurn(span))))
             {
                 var reference = detail.Events.Where(value => value.RunId == run.RunId).Select(TryExactReference).FirstOrDefault(value => value is not null);
-                if (reference is not null) Add(groups, new(HistoricalEvidenceGroupKindV1.TokenRollup, [reference], run.TotalTokens, "token", null, null, null, null, null, null));
+                if (reference is not null)
+                {
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, run.TotalTokens, HistoricalEvidenceScalarUnitsV1.TotalToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, run.InputTokens, HistoricalEvidenceScalarUnitsV1.InputToken);
+                    AddComponent(groups, HistoricalEvidenceGroupKindV1.TokenRollup, reference, run.OutputTokens, HistoricalEvidenceScalarUnitsV1.OutputToken);
+                }
             }
             var exactLocations = ExactLocations(detail, spans[sessionId]).Distinct().ToArray();
             foreach (var objective in objectives[sessionId])
@@ -831,6 +843,24 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
             groups.Add(group);
         }
 
+        private static void AddComponent(List<HistoricalEvidenceGroupDraftV1> groups, HistoricalEvidenceGroupKindV1 kind,
+            HistoricalRawEvidenceReferenceV1 reference, long? value, string unit)
+        {
+            if (value is not null) Add(groups, new(kind, [reference], value, unit, null, null, null, null, null, null));
+        }
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+}
+
+internal static class HistoricalEvidenceReadBoundsV1
+{
+    internal static void Validate(int handoffCount, long aggregateHandoffBytes, int spanCount, int objectiveCount)
+    {
+        if (handoffCount < 0 || handoffCount > HistoricalEvidenceContractsV1.MaximumInstructionFindingHandoffs
+            || aggregateHandoffBytes < 0 || aggregateHandoffBytes > HistoricalEvidenceContractsV1.MaximumInstructionFindingTotalBytes
+            || spanCount < 0 || spanCount > HistoricalEvidenceContractsV1.MaximumEventsPerSession
+            || objectiveCount < 0 || objectiveCount > HistoricalEvidenceContractsV1.MaximumGroupsPerSession)
+            throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidContract);
     }
 }

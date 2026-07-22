@@ -188,8 +188,9 @@ internal static partial class HistoricalEvidenceExtractorV1
                         || PersonNamePattern().IsMatch(descriptor)
                         || !AllowedDescriptorPattern().IsMatch(descriptor))
                 || raw && (session.DescriptorState == HistoricalDescriptorStateV1.Available) != (session.RawLocalDescriptor is not null)
-                || !SafeOptionalToken(session.SourceVersion)
-                || !SafeOptionalToken(session.AdapterVersion)
+                || raw && (!SafeRawMetadataToken(session.SourceVersion) || !SafeRawMetadataToken(session.AdapterVersion))
+                || !raw && (!SafeProjectedMetadataToken("source-version", session.SourceVersion)
+                    || !SafeProjectedMetadataToken("adapter-version", session.AdapterVersion))
                 || session.Completeness == SessionCompleteness.Unbound
                 || session.SourceKind == HistoricalEvidenceSourceKindV1.HistoricalSummary
                     && (session.Completeness != SessionCompleteness.Partial
@@ -238,6 +239,7 @@ internal static partial class HistoricalEvidenceExtractorV1
                 || group.NumericValue < 0
                 || !SafeOptionalToken(group.Unit)
                 || !SafeOptionalToken(group.Status)
+                || !ValidComponentScalar(group.Kind, group.NumericValue, group.Unit, group.Status)
                 || raw && group.ExactCallId is { } call && !SafeLocalCarrier(call)
                 || raw && group.ExactOwnershipId is { } owner && !SafeLocalCarrier(owner)
                 || !raw && (group.ExactCallId is not null || group.ExactOwnershipId is not null))
@@ -408,7 +410,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             || !IsCanonicalSessionId(metadata.SessionId.ToString())
             || !Enum.IsDefined(metadata.SourceSurface) || !Enum.IsDefined(metadata.Completeness)
             || !Enum.IsDefined(metadata.SourceKind) || !Enum.IsDefined(metadata.ContentState)
-            || !SafeOptionalToken(metadata.SourceVersion) || !SafeOptionalToken(metadata.AdapterVersion)
+            || !SafeRawMetadataToken(metadata.SourceVersion) || !SafeRawMetadataToken(metadata.AdapterVersion)
             || !CanonicalReasons(metadata.CompletenessReasons)
             || metadata.CompletenessReasons.Any(reason => CompletenessRank(metadata.Completeness) > CompletenessReasonMaximumRank(reason))
             || metadata.StartedAt is { Offset: var startedOffset } && startedOffset != TimeSpan.Zero
@@ -420,9 +422,9 @@ internal static partial class HistoricalEvidenceExtractorV1
             || metadata.SourceSurfaces.Distinct().Order().SequenceEqual(metadata.SourceSurfaces) == false
             || metadata.SourceProvenance.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
             || metadata.SourceProvenance.Any(value => value is null || !allSurfaces.Contains(value.SourceSurface)
-                || !SafeOptionalToken(value.SourceApplicationVersion) || !SafeOptionalToken(value.AdapterVersion))
+                || !SafeRawMetadataToken(value.SourceApplicationVersion) || !SafeRawMetadataToken(value.AdapterVersion))
             || metadata.ModelObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
-            || metadata.ModelObservations.Any(value => value is null || value.Model is null || !SafeOptionalToken(value.Model)
+            || metadata.ModelObservations.Any(value => value is null || value.Model is null || !SafeRawMetadataToken(value.Model)
                 || !RawReferenceInIndex(value.EvidenceRef, metadata))
             || metadata.DurationObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
             || metadata.DurationObservations.Any(value => value is null || value.DurationMs < 0
@@ -463,7 +465,10 @@ internal static partial class HistoricalEvidenceExtractorV1
             || metadata.SourceSurfaces.Any(value => !Enum.IsDefined(value))
             || !metadata.SourceSurfaces.Distinct().Order().SequenceEqual(metadata.SourceSurfaces)
             || metadata.SourceProvenance.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
-            || metadata.SourceProvenance.Any(value => value is null || !metadata.SourceSurfaces.Contains(value.SourceSurface) || !SafeOptionalToken(value.SourceApplicationVersion) || !SafeOptionalToken(value.AdapterVersion))
+            || metadata.SourceProvenance.Any(value => value is null || !metadata.SourceSurfaces.Contains(value.SourceSurface)
+                || raw && (!SafeRawMetadataToken(value.SourceApplicationVersion) || !SafeRawMetadataToken(value.AdapterVersion))
+                || !raw && (!SafeProjectedMetadataToken("source-version", value.SourceApplicationVersion)
+                    || !SafeProjectedMetadataToken("adapter-version", value.AdapterVersion)))
             || !metadata.SourceProvenance.Distinct().OrderBy(value => value.SourceSurface)
                 .ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal)
                 .ThenBy(value => value.AdapterVersion, StringComparer.Ordinal)
@@ -482,7 +487,9 @@ internal static partial class HistoricalEvidenceExtractorV1
             throw Invalid();
         foreach (var observation in metadata.ModelObservations)
         {
-            if (observation is null || observation.Model is null || !SafeOptionalToken(observation.Model)) throw Invalid();
+            if (observation is null || observation.Model is null
+                || raw && !SafeRawMetadataToken(observation.Model)
+                || !raw && !SafeProjectedMetadataToken("model", observation.Model)) throw Invalid();
             ValidateEvidenceReference(observation.EvidenceRef, raw, sessionId);
         }
         foreach (var observation in metadata.DurationObservations)
@@ -602,7 +609,20 @@ internal static partial class HistoricalEvidenceExtractorV1
             : item.Capabilities;
 
     private static (HistoricalDescriptorStateV1 State, string? Value) Descriptor(bool sanitizedOnly, IReadOnlyList<HistoricalEvidenceGroupDraftV1> drafts)
-        => ProjectDescriptorCandidates(sanitizedOnly, drafts.Select(item => item.RawDescriptor).OfType<string>());
+        => ProjectDescriptorDrafts(sanitizedOnly, drafts);
+
+    internal static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptorDrafts(
+        bool sanitizedOnly, IReadOnlyList<HistoricalEvidenceGroupDraftV1> drafts)
+    {
+        if (sanitizedOnly) return (HistoricalDescriptorStateV1.NotRequested, null);
+        if (drafts.Any(item => item.DescriptorCandidateState == HistoricalDescriptorStateV1.RejectedSensitive))
+            return (HistoricalDescriptorStateV1.RejectedSensitive, null);
+        var projected = ProjectDescriptorCandidates(false, drafts.Select(item => item.RawDescriptor).OfType<string>());
+        return projected.State == HistoricalDescriptorStateV1.Unavailable
+            && drafts.Any(item => item.DescriptorCandidateState is not null)
+            ? (HistoricalDescriptorStateV1.Unavailable, null)
+            : projected;
+    }
 
     internal static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptorCandidates(
         bool sanitizedOnly, IEnumerable<string> rawCandidates)
@@ -631,10 +651,15 @@ internal static partial class HistoricalEvidenceExtractorV1
 
     private static HistoricalEvidenceSessionV1 ProjectSession(
         HistoricalSessionMetadataV1 item, string id, HistoricalSessionCapabilitiesV1 capabilities,
-        HistoricalDescriptorStateV1 descriptorState, string? descriptor) =>
-        new(id, item.SourceSurface, item.SourceVersion, item.AdapterVersion, item.Completeness,
+        HistoricalDescriptorStateV1 descriptorState, string? descriptor)
+    {
+        var safe = !IsCanonicalSessionId(id);
+        return new(id, item.SourceSurface,
+            safe ? TokenizeLabel("source-version", item.SourceVersion) : item.SourceVersion,
+            safe ? TokenizeLabel("adapter-version", item.AdapterVersion) : item.AdapterVersion, item.Completeness,
             item.CompletenessReasons.Distinct(StringComparer.Ordinal).OrderBy(ReasonIndex).ThenBy(value => value, StringComparer.Ordinal).ToArray(),
             item.SourceKind, item.ContentState, descriptorState, descriptor, capabilities, ProjectDecisionMetadata(item, safe: !IsCanonicalSessionId(id)));
+    }
 
     private static HistoricalDecisionMetadataV1 ProjectDecisionMetadata(HistoricalSessionMetadataV1 item, bool safe)
     {
@@ -642,6 +667,11 @@ internal static partial class HistoricalEvidenceExtractorV1
         var provenance = item.SourceProvenance.Count == 0
             ? [new HistoricalSourceProvenanceV1(item.SourceSurface, item.SourceVersion, item.AdapterVersion)]
             : item.SourceProvenance.Distinct().OrderBy(value => value.SourceSurface).ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal).ThenBy(value => value.AdapterVersion, StringComparer.Ordinal).ToArray();
+        if (safe)
+            provenance = provenance.Select(value => new HistoricalSourceProvenanceV1(value.SourceSurface,
+                    TokenizeLabel("source-version", value.SourceApplicationVersion), TokenizeLabel("adapter-version", value.AdapterVersion)))
+                .OrderBy(value => value.SourceSurface).ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal)
+                .ThenBy(value => value.AdapterVersion, StringComparer.Ordinal).ToArray();
         return new(
             safe ? TokenizeLabel("repository", item.Repository) : item.Repository,
             safe ? TokenizeLabel("workspace", item.Workspace) : item.Workspace,
@@ -650,7 +680,8 @@ internal static partial class HistoricalEvidenceExtractorV1
             item.LastSeenAt.ToUniversalTime(),
             surfaces,
             provenance,
-            item.ModelObservations.Select(value => new HistoricalModelObservationV1(value.Model, ProjectReference(value.EvidenceRef, safe)))
+            item.ModelObservations.Select(value => new HistoricalModelObservationV1(
+                    safe ? TokenizeLabel("model", value.Model)! : value.Model, ProjectReference(value.EvidenceRef, safe)))
                 .OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef, HistoricalReferenceComparer.Instance).ToArray(),
             item.DurationObservations.Select(value => new HistoricalDurationObservationV1(value.DurationMs, ProjectReference(value.EvidenceRef, safe)))
                 .OrderBy(value => value.DurationMs).ThenBy(value => value.EvidenceRef, HistoricalReferenceComparer.Instance).ToArray(),
@@ -672,6 +703,10 @@ internal static partial class HistoricalEvidenceExtractorV1
     {
         if (!Enum.IsDefined(draft.Kind)) throw Invalid();
         if (draft.RawDescriptor is not null && draft.Kind != HistoricalEvidenceGroupKindV1.UserCorrection) throw Invalid();
+        if (draft.DescriptorCandidateState is { } candidateState
+            && (draft.Kind != HistoricalEvidenceGroupKindV1.UserCorrection
+                || candidateState is HistoricalDescriptorStateV1.NotRequested
+                || draft.RawDescriptor is not null != (candidateState == HistoricalDescriptorStateV1.Available))) throw Invalid();
         if (draft.Kind == HistoricalEvidenceGroupKindV1.RepeatedToolCall
             && string.IsNullOrWhiteSpace(draft.ExactCallId) && !HashPattern().IsMatch(draft.CanonicalCallHash ?? ""))
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.MissingExactCapability);
@@ -691,6 +726,7 @@ internal static partial class HistoricalEvidenceExtractorV1
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.UnresolvedEvidenceReference);
         }
         if (draft.NumericValue < 0 || !SafeOptionalToken(draft.Unit) || !SafeOptionalToken(draft.Status)
+            || !ValidComponentScalar(draft.Kind, draft.NumericValue, draft.Unit, draft.Status)
             || draft.ExactCallId is { } call && !SafeLocalCarrier(call)
             || draft.ExactOwnershipId is { } owner && !SafeLocalCarrier(owner)) throw Invalid();
         if (draft.FindingId is not null && !FindingIdPattern().IsMatch(draft.FindingId)) throw Invalid();
@@ -720,6 +756,18 @@ internal static partial class HistoricalEvidenceExtractorV1
     };
 
     private static bool SafeOptionalToken(string? value) => value is null || value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
+    private static bool SafeRawMetadataToken(string? value) => value is null
+        || SafeOptionalToken(value) && RepositorySafeMetadataValue(value) && !SensitiveDescriptorPattern().IsMatch(value);
+    private static bool SafeProjectedMetadataToken(string kind, string? value) => value is null
+        || Regex.IsMatch(value, "^" + kind + "-ref-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
+    private static bool ValidComponentScalar(HistoricalEvidenceGroupKindV1 kind, long? numericValue, string? unit, string? status) => kind switch
+    {
+        HistoricalEvidenceGroupKindV1.TokenRollup => numericValue is not null && status is null
+            && unit is HistoricalEvidenceScalarUnitsV1.TotalToken or HistoricalEvidenceScalarUnitsV1.InputToken or HistoricalEvidenceScalarUnitsV1.OutputToken,
+        HistoricalEvidenceGroupKindV1.CacheRollup => numericValue is not null && status is null
+            && unit is HistoricalEvidenceScalarUnitsV1.CacheReadToken or HistoricalEvidenceScalarUnitsV1.CacheCreationToken,
+        _ => true,
+    };
     private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && RawIdentifierPattern().IsMatch(value)
         && !MeasurementSanitizer.IsUnsafeStringValue(value) && !SocialSecurityNumberPattern().IsMatch(value) && !PhoneNumberPattern().IsMatch(value);
     private static bool SafeLabel(string? value) => value is null

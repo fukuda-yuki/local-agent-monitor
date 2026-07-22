@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using CopilotAgentObservability.LocalMonitor.Analysis;
@@ -328,6 +329,113 @@ public sealed class HistoricalEvidenceExtractionTests
         Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
     }
 
+    [Theory]
+    [InlineData("source_version", "sk-abcdefghijklmnopqrstuv")]
+    [InlineData("adapter_version", "prompt:steal")]
+    [InlineData("provenance_version", "sk-abcdefghijklmnopqrstuv")]
+    [InlineData("model", "sk-abcdefghijklmnopqrstuv")]
+    public async Task ExtractAsync_FailsClosedForSensitiveIdentifierMetadata(string target, string sensitive)
+    {
+        var session = Metadata(1);
+        session = target switch
+        {
+            "source_version" => session with
+            {
+                SourceVersion = sensitive,
+                SourceProvenance = [new(session.SourceSurface, sensitive, session.AdapterVersion)],
+            },
+            "adapter_version" => session with
+            {
+                AdapterVersion = sensitive,
+                SourceProvenance = [new(session.SourceSurface, session.SourceVersion, sensitive)],
+            },
+            "provenance_version" => session with
+            {
+                SourceProvenance = [new(session.SourceSurface, sensitive, session.AdapterVersion)],
+            },
+            "model" => session with { ModelObservations = [new(sensitive, Reference(session))] },
+            _ => throw new ArgumentOutOfRangeException(nameof(target)),
+        };
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(
+                Selection(), new RecordingSnapshotSource("snapshot-sensitive-metadata", [session], Evidence), CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Theory]
+    [InlineData("TokenRollup", "cache_read_token")]
+    [InlineData("CacheRollup", "input_token")]
+    public async Task ExtractAsync_RejectsMismatchedClosedScalarComponentUnit(string kindName, string unit)
+    {
+        var session = Metadata(1);
+        var source = new RecordingSnapshotSource("snapshot-scalar-unit", [session], _ =>
+        [
+            Group(Enum.Parse<HistoricalEvidenceGroupKindV1>(kindName), [Reference(session)], 1, unit),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task JsonSchema_RejectsRepresentationWrongNestedReferencesNullLocationAndInvalidScalarToken()
+    {
+        var session = Metadata(1);
+        session = session with { ModelObservations = [new("gpt-5", Reference(session))] };
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(), new RecordingSnapshotSource("snapshot-schema-negative", [session], Evidence), CancellationToken.None);
+        var schemaPath = Path.Combine(AppContext.BaseDirectory, "TestData", "HistoricalEvidence", "historical-evidence-dataset.schema.json");
+        var cases = new List<JsonObject>();
+
+        var wrongSafeReference = JsonNode.Parse(result.RepositorySafeBytes)!.AsObject();
+        wrongSafeReference["sessions"]![0]!["metadata"]!["model_observations"]![0]!["evidence_ref"]!["trace_id"] = "raw-trace";
+        cases.Add(wrongSafeReference);
+        var nullLocation = JsonNode.Parse(result.RawLocalBytes)!.AsObject();
+        nullLocation["sessions"]![0]!["metadata"]!["model_observations"]![0]!["evidence_ref"]!["span_id"] = null;
+        nullLocation["sessions"]![0]!["metadata"]!["model_observations"]![0]!["evidence_ref"]!["turn_index"] = null;
+        cases.Add(nullLocation);
+        var invalidToken = JsonNode.Parse(result.RawLocalBytes)!.AsObject();
+        invalidToken["evidence_groups"]![0]!["unit"] = "not a token";
+        cases.Add(invalidToken);
+
+        foreach (var node in cases)
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"historical-schema-negative-{Guid.NewGuid():N}.json");
+            try
+            {
+                File.WriteAllText(path, node.ToJsonString());
+                Assert.False(ValidateWithPowerShellJsonSchema(path, schemaPath));
+            }
+            finally { File.Delete(path); }
+        }
+    }
+
+    [Fact]
+    public void ProductionReadBounds_AcceptExactMaximaAndRejectOneOverWithoutAllocatingArtifacts()
+    {
+        var type = typeof(HistoricalEvidenceApplicationServiceV1).Assembly.GetType(
+            "CopilotAgentObservability.LocalMonitor.Analysis.HistoricalEvidenceReadBoundsV1");
+        Assert.NotNull(type);
+        var validate = type!.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(validate);
+
+        validate!.Invoke(null,
+            [51_200, 64L * 1024 * 1024, 4_096, 256]);
+        foreach (var values in new object[][]
+        {
+            [51_201, 0L, 0, 0],
+            [0, 64L * 1024 * 1024 + 1, 0, 0],
+            [0, 0L, 4_097, 0],
+            [0, 0L, 0, 257],
+        })
+            Assert.IsType<HistoricalEvidenceValidationException>(Assert.Throws<TargetInvocationException>(
+                () => validate.Invoke(null, values)).InnerException);
+    }
+
     [Fact]
     public async Task ExtractAsync_UsesFrozenCanonicalIdentityAndPayloadHashVector()
     {
@@ -339,7 +447,7 @@ public sealed class HistoricalEvidenceExtractionTests
         Assert.Equal("historical-extraction-723e7878a6d85fea9dffc2282bd46761", result.RawLocal.ExtractionId);
         Assert.Equal("historical-group-03ceab92561b879ce10ff5db999279d2", Assert.Single(result.RawLocal.EvidenceGroups).GroupId);
         Assert.Equal("54b95650a59eab2099187de842bad0a382e0879244eb98287fd19972cc4ba1bc", result.RawLocalSha256);
-        Assert.Equal("69bbb9f8df52156b906340a29abb500de157966e89a40a275d384cfd2297953b", result.RepositorySafeSha256);
+        Assert.Equal("0299a3106cd20c8f94e1a3f69934b24742dfcc2f533451ceb09f4cdb0b4765d7", result.RepositorySafeSha256);
     }
 
     [Fact]

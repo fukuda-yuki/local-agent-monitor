@@ -22,6 +22,15 @@ internal static class HistoricalEvidenceContractsV1
     internal const int MaximumPayloadBytes = 64 * 1024 * 1024;
 }
 
+internal static class HistoricalEvidenceScalarUnitsV1
+{
+    internal const string TotalToken = "total_token";
+    internal const string InputToken = "input_token";
+    internal const string OutputToken = "output_token";
+    internal const string CacheReadToken = "cache_read_token";
+    internal const string CacheCreationToken = "cache_creation_token";
+}
+
 internal enum HistoricalEvidenceSourceKindV1 { LiveOtel, SavedRaw, HistoricalSummary }
 internal enum HistoricalEvidenceRelativePositionV1 { Anchor, Previous, Following }
 internal enum HistoricalEvidenceRepresentationV1 { RawLocal, RepositorySafe }
@@ -197,7 +206,8 @@ internal sealed record HistoricalEvidenceGroupDraftV1(
     string? FindingId,
     string? RawDescriptor,
     InstructionFindingReceiptV1? FindingReceipt = null,
-    InstructionRuleCandidateV1? FindingCandidate = null);
+    InstructionRuleCandidateV1? FindingCandidate = null,
+    HistoricalDescriptorStateV1? DescriptorCandidateState = null);
 
 internal interface IHistoricalEvidenceSnapshotSourceV1
 {

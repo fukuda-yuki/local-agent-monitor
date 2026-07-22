@@ -144,8 +144,10 @@ public sealed class HistoricalEvidenceDatasetStoreTests
         finally { File.Delete(path); }
     }
 
-    [Fact]
-    public async Task Get_RejectsChecksumMatchedUnsafeSourceVersionInBothRepresentations()
+    [Theory]
+    [InlineData("C:\\secret")]
+    [InlineData("sk-abcdefghijklmnopqrstuv")]
+    public async Task Get_RejectsChecksumMatchedUnsafeSourceVersionInBothRepresentations(string unsafeVersion)
     {
         var path = Path.Combine(Path.GetTempPath(), $"history-{Guid.NewGuid():N}.sqlite");
         try
@@ -167,7 +169,7 @@ public sealed class HistoricalEvidenceDatasetStoreTests
                 foreach (var row in rows)
                 {
                     var node = JsonNode.Parse(row.Payload)!.AsObject();
-                    node["sessions"]![0]!["source_version"] = "C:\\secret";
+                    node["sessions"]![0]!["source_version"] = unsafeVersion;
                     var payload = node.ToJsonString();
                     using var update = connection.CreateCommand();
                     update.CommandText = "UPDATE historical_evidence_datasets SET payload_json=$payload,payload_sha256=$checksum WHERE representation=$representation;";

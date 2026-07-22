@@ -25,13 +25,13 @@
         "properties": {
           "schema_version": { "const": "historical-evidence.raw-local.v1" },
           "selection": { "properties": { "explicit_session_ids": { "items": { "$ref": "#/$defs/uuidV7" } } } },
-          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/uuidV7" } } } },
-          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/uuidV7" } } } },
+          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/uuidV7" }, "metadata": { "$ref": "#/$defs/rawDecisionMetadata" } } } },
+          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/uuidV7" }, "metadata": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/rawDecisionMetadata" }] } } } },
           "evidence_groups": {
             "items": {
               "properties": {
                 "session_id": { "$ref": "#/$defs/uuidV7" },
-                "references": { "items": { "properties": { "session_id": { "$ref": "#/$defs/uuidV7" }, "trace_id": { "$ref": "#/$defs/rawId" }, "span_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/rawId" }] } } } }
+                "references": { "items": { "$ref": "#/$defs/rawReference" } }
               }
             }
           }
@@ -41,23 +41,15 @@
         "properties": {
           "schema_version": { "const": "historical-evidence.repository-safe.v1" },
           "selection": { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" }, "task_label": { "$ref": "#/$defs/nullableTaskRef" }, "experiment_label": { "$ref": "#/$defs/nullableExperimentRef" }, "explicit_session_ids": { "items": { "$ref": "#/$defs/sessionRef" } } } },
-          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "raw_local_descriptor": { "type": "null" }, "metadata": { "allOf": [{ "$ref": "#/$defs/decisionMetadata" }, { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" } } }] } } } },
-          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "metadata": { "oneOf": [{ "type": "null" }, { "allOf": [{ "$ref": "#/$defs/decisionMetadata" }, { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" } } }] }] } } } },
+          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "source_version": { "$ref": "#/$defs/nullableSourceVersionRef" }, "adapter_version": { "$ref": "#/$defs/nullableAdapterVersionRef" }, "raw_local_descriptor": { "type": "null" }, "metadata": { "$ref": "#/$defs/safeDecisionMetadata" } } } },
+          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "metadata": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeDecisionMetadata" }] } } } },
           "evidence_groups": {
             "items": {
               "properties": {
                 "session_id": { "$ref": "#/$defs/sessionRef" },
                 "exact_call_id": { "type": "null" },
                 "exact_ownership_id": { "type": "null" },
-                "references": {
-                  "items": {
-                    "properties": {
-                      "session_id": { "$ref": "#/$defs/sessionRef" },
-                      "trace_id": { "$ref": "#/$defs/traceRef" },
-                      "span_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/spanRef" }] }
-                    }
-                  }
-                }
+                "references": { "items": { "$ref": "#/$defs/safeReference" } }
               }
             }
           }
@@ -69,14 +61,23 @@
     "sessionRef": { "type": "string", "pattern": "^session-ref-[0-9a-f]{32}$" },
     "traceRef": { "type": "string", "pattern": "^trace-ref-[0-9a-f]{32}$" },
     "spanRef": { "type": "string", "pattern": "^span-ref-[0-9a-f]{32}$" },
+    "sourceVersionRef": { "type": "string", "pattern": "^source-version-ref-[0-9a-f]{32}$" },
+    "adapterVersionRef": { "type": "string", "pattern": "^adapter-version-ref-[0-9a-f]{32}$" },
+    "modelRef": { "type": "string", "pattern": "^model-ref-[0-9a-f]{32}$" },
+    "nullableSourceVersionRef": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sourceVersionRef" }] },
+    "nullableAdapterVersionRef": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/adapterVersionRef" }] },
     "nullableRepositoryRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^repository-ref-[0-9a-f]{32}$" }] },
     "nullableWorkspaceRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^workspace-ref-[0-9a-f]{32}$" }] },
     "nullableTaskRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^task-ref-[0-9a-f]{32}$" }] },
     "nullableExperimentRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^experiment-ref-[0-9a-f]{32}$" }] },
     "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "rawId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$" },
+    "nullableRawId": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/rawId" }] },
+    "rawMetadataToken": { "type": "string", "pattern": "^(?!.*(?:sk-[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[A-Za-z0-9]{16}))[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$" },
+    "nullableRawMetadataToken": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/rawMetadataToken" }] },
     "time": { "type": "string", "format": "date-time" },
     "nullableString": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 256 }] },
+    "nullableToken": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$" }] },
     "nullableTime": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
     "selection": {
       "type": "object", "additionalProperties": false,
@@ -100,7 +101,7 @@
       "required": ["session_id", "source_surface", "source_version", "adapter_version", "completeness", "completeness_reasons", "source_kind", "content_state", "descriptor_state", "raw_local_descriptor", "capabilities", "metadata"],
       "properties": {
         "session_id": { "type": "string", "minLength": 1, "maxLength": 64 }, "source_surface": { "$ref": "#/$defs/surface" },
-        "source_version": { "$ref": "#/$defs/nullableString" }, "adapter_version": { "$ref": "#/$defs/nullableString" },
+        "source_version": { "$ref": "#/$defs/nullableRawMetadataToken" }, "adapter_version": { "$ref": "#/$defs/nullableRawMetadataToken" },
         "completeness": { "$ref": "#/$defs/completeness" }, "completeness_reasons": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/completenessReason" } },
         "source_kind": { "$ref": "#/$defs/sourceKind" }, "content_state": { "$ref": "#/$defs/contentState" }, "descriptor_state": { "$ref": "#/$defs/descriptorState" },
         "raw_local_descriptor": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 160 }] }, "capabilities": { "$ref": "#/$defs/capabilities" },
@@ -113,11 +114,11 @@
     },
     "sourceProvenance": {
       "type":"object","additionalProperties":false,"required":["source_surface","source_application_version","adapter_version"],
-      "properties":{"source_surface":{"$ref":"#/$defs/surface"},"source_application_version":{"$ref":"#/$defs/nullableString"},"adapter_version":{"$ref":"#/$defs/nullableString"}}
+      "properties":{"source_surface":{"$ref":"#/$defs/surface"},"source_application_version":{"$ref":"#/$defs/nullableRawMetadataToken"},"adapter_version":{"$ref":"#/$defs/nullableRawMetadataToken"}}
     },
     "modelObservation": {
       "type":"object","additionalProperties":false,"required":["model","evidence_ref"],
-      "properties":{"model":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"},"evidence_ref":{"$ref":"#/$defs/reference"}}
+      "properties":{"model":{"$ref":"#/$defs/rawMetadataToken"},"evidence_ref":{"$ref":"#/$defs/reference"}}
     },
     "durationObservation": {
       "type":"object","additionalProperties":false,"required":["duration_ms","evidence_ref"],
@@ -127,6 +128,38 @@
       "type":"object","additionalProperties":false,
       "required":["repository","workspace","started_at","ended_at","last_seen_at","source_surfaces","source_provenance","model_observations","duration_observations","completeness","completeness_reasons","source_kind","content_state","capabilities"],
       "properties":{"repository":{"$ref":"#/$defs/nullableString"},"workspace":{"$ref":"#/$defs/nullableString"},"started_at":{"$ref":"#/$defs/nullableTime"},"ended_at":{"$ref":"#/$defs/nullableTime"},"last_seen_at":{"$ref":"#/$defs/time"},"source_surfaces":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"$ref":"#/$defs/surface"}},"source_provenance":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/sourceProvenance"}},"model_observations":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/modelObservation"}},"duration_observations":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/durationObservation"}},"completeness":{"$ref":"#/$defs/completeness"},"completeness_reasons":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/completenessReason"}},"source_kind":{"$ref":"#/$defs/sourceKind"},"content_state":{"$ref":"#/$defs/contentState"},"capabilities":{"$ref":"#/$defs/capabilities"}}
+    },
+    "rawDecisionMetadata": {
+      "allOf": [
+        { "$ref": "#/$defs/decisionMetadata" },
+        { "properties": {
+          "model_observations": { "items": { "allOf": [{ "$ref": "#/$defs/modelObservation" }, { "properties": { "evidence_ref": { "$ref": "#/$defs/rawReference" } } }] } },
+          "duration_observations": { "items": { "allOf": [{ "$ref": "#/$defs/durationObservation" }, { "properties": { "evidence_ref": { "$ref": "#/$defs/rawReference" } } }] } }
+        } }
+      ]
+    },
+    "safeSourceProvenance": {
+      "type":"object","additionalProperties":false,"required":["source_surface","source_application_version","adapter_version"],
+      "properties":{"source_surface":{"$ref":"#/$defs/surface"},"source_application_version":{"$ref":"#/$defs/nullableSourceVersionRef"},"adapter_version":{"$ref":"#/$defs/nullableAdapterVersionRef"}}
+    },
+    "safeModelObservation": {
+      "type":"object","additionalProperties":false,"required":["model","evidence_ref"],
+      "properties":{"model":{"$ref":"#/$defs/modelRef"},"evidence_ref":{"$ref":"#/$defs/safeReference"}}
+    },
+    "safeDurationObservation": {
+      "type":"object","additionalProperties":false,"required":["duration_ms","evidence_ref"],
+      "properties":{"duration_ms":{"type":"integer","minimum":0},"evidence_ref":{"$ref":"#/$defs/safeReference"}}
+    },
+    "safeDecisionMetadata": {
+      "allOf": [
+        { "$ref": "#/$defs/decisionMetadata" },
+        { "properties": {
+          "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" },
+          "source_provenance": { "items": { "$ref": "#/$defs/safeSourceProvenance" } },
+          "model_observations": { "items": { "$ref": "#/$defs/safeModelObservation" } },
+          "duration_observations": { "items": { "$ref": "#/$defs/safeDurationObservation" } }
+        } }
+      ]
     },
     "completenessReason": { "enum": ["missing_native_session_id", "missing_trace_context", "trace_signal_disabled", "content_capture_disabled", "unsupported_source_version", "ingest_gap", "hook_only", "historical_summary_only", "unknown_span_kind", "schema_drift_detected", "planned_source_not_enabled"] },
     "capabilities": {
@@ -140,23 +173,39 @@
     },
     "reference": {
       "type": "object", "additionalProperties": false, "required": ["session_id", "trace_id", "span_id", "turn_index", "relative_position"],
+      "anyOf": [{ "properties": { "span_id": { "type": "string", "minLength": 1 } } }, { "properties": { "turn_index": { "type": "integer", "minimum": 1 } } }],
       "properties": {
         "session_id": { "type": "string", "minLength": 1, "maxLength": 64 }, "trace_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "span_id": { "oneOf": [{"type":"null"},{"type":"string","minLength":1,"maxLength":4096}] }, "turn_index": { "oneOf": [{"type":"null"},{"type":"integer","minimum":1}] },
         "relative_position": { "enum": ["anchor", "previous", "following"] }
       }
     },
+    "rawReference": {
+      "type":"object","additionalProperties":false,"required":["session_id","trace_id","span_id","turn_index","relative_position"],
+      "anyOf":[{"properties":{"span_id":{"$ref":"#/$defs/rawId"}}},{"properties":{"turn_index":{"type":"integer","minimum":1}}}],
+      "properties":{"session_id":{"$ref":"#/$defs/uuidV7"},"trace_id":{"$ref":"#/$defs/rawId"},"span_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/rawId"}]},"turn_index":{"oneOf":[{"type":"null"},{"type":"integer","minimum":1}]},"relative_position":{"enum":["anchor","previous","following"]}}
+    },
+    "safeReference": {
+      "type":"object","additionalProperties":false,"required":["session_id","trace_id","span_id","turn_index","relative_position"],
+      "anyOf":[{"properties":{"span_id":{"$ref":"#/$defs/spanRef"}}},{"properties":{"turn_index":{"type":"integer","minimum":1}}}],
+      "properties":{"session_id":{"$ref":"#/$defs/sessionRef"},"trace_id":{"$ref":"#/$defs/traceRef"},"span_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/spanRef"}]},"turn_index":{"oneOf":[{"type":"null"},{"type":"integer","minimum":1}]},"relative_position":{"enum":["anchor","previous","following"]}}
+    },
     "group": {
       "type": "object", "additionalProperties": false,
-      "allOf": [{"if":{"properties":{"kind":{"const":"instruction_finding"}},"required":["kind"]},"then":{"properties":{"finding_id":{"type":"string","pattern":"^instruction-finding-[0-9a-f]{24}$"},"finding_receipt":{"type":"object"}}},"else":{"properties":{"finding_id":{"type":"null"},"finding_receipt":{"type":"null"},"finding_candidate":{"type":"null"}}}}],
+      "$comment": "finding_receipt and finding_candidate are opaque Issue #59 owner objects. Schema success is insufficient: consumers MUST reconstruct each complete analysis-run handoff and pass its canonical bytes to InstructionFindingHandoffConsumerV1.Validate.",
+      "allOf": [
+        {"if":{"properties":{"kind":{"const":"instruction_finding"}},"required":["kind"]},"then":{"properties":{"finding_id":{"type":"string","pattern":"^instruction-finding-[0-9a-f]{24}$"},"finding_receipt":{"type":"object"}}},"else":{"properties":{"finding_id":{"type":"null"},"finding_receipt":{"type":"null"},"finding_candidate":{"type":"null"}}}},
+        {"if":{"properties":{"kind":{"const":"token_rollup"}},"required":["kind"]},"then":{"properties":{"numeric_value":{"type":"integer","minimum":0},"unit":{"enum":["total_token","input_token","output_token"]},"status":{"type":"null"}}}},
+        {"if":{"properties":{"kind":{"const":"cache_rollup"}},"required":["kind"]},"then":{"properties":{"numeric_value":{"type":"integer","minimum":0},"unit":{"enum":["cache_read_token","cache_creation_token"]},"status":{"type":"null"}}}}
+      ],
       "required": ["group_id", "kind", "session_id", "references", "numeric_value", "unit", "status", "exact_call_id", "canonical_call_hash", "exact_ownership_id", "finding_id", "finding_receipt", "finding_candidate"],
       "properties": {
         "group_id": {"type":"string","pattern":"^historical-group-[0-9a-f]{32}$"},
         "kind": {"enum":["turn_rollup","token_rollup","cache_rollup","error_span","retry_chain","repeated_tool_call","permission_wait","subagent_fan_out","user_correction","quality_reference","source_difference","instruction_finding"]},
         "session_id":{"type":"string","minLength":1,"maxLength":64}, "references":{"type":"array","minItems":1,"maxItems":16,"items":{"$ref":"#/$defs/reference"}},
-        "numeric_value":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0}]}, "unit":{"$ref":"#/$defs/nullableString"}, "status":{"$ref":"#/$defs/nullableString"},
-        "exact_call_id":{"$ref":"#/$defs/nullableString"}, "canonical_call_hash":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^[0-9a-f]{64}$"}]},
-        "exact_ownership_id":{"$ref":"#/$defs/nullableString"}, "finding_id":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^instruction-finding-[0-9a-f]{24}$"}]},
+        "numeric_value":{"oneOf":[{"type":"null"},{"type":"integer","minimum":0}]}, "unit":{"$ref":"#/$defs/nullableToken"}, "status":{"$ref":"#/$defs/nullableToken"},
+        "exact_call_id":{"$ref":"#/$defs/nullableRawId"}, "canonical_call_hash":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^[0-9a-f]{64}$"}]},
+        "exact_ownership_id":{"$ref":"#/$defs/nullableRawId"}, "finding_id":{"oneOf":[{"type":"null"},{"type":"string","pattern":"^instruction-finding-[0-9a-f]{24}$"}]},
         "finding_receipt":{"oneOf":[{"type":"null"},{"type":"object"}]}, "finding_candidate":{"oneOf":[{"type":"null"},{"type":"object"}]}
       }
     },
