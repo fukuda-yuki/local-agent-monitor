@@ -12,15 +12,6 @@
       "expected_evidence_location": "docs/sprints/issue-75-historical-analysis/validation-matrix.json"
     },
     {
-      "surface_id": "alert-center",
-      "title": "Alerts and Alert Center",
-      "owner_issue": 84,
-      "state": "not_available",
-      "entry_condition": "Issue #84 alert DTO and UI surfaces plus executable tests are present in a candidate SHA.",
-      "required_profiles": ["sanitized", "sanitized-only", "evidence-available", "evidence-missing", "evidence-expired"],
-      "expected_evidence_location": "docs/sprints/issue-84-alert-center/validation-matrix.json"
-    },
-    {
       "surface_id": "transactional-sanitized-import",
       "title": "Transactional sanitized import",
       "owner_issue": 86,

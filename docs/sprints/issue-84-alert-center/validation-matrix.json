@@ -1,0 +1,154 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+  "inventory_date": "2026-07-23",
+  "environment_boundary": "Windows x64 disposable loopback Local Monitor hosts, temporary SQLite databases, sanitized synthetic metadata, and repository-local Playwright Chromium; no genuine producer content capture.",
+  "active_rows": [
+    {
+      "row_id": "91-A-084",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "alert-center-automated",
+      "operation": "typed receipt, evaluation, suppression, lifecycle, exact-evidence, recurring, pagination, restart, and explicit-evaluation flows",
+      "profiles": {
+        "collection": ["api", "ui", "explicit-evaluation"],
+        "content_access": ["sanitized", "sanitized-only"],
+        "compatibility": ["typed-owner-projection", "supported-exact-partition", "versionless-rejected"],
+        "hook": [],
+        "otel": ["available", "missing", "mixed"],
+        "binding": ["exact-session-trace", "unbound-negative"],
+        "restart": ["restart"],
+        "retention": ["missing", "expired"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+        "alert_center": "alert.center.v1",
+        "evaluation_request": "alert.center.evaluation-request.v1",
+        "evaluation_result": "alert.center.evaluation-result.v1",
+        "alert_lifecycle": "alert.lifecycle.v1"
+      },
+      "expected_invariant": "The bounded consumer uses only #80 typed projections and #83 lifecycle, fails closed on malformed or incomplete owner pages and source partitions, preserves exact evidence ownership, survives restart, exposes every matched UI page, and evaluates only after an explicit exact Session/trace request.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-84-alert-center/milestones/M1-alert-center/live-validation.md#91-a-084-automated-gate",
+          "compatibility_basis": "Candidate-pinned unit, route, restart, read-model, and Playwright fixtures exercise the frozen v1 interfaces with sanitized synthetic metadata."
+        }
+      ],
+      "actual_result": "At the exact candidate, the Alert Center/AlertLifecycle/MonitorOverview focused suite passed 106/106 with zero skips; #80 strict and Wave 3 consumer gates passed 49/49 and 33/33; #83 lifecycle owner gate passed 79/79; build passed with zero warnings/errors; and the full solution passed 7889/7889 with zero skips.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #84 Alert Center",
+      "validation_sha": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Disposable loopback hosts and temporary SQLite databases using sanitized synthetic receipts, source observations, lifecycle events, and monitor rows."
+    },
+    {
+      "row_id": "91-S-084",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "alert-center-security",
+      "operation": "sanitized read/UI and same-origin explicit evaluation and lifecycle mutation boundaries",
+      "profiles": {
+        "collection": ["http", "ui"],
+        "content_access": ["sanitized", "sanitized-only"],
+        "compatibility": ["error", "malformed"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-evidence", "mismatch-negative"],
+        "restart": ["stale-revision"],
+        "retention": ["missing", "expired"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+        "alert_center": "alert.center.v1",
+        "browser": "repository Playwright Chromium"
+      },
+      "expected_invariant": "Every Alert Center response remains metadata-only and no-store; non-loopback Host, cross-site reads, cross-site or CSRF-free mutation, malformed requests, stale revisions, and evidence identity or source-partition mismatches fail closed without raw content or silent overwrite.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-84-alert-center/milestones/M1-alert-center/live-validation.md#91-s-084-security-gate",
+          "compatibility_basis": "Candidate-pinned HTTP and Chromium tests cover raw-default and sanitized-only surfaces, negative Host/origin/CSRF/query/body cases, inert captured markup, lifecycle conflicts, and unavailable evidence."
+        }
+      ],
+      "actual_result": "The exact candidate passed the 106-case focused UI/security gate and 7889-case full suite with zero skips; sanitized-only rendering, inert text insertion, no-store responses, Host/origin/CSRF rejection, stale revision handling, raw/path/token no-leak cases, and missing/expired/unknown evidence states were preserved.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #84 Alert Center",
+      "validation_sha": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Disposable loopback HTTP hosts and repository-local headless Chromium with synthetic sanitized values only; no content-enabled capture."
+    },
+    {
+      "row_id": "91-L-084",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "alert-center-live-providers",
+      "operation": "genuine positive alert receipt generation and Alert Center display for GitHub Copilot and Claude Code",
+      "profiles": {
+        "collection": ["github-copilot", "claude-code"],
+        "content_access": ["sanitized"],
+        "compatibility": ["unpromoted-source-version"],
+        "hook": ["available", "unavailable"],
+        "otel": ["available"],
+        "binding": ["exact-linked"],
+        "restart": [],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+        "github_copilot_adapter": "not-promoted-for-required-alert-capabilities",
+        "claude_code_adapter": "not-promoted-for-required-alert-capabilities"
+      },
+      "expected_invariant": "A genuine positive alert is claimed only after a named reviewed #61 source/version manifest authorizes every required frozen rule capability and an exact provider Session/trace evaluation persists a canonical receipt that the Alert Center reads back.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "docs/sprints/issue-84-alert-center/milestones/M1-alert-center/live-validation.md#91-l-084-live-provider-gate",
+          "compatibility_basis": "The candidate-local live gate was stopped before provider execution because the frozen #61 source/version authority has no named reviewed adapter that grants the required Alert Center capabilities for either provider."
+        }
+      ],
+      "actual_result": "No genuine provider evaluation was started. The frozen #61 compatibility authority exposes no named reviewed source/version adapter that grants the required Alert Center rule capabilities to GitHub Copilot or Claude Code, so positive alert generation for both providers remains unverified.",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "No named #61 manifest/source-version adapter authorizes the required Alert Center rule capabilities for GitHub Copilot or Claude Code.",
+      "retry_condition": "Promote a named reviewed #61 source/version mapping with the required capabilities, then rerun exact explicit evaluation and receipt readback for both providers on a newly frozen candidate.",
+      "unverified_capability": "Genuine positive alert receipt generation and Alert Center display for both GitHub Copilot and Claude Code.",
+      "owner": "Issue #84 Alert Center with #61 source-compatibility owners",
+      "validation_sha": "b1fb801101f25ff5d8716a56a8b0ff9c95cc988e",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "Candidate-local compatibility gate only; no provider prompt, response, tool payload, credential, raw record, or content-enabled capture was produced or retained."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/sprints/issue-84-alert-center/README.md",
+    "docs/sprints/issue-84-alert-center/milestones/M1-alert-center/live-validation.md"
+  ],
+  "release_decision": {
+    "decision": "release_ready_with_external_blockers",
+    "external_blockers": [
+      {
+        "row_id": "91-L-084",
+        "severity": "high",
+        "blocker": "No named #61 manifest/source-version adapter authorizes the required Alert Center rule capabilities for GitHub Copilot or Claude Code.",
+        "retry_condition": "Promote a named reviewed #61 source/version mapping with the required capabilities, then rerun exact explicit evaluation and receipt readback for both providers on a newly frozen candidate.",
+        "unverified_capability": "Genuine positive alert receipt generation and Alert Center display for both GitHub Copilot and Claude Code."
+      }
+    ]
+  }
+}

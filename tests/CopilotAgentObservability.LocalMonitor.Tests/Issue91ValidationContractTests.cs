@@ -42,7 +42,7 @@ public sealed class Issue91ValidationContractTests
         Assert.Equal("validation-future-surfaces.v1", registry.RootElement.GetProperty("schema_version").GetString());
 
         var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        Assert.Equal([75, 84, 86, 87, 88, 93],
+        Assert.Equal([75, 86, 87, 88, 93],
             entries.Select(entry => entry.GetProperty("owner_issue").GetInt32()));
         Assert.All(entries, entry =>
         {
