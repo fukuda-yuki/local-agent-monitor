@@ -1,4 +1,5 @@
 using System.Globalization;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using Microsoft.Data.Sqlite;
 
@@ -83,6 +84,34 @@ public sealed class HistoricalImportStoreTests
         Assert.DoesNotContain("conflicting_value", Columns(verification, "historical_import_conflicts"));
         Assert.False(IsRequired(verification, "historical_import_operations", "result_json"));
         Assert.False(IsRequired(verification, "historical_import_operations", "completed_at"));
+    }
+
+    [Fact]
+    public void CreateSchema_PreservesAcceptedHistoricalInstructionAnalysisComponent()
+    {
+        using var database = new HistoricalImportTestDatabase();
+        new SqliteHistoricalInstructionAnalysisStoreV1(database.Path).CreateSchema();
+        string[] existingTables;
+        using (var connection = database.Open())
+        {
+            existingTables = Tables(connection);
+            Assert.Equal(1L, Scalar(connection,
+                "SELECT version FROM schema_version WHERE component='historical_instruction_analysis';"));
+        }
+
+        var store = new SqliteHistoricalImportStore(database.Path);
+        store.CreateSchema();
+        store.CreateSchema();
+
+        using var verification = database.Open();
+        Assert.Equal(1L, Scalar(verification,
+            "SELECT version FROM schema_version WHERE component='historical_instruction_analysis';"));
+        Assert.Equal(1L, Scalar(verification,
+            "SELECT version FROM schema_version WHERE component='historical_import';"));
+        Assert.All(existingTables, table => Assert.Contains(table, Tables(verification)));
+        Assert.Contains("historical_instruction_analysis_runs", Tables(verification));
+        Assert.Equal(0L, Scalar(verification,
+            "SELECT COUNT(*) FROM historical_instruction_analysis_runs;"));
     }
 
     [Fact]
