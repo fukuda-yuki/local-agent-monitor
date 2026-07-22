@@ -253,6 +253,35 @@ public sealed class HistoricalImportCliTests
         AssertHistoricalImportSchemaAbsent(leasedAway);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("inaccessible")]
+    public void DescriptorSnapshotFailure_ReturnsStoreUnavailableExit5WithoutMutation(string failure)
+    {
+        using var temp = new TempDirectory();
+        var database = CreateDatabaseFile(temp.Path);
+        Func<IReadOnlyDictionary<int, HistoricalImportFileIdentity>> descriptorSnapshotFactory = failure switch
+        {
+            "missing" => () => throw new DirectoryNotFoundException("synthetic descriptor directory"),
+            "inaccessible" => () => throw new UnauthorizedAccessException("synthetic descriptor access"),
+            _ => throw new ArgumentOutOfRangeException(nameof(failure)),
+        };
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = HistoricalImportCli.Run(
+            ["history", "--database", database],
+            output,
+            error,
+            applicationFactory: null,
+            descriptorSnapshotFactory);
+
+        Assert.Equal(5, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Equal("historical_import_store_unavailable" + Environment.NewLine, error.ToString());
+        AssertHistoricalImportSchemaAbsent(database);
+    }
+
     [Fact]
     public void History_DatabaseAccessFailure_ReturnsStoreUnavailable()
     {

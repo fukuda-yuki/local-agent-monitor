@@ -14,7 +14,8 @@ internal static class HistoricalImportCli
         string[] args,
         TextWriter output,
         TextWriter error,
-        Func<string, IHistoricalImportApplication>? applicationFactory = null)
+        Func<string, IHistoricalImportApplication>? applicationFactory = null,
+        Func<IReadOnlyDictionary<int, HistoricalImportFileIdentity>>? descriptorSnapshotFactory = null)
     {
         if (!TryParse(args, out var options) || options is null)
         {
@@ -25,7 +26,7 @@ internal static class HistoricalImportCli
         {
             var databasePath = HistoricalImportLocalFile.NormalizeSafePath(options.DatabasePath);
             using var databaseLease = HistoricalImportDatabaseLease.Open(databasePath);
-            databaseLease.RequireLocalMonitorOwnership();
+            databaseLease.RequireLocalMonitorOwnership(descriptorSnapshotFactory);
             IHistoricalImportApplication? application = null;
             try
             {

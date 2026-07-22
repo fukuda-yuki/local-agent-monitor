@@ -72,28 +72,42 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
         {
             lock (UnixConnectionVerificationGate)
             {
-                var descriptorsBeforeOpen = HistoricalImportLocalFile.CaptureRegularFileDescriptors();
                 return OpenVerifiedConnectionCore(
                     afterConnectionOpened,
                     beforeUnixMovedCheck,
-                    descriptorsBeforeOpen);
+                    HistoricalImportLocalFile.CaptureRegularFileDescriptors);
             }
         }
 
         return OpenVerifiedConnectionCore(
             afterConnectionOpened,
             beforeUnixMovedCheck: null,
-            descriptorsBeforeOpen: null);
+            descriptorSnapshotFactory: null);
+    }
+
+    internal SqliteConnection OpenVerifiedConnectionWithDescriptorSnapshot(
+        Func<IReadOnlyDictionary<int, HistoricalImportFileIdentity>> descriptorSnapshotFactory)
+    {
+        ArgumentNullException.ThrowIfNull(descriptorSnapshotFactory);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        lock (UnixConnectionVerificationGate)
+        {
+            return OpenVerifiedConnectionCore(
+                afterConnectionOpened: null,
+                beforeUnixMovedCheck: null,
+                descriptorSnapshotFactory);
+        }
     }
 
     private SqliteConnection OpenVerifiedConnectionCore(
         Action? afterConnectionOpened,
         Action? beforeUnixMovedCheck,
-        IReadOnlyDictionary<int, HistoricalImportFileIdentity>? descriptorsBeforeOpen)
+        Func<IReadOnlyDictionary<int, HistoricalImportFileIdentity>>? descriptorSnapshotFactory)
     {
         SqliteConnection? connection = null;
         try
         {
+            var descriptorsBeforeOpen = descriptorSnapshotFactory?.Invoke();
             connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
                 DataSource = databasePath,
@@ -135,9 +149,14 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
         }
     }
 
-    internal void RequireLocalMonitorOwnership()
+    internal void RequireLocalMonitorOwnership() => RequireLocalMonitorOwnership(descriptorSnapshotFactory: null);
+
+    internal void RequireLocalMonitorOwnership(
+        Func<IReadOnlyDictionary<int, HistoricalImportFileIdentity>>? descriptorSnapshotFactory)
     {
-        using var connection = OpenVerifiedConnection();
+        using var connection = descriptorSnapshotFactory is null
+            ? OpenVerifiedConnection()
+            : OpenVerifiedConnectionWithDescriptorSnapshot(descriptorSnapshotFactory);
         try
         {
             using var version = connection.CreateCommand();
