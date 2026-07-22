@@ -1,9 +1,9 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
-  "final_validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "071b00e319de86cfa842371ee745025f3f2cfe96",
   "inventory_date": "2026-07-23",
-  "environment_boundary": "Draft Issue #79 candidate on Windows native with deterministic synthetic adapter results, disposable SQLite databases, loopback-only test hosts, and repository-safe fixtures; no real producer source is claimed.",
+  "environment_boundary": "Exact functional SHA on Windows native with deterministic synthetic adapter results, disposable SQLite databases, loopback-only test hosts, Playwright Chromium, and repository-safe fixtures; no real producer source is claimed.",
   "active_rows": [
     {
       "row_id": "91-I-079",
@@ -28,17 +28,23 @@
         "matrix_contract": "validation-matrix.v1"
       },
       "expected_invariant": "The source-neutral workflow consumes only schema-valid adapter output and commits an unchanged confirmed preview atomically, idempotently, and without overwriting stronger evidence or inventing merge identity.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
-      "severity": "high",
-      "blocker": "The exact final candidate automation, full suite, and browser matrix have not yet been executed.",
-      "retry_condition": "Freeze the final functional SHA and execute every named Issue #79 contract, store, application, gateway, CLI, route, and Playwright test plus the required repository validation suite.",
-      "unverified_capability": "End-to-end workflow correctness on the exact final candidate.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 071b00e319de86cfa842371ee745025f3f2cfe96: Config CLI HistoricalImport 83/83, Local Monitor HistoricalImport 107/107, Claude mirror 5/5, build 0 warnings/0 errors, Playwright bootstrap, and full solution 7809/7809 passed with zero skips.",
+          "compatibility_basis": "Fresh execution covered the workflow schemas, source gateways, application service, durable SQLite store, real pre-Issue-79 session-v10 upgrade fixture, fresh database, rollback injection stages, CLI, loopback routes, raw-default and sanitized-only Playwright journeys, and accepted Issue #73 schema coexistence."
+        }
+      ],
+      "actual_result": "The exact candidate passed preview/confirmation, stale and changed-preview rejection, monotonic durable status, all-or-nothing rollback, exact identity deduplication, explicit conflict preservation, retention ownership, history, CLI/API parity, browser, fresh-database, supported-upgrade, and component-coexistence coverage.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
       "owner": "Issue #79 historical import",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "071b00e319de86cfa842371ee745025f3f2cfe96",
       "validation_date": "2026-07-23",
-      "environment_boundary": "Draft-only deterministic test boundary; no passing result is recorded."
+      "environment_boundary": "Exact functional SHA on Windows native with synthetic adapters, disposable databases, loopback hosts, and Playwright Chromium; the Unix-only dynamic descriptor case did not execute on this host."
     },
     {
       "row_id": "91-S-079",
@@ -63,17 +69,23 @@
         "workflow_contract": "historical-import-workflow.v1"
       },
       "expected_invariant": "Preview, rejection, conflict, history, HTTP, UI, log, and repository artifacts expose bounded metadata only; include-content requests are rejected and the workflow creates no parallel raw-content or retention lifecycle.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
-      "severity": "high",
-      "blocker": "The exact final candidate security, scanner, and no-leak validation has not yet been executed.",
-      "retry_condition": "Run the named security-focused Issue #79 tests, Issue #91 scanner checks, artifact scan, and required repository validation against the frozen final SHA.",
-      "unverified_capability": "Repository-safe and same-machine security boundaries on the exact final candidate.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 071b00e319de86cfa842371ee745025f3f2cfe96: Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases; 21 contract fixture files produced 2478 variants with 0 matches; the two Issue #79 evidence files produced 236 variants with 0 matches; focused and full suites passed.",
+          "compatibility_basis": "Fresh execution exercised metadata-only DTOs, include-content denial, same-origin and no-store HTTP behavior, inert text rendering, private five-minute locator handling, path redaction, log/repository scans, and fail-closed corpus detection."
+        }
+      ],
+      "actual_result": "The exact candidate passed the repository-safe scanner, security-focused application/route/UI tests, private locator expiry and deletion boundaries, raw-content denial, inert rendering, and artifact leak scans without adding a parallel retention lifecycle.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
       "owner": "Issue #79 historical import",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "071b00e319de86cfa842371ee745025f3f2cfe96",
       "validation_date": "2026-07-23",
-      "environment_boundary": "Draft-only synthetic corpus and disposable local resources; no passing result is recorded."
+      "environment_boundary": "Exact functional SHA with the repository synthetic secret corpus, generated fixtures, disposable databases, and loopback/browser hosts; no live user data was used."
     },
     {
       "row_id": "91-L-079",
@@ -112,7 +124,7 @@
       "retry_condition": "A source owner must promote an exact production tuple and repository-safe fixture, after which the final candidate must execute discovery, preview, confirmed import, result inspection, and leak scanning for that tuple.",
       "unverified_capability": "Successful import interoperability with a real supported historical producer.",
       "owner": "Issue #79 historical import with Issues #76, #77, and #78 source owners",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "071b00e319de86cfa842371ee745025f3f2cfe96",
       "validation_date": "2026-07-23",
       "environment_boundary": "External source-profile activation boundary; no real source data was read, retained, or copied."
     }
@@ -123,7 +135,7 @@
     "docs/sprints/issue-79-historical-import/final-evidence.md"
   ],
   "release_decision": {
-    "decision": "release_blocked",
+    "decision": "release_ready_with_external_blockers",
     "external_blockers": [
       {
         "row_id": "91-L-079",

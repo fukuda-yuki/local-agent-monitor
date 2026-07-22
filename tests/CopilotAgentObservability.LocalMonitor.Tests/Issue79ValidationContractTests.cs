@@ -5,7 +5,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class Issue79ValidationContractTests
 {
-    private const string CandidateSha = "c02c10ab18553acef1619ce12ec630f4f6f5aa5f";
+    private const string KickoffSha = "c02c10ab18553acef1619ce12ec630f4f6f5aa5f";
+    private const string CandidateSha = "071b00e319de86cfa842371ee745025f3f2cfe96";
     private static readonly string RepositoryRoot = FindRepositoryRoot();
     private static readonly string MatrixPath = Path.Combine(
         RepositoryRoot, "docs", "sprints", "issue-79-historical-import", "validation-matrix.json");
@@ -16,34 +17,32 @@ public sealed class Issue79ValidationContractTests
         "issue-91-validation-handoff.json");
 
     [Fact]
-    public void HistoricalImportFunctionalCandidateRemainsInFutureRegistryUntilIssue91Activation()
+    public void HistoricalImportFunctionalCandidateActivatesIssue91RowsAndLeavesFutureRegistry()
     {
         using var registry = JsonDocument.Parse(File.ReadAllText(Path.Combine(
             RepositoryRoot, "docs", "specifications", "contracts", "validation-matrix", "v1",
             "future-surface-registry.json")));
         var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        var registryEntry = Assert.Single(entries,
+        Assert.DoesNotContain(entries,
             entry => entry.GetProperty("surface_id").GetString() == "historical-import");
-        Assert.Equal(79, registryEntry.GetProperty("owner_issue").GetInt32());
-        Assert.Equal("not_available", registryEntry.GetProperty("state").GetString());
 
         using var handoff = JsonDocument.Parse(File.ReadAllText(HandoffPath));
         AssertObjectProperties(
             handoff.RootElement,
             "schema_version", "owner_issue", "surface_id", "activation", "required_profiles",
-            "active_rows", "matrix_ref", "evidence_ref", "inherits_issue_91_pass");
+            "active_rows", "matrix_ref", "evidence_ref", "inherits_issue_91_pass",
+            "canonical_transition");
         Assert.Equal("historical-import-validation-handoff.v1",
             handoff.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal(79, handoff.RootElement.GetProperty("owner_issue").GetInt32());
         Assert.Equal("historical-import", handoff.RootElement.GetProperty("surface_id").GetString());
-        Assert.Equal("future_registry_pending", handoff.RootElement.GetProperty("activation").GetString());
+        Assert.Equal("implemented_candidate", handoff.RootElement.GetProperty("activation").GetString());
         Assert.False(handoff.RootElement.GetProperty("inherits_issue_91_pass").GetBoolean());
         Assert.Equal(
             ["raw-default", "sanitized-only", "supported", "new-version", "unsupported", "schema-drift"],
             handoff.RootElement.GetProperty("required_profiles").EnumerateArray().Select(value => value.GetString()));
-        Assert.Equal(
-            handoff.RootElement.GetProperty("required_profiles").EnumerateArray().Select(value => value.GetString()),
-            registryEntry.GetProperty("required_profiles").EnumerateArray().Select(value => value.GetString()));
+        Assert.Contains("placeholder was removed", handoff.RootElement.GetProperty("canonical_transition").GetString(),
+            StringComparison.Ordinal);
         Assert.Equal("docs/sprints/issue-79-historical-import/validation-matrix.json",
             handoff.RootElement.GetProperty("matrix_ref").GetString());
         Assert.Equal("docs/sprints/issue-79-historical-import/final-evidence.md",
@@ -79,12 +78,12 @@ public sealed class Issue79ValidationContractTests
     }
 
     [Fact]
-    public void DraftMatrixPinsRowsAndClassificationsWithoutInheritingPasses()
+    public void FinalMatrixPinsRowsAndClassificationsWithoutInheritingPasses()
     {
         using var matrix = JsonDocument.Parse(File.ReadAllText(MatrixPath));
         var root = matrix.RootElement;
         Assert.Equal("validation-matrix.v1", root.GetProperty("schema_version").GetString());
-        Assert.Equal(CandidateSha, root.GetProperty("matrix_prep_sha").GetString());
+        Assert.Equal(KickoffSha, root.GetProperty("matrix_prep_sha").GetString());
         Assert.Equal(CandidateSha, root.GetProperty("final_validation_sha").GetString());
         Assert.Equal("docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
             root.GetProperty("future_registry_ref").GetString());
@@ -92,13 +91,12 @@ public sealed class Issue79ValidationContractTests
         var rows = root.GetProperty("active_rows").EnumerateArray().ToArray();
         Assert.Equal(["91-I-079", "91-S-079", "91-L-079"],
             rows.Select(row => row.GetProperty("row_id").GetString()));
-        Assert.Equal(["not_attempted", "not_attempted", "blocked_external"],
+        Assert.Equal(["passed", "passed", "blocked_external"],
             rows.Select(row => row.GetProperty("classification").GetString()));
-        Assert.DoesNotContain(rows, row => row.GetProperty("classification").GetString() == "passed");
         Assert.All(rows, row => Assert.Equal(CandidateSha, row.GetProperty("validation_sha").GetString()));
 
         var decision = root.GetProperty("release_decision");
-        Assert.Equal("release_blocked", decision.GetProperty("decision").GetString());
+        Assert.Equal("release_ready_with_external_blockers", decision.GetProperty("decision").GetString());
         var blocker = Assert.Single(decision.GetProperty("external_blockers").EnumerateArray());
         Assert.Equal("91-L-079", blocker.GetProperty("row_id").GetString());
 
@@ -109,7 +107,7 @@ public sealed class Issue79ValidationContractTests
     }
 
     [Fact]
-    public async Task DraftMatrixPassesIssue91SemanticValidator()
+    public async Task FinalMatrixPassesIssue91SemanticValidator()
     {
         var startInfo = new ProcessStartInfo
         {
@@ -135,23 +133,24 @@ public sealed class Issue79ValidationContractTests
         var stderr = await stderrTask;
 
         Assert.True(process.ExitCode == 0, $"Issue #79 matrix validation failed: {stdout}{stderr}");
-        Assert.Contains("matrix_validation=PASS rows=3 decision=release_blocked", stdout, StringComparison.Ordinal);
+        Assert.Contains("matrix_validation=PASS rows=3 decision=release_ready_with_external_blockers", stdout,
+            StringComparison.Ordinal);
     }
 
     [Fact]
-    public void EvidenceLedgerIsAnExplicitRepositorySafeDraft()
+    public void EvidenceLedgerIsAnExplicitRepositorySafeFinalRecord()
     {
         var evidence = File.ReadAllText(EvidencePath);
 
-        Assert.Contains("DRAFT", evidence, StringComparison.Ordinal);
+        Assert.Contains("FINAL", evidence, StringComparison.Ordinal);
         Assert.Contains(CandidateSha, evidence, StringComparison.Ordinal);
         Assert.Contains("91-I-079", evidence, StringComparison.Ordinal);
         Assert.Contains("91-S-079", evidence, StringComparison.Ordinal);
         Assert.Contains("91-L-079", evidence, StringComparison.Ordinal);
-        Assert.Contains("PENDING", evidence, StringComparison.Ordinal);
-        Assert.Contains("No prior Issue #91 pass is inherited", evidence, StringComparison.Ordinal);
-        Assert.DoesNotContain("release_ready", evidence, StringComparison.Ordinal);
-        Assert.DoesNotContain("result=PASS", evidence, StringComparison.Ordinal);
+        Assert.Contains("7809/7809", evidence, StringComparison.Ordinal);
+        Assert.Contains("No prior Issue #91 pass was inherited", evidence, StringComparison.Ordinal);
+        Assert.Contains("release_ready_with_external_blockers", evidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("PENDING", evidence, StringComparison.Ordinal);
     }
 
     private static void AssertObjectProperties(JsonElement element, params string[] expected)

@@ -2,7 +2,7 @@
   "schema_version": "historical-import-validation-handoff.v1",
   "owner_issue": 79,
   "surface_id": "historical-import",
-  "activation": "future_registry_pending",
+  "activation": "implemented_candidate",
   "required_profiles": [
     "raw-default",
     "sanitized-only",
@@ -33,5 +33,6 @@
   ],
   "matrix_ref": "docs/sprints/issue-79-historical-import/validation-matrix.json",
   "evidence_ref": "docs/sprints/issue-79-historical-import/final-evidence.md",
-  "inherits_issue_91_pass": false
+  "inherits_issue_91_pass": false,
+  "canonical_transition": "The historical-import placeholder was removed from the v1 future registry only after the Issue #79 production candidate and executable workflow, transaction, migration, browser, and security evidence were present. Active classifications live only in the Issue #79 validation matrix; no active state was written into the future registry and no passing result was inherited from the placeholder."
 }

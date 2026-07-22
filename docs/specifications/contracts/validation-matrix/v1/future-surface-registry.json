@@ -12,15 +12,6 @@
       "expected_evidence_location": "docs/sprints/issue-75-historical-analysis/validation-matrix.json"
     },
     {
-      "surface_id": "historical-import",
-      "title": "Historical import",
-      "owner_issue": 79,
-      "state": "not_available",
-      "entry_condition": "Issue #79 import surface and executable compatibility tests are present in a candidate SHA.",
-      "required_profiles": ["raw-default", "sanitized-only", "supported", "new-version", "unsupported", "schema-drift"],
-      "expected_evidence_location": "docs/sprints/issue-79-historical-import/validation-matrix.json"
-    },
-    {
       "surface_id": "alert-center",
       "title": "Alerts and Alert Center",
       "owner_issue": 84,
