@@ -1,9 +1,9 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
-  "final_validation_sha": "0000000000000000000000000000000000000000",
+  "final_validation_sha": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
   "inventory_date": "2026-07-23",
-  "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER: replace the all-zero final_validation_sha after Issue #87 validation is run from one immutable candidate. Current evidence is limited to deterministic synthetic fixtures and disposable local worktree state; no real content-enabled producer capture is authorized or claimed.",
+  "environment_boundary": "Exact functional SHA on Windows x64 with deterministic synthetic raw records, disposable SQLite databases and retained namespaces, loopback-only test hosts, and repository-local Playwright Chromium; no real content-enabled producer capture is authorized or claimed.",
   "active_rows": [
     {
       "row_id": "91-R-087",
@@ -24,6 +24,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
         "bundle_schema": "raw-local-replay-bundle.v1",
         "manifest": "raw-local-replay-manifest.v1",
         "normalization": "raw-measurement-normalization.v1",
@@ -31,17 +32,23 @@
         "dashboard": "raw-replay-dashboard.v1"
       },
       "expected_invariant": "One preview-bound, consented, exact Retention-leased snapshot produces a strictly inspectable deterministic archive and an isolated retained replay without changing live raw, Session, projection, analysis, or evidence stores or invoking an external model.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-87-raw-replay/README.md#candidate-pinned-validation",
+          "compatibility_basis": "Exact-candidate CLI, archive, SQLite snapshot, replay engine, retention lease, loopback route, and full-solution tests used deterministic synthetic records and disposable local state."
+        }
+      ],
+      "actual_result": "At the exact functional candidate, Config CLI RawReplay passed 52/52, Local Monitor RawReplay passed 25/25, build passed with zero warnings/errors, Playwright bootstrap passed, and the exact full solution retry passed 7966/7966 with zero skips after three unrelated Setup barrier cases passed 3/3 in isolated diagnosis.",
+      "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #87 raw local replay",
-      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_sha": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
       "validation_date": "2026-07-23",
-      "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER pending exact-candidate focused and full validation; no raw artifact or sensitive path is recorded."
+      "environment_boundary": "Windows x64 disposable local databases, isolated retained namespaces, loopback hosts, and deterministic synthetic raw records; no raw archive, sensitive path, or content value is recorded."
     },
     {
       "row_id": "91-S-087",
@@ -62,23 +69,30 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
         "archive": "raw-local-replay-zip-store.v1",
         "checksum": "sha256.v1",
         "credential_scan": "raw-replay-credential-scan.v1",
         "retention_policy": "sensitive-bundle-7d"
       },
       "expected_invariant": "Every raw operation fails closed before publication on consent, profile, selection, archive, inventory, checksum, credential, conflict, or version failure; cleanup uses only the existing exact-owned sensitive-bundle path and never targets the caller archive or live evidence.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-87-raw-replay/README.md#candidate-pinned-validation",
+          "compatibility_basis": "Candidate-pinned malformed, corrupt, traversal, oversize, credential, source/version, consent, sanitized-only, staging recovery, lease, and cleanup cases ran with the repository secret corpus and disposable artifacts."
+        }
+      ],
+      "actual_result": "The exact candidate passed consent/profile separation, normal-export non-leakage, archive and checksum validation, credential rejection, source/version conflict, no-heuristic identity, isolated staging, restart recovery, idempotency, cleanup, route security, repository mirror, and evidence scan gates.",
+      "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #87 raw local replay",
-      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_sha": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
       "validation_date": "2026-07-23",
-      "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER pending exact-candidate security, recovery, lease, and cleanup validation with synthetic bounded data only."
+      "environment_boundary": "Repository synthetic secret corpus, disposable local archive and staging roots, sanitized HTTP assertions, and committed evidence text only; temporary raw artifacts were deleted and never treated as repository-safe."
     },
     {
       "row_id": "91-L-087",
@@ -99,6 +113,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
         "bundle_schema": "raw-local-replay-bundle.v1",
         "credential_scan": "raw-replay-credential-scan.v1"
       },
@@ -117,7 +132,7 @@
       "retry_condition": "An operator explicitly authorizes a bounded local content-enabled producer run and repository-safe evidence handling for the exact candidate SHA.",
       "unverified_capability": "Real producer content/provenance preservation through exact export, isolated replay, restart recovery, and cleanup without repository-safe leakage.",
       "owner": "Issue #87 raw local replay",
-      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_sha": "ba4aa770b5691930469510e4c67f5381fe5fbcff",
       "validation_date": "2026-07-23",
       "environment_boundary": "No content-enabled producer process, live raw payload capture, external model, remote endpoint, or shared artifact was used."
     }
@@ -128,7 +143,7 @@
     "docs/specifications/contracts/raw-local-replay/v1/issue-91-validation-handoff.json"
   ],
   "release_decision": {
-    "decision": "release_blocked",
+    "decision": "release_ready_with_external_blockers",
     "external_blockers": [
       {
         "row_id": "91-L-087",
