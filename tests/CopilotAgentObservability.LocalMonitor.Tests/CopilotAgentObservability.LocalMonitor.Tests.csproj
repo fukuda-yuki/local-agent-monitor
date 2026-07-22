@@ -54,6 +54,9 @@
     <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.canonical.sha256"
           Link="TestData\InstructionFindings\instruction-finding-handoff.canonical.sha256"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\historical-evidence\v1\historical-evidence-dataset.schema.json"
+          Link="TestData\HistoricalEvidence\historical-evidence-dataset.schema.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

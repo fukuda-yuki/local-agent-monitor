@@ -127,6 +127,12 @@ internal static class MonitorHost
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
+        var historicalEvidenceStore = new SqliteHistoricalEvidenceDatasetStoreV1(options.DatabasePath);
+        historicalEvidenceStore.CreateSchema();
+        builder.Services.AddSingleton(historicalEvidenceStore);
+        var historicalEvidenceSource = new SqliteHistoricalEvidenceSnapshotSourceV1(options.DatabasePath, sessionStore);
+        builder.Services.AddSingleton<IHistoricalEvidenceSnapshotSourceV1>(historicalEvidenceSource);
+        builder.Services.AddSingleton(new HistoricalEvidenceApplicationServiceV1(historicalEvidenceSource, historicalEvidenceStore, timeProvider));
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
         var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);
         builder.Services.AddSingleton(proposalApplyService);
