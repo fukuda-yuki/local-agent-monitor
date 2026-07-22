@@ -33,8 +33,16 @@ public sealed class AlertLifecycleDomainTests
     [Theory]
     [InlineData(AlertLifecycleState.Open, AlertLifecycleAction.Reopen)]
     [InlineData(AlertLifecycleState.Acknowledged, AlertLifecycleAction.Acknowledge)]
+    [InlineData(AlertLifecycleState.Acknowledged, AlertLifecycleAction.Reopen)]
+    [InlineData(AlertLifecycleState.Dismissed, AlertLifecycleAction.Acknowledge)]
+    [InlineData(AlertLifecycleState.Dismissed, AlertLifecycleAction.Dismiss)]
     [InlineData(AlertLifecycleState.Dismissed, AlertLifecycleAction.Resolve)]
+    [InlineData(AlertLifecycleState.Resolved, AlertLifecycleAction.Acknowledge)]
     [InlineData(AlertLifecycleState.Resolved, AlertLifecycleAction.Dismiss)]
+    [InlineData(AlertLifecycleState.Resolved, AlertLifecycleAction.Resolve)]
+    [InlineData(AlertLifecycleState.Superseded, AlertLifecycleAction.Acknowledge)]
+    [InlineData(AlertLifecycleState.Superseded, AlertLifecycleAction.Dismiss)]
+    [InlineData(AlertLifecycleState.Superseded, AlertLifecycleAction.Resolve)]
     [InlineData(AlertLifecycleState.Superseded, AlertLifecycleAction.Reopen)]
     [InlineData(AlertLifecycleState.Superseded, AlertLifecycleAction.Supersede)]
     public void TransitionTable_RejectsInvalidOrTerminalTransitions(AlertLifecycleState current, AlertLifecycleAction action)
@@ -58,10 +66,20 @@ public sealed class AlertLifecycleDomainTests
     [Theory]
     [InlineData("reviewed retry threshold", true)]
     [InlineData("C:\\Users\\person\\raw.json", false)]
+    [InlineData("see(C:\\Users\\person\\raw.json)", false)]
+    [InlineData("\\\\server\\share\\raw.json", false)]
+    [InlineData("../private/raw.json", false)]
+    [InlineData("src/private/raw.json", false)]
     [InlineData("https://example.test/raw", false)]
+    [InlineData("ssh://example.test/private", false)]
     [InlineData("person@example.test", false)]
     [InlineData("Authorization: Bearer secret", false)]
+    [InlineData("prompt: private input", false)]
+    [InlineData("tool result: private output", false)]
     [InlineData("<script>alert(1)</script>", false)]
+    [InlineData("`raw evidence`", false)]
+    [InlineData("[raw evidence]", false)]
+    [InlineData("{\"prompt\":\"private\"}", false)]
     public void AuditCommentValidation_RejectsKnownRawAndSensitiveShapes(string comment, bool expected)
     {
         Assert.Equal(expected, AlertLifecycleValidation.IsSanitizedComment(comment));
@@ -74,5 +92,12 @@ public sealed class AlertLifecycleDomainTests
         Assert.False(AlertLifecycleValidation.IsReasonCode("User reviewed"));
         Assert.True(AlertLifecycleValidation.IsIdempotencyKey("aid1_" + new string('a', 43)));
         Assert.False(AlertLifecycleValidation.IsIdempotencyKey("aid1_short"));
+    }
+
+    [Fact]
+    public void AuditCommentValidation_CountsUnicodeScalars()
+    {
+        Assert.True(AlertLifecycleValidation.IsSanitizedComment(string.Concat(Enumerable.Repeat("😀", 256))));
+        Assert.False(AlertLifecycleValidation.IsSanitizedComment(string.Concat(Enumerable.Repeat("😀", 257))));
     }
 }

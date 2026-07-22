@@ -69,6 +69,7 @@ public interface IAlertLifecycleStore
     AlertLifecycleStoreResult Get(string alertId);
     AlertLifecycleHistoryResult History(string alertId, int limit = 50);
     AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation);
+    AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation);
     AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation);
     AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation);
 }
@@ -96,7 +97,8 @@ public static partial class AlertLifecycleValidation
     private const int MaximumCommentScalars = 256;
     private static readonly string[] SensitiveMarkers =
     [
-        "authorization:", "bearer ", "api_key", "api-key", "password", "secret", "token=", "token:"
+        "authorization:", "bearer ", "basic ", "api_key", "api-key", "api.key", "apikey", "credential",
+        "password", "secret", "token=", "token:", "prompt:", "response:", "content:", "tool argument", "tool result"
     ];
 
     public static bool IsReasonCode(string? value) => value is { Length: >= 1 and <= 64 }
@@ -113,16 +115,13 @@ public static partial class AlertLifecycleValidation
     {
         if (value is null) return true;
         if (value.Length == 0 || value.EnumerateRunes().Count() > MaximumCommentScalars) return false;
-        if (value.Any(character => char.IsControl(character) || character is '<' or '>')) return false;
-        if (AbsoluteWindowsPath().IsMatch(value) || UriOrUnixPath().IsMatch(value) || Email().IsMatch(value)) return false;
+        if (value.Any(character => char.IsControl(character) || character is '<' or '>' or '`' or '[' or ']' or '{' or '}')) return false;
+        if (value.Contains('/') || value.Contains('\\') || UriOrDrivePrefix().IsMatch(value) || Email().IsMatch(value)) return false;
         return !SensitiveMarkers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
-    [GeneratedRegex(@"(?:^|\s)[A-Za-z]:[\\/]")]
-    private static partial Regex AbsoluteWindowsPath();
-
-    [GeneratedRegex(@"(?:https?://|file://|(?:^|\s)/(?:[^\s/]+/)+)", RegexOptions.IgnoreCase)]
-    private static partial Regex UriOrUnixPath();
+    [GeneratedRegex(@"[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.IgnoreCase)]
+    private static partial Regex UriOrDrivePrefix();
 
     [GeneratedRegex(@"\b[^\s@]+@[^\s@]+\.[^\s@]+\b")]
     private static partial Regex Email();

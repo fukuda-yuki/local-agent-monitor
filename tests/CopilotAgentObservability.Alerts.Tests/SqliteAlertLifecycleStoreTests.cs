@@ -24,6 +24,7 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         Assert.Equal(1L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='alert_lifecycle';"));
         Assert.Equal(["alert_lifecycle_events"], Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'alert_lifecycle_%' ORDER BY name;"));
         Assert.Equal(2L, Scalar<long>(connection, "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='alert_lifecycle_events';"));
+        AssertActorVocabulary(connection);
     }
 
     [Fact]
@@ -38,6 +39,7 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         Assert.Equal(before, ReceiptJson(AlertA));
         using var connection = Open();
         Assert.Equal(["alert_engine:1", "alert_lifecycle:1"], Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component LIKE 'alert_%' ORDER BY component;"));
+        AssertActorVocabulary(connection);
     }
 
     [Fact]
@@ -127,6 +129,24 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     }
 
     [Fact]
+    public void Mutate_UnexpectedConstraintFailureReturnsUnavailableWithoutAppend()
+    {
+        SeedReceipts();
+        var store = Store();
+        store.Initialize();
+        using (var connection = Open())
+        {
+            Execute(connection, "CREATE TRIGGER synthetic_integrity_failure BEFORE INSERT ON alert_lifecycle_events BEGIN SELECT RAISE(ABORT,'synthetic integrity failure'); END;");
+        }
+
+        var result = store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a'));
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        Assert.Empty(store.History(AlertA).Events);
+    }
+
+    [Fact]
     public async Task Mutate_ConcurrentExpectedRevision_AllowsOneWinner()
     {
         SeedReceipts();
@@ -155,9 +175,18 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         store.Initialize();
         store.Mutate(Command(AlertA, AlertLifecycleAction.Dismiss, 0, 'a'));
 
-        var superseded = store.Supersede(Command(AlertA, AlertLifecycleAction.Supersede, 1, 'b') with { OldAlertId = AlertA, NewAlertId = AlertB });
+        var superseded = store.Supersede(Command(AlertA, AlertLifecycleAction.Supersede, 1, 'b') with
+        {
+            Actor = "local_system",
+            ReasonCode = "rule_version_changed",
+            Comment = null,
+            OldAlertId = AlertA,
+            NewAlertId = AlertB,
+        });
 
+        Assert.Equal(AlertLifecycleStoreStatus.Success, superseded.Status);
         Assert.Equal(AlertLifecycleState.Superseded, superseded.Lifecycle!.State);
+        Assert.Equal("local_system", superseded.Event!.Actor);
         Assert.Equal(AlertLifecycleState.Open, store.Get(AlertB).Lifecycle!.State);
         Assert.Equal(0, store.Get(AlertB).Lifecycle!.Revision);
         Assert.Equal(AlertB, superseded.Event!.NewAlertId);
@@ -172,11 +201,89 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a'));
         var receipt = ReceiptJson(AlertA);
 
-        var deleted = store.SourceDeleted(Command(AlertA, AlertLifecycleAction.SourceDeleted, 1, 'b'));
+        var deleted = store.SourceDeleted(Command(AlertA, AlertLifecycleAction.SourceDeleted, 1, 'b') with
+        {
+            Actor = "local_system",
+            ReasonCode = "source_deleted",
+            Comment = null,
+        });
 
+        Assert.Equal(AlertLifecycleStoreStatus.Success, deleted.Status);
         Assert.Equal(AlertLifecycleState.Acknowledged, deleted.Lifecycle!.State);
         Assert.Equal(2, deleted.Lifecycle.Revision);
+        Assert.Equal("local_system", deleted.Event!.Actor);
         Assert.Equal(receipt, ReceiptJson(AlertA));
+    }
+
+    [Fact]
+    public void Resolve_ReevaluationEvidenceDisappearedAppendsSystemEventWithoutChangingReceipt()
+    {
+        SeedReceipts();
+        var store = Store();
+        store.Initialize();
+        var receipt = ReceiptJson(AlertA);
+
+        var resolved = store.ResolveFromReevaluation(Command(AlertA, AlertLifecycleAction.Resolve, 0, 'a') with
+        {
+            Actor = "local_system",
+            ReasonCode = "evidence_missing",
+            Comment = null,
+        });
+
+        Assert.Equal(AlertLifecycleStoreStatus.Success, resolved.Status);
+        Assert.Equal(AlertLifecycleState.Resolved, resolved.Lifecycle!.State);
+        Assert.Equal("local_system", resolved.Event!.Actor);
+        Assert.Equal("evidence_missing", resolved.Event.ReasonCode);
+        Assert.Equal(receipt, ReceiptJson(AlertA));
+    }
+
+    [Fact]
+    public void TrustedProducerSeams_RejectUserActorSystemCommentAndNonExactAlertId()
+    {
+        SeedReceipts();
+        var store = Store();
+        store.Initialize();
+
+        var userActor = store.ResolveFromReevaluation(Command(AlertA, AlertLifecycleAction.Resolve, 0, 'a') with { Comment = null });
+        var systemComment = store.ResolveFromReevaluation(Command(AlertA, AlertLifecycleAction.Resolve, 0, 'b') with { Actor = "local_system" });
+        var nonExactAlert = store.ResolveFromReevaluation(Command(AlertA.ToUpperInvariant(), AlertLifecycleAction.Resolve, 0, 'c') with { Actor = "local_system", Comment = null });
+        var unknownActor = store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'd') with { Actor = "remote_user" });
+
+        Assert.Equal("alert_invalid_actor", userActor.Code);
+        Assert.Equal("alert_invalid_reevaluation", systemComment.Code);
+        Assert.Equal("alert_invalid_request", nonExactAlert.Code);
+        Assert.Equal("alert_invalid_request", unknownActor.Code);
+        Assert.Empty(store.History(AlertA).Events);
+    }
+
+    [Fact]
+    public void LifecycleEvent_ReferencesImmutableReceiptVersionMetadataWithoutDuplicatingIt()
+    {
+        SeedReceipts();
+        var store = Store();
+        store.Initialize();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a')).Status);
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT json_extract(receipt.canonical_json,'$.evaluation_id'),
+                   json_extract(receipt.canonical_json,'$.rule_version'),
+                   json_extract(receipt.canonical_json,'$.configuration_version')
+            FROM alert_lifecycle_events AS lifecycle
+            JOIN alert_receipts AS receipt ON receipt.alert_id=lifecycle.alert_id
+            WHERE lifecycle.alert_id=$alert;
+            """;
+        command.Parameters.AddWithValue("$alert", AlertA);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(new string('e', 64), reader.GetString(0));
+        Assert.Equal("1", reader.GetString(1));
+        Assert.Equal("fixture-v1", reader.GetString(2));
+        Assert.Equal(
+            ["event_id", "alert_id", "revision", "expected_revision", "action", "previous_state", "state", "occurred_at", "actor", "reason_code", "comment", "idempotency_key", "request_hash", "old_alert_id", "new_alert_id", "result_code"],
+            Strings(connection, "SELECT name FROM pragma_table_info('alert_lifecycle_events') ORDER BY cid;"));
     }
 
     [Fact]
@@ -218,6 +325,23 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         using var check = Open();
         Assert.Equal("same", Scalar<string>(check, "SELECT value FROM kept;"));
         Assert.Equal(2L, Scalar<long>(check, "SELECT version FROM schema_version WHERE component='alert_lifecycle';"));
+    }
+
+    [Fact]
+    public void Initialize_DefinitionMismatchedLifecycleV1_FailsClosedWithoutRepair()
+    {
+        using (var connection = Open())
+        {
+            Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('alert_lifecycle',1); CREATE TABLE alert_lifecycle_events(event_id TEXT PRIMARY KEY); INSERT INTO alert_lifecycle_events VALUES('kept');");
+        }
+
+        var result = Store().Initialize();
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        using var check = Open();
+        Assert.Equal("kept", Scalar<string>(check, "SELECT event_id FROM alert_lifecycle_events;"));
+        Assert.Equal(1L, Scalar<long>(check, "SELECT version FROM schema_version WHERE component='alert_lifecycle';"));
     }
 
     public void Dispose()
@@ -267,6 +391,7 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     private static void Execute(SqliteConnection connection, string sql) { using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery(); }
     private static T Scalar<T>(SqliteConnection connection, string sql) { using var command = connection.CreateCommand(); command.CommandText = sql; return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T), System.Globalization.CultureInfo.InvariantCulture); }
     private static string[] Strings(SqliteConnection connection, string sql) { using var command = connection.CreateCommand(); command.CommandText = sql; using var reader = command.ExecuteReader(); var values = new List<string>(); while (reader.Read()) values.Add(reader.GetString(0)); return values.ToArray(); }
+    private static void AssertActorVocabulary(SqliteConnection connection) => Assert.Contains("actor IN ('local_user','local_system')", Scalar<string>(connection, "SELECT sql FROM sqlite_schema WHERE type='table' AND name='alert_lifecycle_events';"), StringComparison.Ordinal);
 
     private sealed class FakeTimeProvider(DateTimeOffset now) : TimeProvider
     {

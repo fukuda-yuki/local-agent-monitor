@@ -26,6 +26,7 @@ public sealed class AlertLifecycleRouteTests
             Assert.Equal(["schema_version", "alert_id", "state", "revision", "last_occurred_at"], json.RootElement.EnumerateObject().Select(item => item.Name));
             Assert.Equal("open", json.RootElement.GetProperty("state").GetString());
             Assert.Equal(0, json.RootElement.GetProperty("revision").GetInt64());
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("last_occurred_at").ValueKind);
         }
 
         using var mutation = Request("""{"schema_version":"alert.lifecycle.v1","action":"acknowledge","expected_revision":0,"reason_code":"user_reviewed","comment":"reviewed locally"}""");
@@ -45,6 +46,10 @@ public sealed class AlertLifecycleRouteTests
         using var historyJson = JsonDocument.Parse(await history.Content.ReadAsStreamAsync());
         Assert.Equal(["schema_version", "alert_id", "events"], historyJson.RootElement.EnumerateObject().Select(item => item.Name));
         Assert.Equal(1, historyJson.RootElement.GetProperty("events").GetArrayLength());
+        var historyEvent = historyJson.RootElement.GetProperty("events")[0];
+        Assert.Equal(["schema_version", "event_id", "alert_id", "revision", "expected_revision", "action", "previous_state", "state", "occurred_at", "actor", "reason_code", "comment", "old_alert_id", "new_alert_id", "result_code"], historyEvent.EnumerateObject().Select(item => item.Name));
+        Assert.Equal(JsonValueKind.Null, historyEvent.GetProperty("old_alert_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, historyEvent.GetProperty("new_alert_id").ValueKind);
     }
 
     [Fact]
@@ -64,6 +69,9 @@ public sealed class AlertLifecycleRouteTests
 
         using var unknown = Request(valid[..^1] + ",\"unknown\":1}");
         await AssertError(await host.Client.SendAsync(unknown), HttpStatusCode.BadRequest, "alert_invalid_request");
+
+        using var internalActor = Request(valid[..^1] + ",\"actor\":\"local_system\"}");
+        await AssertError(await host.Client.SendAsync(internalActor), HttpStatusCode.BadRequest, "alert_invalid_request");
 
         using var sensitive = Request(valid.Replace("null", "\"C:\\\\Users\\\\person\\\\raw.json\"", StringComparison.Ordinal));
         await AssertError(await host.Client.SendAsync(sensitive), HttpStatusCode.BadRequest, "alert_comment_not_sanitized");
@@ -85,6 +93,12 @@ public sealed class AlertLifecycleRouteTests
         using var replay = await host.Client.SendAsync(replayRequest);
         Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
         using (var json = JsonDocument.Parse(await replay.Content.ReadAsStreamAsync())) Assert.True(json.RootElement.GetProperty("idempotent_replay").GetBoolean());
+
+        using var mismatchRequest = Request(body.Replace("reviewed locally", "different review", StringComparison.Ordinal));
+        await AssertError(await host.Client.SendAsync(mismatchRequest), HttpStatusCode.Conflict, "alert_idempotency_conflict");
+
+        using var invalidTransitionRequest = Request(body.Replace("\"expected_revision\":0", "\"expected_revision\":1", StringComparison.Ordinal).Replace("\"dismiss\"", "\"resolve\"", StringComparison.Ordinal), key: "aid1_" + new string('c', 43));
+        await AssertError(await host.Client.SendAsync(invalidTransitionRequest), HttpStatusCode.Conflict, "alert_invalid_transition");
 
         using var staleRequest = Request(body, key: "aid1_" + new string('b', 43));
         await AssertError(await host.Client.SendAsync(staleRequest), HttpStatusCode.Conflict, "alert_revision_conflict");
@@ -185,6 +199,7 @@ public sealed class AlertLifecycleRouteTests
         public AlertLifecycleStoreResult Get(string alertId) => Unavailable();
         public AlertLifecycleHistoryResult History(string alertId, int limit = 50) => new(AlertLifecycleStoreStatus.Unavailable, [], "alert_lifecycle_store_unavailable");
         public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) => Unavailable();
+        public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => Unavailable();
         public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => Unavailable();
         public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => Unavailable();
     }

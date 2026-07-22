@@ -76,23 +76,38 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
     }
 
     public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) =>
-        mutation.Action is AlertLifecycleAction.Acknowledge or AlertLifecycleAction.Dismiss or AlertLifecycleAction.Resolve or AlertLifecycleAction.Reopen
+        mutation.Actor == "local_user"
+        && mutation.Action is AlertLifecycleAction.Acknowledge or AlertLifecycleAction.Dismiss or AlertLifecycleAction.Resolve or AlertLifecycleAction.Reopen
         && mutation.OldAlertId is null && mutation.NewAlertId is null
             ? Append(mutation, requireNewReceipt: false)
-            : Invalid("alert_invalid_action");
+            : Invalid(mutation.Actor == "local_user" ? "alert_invalid_action" : ActorError(mutation.Actor));
+
+    public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) =>
+        mutation.Actor == "local_system"
+        && mutation.Action == AlertLifecycleAction.Resolve
+        && mutation.Comment is null && mutation.OldAlertId is null && mutation.NewAlertId is null
+            ? Append(mutation, requireNewReceipt: false)
+            : Invalid(mutation.Actor == "local_system" ? "alert_invalid_reevaluation" : ActorError(mutation.Actor));
 
     public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) =>
-        mutation.Action == AlertLifecycleAction.Supersede
+        mutation.Actor == "local_system"
+        && mutation.Action == AlertLifecycleAction.Supersede
+        && mutation.Comment is null
         && mutation.OldAlertId == mutation.AlertId
         && AlertLifecycleValidation.IsCanonicalAlertId(mutation.NewAlertId)
         && mutation.NewAlertId != mutation.AlertId
             ? Append(mutation, requireNewReceipt: true)
-            : Invalid("alert_invalid_supersession");
+            : Invalid(mutation.Actor == "local_system" ? "alert_invalid_supersession" : ActorError(mutation.Actor));
 
     public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) =>
-        mutation.Action == AlertLifecycleAction.SourceDeleted && mutation.OldAlertId is null && mutation.NewAlertId is null
+        mutation.Actor == "local_system"
+        && mutation.Action == AlertLifecycleAction.SourceDeleted
+        && mutation.Comment is null && mutation.OldAlertId is null && mutation.NewAlertId is null
             ? Append(mutation, requireNewReceipt: false)
-            : Invalid("alert_invalid_source_deletion");
+            : Invalid(mutation.Actor == "local_system" ? "alert_invalid_source_deletion" : ActorError(mutation.Actor));
+
+    private static string ActorError(string actor) =>
+        actor is "local_user" or "local_system" ? "alert_invalid_actor" : "alert_invalid_request";
 
     private AlertLifecycleStoreResult Append(AlertLifecycleMutation mutation, bool requireNewReceipt)
     {
@@ -139,13 +154,13 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
             return new(AlertLifecycleStoreStatus.Success, Lifecycle: View(appended), Event: appended);
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return Busy(); }
-        catch (SqliteException exception) when (exception.SqliteErrorCode == 19) { return Conflict("alert_revision_conflict"); }
         catch (SqliteException) { return Unavailable(); }
     }
 
     private static AlertLifecycleStoreResult? Validate(AlertLifecycleMutation value)
     {
-        if (!AlertLifecycleValidation.IsCanonicalAlertId(value.AlertId) || value.ExpectedRevision < 0 || value.Actor != "local_user") return Invalid("alert_invalid_request");
+        if (!AlertLifecycleValidation.IsCanonicalAlertId(value.AlertId) || value.ExpectedRevision < 0
+            || value.Actor is not ("local_user" or "local_system")) return Invalid("alert_invalid_request");
         if (!AlertLifecycleValidation.IsReasonCode(value.ReasonCode)) return Invalid("alert_invalid_reason_code");
         if (!AlertLifecycleValidation.IsSanitizedComment(value.Comment)) return Invalid("alert_comment_not_sanitized");
         if (!AlertLifecycleValidation.IsIdempotencyKey(value.IdempotencyKey)) return Invalid("alert_invalid_idempotency_key");

@@ -19,7 +19,7 @@ immutable.
 | Lifecycle state/event/API | `alert.lifecycle.v1` |
 | Sanitized export profile | `sanitized-alert-lifecycle.v1` |
 | SQLite component | `schema_version(component='alert_lifecycle', version=1)` |
-| Actor label | `local_user` |
+| Actor labels | `local_user` for HTTP/user actions; `local_system` for trusted reevaluation, supersession, and source-deletion seams |
 | History default/maximum | `50` / `100` events |
 | Comment maximum | `256` Unicode scalar values |
 | Reason-code maximum | `64` lowercase metadata-token characters |
@@ -41,14 +41,16 @@ in a mutable current-state table.
 | --- | --- | --- | --- |
 | `acknowledge` | user | `open` | `acknowledged` |
 | `dismiss` | user | `open`, `acknowledged` | `dismissed` |
-| `resolve` | user | `open`, `acknowledged` | `resolved` |
+| `resolve` | user or trusted internal reevaluator | `open`, `acknowledged` | `resolved` |
 | `reopen` | user | `dismissed`, `resolved` | `open` |
 | `supersede` | trusted internal producer | `open`, `acknowledged`, `dismissed`, `resolved` | `superseded` |
 | `source_deleted` | trusted internal producer | any state | unchanged |
 
-`superseded` is terminal. A user cannot create a supersede or source-deletion
-event. Invalid transitions return `alert_invalid_transition` without an event.
-An explicit reopen creates a new revision on the same receipt; a new rule or
+`superseded` is terminal. A user cannot select `local_system` or create a
+trusted reevaluation, supersede, or source-deletion event. Trusted seams require
+the exact alert ID, `local_system`, a bounded reason code, and a null comment.
+Invalid transitions return `alert_invalid_transition` without an event. An
+explicit reopen creates a new revision on the same receipt; a new rule or
 configuration receipt starts independently at lazy `open` revision `0`.
 Dismissed or resolved state is never inherited by a new receipt.
 
@@ -61,14 +63,23 @@ local actor label, bounded reason code and optional sanitized comment,
 idempotency key and canonical request hash, optional explicitly supplied old
 and new alert IDs, and a bounded result code. Rows are append-only: application
 code exposes no update/delete operation and database triggers reject update or
-delete.
+delete. The actor column is a closed `local_user | local_system` vocabulary;
+the actor is part of the idempotency request hash.
+
+Rule version, configuration version/hash, and evaluation ID are not duplicated
+into lifecycle rows. The `alert_id` foreign key is the exact reference to the
+immutable `alert_receipts.canonical_json`, which remains the sole authority for
+those Issue #80 fields. Tests join the lifecycle event to that receipt and prove
+the canonical bytes and version metadata remain unchanged after mutation.
 
 The store verifies the referenced `alert_id` in the Issue #80
 `alert_receipts` table but never updates an engine-owned row. Mutation runs in
 one immediate transaction, compares `expected_revision` with the derived
 revision, validates the transition, and inserts the next event. A mismatch or
 losing concurrent writer returns `alert_revision_conflict`; no last-write-wins
-path exists.
+path exists. `BEGIN IMMEDIATE` serializes writers, so an expected-revision race
+is detected before insert. Any unexpected SQLite constraint or integrity error
+is `alert_lifecycle_store_unavailable`, not a revision conflict.
 
 Initialization is additive and transactional. Fresh databases and databases
 with the accepted `alert_engine` v1 component are supported. Existing
@@ -86,11 +97,27 @@ even when its original expected revision is now stale, and appends no event.
 Reusing the key for any different request returns
 `alert_idempotency_conflict` and appends no event.
 
+Trusted seam validation uses fixed errors: `alert_invalid_actor` for a caller
+selecting the wrong closed actor, `alert_invalid_reevaluation` for a malformed
+system resolution, `alert_invalid_supersession` for malformed explicit old/new
+IDs, and `alert_invalid_source_deletion` for a malformed source-deletion
+callback. Invalid exact alert IDs, revisions, or actor vocabulary return
+`alert_invalid_request`; invalid reason/comment/idempotency values retain their
+fixed `alert_invalid_reason_code`, `alert_comment_not_sanitized`, and
+`alert_invalid_idempotency_key` codes. None includes rejected input.
+
 ## Reevaluation, supersession, and source deletion
 
 Issue #80 deterministically gives the same alert ID for the same
 rule/version/input/configuration, so an unchanged reevaluation reuses the
 existing lifecycle and creates no lifecycle event.
+
+When an exact reevaluation determines that the evidence for one existing alert
+has disappeared and there is no replacement receipt, the trusted resolution
+seam appends `resolve` for that exact alert ID with actor `local_system`. It
+does not search by rule, Session, trace, time, repository, workspace, content,
+or similarity. User resolve remains a separate `local_user` call with the same
+state preconditions.
 
 A trusted producer may explicitly call the supersession seam with both
 `old_alert_id` and `new_alert_id`. Both immutable receipts must exist and be
@@ -110,10 +137,15 @@ v1 does not infer this callback from Session, trace, time, or rule metadata.
 Reason codes use the bounded lowercase metadata-token grammar. Comments are
 optional inert text and are never populated automatically from evidence,
 prompts, responses, tool arguments/results, or exception messages. Input with
-control characters, markup delimiters, URI/path forms, email-like PII, or
-credential/token markers is rejected as `alert_comment_not_sanitized`; it is
-not truncated or partially persisted. Logs and error responses never include a
-comment, evidence body, provider exception, path, or database text.
+control characters; markup/structured-data delimiters `<`, `>`, backtick, `[`,
+`]`, `{`, or `}`; any slash or backslash; a URI/drive prefix; email-like PII;
+or the fixed case-insensitive raw/credential markers `authorization:`,
+`bearer `, `basic `, `api_key`, `api-key`, `api.key`, `apikey`, `credential`,
+`password`, `secret`, `token=`, `token:`, `prompt:`, `response:`, `content:`,
+`tool argument`, or `tool result` is rejected as
+`alert_comment_not_sanitized`. Input is not truncated or partially persisted.
+Logs and error responses never include a comment, evidence body, provider
+exception, path, or database text.
 
 ## HTTP API
 

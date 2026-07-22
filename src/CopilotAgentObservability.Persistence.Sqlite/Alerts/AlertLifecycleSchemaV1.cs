@@ -16,7 +16,7 @@ internal static class AlertLifecycleSchemaV1
             previous_state TEXT NOT NULL CHECK(previous_state IN ('open','acknowledged','dismissed','resolved','superseded')),
             state TEXT NOT NULL CHECK(state IN ('open','acknowledged','dismissed','resolved','superseded')),
             occurred_at TEXT NOT NULL,
-            actor TEXT NOT NULL CHECK(actor='local_user'),
+            actor TEXT NOT NULL CHECK(actor IN ('local_user','local_system')),
             reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 64 AND reason_code NOT GLOB '*[^a-z0-9._-]*'),
             comment TEXT NULL CHECK(comment IS NULL OR length(comment) BETWEEN 1 AND 256),
             idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key)=48 AND substr(idempotency_key,1,5)='aid1_' AND substr(idempotency_key,6) NOT GLOB '*[^A-Za-z0-9_-]*'),
