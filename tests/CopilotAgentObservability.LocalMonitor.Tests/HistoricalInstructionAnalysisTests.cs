@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using CopilotAgentObservability.InstructionFindings;
 using CopilotAgentObservability.LocalMonitor.Analysis;
@@ -12,7 +13,7 @@ public sealed class HistoricalInstructionAnalysisTests
     {
         using var temp = new MonitorTempDirectory();
         var first = Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 2);
-        var second = Session(2, SessionCompleteness.Partial, SessionSourceSurface.ClaudeCode, "2.0.0", turnCount: 1);
+        var second = Session(2, SessionCompleteness.Partial, SessionSourceSurface.ClaudeCode, "2.0.0", turnCount: 2);
         var source = new SnapshotSource([first, second]);
         var extractionStore = new SqliteHistoricalEvidenceDatasetStoreV1(temp.DatabasePath);
         extractionStore.CreateSchema();
@@ -26,7 +27,7 @@ public sealed class HistoricalInstructionAnalysisTests
         var provider = new RecordingProvider(request =>
         {
             var firstGroups = request.Dataset.EvidenceGroups.Where(group => group.SessionId == first.SessionId.ToString()).ToArray();
-            var secondGroup = request.Dataset.EvidenceGroups.Single(group => group.SessionId == second.SessionId.ToString());
+            var secondGroups = request.Dataset.EvidenceGroups.Where(group => group.SessionId == second.SessionId.ToString()).ToArray();
             return new HistoricalInstructionProviderResultV1(
                 HistoricalInstructionProviderCompletionV1.Complete,
                 "trace-1",
@@ -36,7 +37,7 @@ public sealed class HistoricalInstructionAnalysisTests
                         InstructionFindingVerdictV1.Supported,
                         InstructionFindingExtractorSourceV1.DeterministicPrepass,
                         firstGroups.SelectMany(group => group.References).Select(ToInstructionReference).ToArray(),
-                        [.. firstGroups.Select(group => group.GroupId), secondGroup.GroupId]),
+                        [.. firstGroups.Select(group => group.GroupId), .. secondGroups.Select(group => group.GroupId)]),
                 ]);
         });
         var analysisStore = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
@@ -47,13 +48,15 @@ public sealed class HistoricalInstructionAnalysisTests
 
         await service.RunAsync(runId, CancellationToken.None);
 
-        var run = Assert.IsType<HistoricalInstructionAnalysisRunV1>(service.Get(runId));
+        var run = Assert.IsType<HistoricalInstructionAnalysisReadV1>(service.Get(runId));
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(run));
         Assert.Equal(HistoricalInstructionAnalysisStateV1.Succeeded, run.State);
         Assert.Equal(sourceReadsAfterExtraction, source.ReadCount);
         Assert.Equal(runId, InstructionFindingHandoffConsumerV1.Validate(run.HandoffBytes));
         var receipt = Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(run.Receipt);
         var support = Assert.Single(receipt.Findings);
         var review = ReviewCase("A");
+        Assert.Equal(new[] { true, true }, review.PerSessionCategoryMinimumMet);
         Assert.Equal(review.ExpectedSupportKind, Snake(support.SupportKind));
         Assert.Equal(review.SessionCount, support.RecurringCount);
         Assert.Equal(2, support.SupportingSessionIds.Count);
@@ -76,6 +79,132 @@ public sealed class HistoricalInstructionAnalysisTests
     }
 
     [Fact]
+    public async Task RunAsync_UnrelatedSecondSessionCannotPromoteCategoryToRecurring()
+    {
+        var first = Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 2);
+        var second = Session(2, SessionCompleteness.Partial, SessionSourceSurface.ClaudeCode, "2.0.0", turnCount: 1);
+        var provider = new RecordingProvider(request =>
+        {
+            var firstGroups = request.Dataset.EvidenceGroups.Where(group => group.SessionId == first.SessionId.ToString()).ToArray();
+            return Complete(request, firstGroups, request.Dataset.EvidenceGroups.ToArray());
+        });
+        using var fixture = await AnalysisFixture.CreateAsync([first, second], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        var read = Assert.IsType<HistoricalInstructionAnalysisReadV1>(fixture.Service.Get(runId));
+        var finding = Assert.Single(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(read.Receipt).Findings);
+        var review = ReviewCase("C");
+        Assert.Equal(new[] { true, false }, review.PerSessionCategoryMinimumMet);
+        Assert.Equal(review.ExpectedSupportKind, Snake(finding.SupportKind));
+        Assert.Equal(review.GroundedSessionCount, finding.RecurringCount);
+        Assert.Equal(review.ExpectedVerdict, Snake(finding.Verdict));
+        Assert.Equal(review.ExpectedEligible, finding.CandidateEligibility == InstructionCandidateEligibilityV1.Eligible);
+        Assert.Single(finding.SupportingSessionIds);
+        Assert.Equal(
+            fixture.Extraction.RawLocal.EvidenceGroups
+                .Where(group => group.SessionId == first.SessionId.ToString())
+                .Select(group => group.GroupId).Order(StringComparer.Ordinal),
+            finding.SupportingGroupIds);
+        Assert.All(finding.EvidenceRefs, reference =>
+            Assert.Equal(finding.SupportingSessionIds[0], reference.SessionId));
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(read));
+    }
+
+    [Fact]
+    public async Task RunAsync_RedundantNonAnchorTurnGroupIsExcludedFromGroundedSupport()
+    {
+        var baseSession = Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 2);
+        var session = baseSession with
+        {
+            EvidenceLocations =
+            [
+                .. baseSession.EvidenceLocations,
+                new HistoricalEvidenceLocationV1(
+                    baseSession.SessionId,
+                    "trace-context",
+                    "span-context",
+                    3,
+                    HistoricalEvidenceRelativePositionV1.Previous),
+            ],
+        };
+        var provider = new RecordingProvider(request =>
+        {
+            var anchorGroups = request.Dataset.EvidenceGroups
+                .Where(group => group.References.Any(reference =>
+                    reference.TraceId == "trace-1"
+                    && reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Anchor))
+                .ToArray();
+            return Complete(request, anchorGroups, request.Dataset.EvidenceGroups.ToArray());
+        });
+        using var fixture = await AnalysisFixture.CreateAsync([session], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        var support = Assert.Single(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(
+            fixture.Service.Get(runId)!.Receipt).Findings);
+        Assert.Equal(
+            fixture.Extraction.RawLocal.EvidenceGroups
+                .Where(group => group.References.Any(reference =>
+                    reference.TraceId == "trace-1"
+                    && reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Anchor))
+                .Select(group => group.GroupId).Order(StringComparer.Ordinal),
+            support.SupportingGroupIds);
+        Assert.DoesNotContain(support.EvidenceRefs, reference =>
+            reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Previous);
+    }
+
+    [Fact]
+    public async Task RunAsync_AmbiguityGroundingKeepsRequiredNonTurnContextTrace()
+    {
+        var baseSession = Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 1);
+        var session = baseSession with
+        {
+            Capabilities = baseSession.Capabilities with { ErrorSpan = true },
+            EvidenceLocations =
+            [
+                .. baseSession.EvidenceLocations,
+                new HistoricalEvidenceLocationV1(
+                    baseSession.SessionId,
+                    "trace-context",
+                    "error-context",
+                    null,
+                    HistoricalEvidenceRelativePositionV1.Previous),
+            ],
+        };
+        var provider = new RecordingProvider(request =>
+        {
+            var anchorGroup = request.Dataset.EvidenceGroups.Single(group =>
+                group.Kind == HistoricalEvidenceGroupKindV1.TurnRollup);
+            return new HistoricalInstructionProviderResultV1(
+                HistoricalInstructionProviderCompletionV1.Complete,
+                "trace-1",
+                [
+                    new HistoricalInstructionFindingSubmissionV1(
+                        InstructionFindingCategoryV1.Ambiguity,
+                        InstructionFindingVerdictV1.Supported,
+                        InstructionFindingExtractorSourceV1.DeterministicPrepass,
+                        anchorGroup.References.Select(ToInstructionReference).ToArray(),
+                        request.Dataset.EvidenceGroups.Select(group => group.GroupId).ToArray()),
+                ]);
+        });
+        using var fixture = await AnalysisFixture.CreateAsync([session], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        var support = Assert.Single(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(
+            fixture.Service.Get(runId)!.Receipt).Findings);
+        Assert.Equal(HistoricalInstructionSupportKindV1.SingleSession, support.SupportKind);
+        Assert.Equal(InstructionFindingVerdictV1.Weak, support.Verdict);
+        Assert.Equal(2, support.SupportingGroupIds.Count);
+        Assert.Contains(support.EvidenceRefs, reference =>
+            reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Previous);
+    }
+
+    [Fact]
     public async Task RunAsync_OneSessionSupportedSubmissionBecomesWeakAndIneligible()
     {
         var session = Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 2);
@@ -89,14 +218,33 @@ public sealed class HistoricalInstructionAnalysisTests
 
         await fixture.Service.RunAsync(runId, CancellationToken.None);
 
-        var run = Assert.IsType<HistoricalInstructionAnalysisRunV1>(fixture.Service.Get(runId));
+        var run = Assert.IsType<HistoricalInstructionAnalysisReadV1>(fixture.Service.Get(runId));
         var finding = Assert.Single(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(run.Receipt).Findings);
         var review = ReviewCase("B");
+        Assert.Equal(new[] { true }, review.PerSessionCategoryMinimumMet);
         Assert.Equal(review.ExpectedSupportKind, Snake(finding.SupportKind));
         Assert.Equal(review.SessionCount, finding.RecurringCount);
         Assert.Equal(review.ExpectedVerdict, Snake(finding.Verdict));
         Assert.Equal(review.ExpectedEligible, finding.CandidateEligibility == InstructionCandidateEligibilityV1.Eligible);
         Assert.DoesNotContain("\"candidates\":[{", System.Text.Encoding.UTF8.GetString(run.HandoffBytes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_NoSessionMeetsCategoryMinimumRejectsSubmission()
+    {
+        var provider = new RecordingProvider(request =>
+        {
+            var groups = request.Dataset.EvidenceGroups.ToArray();
+            return Complete(request, groups, groups);
+        });
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", turnCount: 1)],
+            provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.InvalidCitation);
     }
 
     [Fact]
@@ -110,10 +258,11 @@ public sealed class HistoricalInstructionAnalysisTests
 
         await fixture.Service.RunAsync(runId, CancellationToken.None);
 
-        var run = Assert.IsType<HistoricalInstructionAnalysisRunV1>(fixture.Service.Get(runId));
+        var run = Assert.IsType<HistoricalInstructionAnalysisReadV1>(fixture.Service.Get(runId));
         Assert.Equal(HistoricalInstructionAnalysisStateV1.ZeroFindings, run.State);
         Assert.Empty(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(run.Receipt).Findings);
         Assert.Equal(runId, InstructionFindingHandoffConsumerV1.Validate(run.HandoffBytes));
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(run));
     }
 
     [Fact]
@@ -192,6 +341,71 @@ public sealed class HistoricalInstructionAnalysisTests
     }
 
     [Fact]
+    public async Task RunAsync_OwnedTimeoutWinsWhenItTriggersCallerCancellation()
+    {
+        using var callerCancellation = new CancellationTokenSource();
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)],
+            new CancelCallerWhenProviderTokenCancels(callerCancellation));
+        var runId = fixture.Service.Start(Request(fixture.Extraction, timeoutMilliseconds: 25));
+
+        await fixture.Service.RunAsync(runId, callerCancellation.Token);
+
+        Assert.True(callerCancellation.IsCancellationRequested);
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.TimedOut);
+    }
+
+    [Fact]
+    public async Task RunAsync_ProviderSelfCancellationBeforeDeadlineIsProviderFailure()
+    {
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)],
+            new SelfCancelingProvider());
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.ProviderFailed);
+    }
+
+    [Fact]
+    public async Task RunAsync_ProviderSelfCancellationWinsBeforeLaterCallerCancellation()
+    {
+        var provider = new ControllableSelfCancelingProvider();
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)],
+            provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        using var callerCancellation = new CancellationTokenSource();
+        var running = fixture.Service.RunAsync(runId, callerCancellation.Token);
+        await provider.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        provider.Cancel();
+        callerCancellation.Cancel();
+        await running;
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.ProviderFailed);
+    }
+
+    [Fact]
+    public async Task RunAsync_InFlightCallerCancellationHasDistinctTerminalState()
+    {
+        var provider = new SignalingWaitingProvider();
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)],
+            provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        using var cancellation = new CancellationTokenSource();
+
+        var running = fixture.Service.RunAsync(runId, cancellation.Token);
+        await provider.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await running;
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.Canceled);
+    }
+
+    [Fact]
     public async Task RunAsync_UnresolvedSupportingGroupRejectsWholeResult()
     {
         var provider = new RecordingProvider(request =>
@@ -250,6 +464,71 @@ public sealed class HistoricalInstructionAnalysisTests
     }
 
     [Fact]
+    public async Task RunAsync_AbsentExtractionIsStaleAndRetainsUnavailableReadProjection()
+    {
+        var provider = new RecordingProvider(_ => new(
+            HistoricalInstructionProviderCompletionV1.Complete, string.Empty, []));
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)], provider);
+        var request = Request(fixture.Extraction) with
+        {
+            ExtractionId = "historical-extraction-00000000000000000000000000000000",
+        };
+        var runId = fixture.Service.Start(request);
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        var read = AssertTerminalWithoutReceipt(
+            fixture.Service,
+            runId,
+            HistoricalInstructionAnalysisStateV1.StaleExtraction);
+        Assert.False(read.DatasetProjection.ContentAvailable);
+        Assert.Empty(read.DatasetProjection.DatasetDistribution.Completeness);
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
+    public async Task RunAsync_CorruptStoredExtractionFailsClosedAsExtractionInvalid()
+    {
+        var provider = new RecordingProvider(_ => new(
+            HistoricalInstructionProviderCompletionV1.Complete, string.Empty, []));
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        fixture.Execute(
+            "UPDATE historical_evidence_datasets SET payload_sha256='" + new string('0', 64)
+            + "' WHERE extraction_id='" + fixture.Extraction.RawLocal.ExtractionId + "' AND representation='raw_local';");
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.ExtractionInvalid);
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
+    public async Task RunAsync_PreExistingCorruptExtractionStillCreatesReadableExtractionInvalidRun()
+    {
+        var provider = new RecordingProvider(_ => new(
+            HistoricalInstructionProviderCompletionV1.Complete, string.Empty, []));
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 1)], provider);
+        fixture.Execute(
+            "UPDATE historical_evidence_datasets SET payload_sha256='" + new string('0', 64)
+            + "' WHERE extraction_id='" + fixture.Extraction.RawLocal.ExtractionId + "' AND representation='raw_local';");
+
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        var read = AssertTerminalWithoutReceipt(
+            fixture.Service,
+            runId,
+            HistoricalInstructionAnalysisStateV1.ExtractionInvalid);
+        Assert.False(read.DatasetProjection.ContentAvailable);
+        Assert.Empty(read.DatasetProjection.DatasetDistribution.Completeness);
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
     public async Task RunAsync_SanitizedOnlyDoesNotCallRawProvider()
     {
         var provider = new RecordingProvider(_ => new(
@@ -262,7 +541,12 @@ public sealed class HistoricalInstructionAnalysisTests
 
         await fixture.Service.RunAsync(runId, CancellationToken.None);
 
-        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.ContentUnavailable);
+        var read = AssertTerminalWithoutReceipt(
+            fixture.Service,
+            runId,
+            HistoricalInstructionAnalysisStateV1.ContentUnavailable);
+        Assert.True(read.DatasetProjection.SanitizedOnly);
+        Assert.False(read.DatasetProjection.ContentAvailable);
         Assert.Empty(provider.Requests);
     }
 
@@ -277,6 +561,20 @@ public sealed class HistoricalInstructionAnalysisTests
         await fixture.Service.RunAsync(runId, CancellationToken.None);
 
         AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.NoEligibleSessions);
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
+    public async Task RunAsync_EmptySanitizedDatasetUsesContentUnavailablePrecedence()
+    {
+        var provider = new RecordingProvider(_ => new(
+            HistoricalInstructionProviderCompletionV1.Complete, string.Empty, []));
+        using var fixture = await AnalysisFixture.CreateAsync([], provider, sanitizedOnly: true);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+
+        AssertTerminalWithoutReceipt(fixture.Service, runId, HistoricalInstructionAnalysisStateV1.ContentUnavailable);
         Assert.Empty(provider.Requests);
     }
 
@@ -317,10 +615,17 @@ public sealed class HistoricalInstructionAnalysisTests
 
         await fixture.Service.RunAsync(runId, CancellationToken.None);
 
-        var run = Assert.IsType<HistoricalInstructionAnalysisRunV1>(fixture.Service.Get(runId));
-        var receiptBytes = HistoricalInstructionAnalysisJsonV1.Serialize(Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(run.Receipt));
+        var run = Assert.IsType<HistoricalInstructionAnalysisReadV1>(fixture.Service.Get(runId));
+        var receipt = Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(run.Receipt);
+        var receiptBytes = HistoricalInstructionAnalysisJsonV1.Serialize(receipt);
         Assert.DoesNotContain(rawMarker, System.Text.Encoding.UTF8.GetString(receiptBytes), StringComparison.Ordinal);
         Assert.DoesNotContain(rawMarker, System.Text.Encoding.UTF8.GetString(run.HandoffBytes), StringComparison.Ordinal);
+        var support = Assert.Single(receipt.Findings);
+        Assert.Equal(
+            fixture.Extraction.RawLocal.EvidenceGroups
+                .Where(group => group.Kind == HistoricalEvidenceGroupKindV1.TurnRollup)
+                .Select(group => group.GroupId).Order(StringComparer.Ordinal),
+            support.SupportingGroupIds);
     }
 
     [Fact]
@@ -350,6 +655,67 @@ public sealed class HistoricalInstructionAnalysisTests
 
         var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(
             () => HistoricalInstructionAnalysisJsonV1.Serialize(unsafeReceipt));
+
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence, exception.Code);
+    }
+
+    [Fact]
+    public async Task ReceiptValidation_RejectsCredentialCarrierInModelOrProvider()
+    {
+        var provider = new RecordingProvider(request =>
+        {
+            var groups = request.Dataset.EvidenceGroups.ToArray();
+            return Complete(request, groups, groups);
+        });
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 2)], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+        var receipt = Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(fixture.Service.Get(runId)!.Receipt);
+
+        foreach (var value in new[]
+        {
+            "sk-abcdefghijklmnopqrstuvwxyz",
+            "github_pat_abcdefghijklmnopqrstuvwxyz",
+            "glpat-abcdefghijklmnopqrstuvwx",
+            "ghp_abcdefghijklmnopqrstuvwx",
+            "api-key",
+        })
+        {
+            Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+                HistoricalInstructionAnalysisJsonV1.Serialize(receipt with { Model = value }));
+            Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+                HistoricalInstructionAnalysisJsonV1.Serialize(receipt with { Provider = value }));
+        }
+    }
+
+    [Fact]
+    public async Task ReadConsumer_RejectsValidSameRunHandoffThatDoesNotMatchReceiptFindings()
+    {
+        var provider = new RecordingProvider(request =>
+        {
+            var groups = request.Dataset.EvidenceGroups.ToArray();
+            return Complete(request, groups, groups);
+        });
+        using var fixture = await AnalysisFixture.CreateAsync(
+            [Session(1, SessionCompleteness.Full, SessionSourceSurface.CopilotSdk, "1.0.0", 2)], provider);
+        var runId = fixture.Service.Start(Request(fixture.Extraction));
+        await fixture.Service.RunAsync(runId, CancellationToken.None);
+        var read = Assert.IsType<HistoricalInstructionAnalysisReadV1>(fixture.Service.Get(runId));
+        var receipt = Assert.IsType<HistoricalInstructionAnalysisReceiptV1>(read.Receipt);
+        var emptyHandoff = InstructionFindingJsonV1.Serialize(new InstructionFindingHandoffV1(
+            InstructionFindingContractsV1.HandoffSchemaVersion,
+            runId,
+            [],
+            []));
+        var mismatched = read with
+        {
+            Receipt = receipt with { HandoffSha256 = Sha256(emptyHandoff) },
+            HandoffBytes = emptyHandoff,
+        };
+
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+            HistoricalInstructionAnalysisReadConsumerV1.Validate(mismatched));
 
         Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence, exception.Code);
     }
@@ -384,15 +750,19 @@ public sealed class HistoricalInstructionAnalysisTests
                     supportGroups.Select(group => group.GroupId).ToArray()),
             ]);
 
-    private static void AssertTerminalWithoutReceipt(
+    private static HistoricalInstructionAnalysisReadV1 AssertTerminalWithoutReceipt(
         HistoricalInstructionAnalysisApplicationServiceV1 service,
         long runId,
         HistoricalInstructionAnalysisStateV1 expected)
     {
-        var run = Assert.IsType<HistoricalInstructionAnalysisRunV1>(service.Get(runId));
+        var run = Assert.IsType<HistoricalInstructionAnalysisReadV1>(service.Get(runId));
         Assert.Equal(expected, run.State);
         Assert.Null(run.Receipt);
         Assert.Empty(run.HandoffBytes);
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(run));
+        Assert.NotNull(run.DatasetProjection.DatasetDistribution.Completeness);
+        Assert.NotNull(run.DatasetProjection.DatasetDistribution.SourceKinds);
+        return run;
     }
 
     private static ReviewFixtureCase ReviewCase(string id)
@@ -408,6 +778,9 @@ public sealed class HistoricalInstructionAnalysisTests
             .Single(value => value.GetProperty("id").GetString() == id);
         return new(
             item.GetProperty("session_count").GetInt32(),
+            item.GetProperty("grounded_session_count").GetInt32(),
+            item.GetProperty("per_session_category_minimum_met").EnumerateArray()
+                .Select(value => value.GetBoolean()).ToArray(),
             item.GetProperty("expected_support_kind").GetString()!,
             item.GetProperty("expected_verdict").GetString()!,
             item.GetProperty("expected_candidate_eligible").GetBoolean());
@@ -416,6 +789,9 @@ public sealed class HistoricalInstructionAnalysisTests
     private static string Snake<T>(T value) where T : struct, Enum =>
         string.Concat(value.ToString().Select((character, index) =>
             char.IsUpper(character) && index > 0 ? "_" + char.ToLowerInvariant(character) : char.ToLowerInvariant(character).ToString()));
+
+    private static string Sha256(ReadOnlySpan<byte> bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static InstructionRawEvidenceReferenceV1 ToInstructionReference(HistoricalEvidenceReferenceV1 reference) =>
         new(reference.SessionId, reference.TraceId, reference.SpanId, reference.TurnIndex,
@@ -492,17 +868,16 @@ public sealed class HistoricalInstructionAnalysisTests
             {
                 owner.ReadCount++;
                 var session = sessions.Single(value => value.SessionId == sessionId);
-                var groups = session.EvidenceLocations.Select(location => new HistoricalEvidenceGroupDraftV1(
-                        HistoricalEvidenceGroupKindV1.TurnRollup,
-                        [new(location.SessionId, location.TraceId, location.SpanId, location.TurnIndex, location.RelativePosition)],
-                        1,
-                        "turn",
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null)).ToList();
+                var groups = session.EvidenceLocations.Select(location =>
+                    location.SpanId?.StartsWith("error-", StringComparison.Ordinal) == true
+                        ? new HistoricalEvidenceGroupDraftV1(
+                            HistoricalEvidenceGroupKindV1.ErrorSpan,
+                            [new(location.SessionId, location.TraceId, location.SpanId, location.TurnIndex, location.RelativePosition)],
+                            null, null, "error", null, null, null, null, null)
+                        : new HistoricalEvidenceGroupDraftV1(
+                            HistoricalEvidenceGroupKindV1.TurnRollup,
+                            [new(location.SessionId, location.TraceId, location.SpanId, location.TurnIndex, location.RelativePosition)],
+                            1, "turn", null, null, null, null, null, null)).ToList();
                 if (rawDescriptor is not null && includeDescriptors && session == sessions[0])
                 {
                     var location = session.EvidenceLocations[0];
@@ -552,6 +927,67 @@ public sealed class HistoricalInstructionAnalysisTests
         }
     }
 
+    private sealed class SignalingWaitingProvider : IHistoricalInstructionAnalysisProviderV1
+    {
+        private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task Entered => entered.Task;
+
+        public async Task<HistoricalInstructionProviderResultV1> AnalyzeAsync(
+            HistoricalInstructionProviderRequestV1 request,
+            CancellationToken cancellationToken)
+        {
+            entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException();
+        }
+    }
+
+    private sealed class SelfCancelingProvider : IHistoricalInstructionAnalysisProviderV1
+    {
+        public Task<HistoricalInstructionProviderResultV1> AnalyzeAsync(
+            HistoricalInstructionProviderRequestV1 request,
+            CancellationToken cancellationToken) =>
+            Task.FromCanceled<HistoricalInstructionProviderResultV1>(new CancellationToken(canceled: true));
+    }
+
+    private sealed class ControllableSelfCancelingProvider : IHistoricalInstructionAnalysisProviderV1
+    {
+        private readonly TaskCompletionSource<HistoricalInstructionProviderResultV1> completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task Entered => entered.Task;
+
+        internal void Cancel() => completion.TrySetCanceled();
+
+        public Task<HistoricalInstructionProviderResultV1> AnalyzeAsync(
+            HistoricalInstructionProviderRequestV1 request,
+            CancellationToken cancellationToken)
+        {
+            entered.TrySetResult();
+            return completion.Task;
+        }
+    }
+
+    private sealed class CancelCallerWhenProviderTokenCancels(CancellationTokenSource callerCancellation)
+        : IHistoricalInstructionAnalysisProviderV1
+    {
+        public async Task<HistoricalInstructionProviderResultV1> AnalyzeAsync(
+            HistoricalInstructionProviderRequestV1 request,
+            CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<HistoricalInstructionProviderResultV1>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(() =>
+            {
+                callerCancellation.Cancel();
+                completion.TrySetCanceled(cancellationToken);
+            });
+            return await completion.Task;
+        }
+    }
+
     private sealed class AnalysisFixture : IDisposable
     {
         private readonly MonitorTempDirectory temp;
@@ -568,6 +1004,15 @@ public sealed class HistoricalInstructionAnalysisTests
 
         internal HistoricalEvidenceExtractionV1 Extraction { get; }
         internal HistoricalInstructionAnalysisApplicationServiceV1 Service { get; }
+
+        internal void Execute(string sql)
+        {
+            using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
 
         internal static async Task<AnalysisFixture> CreateAsync(
             IReadOnlyList<HistoricalSessionMetadataV1> sessions,
@@ -613,6 +1058,8 @@ public sealed class HistoricalInstructionAnalysisTests
 
     private sealed record ReviewFixtureCase(
         int SessionCount,
+        int GroundedSessionCount,
+        IReadOnlyList<bool> PerSessionCategoryMinimumMet,
         string ExpectedSupportKind,
         string ExpectedVerdict,
         bool ExpectedEligible);

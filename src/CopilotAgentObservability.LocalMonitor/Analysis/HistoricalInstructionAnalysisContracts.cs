@@ -6,6 +6,7 @@ internal static class HistoricalInstructionAnalysisContractsV1
 {
     internal const string RequestSchemaVersion = "historical-instruction-analysis.request.v1";
     internal const string ReceiptSchemaVersion = "historical-instruction-analysis.receipt.v1";
+    internal const string ReadSchemaVersion = "historical-instruction-analysis.read.v1";
     internal const string PromptTemplateVersion = "historical-instruction-analysis.prompt.v1";
     internal const int MaximumTimeoutMilliseconds = 3_600_000;
     internal const int MaximumReceiptBytes = HistoricalEvidenceContractsV1.MaximumPayloadBytes;
@@ -20,10 +21,12 @@ internal enum HistoricalInstructionAnalysisStateV1
     NoEligibleSessions,
     ContentUnavailable,
     StaleExtraction,
+    ExtractionInvalid,
     InvalidCitation,
     ProviderPartial,
     ProviderFailed,
     TimedOut,
+    Canceled,
 }
 
 internal enum HistoricalInstructionProviderCompletionV1 { Complete, Partial }
@@ -60,6 +63,12 @@ internal sealed record HistoricalInstructionAnalysisRequestV1(
     [property: JsonPropertyOrder(6)] int TimeoutMilliseconds,
     [property: JsonPropertyOrder(7)] string PromptTemplateVersion);
 
+internal sealed record HistoricalInstructionAnalysisDatasetProjectionV1(
+    [property: JsonPropertyOrder(0)] bool TruncatedBefore,
+    [property: JsonPropertyOrder(1)] bool SanitizedOnly,
+    [property: JsonPropertyOrder(2)] bool ContentAvailable,
+    [property: JsonPropertyOrder(3)] HistoricalEvidenceDistributionV1 DatasetDistribution);
+
 internal sealed record HistoricalInstructionFindingSubmissionV1(
     InstructionFindingCategoryV1 Category,
     InstructionFindingVerdictV1 AssessedVerdict,
@@ -94,7 +103,7 @@ internal static class HistoricalInstructionAnalysisPromptV1
         Analyze only the supplied persisted historical-evidence.raw-local.v1 dataset. Do not search, query, or infer any Session, trace, repository, workspace, source, or history outside that dataset.
         Reuse only the instruction-finding.v1 categories: goal_clarity, ambiguity, acceptance_criteria_missing, scope_boundary_missing, task_too_large, test_requirement_missing, evidence_requirement_missing, and environment_assumption_missing.
         Every submission must use one shared exact anchor trace, exact anchor evidence references present in included evidence groups, exact supporting group IDs, one closed verdict (supported, weak, or incomplete), and one closed extractor source (deterministic_prepass or prompt_only).
-        A recurring claim requires evidence owned by at least two distinct included Sessions. One-Session support cannot be Recommended-equivalent. Do not upgrade weak or incomplete evidence.
+        A recurring claim requires the same category to meet its instruction-finding.v1 evidence minimum independently inside at least two distinct included Sessions. Unrelated or under-minimum supporting groups do not count. One-Session support cannot be Recommended-equivalent. Do not upgrade weak or incomplete evidence.
         Submit no title, summary, explanation, instruction, target, rule text, source excerpt, prompt/response body, tool body, credential, personal data, or local path. Code generates fixed instruction-finding.v1 templates after exact citation validation.
         A complete response with zero submissions is valid. Mark an interrupted or incomplete response partial; do not present partial output as success.
         """;
@@ -135,12 +144,39 @@ internal sealed record HistoricalInstructionAnalysisReceiptV1(
 internal sealed record HistoricalInstructionAnalysisRunV1(
     long RunId,
     HistoricalInstructionAnalysisRequestV1 Request,
+    HistoricalInstructionAnalysisDatasetProjectionV1 DatasetProjection,
     HistoricalInstructionAnalysisStateV1 State,
     DateTimeOffset RequestedAt,
     DateTimeOffset? StartedAt,
     DateTimeOffset? CompletedAt,
     HistoricalInstructionAnalysisReceiptV1? Receipt,
-    byte[] HandoffBytes);
+    byte[] HandoffBytes)
+{
+    internal HistoricalInstructionAnalysisReadV1 ToRead() =>
+        new(
+            HistoricalInstructionAnalysisContractsV1.ReadSchemaVersion,
+            RunId,
+            Request,
+            DatasetProjection,
+            State,
+            RequestedAt,
+            StartedAt,
+            CompletedAt,
+            Receipt,
+            HandoffBytes.ToArray());
+}
+
+internal sealed record HistoricalInstructionAnalysisReadV1(
+    [property: JsonPropertyOrder(0)] string SchemaVersion,
+    [property: JsonPropertyOrder(1)] long RunId,
+    [property: JsonPropertyOrder(2)] HistoricalInstructionAnalysisRequestV1 Request,
+    [property: JsonPropertyOrder(3)] HistoricalInstructionAnalysisDatasetProjectionV1 DatasetProjection,
+    [property: JsonPropertyOrder(4)] HistoricalInstructionAnalysisStateV1 State,
+    [property: JsonPropertyOrder(5)] DateTimeOffset RequestedAt,
+    [property: JsonPropertyOrder(6)] DateTimeOffset? StartedAt,
+    [property: JsonPropertyOrder(7)] DateTimeOffset? CompletedAt,
+    [property: JsonPropertyOrder(8)] HistoricalInstructionAnalysisReceiptV1? Receipt,
+    [property: JsonPropertyOrder(9)] byte[] HandoffBytes);
 
 internal static class HistoricalInstructionAnalysisStateWireV1
 {
@@ -153,10 +189,12 @@ internal static class HistoricalInstructionAnalysisStateWireV1
         HistoricalInstructionAnalysisStateV1.NoEligibleSessions => "no_eligible_sessions",
         HistoricalInstructionAnalysisStateV1.ContentUnavailable => "content_unavailable",
         HistoricalInstructionAnalysisStateV1.StaleExtraction => "stale_extraction",
+        HistoricalInstructionAnalysisStateV1.ExtractionInvalid => "extraction_invalid",
         HistoricalInstructionAnalysisStateV1.InvalidCitation => "invalid_citation",
         HistoricalInstructionAnalysisStateV1.ProviderPartial => "provider_partial",
         HistoricalInstructionAnalysisStateV1.ProviderFailed => "provider_failed",
         HistoricalInstructionAnalysisStateV1.TimedOut => "timed_out",
+        HistoricalInstructionAnalysisStateV1.Canceled => "canceled",
         _ => throw new HistoricalInstructionAnalysisValidationException(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract),
     };
 
@@ -169,10 +207,12 @@ internal static class HistoricalInstructionAnalysisStateWireV1
         "no_eligible_sessions" => HistoricalInstructionAnalysisStateV1.NoEligibleSessions,
         "content_unavailable" => HistoricalInstructionAnalysisStateV1.ContentUnavailable,
         "stale_extraction" => HistoricalInstructionAnalysisStateV1.StaleExtraction,
+        "extraction_invalid" => HistoricalInstructionAnalysisStateV1.ExtractionInvalid,
         "invalid_citation" => HistoricalInstructionAnalysisStateV1.InvalidCitation,
         "provider_partial" => HistoricalInstructionAnalysisStateV1.ProviderPartial,
         "provider_failed" => HistoricalInstructionAnalysisStateV1.ProviderFailed,
         "timed_out" => HistoricalInstructionAnalysisStateV1.TimedOut,
+        "canceled" => HistoricalInstructionAnalysisStateV1.Canceled,
         _ => throw new HistoricalInstructionAnalysisValidationException(HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence),
     };
 }

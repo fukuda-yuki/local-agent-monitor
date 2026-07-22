@@ -18,6 +18,7 @@ The fixed versions are:
 ```text
 historical-instruction-analysis.request.v1
 historical-instruction-analysis.receipt.v1
+historical-instruction-analysis.read.v1
 historical-instruction-analysis.prompt.v1
 ```
 
@@ -38,19 +39,27 @@ Each explicit start appends a new positive historical analysis run ID. A retry
 is another start and therefore another run; it never overwrites an earlier
 failure or result.
 
+Start attempts a repository-safe #72 projection. If the #72 owner already
+rejects persisted bytes, start still appends the run with the closed unavailable
+projection; the running recheck terminates as `extraction_invalid`. Corrupt #72
+bytes are never returned or interpreted to populate the projection.
+
 The immutable request records:
 
 - request schema version;
 - Issue #72 extraction ID and exact raw-local SHA-256 expected by the caller;
 - bounded model and provider identifiers;
 - lowercase 64-hex configuration SHA-256, computed without credentials;
-- positive timeout in milliseconds;
+- timeout in the inclusive range `1..3,600,000` milliseconds;
 - exact prompt-template version;
 - canonical UTC request time.
 
 Model and provider identifiers use the bounded metadata-token grammar and may
 not contain whitespace, control characters, URI/path separators, credentials,
-or free text. Configuration bytes, provider base URLs, API keys, environment
+or free text. They must also pass the shared sensitive-carrier gate; normalized
+credential shapes including `api-key` / `api_key`, `sk-...`, and
+`github_pat_...` are rejected even when they match the token grammar.
+Configuration bytes, provider base URLs, API keys, environment
 values, and exception text are never stored. The prompt-template version must
 equal `historical-instruction-analysis.prompt.v1`; silent fallback to another
 template is forbidden.
@@ -67,10 +76,12 @@ zero_findings
 no_eligible_sessions
 content_unavailable
 stale_extraction
+extraction_invalid
 invalid_citation
 provider_partial
 provider_failed
 timed_out
+canceled
 ```
 
 Only `queued -> running -> <one terminal state>` is valid. A terminal row is
@@ -79,6 +90,15 @@ immutable. `succeeded` requires one or more validated findings.
 #59 handoff. Neither is interchangeable with `no_eligible_sessions`, an
 unavailable raw-local boundary, timeout, provider failure/partial output, stale
 input, or rejected citation.
+
+`stale_extraction` means only that the extraction is absent or that a valid
+persisted extraction does not match the requested ID/checksum.
+`extraction_invalid` means the #72 owner rejected malformed, oversized,
+checksum-invalid, noncanonical, or semantically invalid persisted data.
+`timed_out` is used only when the run-owned timeout source is the first owned
+cancellation cause; `canceled` is used when caller cancellation is first.
+Provider self-cancellation before either source fires is `provider_failed`.
+No partial output is published for cancellation or failure.
 
 `provider_partial` covers both an explicit incomplete provider response and a
 provider failure after one or more submissions. Partial submissions are not
@@ -109,7 +129,9 @@ If the extraction is absent or its expected checksum differs, the state is
 provider is not called. Descriptor-unavailable Sessions may still contribute
 their bounded non-descriptor evidence groups; their descriptor/content state
 stays explicit in the bounded provider input. An empty included set is
-`no_eligible_sessions`.
+`no_eligible_sessions`. The `sanitized_only` check precedes the empty-set check,
+so an empty sanitized extraction is `content_unavailable`. Owner validation
+failure while reopening stored #72 data is `extraction_invalid`.
 
 ## Provider submission
 
@@ -127,8 +149,9 @@ is valid.
 The runner builds the #59 evidence index only from exact references present in
 the included raw-local groups for the selected anchor. `turn_rollup` supplies
 `turn`, `error_span` and `retry_chain` supply `error_or_retry_span`, and
-`user_correction` supplies `instruction_span`. Other groups may support the
-historical recurrence projection but do not invent a #59 evidence kind.
+`user_correction` supplies `instruction_span`. Other groups neither count nor
+enter the historical recurrence projection and do not invent a #59 evidence
+kind.
 
 ## Post-validation and recurrence
 
@@ -144,20 +167,27 @@ Before invoking the #59 producer, the runner rejects the whole result when:
 - a category, verdict, or extractor source is outside Issue #59;
 - a provider response is null, structurally invalid, or incomplete.
 
-Historical support is derived, never trusted from the provider. Supporting
-Session IDs are the distinct Sessions owning the resolved supporting groups.
-A recurring claim requires at least two distinct Sessions. An assessed
-`supported` submission with one distinct Session is passed to #59 as `weak`,
-which makes it ineligible. Provider-assessed `weak` and `incomplete` verdicts
-are preserved and never upgraded.
+Historical support is derived, never trusted from the provider. For each
+submitted category, the runner evaluates every owning Session independently
+using only exact references and #59 evidence kinds from that Session's resolved
+supporting groups. The unchanged #59 producer applies the same category-specific
+minimum to a Session-local draft. A Session counts toward recurrence only when
+that same-category draft remains `supported`.
 
-The #59 producer remains responsible for category-specific anchor evidence
-minimums and may further downgrade a proposed `supported` verdict. Candidate
-eligibility is copied from the resulting #59 receipt; Issue #73 has no
-promotion shortcut.
+Unrelated, unmapped, redundant, or category-under-minimum groups are excluded
+from the recurrence count and historical support projection. For each grounded
+Session, the persisted support groups are the deterministic minimal ordered set
+whose removal would make the unchanged #59 category check no longer supported.
+A recurring claim requires
+at least two independently grounded distinct Sessions. A provider-assessed
+`supported` submission with one grounded Session is passed to #59 as `weak`,
+which makes it ineligible; a submission with no grounded Session is rejected.
+Provider-assessed `weak` and `incomplete` verdicts are preserved and never
+upgraded. Candidate eligibility is copied from the resulting #59 receipt;
+Issue #73 has no promotion shortcut.
 
 Source-version, source-surface, source-kind, and completeness distributions are
-derived from the exact supporting Sessions. Mixed values remain explicit in
+derived only from the exact grounded supporting Sessions/groups. Mixed values remain explicit in
 the historical finding projection; missing or partial evidence is never
 interpreted as zero or full evidence.
 
@@ -189,12 +219,24 @@ joins them by `finding_id`; it does not infer, rewrite, or upgrade them.
 
 ## Persistence
 
-The Issue #73 owner stores the immutable request/state and, only for
+The Issue #73 owner stores the immutable request/state and the repository-safe
+dataset projection independently of outcome. The projection preserves
+truncation, sanitized/content flags, and completeness/source distributions for
+`queued`, `running`, and every terminal state. Only for
 `succeeded` or `zero_findings`, canonical receipt and #59 handoff bytes with
 separate lowercase SHA-256 values. Terminal completion of both carriers is one
 transaction. Reads verify size, checksum, canonical reserialization, request
 provenance, state invariants, finding linkage, and the exact #59 consumer before
 returning a DTO.
+
+`historical-instruction-analysis.read.v1` is the exact read DTO for #75. Its
+shared consumer validates schema/run/request provenance, timestamp and state
+invariants, the safe dataset projection, success-receipt linkage, and canonical
+#59 bytes. A non-success state has no receipt/handoff but retains the projection.
+`content_unavailable` requires `sanitized_only=true` and
+`content_available=false`; `no_eligible_sessions` requires a non-sanitized,
+content-capable projection with empty dataset distributions. Provider-stage
+terminal states require the non-sanitized content-capable projection.
 
 Persistence is insert/new-run plus compare-and-set transitions. There is no
 retry rewrite, partial-result promotion, or insert-or-replace path.
@@ -213,6 +255,7 @@ rejected without mutation.
 Issue #75 receives one read model with:
 
 ```text
+schema_version = historical-instruction-analysis.read.v1
 run_id
 state
 requested_at / started_at / completed_at
@@ -227,9 +270,18 @@ canonical instruction-finding-handoff.v1 bytes when state permits
 This supports the required UI distinctions: no eligible Sessions, mixed
 source/completeness, truncated extraction, content unavailable, queued,
 running, succeeded, zero findings, failed provider, timed out, invalid citation,
-stale extraction, and partial provider output. #75 must validate the canonical
+stale extraction, invalid extraction, canceled execution, and partial provider
+output. #75 must validate the canonical
 handoff bytes with the shared #59 consumer and preserve every final verdict and
 eligibility value.
+
+Normal Local Monitor construction initializes the component-v1 store and
+registers a #73 composition beside the #72 application service. The read
+boundary is always available; runner creation requires an explicitly supplied
+`IHistoricalInstructionAnalysisProviderV1`. No provider, credential,
+raw-content execution, HTTP route, background worker, or UI is enabled by
+default. Automated fake-provider coverage is not genuine provider execution;
+the latter remains `blocked_external` until separate live evidence exists.
 
 ## Privacy and validation matrix
 
@@ -239,16 +291,24 @@ Focused fixtures cover:
   #59 category minima also pass;
 - B: the same apparent pattern grounded in one Session, retained as weak and
   ineligible;
+- an unrelated or category-under-minimum second Session cannot promote A to
+  recurring and is absent from the support projection;
 - provider-complete zero findings;
-- timeout, provider failure after zero submissions, and provider partial after
+- exact timeout bounds (`3,600,000` accepted; `3,600,001` rejected), owned
+  timeout, immediate provider self-cancellation, caller cancellation, provider
+  failure after zero submissions, and provider partial after
   accepted submissions;
 - unresolved group/reference citation;
-- stale checksum, empty dataset, and sanitized-only/content-unavailable input;
+- stale checksum, corrupt #72 persistence, empty dataset, and
+  empty+sanitized/content-unavailable precedence;
 - mixed source/completeness distribution;
 - a bounded raw-local descriptor marker never enters the receipt or handoff;
-- path/credential-like provenance and path-like repository-safe distribution
+- `sk-...`, `github_pat_...`, `api-key`, other path/credential-like provenance,
+  and path-like repository-safe distribution
   values are rejected rather than persisted;
-- canonical #59 consumer compatibility.
+- canonical #59 consumer compatibility;
+- exact read-consumer compatibility for queued, running, and every terminal
+  state, plus provider-free production composition resolution.
 
 The A/B expected judgement is the Issue #73 human-review record: recurrence is
 supported only for A; B must not be presented as a Recommended-equivalent

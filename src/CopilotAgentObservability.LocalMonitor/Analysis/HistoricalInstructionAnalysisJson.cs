@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.LocalMonitor.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
@@ -38,6 +39,35 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
         }
     }
 
+    internal static byte[] SerializeDatasetProjection(HistoricalInstructionAnalysisDatasetProjectionV1 projection)
+    {
+        ValidateDatasetProjection(projection);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(projection, Options);
+        if (bytes.Length > HistoricalInstructionAnalysisContractsV1.MaximumReceiptBytes) throw Invalid();
+        return bytes;
+    }
+
+    internal static HistoricalInstructionAnalysisDatasetProjectionV1 DeserializeDatasetProjection(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty || bytes.Length > HistoricalInstructionAnalysisContractsV1.MaximumReceiptBytes) throw Invalid();
+        try
+        {
+            var projection = JsonSerializer.Deserialize<HistoricalInstructionAnalysisDatasetProjectionV1>(bytes, Options)
+                ?? throw Invalid();
+            ValidateDatasetProjection(projection);
+            if (!bytes.SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(projection, Options))) throw Invalid();
+            return projection;
+        }
+        catch (HistoricalInstructionAnalysisValidationException) { throw; }
+        catch (Exception exception) when (exception is JsonException or NotSupportedException or ArgumentException
+            or InvalidOperationException or NullReferenceException or OverflowException)
+        {
+            throw new HistoricalInstructionAnalysisValidationException(
+                HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence,
+                exception);
+        }
+    }
+
     internal static void ValidateRequest(HistoricalInstructionAnalysisRequestV1 request)
     {
         if (request is null
@@ -46,10 +76,23 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
             || !HashPattern().IsMatch(request.ExtractionSha256 ?? string.Empty)
             || !IdentifierPattern().IsMatch(request.Model ?? string.Empty)
             || !IdentifierPattern().IsMatch(request.Provider ?? string.Empty)
+            || SessionSecretFilter.IsSensitiveCarrier(request.Model!)
+            || SessionSecretFilter.IsSensitiveCarrier(request.Provider!)
             || !HashPattern().IsMatch(request.ConfigurationSha256 ?? string.Empty)
             || request.TimeoutMilliseconds is <= 0 or > HistoricalInstructionAnalysisContractsV1.MaximumTimeoutMilliseconds
             || request.PromptTemplateVersion != HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion)
             throw new HistoricalInstructionAnalysisValidationException(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract);
+    }
+
+    internal static void ValidateDatasetProjection(HistoricalInstructionAnalysisDatasetProjectionV1 projection)
+    {
+        if (projection is null
+            || projection.SanitizedOnly && projection.ContentAvailable
+            || projection.DatasetDistribution is null
+            || !ValidDistribution(projection.DatasetDistribution.Completeness)
+            || !ValidDistribution(projection.DatasetDistribution.SourceKinds)
+            || !ValidDistribution(projection.DatasetDistribution.Capabilities))
+            throw Invalid();
     }
 
     internal static void ValidateReceipt(HistoricalInstructionAnalysisReceiptV1 receipt)
@@ -62,6 +105,8 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
             || receipt.State is not (HistoricalInstructionAnalysisStateV1.Succeeded or HistoricalInstructionAnalysisStateV1.ZeroFindings)
             || !IdentifierPattern().IsMatch(receipt.Model ?? string.Empty)
             || !IdentifierPattern().IsMatch(receipt.Provider ?? string.Empty)
+            || SessionSecretFilter.IsSensitiveCarrier(receipt.Model!)
+            || SessionSecretFilter.IsSensitiveCarrier(receipt.Provider!)
             || !HashPattern().IsMatch(receipt.ConfigurationSha256 ?? string.Empty)
             || receipt.TimeoutMilliseconds is <= 0 or > HistoricalInstructionAnalysisContractsV1.MaximumTimeoutMilliseconds
             || receipt.PromptTemplateVersion != HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion

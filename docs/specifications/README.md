@@ -36,6 +36,7 @@
 | Trace agent execution graph | [interfaces/trace-agent-execution-graph.md](interfaces/trace-agent-execution-graph.md) |
 | Historical source import | [interfaces/historical-source-import.md](interfaces/historical-source-import.md) |
 | Historical evidence extraction | [interfaces/historical-evidence-extraction.md](interfaces/historical-evidence-extraction.md) |
+| Historical instruction analysis | [interfaces/historical-instruction-analysis.md](interfaces/historical-instruction-analysis.md) |
 | Alert rule engine | [interfaces/alert-rule-engine.md](interfaces/alert-rule-engine.md) |
 | Tool/retry/permission alert rules | [interfaces/tool-alert-rules.md](interfaces/tool-alert-rules.md) |
 | Token/context/cache alert rules | [interfaces/token-context-cache-alert-rules.md](interfaces/token-context-cache-alert-rules.md) |

@@ -325,7 +325,7 @@ internal static partial class RepositoryMetadataDiagnostics
         return RepositoryMetadataAttributeClassification.Other;
     }
 
-    private static bool IsTokenLike(string value) => TokenPattern().IsMatch(value);
+    internal static bool IsTokenLike(string value) => TokenPattern().IsMatch(value);
 
     private static string? SanitizeRepositoryName(string? value)
     {

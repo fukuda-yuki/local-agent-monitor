@@ -387,6 +387,20 @@ redefining either contract. It adds no source discovery/import, LLM execution,
 HTTP/UI surface, proposal, effect, or apply behavior; #73 and #74 consume the
 persisted v1 forms independently.
 
+## Historical instruction analysis
+
+Issue #73 freezes the persisted-#72-only runner at
+[historical instruction analysis](specifications/interfaces/historical-instruction-analysis.md).
+The existing #59 producer evaluates the same category independently inside
+each supporting Session, and only two or more independently supported Sessions
+may become recurring. Provenance passes the shared sensitive-carrier gate,
+timeout is bounded to one hour, and stale/owner-invalid/caller-canceled/owned-
+timeout outcomes remain distinct. The exact
+`historical-instruction-analysis.read.v1` DTO preserves repository-safe dataset
+projection for queued, running, and every terminal state. Local Monitor
+registers the component-v1 store and provider-free composition, but configures
+no provider, credential, raw execution, route, worker, or UI by default.
+
 ## Historical efficiency analysis
 
 Issue #74 freezes the deterministic consumer contract at
@@ -529,6 +543,7 @@ sanitized. The canonical contract is
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
 | Historical source import interface | [specifications/interfaces/historical-source-import.md](specifications/interfaces/historical-source-import.md) |
 | Historical evidence extraction interface | [specifications/interfaces/historical-evidence-extraction.md](specifications/interfaces/historical-evidence-extraction.md) |
+| Historical instruction analysis interface | [specifications/interfaces/historical-instruction-analysis.md](specifications/interfaces/historical-instruction-analysis.md) |
 | Alert rule engine interface | [specifications/interfaces/alert-rule-engine.md](specifications/interfaces/alert-rule-engine.md) |
 | Tool/retry/permission alert rules | [specifications/interfaces/tool-alert-rules.md](specifications/interfaces/tool-alert-rules.md) |
 | Token/context/cache alert rules | [specifications/interfaces/token-context-cache-alert-rules.md](specifications/interfaces/token-context-cache-alert-rules.md) |

@@ -17,7 +17,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public class MonitorHostTests
 {
     [Fact]
-    public void Build_RegistersHistoricalEvidenceApplicationAndPairedStore()
+    public async Task Build_RegistersHistoricalEvidenceAndProviderFreeHistoricalInstructionComposition()
     {
         using var tempDirectory = new MonitorTempDirectory();
 
@@ -27,6 +27,25 @@ public class MonitorHostTests
 
         Assert.NotNull(app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>());
         Assert.NotNull(app.Services.GetRequiredService<SqliteHistoricalEvidenceDatasetStoreV1>());
+        Assert.NotNull(app.Services.GetRequiredService<SqliteHistoricalInstructionAnalysisStoreV1>());
+        var composition = app.Services.GetRequiredService<HistoricalInstructionAnalysisCompositionV1>();
+        Assert.Null(app.Services.GetService<IHistoricalInstructionAnalysisProviderV1>());
+        var runner = composition.CreateRunner(new UnusedHistoricalInstructionProvider());
+        var runId = runner.Start(new HistoricalInstructionAnalysisRequestV1(
+            HistoricalInstructionAnalysisContractsV1.RequestSchemaVersion,
+            "historical-extraction-00000000000000000000000000000000",
+            new string('a', 64),
+            "gpt-5",
+            "copilot",
+            new string('b', 64),
+            30_000,
+            HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion));
+
+        await runner.RunAsync(runId, CancellationToken.None);
+
+        var read = Assert.IsType<HistoricalInstructionAnalysisReadV1>(composition.Get(runId));
+        Assert.Equal(HistoricalInstructionAnalysisStateV1.StaleExtraction, read.State);
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(read));
     }
 
     [Fact]
@@ -749,6 +768,14 @@ public class MonitorHostTests
         using var command = connection.CreateCommand();
         command.CommandText = commandText;
         command.ExecuteNonQuery();
+    }
+
+    private sealed class UnusedHistoricalInstructionProvider : IHistoricalInstructionAnalysisProviderV1
+    {
+        public Task<HistoricalInstructionProviderResultV1> AnalyzeAsync(
+            HistoricalInstructionProviderRequestV1 request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The host composition test must not execute a provider.");
     }
 
     private sealed class ThrowingCommitStore : IIngestionCommitStore

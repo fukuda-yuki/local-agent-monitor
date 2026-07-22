@@ -295,7 +295,10 @@ carrier authorities. Persistence implements their SQLite stores and trusted
 snapshot adapter; Config CLI and Local Monitor provide public adapters without
 moving domain validation into an upper layer. Historical evidence extraction
 is an internal Local Monitor application/persistence boundary and adds no HTTP
-or shared lower-level dependency.
+or shared lower-level dependency. Local Monitor host construction also
+initializes the #73 store/read composition beside #72, but requires an explicit
+provider to construct a runner and never configures provider credentials or
+starts raw execution by default.
 
 The Wave 3 alert compatibility repair keeps the same dependency direction.
 `Alerts` additionally owns the source-neutral evaluate-and-append application
@@ -319,7 +322,12 @@ exact-bound Session metadata + sanitized monitor facts + #59 handoffs
   -> coherent bounded historical snapshot
   -> raw-local + repository-safe canonical datasets
   -> insert-or-identical local persistence
-  -> #73 consumer
+persisted #72 raw-local/repository-safe pair
+  -> registered #73 composition (explicit provider only)
+  -> bounded provider execution
+  -> per-Session #59 grounding + canonical handoff
+  -> historical_instruction_analysis component v1
+  -> exact #75 read DTO
 
 exact canonical #72 repository-safe dataset
   -> deterministic #74 efficiency-driver registry

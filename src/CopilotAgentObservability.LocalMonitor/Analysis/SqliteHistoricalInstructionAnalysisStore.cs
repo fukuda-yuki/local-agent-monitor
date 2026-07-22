@@ -23,9 +23,11 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
             configuration_sha256 TEXT NOT NULL CHECK(length(configuration_sha256)=64 AND configuration_sha256=lower(configuration_sha256)),
             timeout_ms INTEGER NOT NULL CHECK(timeout_ms>0 AND timeout_ms<=3600000),
             prompt_template_version TEXT NOT NULL,
+            dataset_projection_json TEXT NOT NULL CHECK(length(CAST(dataset_projection_json AS BLOB))<=67108864),
+            dataset_projection_sha256 TEXT NOT NULL CHECK(length(dataset_projection_sha256)=64 AND dataset_projection_sha256=lower(dataset_projection_sha256)),
             state TEXT NOT NULL CHECK(state IN (
                 'queued','running','succeeded','zero_findings','no_eligible_sessions','content_unavailable',
-                'stale_extraction','invalid_citation','provider_partial','provider_failed','timed_out')),
+                'stale_extraction','extraction_invalid','invalid_citation','provider_partial','provider_failed','timed_out','canceled')),
             requested_at TEXT NOT NULL,
             started_at TEXT NULL,
             completed_at TEXT NULL,
@@ -74,19 +76,25 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         }
     }
 
-    internal long Start(HistoricalInstructionAnalysisRequestV1 request, DateTimeOffset requestedAt)
+    internal long Start(
+        HistoricalInstructionAnalysisRequestV1 request,
+        HistoricalInstructionAnalysisDatasetProjectionV1 datasetProjection,
+        DateTimeOffset requestedAt)
     {
         HistoricalInstructionAnalysisJsonV1.ValidateRequest(request);
+        var projectionBytes = HistoricalInstructionAnalysisJsonV1.SerializeDatasetProjection(datasetProjection);
+        var projectionJson = Encoding.UTF8.GetString(projectionBytes);
+        var projectionSha = Sha256(projectionBytes);
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText =
             """
             INSERT INTO historical_instruction_analysis_runs (
                 request_schema_version,extraction_id,extraction_sha256,model,provider,configuration_sha256,
-                timeout_ms,prompt_template_version,state,requested_at
+                timeout_ms,prompt_template_version,dataset_projection_json,dataset_projection_sha256,state,requested_at
             ) VALUES (
                 $schema,$extraction,$extraction_sha,$model,$provider,$configuration_sha,
-                $timeout,$template,'queued',$requested
+                $timeout,$template,$projection,$projection_sha,'queued',$requested
             );
             SELECT last_insert_rowid();
             """;
@@ -98,6 +106,8 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         command.Parameters.AddWithValue("$configuration_sha", request.ConfigurationSha256);
         command.Parameters.AddWithValue("$timeout", request.TimeoutMilliseconds);
         command.Parameters.AddWithValue("$template", request.PromptTemplateVersion);
+        command.Parameters.AddWithValue("$projection", projectionJson);
+        command.Parameters.AddWithValue("$projection_sha", projectionSha);
         command.Parameters.AddWithValue("$requested", Utc(requestedAt));
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
@@ -105,7 +115,13 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
     internal void MarkRunning(long runId, DateTimeOffset startedAt)
     {
         using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        var existing = Read(connection, transaction, runId) ?? throw InvalidTransition();
+        if (existing.State != HistoricalInstructionAnalysisStateV1.Queued
+            || startedAt.ToUniversalTime() < existing.RequestedAt)
+            throw InvalidTransition();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             UPDATE historical_instruction_analysis_runs
@@ -115,6 +131,7 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         command.Parameters.AddWithValue("$id", runId);
         command.Parameters.AddWithValue("$started", Utc(startedAt));
         if (command.ExecuteNonQuery() != 1) throw InvalidTransition();
+        transaction.Commit();
     }
 
     internal void Complete(
@@ -148,7 +165,9 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         using var transaction = connection.BeginTransaction();
         var existing = Read(connection, transaction, runId) ?? throw InvalidTransition();
         if (existing.State != HistoricalInstructionAnalysisStateV1.Running
-            || receipt is not null && !ReceiptMatchesRequest(receipt, existing.Request))
+            || completedAt.ToUniversalTime() < existing.StartedAt
+            || receipt is not null && (!ReceiptMatchesRequest(receipt, existing.Request)
+                || !ReceiptMatchesProjection(receipt, existing.DatasetProjection)))
             throw InvalidTransition();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -199,7 +218,8 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         command.CommandText =
             """
             SELECT request_schema_version,extraction_id,extraction_sha256,model,provider,configuration_sha256,
-                   timeout_ms,prompt_template_version,state,requested_at,started_at,completed_at,
+                   timeout_ms,prompt_template_version,dataset_projection_json,dataset_projection_sha256,
+                   state,requested_at,started_at,completed_at,
                    receipt_json,receipt_sha256,handoff_json,handoff_sha256
             FROM historical_instruction_analysis_runs WHERE run_id=$id;
             """;
@@ -209,40 +229,57 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         var request = new HistoricalInstructionAnalysisRequestV1(
             reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
             reader.GetString(5), reader.GetInt32(6), reader.GetString(7));
-        HistoricalInstructionAnalysisJsonV1.ValidateRequest(request);
-        var state = HistoricalInstructionAnalysisStateWireV1.Parse(reader.GetString(8));
-        var requestedAt = ParseUtc(reader.GetString(9));
-        DateTimeOffset? startedAt = reader.IsDBNull(10) ? null : ParseUtc(reader.GetString(10));
-        DateTimeOffset? completedAt = reader.IsDBNull(11) ? null : ParseUtc(reader.GetString(11));
+        try
+        {
+            HistoricalInstructionAnalysisJsonV1.ValidateRequest(request);
+        }
+        catch (HistoricalInstructionAnalysisValidationException exception)
+        {
+            throw new HistoricalInstructionAnalysisValidationException(
+                HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence,
+                exception);
+        }
+        var projectionBytes = Encoding.UTF8.GetBytes(reader.GetString(8));
+        if (projectionBytes.Length > HistoricalInstructionAnalysisContractsV1.MaximumReceiptBytes
+            || Sha256(projectionBytes) != reader.GetString(9)) throw InvalidPersistence();
+        var projection = HistoricalInstructionAnalysisJsonV1.DeserializeDatasetProjection(projectionBytes);
+        var state = HistoricalInstructionAnalysisStateWireV1.Parse(reader.GetString(10));
+        var requestedAt = ParseUtc(reader.GetString(11));
+        DateTimeOffset? startedAt = reader.IsDBNull(12) ? null : ParseUtc(reader.GetString(12));
+        DateTimeOffset? completedAt = reader.IsDBNull(13) ? null : ParseUtc(reader.GetString(13));
         if (state == HistoricalInstructionAnalysisStateV1.Queued && (startedAt is not null || completedAt is not null)
             || state == HistoricalInstructionAnalysisStateV1.Running && (startedAt is null || completedAt is not null)
             || IsTerminal(state) && (startedAt is null || completedAt is null))
             throw InvalidPersistence();
 
-        var hasReceipt = !reader.IsDBNull(12);
-        var hasHandoff = !reader.IsDBNull(14);
-        if (hasReceipt != !reader.IsDBNull(13) || hasHandoff != !reader.IsDBNull(15) || hasReceipt != hasHandoff)
+        var hasReceipt = !reader.IsDBNull(14);
+        var hasHandoff = !reader.IsDBNull(16);
+        if (hasReceipt != !reader.IsDBNull(15) || hasHandoff != !reader.IsDBNull(17) || hasReceipt != hasHandoff)
             throw InvalidPersistence();
         HistoricalInstructionAnalysisReceiptV1? receipt = null;
         byte[] handoffBytes = [];
         if (hasReceipt)
         {
-            var receiptBytes = Encoding.UTF8.GetBytes(reader.GetString(12));
+            var receiptBytes = Encoding.UTF8.GetBytes(reader.GetString(14));
             if (receiptBytes.Length > HistoricalInstructionAnalysisContractsV1.MaximumReceiptBytes
-                || Sha256(receiptBytes) != reader.GetString(13)) throw InvalidPersistence();
+                || Sha256(receiptBytes) != reader.GetString(15)) throw InvalidPersistence();
             receipt = HistoricalInstructionAnalysisJsonV1.Deserialize(receiptBytes);
-            handoffBytes = Encoding.UTF8.GetBytes(reader.GetString(14));
+            handoffBytes = Encoding.UTF8.GetBytes(reader.GetString(16));
             if (handoffBytes.Length > InstructionFindingHandoffConsumerV1.MaxPayloadBytes
-                || Sha256(handoffBytes) != reader.GetString(15)) throw InvalidPersistence();
+                || Sha256(handoffBytes) != reader.GetString(17)) throw InvalidPersistence();
             ValidateSuccessfulPair(runId, state, receipt, handoffBytes);
-            if (!ReceiptMatchesRequest(receipt, request)) throw InvalidPersistence();
+            if (!ReceiptMatchesRequest(receipt, request) || !ReceiptMatchesProjection(receipt, projection))
+                throw InvalidPersistence();
         }
         else if (state is HistoricalInstructionAnalysisStateV1.Succeeded or HistoricalInstructionAnalysisStateV1.ZeroFindings)
         {
             throw InvalidPersistence();
         }
 
-        return new(runId, request, state, requestedAt, startedAt, completedAt, receipt, handoffBytes);
+        var run = new HistoricalInstructionAnalysisRunV1(
+            runId, request, projection, state, requestedAt, startedAt, completedAt, receipt, handoffBytes);
+        _ = HistoricalInstructionAnalysisReadConsumerV1.Validate(run.ToRead());
+        return run;
     }
 
     private static void ValidateSuccessfulPair(
@@ -289,6 +326,21 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         && receipt.ConfigurationSha256 == request.ConfigurationSha256
         && receipt.TimeoutMilliseconds == request.TimeoutMilliseconds
         && receipt.PromptTemplateVersion == request.PromptTemplateVersion;
+
+    private static bool ReceiptMatchesProjection(
+        HistoricalInstructionAnalysisReceiptV1 receipt,
+        HistoricalInstructionAnalysisDatasetProjectionV1 projection) =>
+        receipt.TruncatedBefore == projection.TruncatedBefore
+        && receipt.SanitizedOnly == projection.SanitizedOnly
+        && receipt.ContentAvailable == projection.ContentAvailable
+        && DistributionMatches(receipt.DatasetDistribution.Completeness, projection.DatasetDistribution.Completeness)
+        && DistributionMatches(receipt.DatasetDistribution.SourceKinds, projection.DatasetDistribution.SourceKinds)
+        && DistributionMatches(receipt.DatasetDistribution.Capabilities, projection.DatasetDistribution.Capabilities);
+
+    private static bool DistributionMatches(
+        IReadOnlyList<HistoricalDistributionCountV1> left,
+        IReadOnlyList<HistoricalDistributionCountV1> right) =>
+        left.SequenceEqual(right);
 
     private static bool IsTerminal(HistoricalInstructionAnalysisStateV1 state) =>
         state is not (HistoricalInstructionAnalysisStateV1.Queued or HistoricalInstructionAnalysisStateV1.Running);

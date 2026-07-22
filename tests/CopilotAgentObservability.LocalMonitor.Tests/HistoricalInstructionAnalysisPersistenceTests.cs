@@ -83,19 +83,137 @@ public sealed class HistoricalInstructionAnalysisPersistenceTests
     [InlineData("../model")]
     [InlineData("https://provider")]
     [InlineData("model api-key")]
-    public void Start_RejectsPathUriOrCredentialLikeIdentifierWithoutInsert(string unsafeModel)
+    [InlineData("sk-abcdefghijklmnopqrstuvwxyz")]
+    [InlineData("github_pat_abcdefghijklmnopqrstuvwxyz")]
+    [InlineData("glpat-abcdefghijklmnopqrstuvwx")]
+    [InlineData("ghp_abcdefghijklmnopqrstuvwx")]
+    [InlineData("api-key")]
+    public void Start_RejectsPathUriOrCredentialLikeIdentifierWithoutInsert(string unsafeIdentifier)
     {
         using var temp = new MonitorTempDirectory();
         var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
         store.CreateSchema();
-        var request = Request() with { Model = unsafeModel };
+        var modelRequest = Request() with { Model = unsafeIdentifier };
+        var providerRequest = Request() with { Provider = unsafeIdentifier };
 
-        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(
-            () => store.Start(request, DateTimeOffset.UnixEpoch));
+        var modelException = Assert.Throws<HistoricalInstructionAnalysisValidationException>(
+            () => store.Start(modelRequest, Projection(), DateTimeOffset.UnixEpoch));
+        var providerException = Assert.Throws<HistoricalInstructionAnalysisValidationException>(
+            () => store.Start(providerRequest, Projection(), DateTimeOffset.UnixEpoch));
 
-        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract, exception.Code);
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract, modelException.Code);
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract, providerException.Code);
         Assert.Equal(0L, Number(temp.DatabasePath,
             "SELECT count(*) FROM historical_instruction_analysis_runs;"));
+    }
+
+    [Fact]
+    public void Start_AcceptsExactOneHourTimeout_AndRejectsLargerValue()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
+        store.CreateSchema();
+
+        var accepted = store.Start(Request() with { TimeoutMilliseconds = 3_600_000 }, Projection(), DateTimeOffset.UnixEpoch);
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+            store.Start(Request() with { TimeoutMilliseconds = 3_600_001 }, Projection(), DateTimeOffset.UnixEpoch));
+
+        Assert.True(accepted > 0);
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract, exception.Code);
+        Assert.Equal(1L, Number(temp.DatabasePath, "SELECT count(*) FROM historical_instruction_analysis_runs;"));
+    }
+
+    [Fact]
+    public void ReadConsumer_AcceptsQueuedRunningAndEveryNonSuccessTerminalState()
+    {
+        var terminalStates = Enum.GetValues<HistoricalInstructionAnalysisStateV1>()
+            .Where(state => state is not (HistoricalInstructionAnalysisStateV1.Queued
+                or HistoricalInstructionAnalysisStateV1.Running
+                or HistoricalInstructionAnalysisStateV1.Succeeded
+                or HistoricalInstructionAnalysisStateV1.ZeroFindings))
+            .ToArray();
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
+        store.CreateSchema();
+
+        var queuedId = store.Start(Request(), Projection(), DateTimeOffset.UnixEpoch);
+        Assert.Equal(queuedId, HistoricalInstructionAnalysisReadConsumerV1.Validate(store.Get(queuedId)!.ToRead()));
+        store.MarkRunning(queuedId, DateTimeOffset.UnixEpoch.AddSeconds(1));
+        Assert.Equal(queuedId, HistoricalInstructionAnalysisReadConsumerV1.Validate(store.Get(queuedId)!.ToRead()));
+
+        foreach (var state in terminalStates)
+        {
+            var expectedProjection = ProjectionForState(state);
+            var runId = store.Start(Request(), expectedProjection, DateTimeOffset.UnixEpoch);
+            store.MarkRunning(runId, DateTimeOffset.UnixEpoch.AddSeconds(1));
+            store.Complete(runId, state, null, null, DateTimeOffset.UnixEpoch.AddSeconds(2));
+            var read = store.Get(runId)!.ToRead();
+            Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(read));
+            Assert.Equal(expectedProjection.TruncatedBefore, read.DatasetProjection.TruncatedBefore);
+            Assert.Equal(expectedProjection.SanitizedOnly, read.DatasetProjection.SanitizedOnly);
+            Assert.Equal(expectedProjection.ContentAvailable, read.DatasetProjection.ContentAvailable);
+            Assert.Equal(expectedProjection.DatasetDistribution.Completeness, read.DatasetProjection.DatasetDistribution.Completeness);
+            Assert.Equal(expectedProjection.DatasetDistribution.SourceKinds, read.DatasetProjection.DatasetDistribution.SourceKinds);
+            Assert.Equal(expectedProjection.DatasetDistribution.Capabilities, read.DatasetProjection.DatasetDistribution.Capabilities);
+        }
+    }
+
+    [Theory]
+    [InlineData("content_unavailable")]
+    [InlineData("no_eligible_sessions")]
+    public void ReadConsumer_RejectsImpossibleTerminalStateProjectionPair(
+        string wireState)
+    {
+        var state = HistoricalInstructionAnalysisStateWireV1.Parse(wireState);
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
+        store.CreateSchema();
+        var runId = store.Start(Request(), Projection(), DateTimeOffset.UnixEpoch);
+        store.MarkRunning(runId, DateTimeOffset.UnixEpoch.AddSeconds(1));
+        store.Complete(runId, state, null, null, DateTimeOffset.UnixEpoch.AddSeconds(2));
+
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() => store.Get(runId));
+
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidPersistence, exception.Code);
+    }
+
+    [Fact]
+    public void MarkRunning_RejectsClockRegressionWithoutMutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch.AddSeconds(2);
+        var runId = store.Start(Request(), Projection(), requestedAt);
+
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+            store.MarkRunning(runId, requestedAt.AddTicks(-1)));
+
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidTransition, exception.Code);
+        var run = store.Get(runId)!;
+        Assert.Equal(HistoricalInstructionAnalysisStateV1.Queued, run.State);
+        Assert.Null(run.StartedAt);
+    }
+
+    [Fact]
+    public void Complete_RejectsClockRegressionWithoutMutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
+        store.CreateSchema();
+        var requestedAt = DateTimeOffset.UnixEpoch;
+        var startedAt = requestedAt.AddSeconds(2);
+        var runId = store.Start(Request(), Projection(), requestedAt);
+        store.MarkRunning(runId, startedAt);
+
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+            store.Complete(runId, HistoricalInstructionAnalysisStateV1.ProviderFailed, null, null,
+                startedAt.AddTicks(-1)));
+
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidTransition, exception.Code);
+        var run = store.Get(runId)!;
+        Assert.Equal(HistoricalInstructionAnalysisStateV1.Running, run.State);
+        Assert.Null(run.CompletedAt);
     }
 
     [Fact]
@@ -104,7 +222,7 @@ public sealed class HistoricalInstructionAnalysisPersistenceTests
         using var temp = new MonitorTempDirectory();
         var store = new SqliteHistoricalInstructionAnalysisStoreV1(temp.DatabasePath);
         store.CreateSchema();
-        var runId = store.Start(Request(), DateTimeOffset.UnixEpoch);
+        var runId = store.Start(Request(), Projection(), DateTimeOffset.UnixEpoch);
         store.MarkRunning(runId, DateTimeOffset.UnixEpoch.AddSeconds(1));
         store.Complete(runId, HistoricalInstructionAnalysisStateV1.ProviderFailed, null, null,
             DateTimeOffset.UnixEpoch.AddSeconds(2));
@@ -130,6 +248,26 @@ public sealed class HistoricalInstructionAnalysisPersistenceTests
             new string('b', 64),
             30_000,
             HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion);
+
+    private static HistoricalInstructionAnalysisDatasetProjectionV1 Projection() =>
+        new(
+            TruncatedBefore: true,
+            SanitizedOnly: false,
+            ContentAvailable: true,
+            new HistoricalEvidenceDistributionV1(
+                [new HistoricalDistributionCountV1("full", 1)],
+                [new HistoricalDistributionCountV1("live_otel", 1)],
+                [new HistoricalDistributionCountV1("turn_rollup", 1)]));
+
+    private static HistoricalInstructionAnalysisDatasetProjectionV1 ProjectionForState(
+        HistoricalInstructionAnalysisStateV1 state) => state switch
+    {
+        HistoricalInstructionAnalysisStateV1.ContentUnavailable =>
+            Projection() with { SanitizedOnly = true, ContentAvailable = false },
+        HistoricalInstructionAnalysisStateV1.NoEligibleSessions =>
+            Projection() with { DatasetDistribution = new HistoricalEvidenceDistributionV1([], [], []) },
+        _ => Projection(),
+    };
 
     private static void Execute(string databasePath, string sql)
     {

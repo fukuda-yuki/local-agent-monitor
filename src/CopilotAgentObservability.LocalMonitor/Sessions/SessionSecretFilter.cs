@@ -19,6 +19,16 @@ internal static class SessionSecretFilter
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
+    internal static bool IsSensitiveCarrier(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (CopilotAgentObservability.Telemetry.RepositoryMetadataDiagnostics.IsTokenLike(value)) return true;
+        if (!string.Equals(SanitizeString(value), value, StringComparison.Ordinal)) return true;
+        var normalized = string.Concat(value.Where(char.IsAsciiLetterOrDigit));
+        return SecretFragments.Any(fragment =>
+            string.Equals(normalized, string.Concat(fragment.Where(char.IsAsciiLetterOrDigit)), StringComparison.OrdinalIgnoreCase));
+    }
+
     private static void WriteFiltered(Utf8JsonWriter writer, JsonElement value)
     {
         switch (value.ValueKind)
