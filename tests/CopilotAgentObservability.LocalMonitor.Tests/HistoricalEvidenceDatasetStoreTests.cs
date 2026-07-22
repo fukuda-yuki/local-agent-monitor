@@ -207,6 +207,95 @@ public sealed class HistoricalEvidenceDatasetStoreTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public async Task Get_RejectsChecksumMatchedCrossRepresentationMetadataMismatch()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"history-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            var store = new SqliteHistoricalEvidenceDatasetStoreV1(path);
+            store.CreateSchema();
+            var extraction = await HistoricalEvidenceTestFixture.CreateAsync(CancellationToken.None);
+            store.Save(extraction, DateTimeOffset.UtcNow);
+            using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                connection.Open();
+                using var select = connection.CreateCommand();
+                select.CommandText = "SELECT payload_json FROM historical_evidence_datasets WHERE representation='repository_safe';";
+                var node = JsonNode.Parse((string)select.ExecuteScalar()!)!.AsObject();
+                node["sessions"]![0]!["metadata"]!["repository"] = "repository-ref-00000000000000000000000000000000";
+                var payload = node.ToJsonString();
+                using var update = connection.CreateCommand();
+                update.CommandText = "UPDATE historical_evidence_datasets SET payload_json=$payload,payload_sha256=$checksum WHERE representation='repository_safe';";
+                update.Parameters.AddWithValue("$payload", payload);
+                update.Parameters.AddWithValue("$checksum", HistoricalEvidenceExtractorV1.Sha256(Encoding.UTF8.GetBytes(payload)));
+                update.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<HistoricalEvidenceValidationException>(() => store.Get(extraction.RawLocal.ExtractionId));
+            Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception.Code);
+            Assert.Null(exception.InnerException);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task Get_NullRequiredGraphMapsToBoundedInvalidPersistence()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"history-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            var store = new SqliteHistoricalEvidenceDatasetStoreV1(path);
+            store.CreateSchema();
+            var extraction = await HistoricalEvidenceTestFixture.CreateAsync(CancellationToken.None);
+            store.Save(extraction, DateTimeOffset.UtcNow);
+            using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                connection.Open();
+                using var select = connection.CreateCommand();
+                select.CommandText = "SELECT payload_json FROM historical_evidence_datasets WHERE representation='raw_local';";
+                var node = JsonNode.Parse((string)select.ExecuteScalar()!)!.AsObject();
+                node["sessions"] = null;
+                var payload = node.ToJsonString();
+                using var update = connection.CreateCommand();
+                update.CommandText = "UPDATE historical_evidence_datasets SET payload_json=$payload,payload_sha256=$checksum WHERE representation='raw_local';";
+                update.Parameters.AddWithValue("$payload", payload);
+                update.Parameters.AddWithValue("$checksum", HistoricalEvidenceExtractorV1.Sha256(Encoding.UTF8.GetBytes(payload)));
+                update.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<HistoricalEvidenceValidationException>(() => store.Get(extraction.RawLocal.ExtractionId));
+            Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception.Code);
+            Assert.Null(exception.InnerException);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task Get_RejectsOversizedPayloadBeforeTextMaterialization()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"history-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            var store = new SqliteHistoricalEvidenceDatasetStoreV1(path);
+            store.CreateSchema();
+            var extraction = await HistoricalEvidenceTestFixture.CreateAsync(CancellationToken.None);
+            store.Save(extraction, DateTimeOffset.UtcNow);
+            using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "PRAGMA ignore_check_constraints=ON; UPDATE historical_evidence_datasets SET payload_json=CAST(zeroblob(67108865) AS TEXT) WHERE representation='raw_local';";
+                command.ExecuteNonQuery();
+            }
+
+            var exception = Assert.Throws<HistoricalEvidenceValidationException>(() => store.Get(extraction.RawLocal.ExtractionId));
+            Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception.Code);
+            Assert.Null(exception.InnerException);
+        }
+        finally { File.Delete(path); }
+    }
 }
 
 internal static class HistoricalEvidenceTestFixture

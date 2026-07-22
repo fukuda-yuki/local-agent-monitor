@@ -24,7 +24,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
                 representation TEXT NOT NULL CHECK(representation IN ('raw_local','repository_safe')),
                 schema_version TEXT NOT NULL,
                 snapshot_id TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL CHECK(length(CAST(payload_json AS BLOB))<=67108864),
                 payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64 AND payload_sha256=lower(payload_sha256)),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(extraction_id,representation)
@@ -50,6 +50,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
         try
         {
             using var connection = Open();
+            EnsurePayloadSizes(connection, extractionId);
             var rows = ReadRows(connection, extractionId);
             if (rows.Count == 0) return null;
             if (rows.Count != 2) throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
@@ -67,7 +68,8 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
         {
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
-        catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or ArgumentException or OverflowException)
+        catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException
+            or FormatException or ArgumentException or OverflowException or NullReferenceException)
         {
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
@@ -122,14 +124,17 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
                 || raw.SourceSurface != safe.SourceSurface || raw.SourceVersion != safe.SourceVersion || raw.AdapterVersion != safe.AdapterVersion
                 || raw.Completeness != safe.Completeness || raw.SourceKind != safe.SourceKind || raw.ContentState != safe.ContentState
                 || !raw.CompletenessReasons.SequenceEqual(safe.CompletenessReasons) || raw.DescriptorState != safe.DescriptorState
-                || raw.Capabilities != safe.Capabilities || safe.RawLocalDescriptor is not null)
+                || raw.Capabilities != safe.Capabilities || safe.RawLocalDescriptor is not null
+                || !MetadataPairMatches(raw.Metadata, safe.Metadata, raw.SessionId, safe.SessionId))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
         for (var index = 0; index < extraction.RawLocal.ExcludedSessions.Count; index++)
         {
             var raw = extraction.RawLocal.ExcludedSessions[index];
             var safe = extraction.RepositorySafe.ExcludedSessions[index];
-            if (!Guid.TryParse(raw.SessionId, out var rawId) || SafeSession(rawId) != safe.SessionId || raw.Reason != safe.Reason)
+            if (!Guid.TryParse(raw.SessionId, out var rawId) || SafeSession(rawId) != safe.SessionId || raw.Reason != safe.Reason
+                || (raw.Metadata is null) != (safe.Metadata is null)
+                || raw.Metadata is not null && !MetadataPairMatches(raw.Metadata, safe.Metadata!, raw.SessionId, safe.SessionId))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
         for (var groupIndex = 0; groupIndex < extraction.RawLocal.EvidenceGroups.Count; groupIndex++)
@@ -138,7 +143,8 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             var safe = extraction.RepositorySafe.EvidenceGroups[groupIndex];
             if (raw.References.Count != safe.References.Count || safe.ExactCallId is not null || safe.ExactOwnershipId is not null
                 || raw.NumericValue != safe.NumericValue || raw.Unit != safe.Unit || raw.Status != safe.Status
-                || raw.CanonicalCallHash != safe.CanonicalCallHash || raw.FindingId != safe.FindingId)
+                || raw.CanonicalCallHash != safe.CanonicalCallHash || raw.FindingId != safe.FindingId
+                || raw.FindingReceipt != safe.FindingReceipt || raw.FindingCandidate != safe.FindingCandidate)
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
             for (var refIndex = 0; refIndex < raw.References.Count; refIndex++)
             {
@@ -160,9 +166,52 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
     private static string SafeSession(Guid id) => InstructionFindingReferenceTokenizationV1.Tokenize(new(
         id.ToString(), "x", null, 1, InstructionEvidenceRelativePositionV1.Anchor)).SessionId!;
 
+    private static bool MetadataPairMatches(
+        HistoricalDecisionMetadataV1 raw,
+        HistoricalDecisionMetadataV1 safe,
+        string rawSessionId,
+        string safeSessionId)
+    {
+        if (safe.Repository != HistoricalEvidenceExtractorV1.TokenizeLabel("repository", raw.Repository)
+            || safe.Workspace != HistoricalEvidenceExtractorV1.TokenizeLabel("workspace", raw.Workspace)
+            || raw.StartedAt != safe.StartedAt || raw.EndedAt != safe.EndedAt || raw.LastSeenAt != safe.LastSeenAt
+            || !raw.SourceSurfaces.SequenceEqual(safe.SourceSurfaces)
+            || !raw.SourceProvenance.SequenceEqual(safe.SourceProvenance)
+            || raw.Completeness != safe.Completeness
+            || !raw.CompletenessReasons.SequenceEqual(safe.CompletenessReasons)
+            || raw.SourceKind != safe.SourceKind || raw.ContentState != safe.ContentState
+            || raw.Capabilities != safe.Capabilities
+            || raw.ModelObservations.Count != safe.ModelObservations.Count
+            || raw.DurationObservations.Count != safe.DurationObservations.Count)
+            return false;
+        for (var index = 0; index < raw.ModelObservations.Count; index++)
+            if (raw.ModelObservations[index].Model != safe.ModelObservations[index].Model
+                || !ReferencePairMatches(raw.ModelObservations[index].EvidenceRef, safe.ModelObservations[index].EvidenceRef, rawSessionId, safeSessionId))
+                return false;
+        for (var index = 0; index < raw.DurationObservations.Count; index++)
+            if (raw.DurationObservations[index].DurationMs != safe.DurationObservations[index].DurationMs
+                || !ReferencePairMatches(raw.DurationObservations[index].EvidenceRef, safe.DurationObservations[index].EvidenceRef, rawSessionId, safeSessionId))
+                return false;
+        return true;
+    }
+
+    private static bool ReferencePairMatches(HistoricalEvidenceReferenceV1 raw, HistoricalEvidenceReferenceV1 safe, string rawSessionId, string safeSessionId)
+    {
+        if (raw.SessionId != rawSessionId || safe.SessionId != safeSessionId) return false;
+        var expected = InstructionFindingReferenceTokenizationV1.Tokenize(new(
+            raw.SessionId, raw.TraceId, raw.SpanId, raw.TurnIndex,
+            (InstructionEvidenceRelativePositionV1)(int)raw.RelativePosition));
+        return safe.TraceId == expected.TraceId && safe.SpanId == expected.SpanId
+            && safe.TurnIndex == raw.TurnIndex && safe.RelativePosition == raw.RelativePosition;
+    }
+
     private static bool SelectionPairMatches(HistoricalEvidenceSelectionProjectionV1 raw, HistoricalEvidenceSelectionProjectionV1 safe) =>
-        raw.Repository == safe.Repository && raw.Workspace == safe.Workspace && raw.From == safe.From && raw.To == safe.To
-        && raw.SourceSurfaces.SequenceEqual(safe.SourceSurfaces) && raw.TaskLabel == safe.TaskLabel && raw.ExperimentLabel == safe.ExperimentLabel
+        safe.Repository == HistoricalEvidenceExtractorV1.TokenizeLabel("repository", raw.Repository)
+        && safe.Workspace == HistoricalEvidenceExtractorV1.TokenizeLabel("workspace", raw.Workspace)
+        && safe.TaskLabel == HistoricalEvidenceExtractorV1.TokenizeLabel("task", raw.TaskLabel)
+        && safe.ExperimentLabel == HistoricalEvidenceExtractorV1.TokenizeLabel("experiment", raw.ExperimentLabel)
+        && raw.From == safe.From && raw.To == safe.To
+        && raw.SourceSurfaces.SequenceEqual(safe.SourceSurfaces)
         && raw.MaximumSessionCount == safe.MaximumSessionCount && raw.SanitizedOnly == safe.SanitizedOnly
         && raw.ExplicitSessionIds.Count == safe.ExplicitSessionIds.Count
         && raw.ExplicitSessionIds.Select(Guid.Parse).Select(SafeSession).SequenceEqual(safe.ExplicitSessionIds);
@@ -179,7 +228,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         HistoricalEvidenceDatasetV1 dataset;
         try { dataset = HistoricalEvidenceJsonV1.Deserialize(bytes); }
-        catch (HistoricalEvidenceValidationException exception) { throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception); }
+        catch (HistoricalEvidenceValidationException) { throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence); }
         if (dataset.Representation != expected || dataset.SchemaVersion != row.SchemaVersion || dataset.SnapshotId != row.SnapshotId || dataset.ExtractionId != row.ExtractionId)
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         return new(dataset, bytes, row.Checksum);
@@ -194,6 +243,17 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
         var result = new List<StoredRow>();
         while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5)));
         return result;
+    }
+
+    private static void EnsurePayloadSizes(SqliteConnection connection, string extractionId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT length(CAST(payload_json AS BLOB)) FROM historical_evidence_datasets WHERE extraction_id=$id;";
+        command.Parameters.AddWithValue("$id", extractionId);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+            if (reader.IsDBNull(0) || reader.GetInt64(0) > HistoricalEvidenceContractsV1.MaximumPayloadBytes)
+                throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
     }
 
     private SqliteConnection Open()

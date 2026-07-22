@@ -25,6 +25,7 @@ create proposals/effects.
 | evidence groups per session | 256 | Matches the repository's existing bounded manifest-member ceiling and prevents one included Session from dominating the dataset. |
 | explicit Session IDs | 200 | Cannot exceed the maximum selected Session count. |
 | snapshot metadata candidates | 401 | At most the requested maximum plus one matching suffix entry, unioned with at most 200 explicitly requested existing Sessions. |
+| canonical payload bytes | 67,108,864 per representation | Bounds serialization, persistence, and read allocation independently of SQLite text limits. |
 
 The date range has no invented default. Both endpoints are optional, but
 `maximum_session_count` is always present and bounded, so an omitted date range
@@ -46,9 +47,18 @@ metadata but do not narrow the matching query; an explicitly requested Session
 that fails another filter is recorded as `filter_mismatch`. When IDs are the
 only selector, only those Sessions match.
 
+`HistoricalEvidenceApplicationServiceV1` is the only production creation/read
+boundary. Normal Local Monitor construction registers it with a
+`SqliteHistoricalEvidenceSnapshotSourceV1` over the accepted Session tables,
+the existing retention-authorized `ISessionStore.ReadContentAsync` boundary,
+and the paired SQLite dataset store. It adds no HTTP route. Issues #73/#74
+request or reopen datasets through this service and never scan history.
+
 One extraction opens one `IHistoricalEvidenceSnapshotLeaseV1`. Its snapshot ID,
-Session metadata, evidence indexes, and included-body reads belong to one
-coherent read snapshot. The lease returns the canonical most-recent matching
+Session metadata, and evidence indexes belong to one coherent revision-fenced
+read snapshot. Included-body reads use the captured exact event IDs but are
+separately re-authorized against the current retention state before content is
+materialized. The lease returns the canonical most-recent matching
 suffix of at most `maximum_session_count + 1`, unioned with metadata for every
 explicitly requested existing Session (at most 200) and de-duplicated by local
 Session ID. It also returns the exact non-negative count of earlier matching
@@ -67,7 +77,9 @@ Returned overflow Sessions receive `window_truncated`. Metadata-omitted earlier
 Sessions are represented by the exact bounded scalar
 `truncated_session_count = omitted_earlier_matching_session_count +
 returned_matching_overflow`; their IDs are not listed. `truncated_before` is
-true exactly when that count is positive. Excluded rows sort by canonical raw
+true exactly when that count is positive. An omitted earlier match may be
+followed only by returned ineligible rows, so `truncated_before` does not imply
+a returned `window_truncated` decision. Excluded rows sort by canonical raw
 Session UUID ordinal, and the repository-safe form preserves that raw order
 after tokenization. There is no latest-Session guessing or relation inference.
 
@@ -78,9 +90,16 @@ body read.
 
 ## Eligibility and capabilities
 
-Each decision records Session ID, surface, source/adapter versions when known,
-completeness and its canonical Issue #61 reasons, evidence source kind, content
-state, inclusion, and one exclusion reason.
+Each existing included or excluded decision records the complete bounded
+metadata projection: canonical UUIDv7 Session ID, repository/workspace labels,
+UTC start/end/last-seen timestamps, every exact source surface, every distinct
+`(surface, source_application_version, adapter_version)` provenance tuple,
+completeness and its canonical Issue #51/#61 reasons, evidence source kind,
+content state, and evidence-backed model and duration observations. A model or
+duration observation carries the exact evidence reference that proves it;
+unknown stays absent. A missing explicit Session alone has null metadata.
+Reason ceilings are revalidated for every included and excluded existing
+decision.
 
 Closed evidence source kinds are `live_otel`, `saved_raw`, and
 `historical_summary`. `unbound` Sessions and Sessions with no exact evidence
@@ -113,9 +132,13 @@ rejects the complete extraction; invalid evidence is never silently dropped.
 `repeated_tool_call` requires either exact call ID or a producer-supplied
 canonical hash. `subagent_fan_out` requires an exact ownership ID. The
 extractor never manufactures either value from name, content, order, or time.
-`instruction_finding` retains only the existing
-`instruction-finding-<24-lowercase-hex>` ID and already-tokenized Issue #59
-references; it does not copy or redefine the finding receipt.
+`instruction_finding` embeds the exact existing `InstructionFindingReceiptV1`
+and, when eligible, its exact `InstructionRuleCandidateV1`. It uses the actual
+Issue #59 `InstructionEvidenceReferenceV1` type and validators. The group
+reference set must equal the receipt reference set exactly; each representation
+retains its own canonical order because opaque-token order need not equal raw-ID
+order. The candidate must name that receipt. A both-null span/turn reference, invalid anchor relation, token-only
+membership, or parallel historical reference vocabulary is rejected.
 
 Groups sort by Session order, closed kind order, then group ID. References sort
 by Session, trace, nullable span, nullable turn, and Issue #59 relative-position
@@ -128,8 +151,12 @@ The extractor emits two forms from the same validated snapshot:
 
 - `historical-evidence.raw-local.v1` contains canonical lowercase Session UUIDs
   and exact source trace/span identifiers. It may contain one bounded
-  `raw_local_descriptor` only after first-line truncation and fail-closed
-  credential, PII, control-character, and absolute-path screening.
+  `raw_local_descriptor` only after first-line truncation and a closed-shape
+  projection. Descriptor access is attempted only for raw-local posture when
+  exact raw-descriptor capability is true, content state is `available`, the
+  source is not `historical_summary`, and the existing retention read returns
+  a granted lease. Denied, busy, expired, redacted, not-captured, unsupported,
+  and sanitized cases do not materialize content.
 - `historical-evidence.repository-safe.v1` replaces Session/trace/span IDs with
   the exact Issue #59 kind-specific `session-ref-*`, `trace-ref-*`, and
   `span-ref-*` tokens and omits descriptor text. It retains only descriptor
@@ -139,6 +166,12 @@ When more than one raw descriptor candidate exists, any sensitive candidate
 rejects the descriptor for that Session. Otherwise the extractor selects the
 ordinally smallest distinct bounded first line so producer draft order cannot
 change canonical output.
+
+Raw identifier carriers use closed ASCII grammars; local Session identity is a
+canonical UUIDv7. Repository-safe labels and identifier-like metadata are null,
+fixed allowlisted values, or domain-separated opaque tokens. Relative, device,
+home, UNC, and absolute paths; credentials; PII; and malicious carrier strings
+reject before serialization rather than relying on a permissive blacklist.
 
 `sanitized_only=true` never asks the snapshot lease for descriptor-bearing
 content and both forms record `not_requested`. Repository-safe output contains
@@ -168,6 +201,10 @@ representation. Writes are insert-or-identical. A conflicting rewrite fails.
 A read verifies schema version, representation, checksum, strict JSON shape,
 canonical reserialization, extraction ID, and that both forms share the same
 snapshot/selection/decision/group identity before returning either form.
+Serialization rejects a representation above 67,108,864 UTF-8 bytes. SQLite
+reads query `length(CAST(payload_json AS BLOB))` before materializing text and
+map every null, malformed, oversized, checksum-mismatched, or shape-invalid row
+to fixed `InvalidPersistence` without inner detail.
 
 ## Consumer handoff
 
@@ -178,3 +215,6 @@ snapshot/selection/decision/group identity before returning either form.
   default; any raw-local analysis requires the same explicit local raw boundary.
 - Neither consumer may widen bounds, reinterpret missing as zero, infer joins,
   read an excluded body, or add fields/categories to #58/#59 contracts.
+- Consumer contract tests construct both requests using only the persisted
+  dataset and prove no out-of-band Session, raw telemetry, or finding-store read
+  is needed.

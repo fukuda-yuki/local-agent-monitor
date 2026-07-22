@@ -17,7 +17,7 @@ internal static partial class HistoricalEvidenceExtractorV1
         "schema_drift_detected", "planned_source_not_enabled",
     ];
 
-    [GeneratedRegex(@"(?i)(?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+|[a-z]:[\\/][^\s]*|\\\\[^\s]+|(?<![a-z0-9])/[a-z0-9._~/-]+|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|glpat-[a-z0-9_-]{20,}|sk-[a-z0-9_-]{20,}|akia[a-z0-9]{16}|(?:authorization\s*:\s*bearer|bearer\s+)[a-z0-9._~+/-]{8,}|(?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*\S+)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?i)(?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+|[a-z]:[^\s]*|\\\\[^\s]+|(?<![a-z0-9])/[a-z0-9._~/-]+|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|glpat-[a-z0-9_-]{20,}|sk-[a-z0-9_-]{20,}|akia[a-z0-9]{16}|(?:authorization\s*:\s*bearer|bearer\s+)[a-z0-9._~+/-]{8,}|(?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*\S+)", RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveDescriptorPattern();
 
     internal static async ValueTask<HistoricalEvidenceExtractionV1> ExtractAsync(
@@ -34,7 +34,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             .OrderBy(item => item.StartedAt ?? item.LastSeenAt)
             .ThenBy(item => item.SessionId.ToString(), StringComparer.Ordinal)
             .ToArray();
-        var excluded = new List<(Guid Id, HistoricalSessionExclusionReasonV1 Reason)>();
+        var excluded = new List<(Guid Id, HistoricalSessionExclusionReasonV1 Reason, HistoricalSessionMetadataV1? Metadata)>();
         var eligible = new List<HistoricalSessionMetadataV1>();
         foreach (var metadata in ordered)
         {
@@ -44,7 +44,7 @@ internal static partial class HistoricalEvidenceExtractorV1
                 if (reason == HistoricalSessionExclusionReasonV1.FilterMismatch
                     && !selection.ExplicitSessionIds.Contains(metadata.SessionId))
                     throw Invalid();
-                excluded.Add((metadata.SessionId, reason));
+                excluded.Add((metadata.SessionId, reason, metadata));
             }
             else eligible.Add(metadata);
         }
@@ -52,7 +52,7 @@ internal static partial class HistoricalEvidenceExtractorV1
         foreach (var missing in selection.ExplicitSessionIds
                      .Except(snapshot.Sessions.Select(item => item.SessionId))
                      .OrderBy(item => item.ToString(), StringComparer.Ordinal))
-            excluded.Add((missing, HistoricalSessionExclusionReasonV1.MissingSessionReference));
+            excluded.Add((missing, HistoricalSessionExclusionReasonV1.MissingSessionReference, null));
 
         var returnedMatchingOverflow = Math.Max(0, eligible.Count - selection.MaximumSessionCount);
         long truncatedSessionCount;
@@ -62,7 +62,7 @@ internal static partial class HistoricalEvidenceExtractorV1
         if (returnedMatchingOverflow > 0)
         {
             foreach (var truncated in eligible.Take(returnedMatchingOverflow))
-                excluded.Add((truncated.SessionId, HistoricalSessionExclusionReasonV1.WindowTruncated));
+                excluded.Add((truncated.SessionId, HistoricalSessionExclusionReasonV1.WindowTruncated, truncated));
             eligible = eligible.TakeLast(selection.MaximumSessionCount).ToList();
         }
         excluded = excluded.OrderBy(item => item.Id.ToString(), StringComparer.Ordinal).ToList();
@@ -104,8 +104,8 @@ internal static partial class HistoricalEvidenceExtractorV1
             rawGroups.AddRange(sessionRawGroups);
             safeGroups.AddRange(sessionSafeGroups);
         }
-        var rawExcluded = excluded.Select(item => new HistoricalExcludedSessionV1(item.Id.ToString(), item.Reason)).ToArray();
-        var safeExcluded = excluded.Select(item => new HistoricalExcludedSessionV1(SafeSession(item.Id), item.Reason)).ToArray();
+        var rawExcluded = excluded.Select(item => new HistoricalExcludedSessionV1(item.Id.ToString(), item.Reason, item.Metadata is null ? null : ProjectDecisionMetadata(item.Metadata, safe: false))).ToArray();
+        var safeExcluded = excluded.Select(item => new HistoricalExcludedSessionV1(SafeSession(item.Id), item.Reason, item.Metadata is null ? null : ProjectDecisionMetadata(item.Metadata, safe: true))).ToArray();
         var distribution = Distribution(rawSessions);
         var raw = new HistoricalEvidenceDatasetV1(
             HistoricalEvidenceContractsV1.RawLocalSchemaVersion, extractionId, snapshot.SnapshotId,
@@ -137,7 +137,6 @@ internal static partial class HistoricalEvidenceExtractorV1
         if (dataset.Sessions.Select(item => item.SessionId).Distinct(StringComparer.Ordinal).Count() != dataset.Sessions.Count
             || dataset.ExcludedSessions.Select(item => item.SessionId).Distinct(StringComparer.Ordinal).Count() != dataset.ExcludedSessions.Count
             || dataset.ExcludedSessions.Count > HistoricalEvidenceContractsV1.MaximumSessions * 2 + 1
-            || dataset.TruncatedBefore != (returnedWindowExclusionCount > 0)
             || dataset.TruncatedSessionCount < returnedWindowExclusionCount
             || raw && !dataset.ExcludedSessions.SequenceEqual(dataset.ExcludedSessions.OrderBy(item => item.SessionId, StringComparer.Ordinal))
             || dataset.EvidenceGroups.Count > HistoricalEvidenceContractsV1.MaximumSessions * HistoricalEvidenceContractsV1.MaximumGroupsPerSession
@@ -159,7 +158,8 @@ internal static partial class HistoricalEvidenceExtractorV1
                     && (string.IsNullOrWhiteSpace(descriptor)
                         || descriptor.EnumerateRunes().Count() > HistoricalEvidenceContractsV1.MaximumDescriptorLength
                         || descriptor.Any(char.IsControl)
-                        || SensitiveDescriptorPattern().IsMatch(descriptor))
+                        || SensitiveDescriptorPattern().IsMatch(descriptor)
+                        || !AllowedDescriptorPattern().IsMatch(descriptor))
                 || raw && (session.DescriptorState == HistoricalDescriptorStateV1.Available) != (session.RawLocalDescriptor is not null)
                 || !SafeOptionalToken(session.SourceVersion)
                 || !SafeOptionalToken(session.AdapterVersion)
@@ -170,14 +170,27 @@ internal static partial class HistoricalEvidenceExtractorV1
                         || session.Capabilities.RepeatedToolCall
                         || session.Capabilities.SubagentFanOut
                         || session.Capabilities.RawLocalDescriptor)
-                || !CanonicalReasons(session.CompletenessReasons))
+                || !CanonicalReasons(session.CompletenessReasons)
+                || session.Metadata is null
+                || !session.Metadata.SourceSurfaces.Contains(session.SourceSurface)
+                || !session.Metadata.SourceProvenance.Contains(new(session.SourceSurface, session.SourceVersion, session.AdapterVersion))
+                || session.Metadata.Completeness != session.Completeness
+                || !session.Metadata.CompletenessReasons.SequenceEqual(session.CompletenessReasons)
+                || session.Metadata.SourceKind != session.SourceKind
+                || session.Metadata.ContentState != session.ContentState
+                || session.Metadata.Capabilities != session.Capabilities)
                 throw Invalid();
+            ValidateDecisionMetadata(session.Metadata, raw, session.SessionId);
         }
         foreach (var excluded in dataset.ExcludedSessions)
+        {
             if (!Enum.IsDefined(excluded.Reason)
                 || includedIds.Contains(excluded.SessionId)
                 || raw && !IsCanonicalSessionId(excluded.SessionId)
-                || !raw && !InstructionFindingReferenceTokenizationV1.IsSessionReference(excluded.SessionId)) throw Invalid();
+                || !raw && !InstructionFindingReferenceTokenizationV1.IsSessionReference(excluded.SessionId)
+                || (excluded.Metadata is null) != (excluded.Reason == HistoricalSessionExclusionReasonV1.MissingSessionReference)) throw Invalid();
+            if (excluded.Metadata is not null) ValidateDecisionMetadata(excluded.Metadata, raw, excluded.SessionId);
+        }
         var sessionOrder = dataset.Sessions.Select((item, index) => (item.SessionId, index)).ToDictionary(item => item.SessionId, item => item.index, StringComparer.Ordinal);
         var canonicalGroups = dataset.EvidenceGroups.OrderBy(item => sessionOrder.GetValueOrDefault(item.SessionId, int.MaxValue)).ThenBy(item => item.Kind).ThenBy(item => item.GroupId, StringComparer.Ordinal).ToArray();
         if (!dataset.EvidenceGroups.SequenceEqual(canonicalGroups)) throw Invalid();
@@ -211,7 +224,11 @@ internal static partial class HistoricalEvidenceExtractorV1
                         || !InstructionFindingReferenceTokenizationV1.IsTraceReference(reference.TraceId)
                         || reference.SpanId is not null && !InstructionFindingReferenceTokenizationV1.IsSpanReference(reference.SpanId)))
                     throw Invalid();
+                ValidateEvidenceReference(reference, raw, group.SessionId);
             }
+            if (group.Kind == HistoricalEvidenceGroupKindV1.InstructionFinding)
+                ValidateInstructionFindingAssociation(group.References, group.FindingId!, group.FindingReceipt, group.FindingCandidate, raw);
+            else if (group.FindingId is not null || group.FindingReceipt is not null || group.FindingCandidate is not null) throw Invalid();
             if (raw && group.GroupId != ComputeGroupId(group))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidDerivedIdentity);
         }
@@ -256,9 +273,9 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static HistoricalEvidenceSelectionProjectionV1 ProjectSelection(HistoricalEvidenceSelectionV1 selection, bool safe)
     {
         var canonical = CanonicalInputSelection(selection);
-        return new(canonical.Repository, canonical.Workspace, canonical.From, canonical.To,
+        return new(safe ? TokenizeLabel("repository", canonical.Repository) : canonical.Repository, safe ? TokenizeLabel("workspace", canonical.Workspace) : canonical.Workspace, canonical.From, canonical.To,
             canonical.ExplicitSessionIds.Select(item => safe ? SafeSession(item) : item.ToString()).ToArray(),
-            canonical.SourceSurfaces, canonical.TaskLabel, canonical.ExperimentLabel,
+            canonical.SourceSurfaces, safe ? TokenizeLabel("task", canonical.TaskLabel) : canonical.TaskLabel, safe ? TokenizeLabel("experiment", canonical.ExperimentLabel) : canonical.ExperimentLabel,
             canonical.MaximumSessionCount, canonical.SanitizedOnly);
     }
 
@@ -278,8 +295,15 @@ internal static partial class HistoricalEvidenceExtractorV1
             && selection.ExplicitSessionIds.Count == 0 && selection.SourceSurfaces.Count == 0
             && selection.TaskLabel is null && selection.ExperimentLabel is null)
             throw Invalid();
-        foreach (var label in new[] { selection.Repository, selection.Workspace, selection.TaskLabel, selection.ExperimentLabel })
-            if (!SafeLabel(label)) throw Invalid();
+        if (raw)
+        {
+            foreach (var label in new[] { selection.Repository, selection.Workspace, selection.TaskLabel, selection.ExperimentLabel })
+                if (!SafeLabel(label)) throw Invalid();
+        }
+        else if (!SafeProjectedLabel("repository", selection.Repository)
+            || !SafeProjectedLabel("workspace", selection.Workspace)
+            || !SafeProjectedLabel("task", selection.TaskLabel)
+            || !SafeProjectedLabel("experiment", selection.ExperimentLabel)) throw Invalid();
         foreach (var id in selection.ExplicitSessionIds)
             if (raw ? !IsCanonicalSessionId(id) : !InstructionFindingReferenceTokenizationV1.IsSessionReference(id)) throw Invalid();
         if (raw && !selection.ExplicitSessionIds.SequenceEqual(selection.ExplicitSessionIds.Order(StringComparer.Ordinal))) throw Invalid();
@@ -291,6 +315,7 @@ internal static partial class HistoricalEvidenceExtractorV1
         if (selection.MaximumSessionCount is < 1 or > HistoricalEvidenceContractsV1.MaximumSessions
             || selection.ExplicitSessionIds.Count > HistoricalEvidenceContractsV1.MaximumSessions
             || selection.ExplicitSessionIds.Distinct().Count() != selection.ExplicitSessionIds.Count
+            || selection.ExplicitSessionIds.Any(id => !IsCanonicalSessionId(id.ToString("D")))
             || selection.SourceSurfaces.Distinct().Count() != selection.SourceSurfaces.Count
             || selection.SourceSurfaces.Any(surface => !Enum.IsDefined(surface))
             || selection.From is { } from && selection.To is { } to && from >= to
@@ -323,16 +348,166 @@ internal static partial class HistoricalEvidenceExtractorV1
 
     private static void ValidateMetadata(HistoricalSessionMetadataV1 metadata)
     {
-        if (!Enum.IsDefined(metadata.SourceSurface) || !Enum.IsDefined(metadata.Completeness)
+        if (metadata is null) throw Invalid();
+        var allSurfaces = metadata.SourceSurfaces?.Append(metadata.SourceSurface).Distinct().Order().ToArray() ?? [];
+        if (metadata.CompletenessReasons is null || metadata.Capabilities is null
+            || metadata.EvidenceLocations is null || metadata.InstructionFindingIds is null
+            || metadata.SourceSurfaces is null || metadata.SourceProvenance is null
+            || metadata.ModelObservations is null || metadata.DurationObservations is null
+            || !IsCanonicalSessionId(metadata.SessionId.ToString())
+            || !Enum.IsDefined(metadata.SourceSurface) || !Enum.IsDefined(metadata.Completeness)
             || !Enum.IsDefined(metadata.SourceKind) || !Enum.IsDefined(metadata.ContentState)
             || !SafeOptionalToken(metadata.SourceVersion) || !SafeOptionalToken(metadata.AdapterVersion)
+            || !CanonicalReasons(metadata.CompletenessReasons)
+            || metadata.CompletenessReasons.Any(reason => CompletenessRank(metadata.Completeness) > CompletenessReasonMaximumRank(reason))
+            || metadata.StartedAt is { Offset: var startedOffset } && startedOffset != TimeSpan.Zero
+            || metadata.EndedAt is { Offset: var endedOffset } && endedOffset != TimeSpan.Zero
+            || metadata.LastSeenAt.Offset != TimeSpan.Zero
+            || metadata.StartedAt is { } started && metadata.EndedAt is { } ended && ended < started
+            || allSurfaces.Length is < 1 or > 5
+            || allSurfaces.Any(value => !Enum.IsDefined(value))
+            || metadata.SourceSurfaces.Distinct().Order().SequenceEqual(metadata.SourceSurfaces) == false
+            || metadata.SourceProvenance.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || metadata.SourceProvenance.Any(value => value is null || !allSurfaces.Contains(value.SourceSurface)
+                || !SafeOptionalToken(value.SourceApplicationVersion) || !SafeOptionalToken(value.AdapterVersion))
+            || metadata.ModelObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || metadata.ModelObservations.Any(value => value is null || !SafeOptionalToken(value.Model)
+                || !RawReferenceInIndex(value.EvidenceRef, metadata))
+            || metadata.DurationObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || metadata.DurationObservations.Any(value => value is null || value.DurationMs < 0
+                || !RawReferenceInIndex(value.EvidenceRef, metadata))
             || metadata.EvidenceLocations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession * HistoricalEvidenceContractsV1.MaximumReferencesPerGroup
             || metadata.InstructionFindingIds.Distinct(StringComparer.Ordinal).Count() != metadata.InstructionFindingIds.Count
             || metadata.InstructionFindingIds.Any(id => !FindingIdPattern().IsMatch(id)))
             throw Invalid();
         foreach (var label in new[] { metadata.Repository, metadata.Workspace, metadata.TaskLabel, metadata.ExperimentLabel })
             if (!SafeLabel(label)) throw Invalid();
+        foreach (var location in metadata.EvidenceLocations)
+            if (location is null || !RawReferenceInIndex(new(
+                location.SessionId, location.TraceId, location.SpanId, location.TurnIndex, location.RelativePosition), metadata))
+                throw Invalid();
     }
+
+    private static bool RawReferenceInIndex(HistoricalRawEvidenceReferenceV1? reference, HistoricalSessionMetadataV1 metadata) =>
+        reference is not null
+        && reference.SessionId == metadata.SessionId
+        && Enum.IsDefined(reference.RelativePosition)
+        && (reference.SpanId is not null || reference.TurnIndex is not null)
+        && reference.TurnIndex is null or > 0
+        && RawIdentifierPattern().IsMatch(reference.TraceId)
+        && (reference.SpanId is null || RawIdentifierPattern().IsMatch(reference.SpanId))
+        && metadata.EvidenceLocations.Any(location => location is not null
+            && location.SessionId == reference.SessionId
+            && location.TraceId == reference.TraceId
+            && location.SpanId == reference.SpanId
+            && location.TurnIndex == reference.TurnIndex
+            && location.RelativePosition == reference.RelativePosition);
+
+    private static void ValidateDecisionMetadata(HistoricalDecisionMetadataV1 metadata, bool raw, string sessionId)
+    {
+        if (metadata is null
+            || metadata.SourceSurfaces is null || metadata.SourceProvenance is null || metadata.ModelObservations is null || metadata.DurationObservations is null
+            || metadata.CompletenessReasons is null || metadata.Capabilities is null
+            || metadata.SourceSurfaces.Count is < 1 or > 5
+            || metadata.SourceSurfaces.Any(value => !Enum.IsDefined(value))
+            || !metadata.SourceSurfaces.Distinct().Order().SequenceEqual(metadata.SourceSurfaces)
+            || metadata.SourceProvenance.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || metadata.SourceProvenance.Any(value => value is null || !metadata.SourceSurfaces.Contains(value.SourceSurface) || !SafeOptionalToken(value.SourceApplicationVersion) || !SafeOptionalToken(value.AdapterVersion))
+            || !metadata.SourceProvenance.Distinct().OrderBy(value => value.SourceSurface)
+                .ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal)
+                .ThenBy(value => value.AdapterVersion, StringComparer.Ordinal)
+                .SequenceEqual(metadata.SourceProvenance)
+            || metadata.ModelObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || metadata.DurationObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
+            || !Enum.IsDefined(metadata.Completeness) || !Enum.IsDefined(metadata.SourceKind) || !Enum.IsDefined(metadata.ContentState)
+            || !CanonicalReasons(metadata.CompletenessReasons)
+            || metadata.CompletenessReasons.Any(reason => CompletenessRank(metadata.Completeness) > CompletenessReasonMaximumRank(reason))
+            || metadata.StartedAt is { Offset: var startedOffset } && startedOffset != TimeSpan.Zero
+            || metadata.EndedAt is { Offset: var endedOffset } && endedOffset != TimeSpan.Zero
+            || metadata.LastSeenAt.Offset != TimeSpan.Zero
+            || metadata.StartedAt is { } started && metadata.EndedAt is { } ended && ended < started
+            || raw && (!SafeLabel(metadata.Repository) || !SafeLabel(metadata.Workspace))
+            || !raw && (!SafeProjectedLabel("repository", metadata.Repository) || !SafeProjectedLabel("workspace", metadata.Workspace)))
+            throw Invalid();
+        foreach (var observation in metadata.ModelObservations)
+        {
+            if (observation is null || !SafeOptionalToken(observation.Model)) throw Invalid();
+            ValidateEvidenceReference(observation.EvidenceRef, raw, sessionId);
+        }
+        foreach (var observation in metadata.DurationObservations)
+        {
+            if (observation is null || observation.DurationMs < 0) throw Invalid();
+            ValidateEvidenceReference(observation.EvidenceRef, raw, sessionId);
+        }
+    }
+
+    private static void ValidateEvidenceReference(HistoricalEvidenceReferenceV1 reference, bool raw, string sessionId)
+    {
+        if (reference is null || reference.SessionId != sessionId || !Enum.IsDefined(reference.RelativePosition)
+            || reference.SpanId is null && reference.TurnIndex is null || reference.TurnIndex is <= 0) throw Invalid();
+        if (raw)
+        {
+            if (!IsCanonicalSessionId(reference.SessionId) || !RawIdentifierPattern().IsMatch(reference.TraceId)
+                || reference.SpanId is not null && !RawIdentifierPattern().IsMatch(reference.SpanId)) throw Invalid();
+        }
+        else if (!InstructionFindingReferenceTokenizationV1.IsSessionReference(reference.SessionId)
+            || !InstructionFindingReferenceTokenizationV1.IsTraceReference(reference.TraceId)
+            || reference.SpanId is not null && !InstructionFindingReferenceTokenizationV1.IsSpanReference(reference.SpanId)) throw Invalid();
+    }
+
+    private static void ValidateInstructionFindingAssociation(
+        IReadOnlyList<HistoricalRawEvidenceReferenceV1> references,
+        string findingId,
+        InstructionFindingReceiptV1? receipt,
+        InstructionRuleCandidateV1? candidate,
+        bool raw)
+    {
+        var projected = references.Select(reference => InstructionFindingReferenceTokenizationV1.Tokenize(new(
+            reference.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+            (InstructionEvidenceRelativePositionV1)(int)reference.RelativePosition))).ToArray();
+        ValidateInstructionFindingAssociation(projected, findingId, receipt, candidate);
+    }
+
+    private static void ValidateInstructionFindingAssociation(
+        IReadOnlyList<HistoricalEvidenceReferenceV1> references,
+        string findingId,
+        InstructionFindingReceiptV1? receipt,
+        InstructionRuleCandidateV1? candidate,
+        bool raw)
+    {
+        var projected = references.Select(reference => raw
+            ? InstructionFindingReferenceTokenizationV1.Tokenize(new(reference.SessionId, reference.TraceId, reference.SpanId, reference.TurnIndex, (InstructionEvidenceRelativePositionV1)(int)reference.RelativePosition))
+            : new InstructionEvidenceReferenceV1(reference.SessionId, reference.TraceId, reference.SpanId, reference.TurnIndex, (InstructionEvidenceRelativePositionV1)(int)reference.RelativePosition)).ToArray();
+        ValidateInstructionFindingAssociation(projected, findingId, receipt, candidate);
+    }
+
+    private static void ValidateInstructionFindingAssociation(
+        IReadOnlyList<InstructionEvidenceReferenceV1> references,
+        string findingId,
+        InstructionFindingReceiptV1? receipt,
+        InstructionRuleCandidateV1? candidate)
+    {
+        if (receipt is null || receipt.FindingId != findingId || references.Count != receipt.EvidenceRefs.Count
+            || !references.ToHashSet().SetEquals(receipt.EvidenceRefs)) throw Invalid();
+        try
+        {
+            InstructionFindingPipelineV1.ValidateHandoff(new(
+                InstructionFindingContractsV1.HandoffSchemaVersion,
+                receipt.AnalysisRunId,
+                [receipt],
+                candidate is null ? [] : [candidate]));
+        }
+        catch (InstructionFindingValidationException) { throw Invalid(); }
+    }
+
+    private static int CompletenessRank(SessionCompleteness value) => value switch { SessionCompleteness.Unbound => 0, SessionCompleteness.Partial => 1, SessionCompleteness.Rich => 2, SessionCompleteness.Full => 3, _ => throw Invalid() };
+    private static int CompletenessReasonMaximumRank(string value) => value switch
+    {
+        "missing_native_session_id" or "planned_source_not_enabled" => 0,
+        "historical_summary_only" or "schema_drift_detected" => 1,
+        "missing_trace_context" or "trace_signal_disabled" or "content_capture_disabled" or "unsupported_source_version" or "ingest_gap" or "hook_only" or "unknown_span_kind" => 2,
+        _ => throw Invalid(),
+    };
 
     private static HistoricalSessionExclusionReasonV1? Exclusion(HistoricalEvidenceSelectionV1 selection, HistoricalSessionMetadataV1 item)
     {
@@ -382,7 +557,7 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptor(string candidate)
     {
         var firstLine = candidate.Split('\n', 2)[0].TrimEnd('\r').Trim();
-        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || SensitiveDescriptorPattern().IsMatch(firstLine))
+        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || SensitiveDescriptorPattern().IsMatch(firstLine) || !AllowedDescriptorPattern().IsMatch(firstLine))
             return (HistoricalDescriptorStateV1.RejectedSensitive, null);
         var bounded = string.Concat(firstLine.EnumerateRunes().Take(HistoricalEvidenceContractsV1.MaximumDescriptorLength).Select(rune => rune.ToString()));
         return (HistoricalDescriptorStateV1.Available, bounded);
@@ -393,7 +568,30 @@ internal static partial class HistoricalEvidenceExtractorV1
         HistoricalDescriptorStateV1 descriptorState, string? descriptor) =>
         new(id, item.SourceSurface, item.SourceVersion, item.AdapterVersion, item.Completeness,
             item.CompletenessReasons.Distinct(StringComparer.Ordinal).OrderBy(ReasonIndex).ThenBy(value => value, StringComparer.Ordinal).ToArray(),
-            item.SourceKind, item.ContentState, descriptorState, descriptor, capabilities);
+            item.SourceKind, item.ContentState, descriptorState, descriptor, capabilities, ProjectDecisionMetadata(item, safe: !IsCanonicalSessionId(id)));
+
+    private static HistoricalDecisionMetadataV1 ProjectDecisionMetadata(HistoricalSessionMetadataV1 item, bool safe)
+    {
+        var surfaces = item.SourceSurfaces.Append(item.SourceSurface).Distinct().Order().ToArray();
+        var provenance = item.SourceProvenance.Count == 0
+            ? [new HistoricalSourceProvenanceV1(item.SourceSurface, item.SourceVersion, item.AdapterVersion)]
+            : item.SourceProvenance.Distinct().OrderBy(value => value.SourceSurface).ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal).ThenBy(value => value.AdapterVersion, StringComparer.Ordinal).ToArray();
+        return new(
+            safe ? TokenizeLabel("repository", item.Repository) : item.Repository,
+            safe ? TokenizeLabel("workspace", item.Workspace) : item.Workspace,
+            item.StartedAt?.ToUniversalTime(),
+            item.EndedAt?.ToUniversalTime(),
+            item.LastSeenAt.ToUniversalTime(),
+            surfaces,
+            provenance,
+            item.ModelObservations.OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef, HistoricalRawReferenceComparer.Instance).Select(value => new HistoricalModelObservationV1(value.Model, ProjectReference(value.EvidenceRef, safe))).ToArray(),
+            item.DurationObservations.OrderBy(value => value.DurationMs).ThenBy(value => value.EvidenceRef, HistoricalRawReferenceComparer.Instance).Select(value => new HistoricalDurationObservationV1(value.DurationMs, ProjectReference(value.EvidenceRef, safe))).ToArray(),
+            item.Completeness,
+            item.CompletenessReasons.Distinct(StringComparer.Ordinal).OrderBy(ReasonIndex).ToArray(),
+            item.SourceKind,
+            item.ContentState,
+            EffectiveCapabilities(item));
+    }
 
     private static int ReasonIndex(string value)
     {
@@ -431,6 +629,9 @@ internal static partial class HistoricalEvidenceExtractorV1
         if (draft.Kind == HistoricalEvidenceGroupKindV1.InstructionFinding
             && (draft.FindingId is null || !metadata.InstructionFindingIds.Contains(draft.FindingId, StringComparer.Ordinal)))
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.UnresolvedEvidenceReference);
+        if (draft.Kind == HistoricalEvidenceGroupKindV1.InstructionFinding)
+            ValidateInstructionFindingAssociation(draft.References, draft.FindingId!, draft.FindingReceipt, draft.FindingCandidate, raw: true);
+        else if (draft.FindingId is not null || draft.FindingReceipt is not null || draft.FindingCandidate is not null) throw Invalid();
     }
 
     private static bool Supports(HistoricalSessionCapabilitiesV1 capabilities, HistoricalEvidenceGroupKindV1 kind) => kind switch
@@ -451,7 +652,7 @@ internal static partial class HistoricalEvidenceExtractorV1
     };
 
     private static bool SafeOptionalToken(string? value) => value is null || value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
-    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 256 && !value.Any(char.IsControl) && !SensitiveDescriptorPattern().IsMatch(value);
+    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
     private static bool SafeLabel(string? value) => value is null
         || value.Length is > 0 and <= 256
             && !string.IsNullOrWhiteSpace(value)
@@ -465,7 +666,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             references.Select(reference => ProjectReference(reference, safe)).ToArray(),
             draft.NumericValue, draft.Unit, draft.Status,
             safe ? null : draft.ExactCallId, draft.CanonicalCallHash,
-            safe ? null : draft.ExactOwnershipId, draft.FindingId);
+            safe ? null : draft.ExactOwnershipId, draft.FindingId, draft.FindingReceipt, draft.FindingCandidate);
 
     private static HistoricalEvidenceReferenceV1 ProjectReference(HistoricalRawEvidenceReferenceV1 reference, bool safe)
     {
@@ -505,7 +706,7 @@ internal static partial class HistoricalEvidenceExtractorV1
 
     private static string GroupId(Guid sessionId, HistoricalEvidenceGroupDraftV1 draft, IReadOnlyList<HistoricalRawEvidenceReferenceV1> references)
     {
-        var fields = new List<string?> { sessionId.ToString(), Snake(draft.Kind), draft.NumericValue?.ToString(System.Globalization.CultureInfo.InvariantCulture), draft.Unit, draft.Status, draft.ExactCallId, draft.CanonicalCallHash, draft.ExactOwnershipId, draft.FindingId };
+        var fields = new List<string?> { sessionId.ToString(), Snake(draft.Kind), draft.NumericValue?.ToString(System.Globalization.CultureInfo.InvariantCulture), draft.Unit, draft.Status, draft.ExactCallId, draft.CanonicalCallHash, draft.ExactOwnershipId, draft.FindingId, draft.FindingReceipt?.FindingId, draft.FindingCandidate?.CandidateId };
         foreach (var item in references)
         {
             fields.Add(item.SessionId.ToString()); fields.Add(item.TraceId); fields.Add(item.SpanId);
@@ -521,7 +722,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             sessionId, item.TraceId, item.SpanId, item.TurnIndex, item.RelativePosition)).ToArray();
         var draft = new HistoricalEvidenceGroupDraftV1(
             group.Kind, references, group.NumericValue, group.Unit, group.Status, group.ExactCallId,
-            group.CanonicalCallHash, group.ExactOwnershipId, group.FindingId, null);
+            group.CanonicalCallHash, group.ExactOwnershipId, group.FindingId, null, group.FindingReceipt, group.FindingCandidate);
         return GroupId(sessionId, draft, references);
     }
 
@@ -542,12 +743,15 @@ internal static partial class HistoricalEvidenceExtractorV1
         && left.References.SequenceEqual(right.References)
         && left.NumericValue == right.NumericValue && left.Unit == right.Unit && left.Status == right.Status
         && left.ExactCallId == right.ExactCallId && left.CanonicalCallHash == right.CanonicalCallHash
-        && left.ExactOwnershipId == right.ExactOwnershipId && left.FindingId == right.FindingId;
+        && left.ExactOwnershipId == right.ExactOwnershipId && left.FindingId == right.FindingId
+        && left.FindingReceipt == right.FindingReceipt && left.FindingCandidate == right.FindingCandidate;
 
     private static bool IsCanonicalSessionId(string value) =>
-        Guid.TryParseExact(value, "D", out var parsed) && parsed.ToString("D") == value;
+        Guid.TryParseExact(value, "D", out var parsed) && parsed.Version == 7 && parsed.ToString("D") == value;
+    private static bool SafeProjectedLabel(string kind, string? value) => value is null || Regex.IsMatch(value, "^" + kind + "-ref-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
 
     private static string SafeSession(Guid id) => InstructionFindingReferenceTokenizationV1.Tokenize(new(id.ToString(), "x", null, 1, InstructionEvidenceRelativePositionV1.Anchor)).SessionId!;
+    internal static string? TokenizeLabel(string kind, string? value) => value is null ? null : kind + "-ref-" + Digest("copilot-agent-observability/historical-safe-label/v1", kind, value);
     private static string ExtractionDigest(string snapshotId, ReadOnlySpan<byte> selectionBytes)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -594,6 +798,8 @@ internal static partial class HistoricalEvidenceExtractorV1
     [GeneratedRegex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant)] private static partial Regex HashPattern();
     [GeneratedRegex("^instruction-finding-[0-9a-f]{24}$", RegexOptions.CultureInvariant)] private static partial Regex FindingIdPattern();
     [GeneratedRegex("^[A-Za-z0-9._:+-]+$", RegexOptions.CultureInvariant)] private static partial Regex SafeTokenPattern();
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$", RegexOptions.CultureInvariant)] private static partial Regex RawIdentifierPattern();
+    [GeneratedRegex("^[\\p{L}\\p{N}][\\p{L}\\p{N} .,;:!?()'\"_-]*$", RegexOptions.CultureInvariant)] private static partial Regex AllowedDescriptorPattern();
 
     private sealed class HistoricalRawReferenceComparer : IComparer<HistoricalRawEvidenceReferenceV1>
     {

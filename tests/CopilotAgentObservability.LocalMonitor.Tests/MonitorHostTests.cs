@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
@@ -15,6 +16,19 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public class MonitorHostTests
 {
+    [Fact]
+    public void Build_RegistersHistoricalEvidenceApplicationAndPairedStore()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+
+        using var app = MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, UseUserSecrets = false });
+
+        Assert.NotNull(app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>());
+        Assert.NotNull(app.Services.GetRequiredService<SqliteHistoricalEvidenceDatasetStoreV1>());
+    }
+
     [Fact]
     public void Build_MigratesAndRegistersDedicatedSessionStoreSynchronously()
     {

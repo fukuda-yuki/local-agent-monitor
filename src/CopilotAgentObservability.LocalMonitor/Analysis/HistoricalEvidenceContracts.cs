@@ -12,6 +12,7 @@ internal static class HistoricalEvidenceContractsV1
     internal const int MaximumGroupsPerSession = 256;
     internal const int MaximumReferencesPerGroup = 16;
     internal const int MaximumDescriptorLength = 160;
+    internal const int MaximumPayloadBytes = 64 * 1024 * 1024;
 }
 
 internal enum HistoricalEvidenceSourceKindV1 { LiveOtel, SavedRaw, HistoricalSummary }
@@ -136,7 +137,46 @@ internal sealed record HistoricalSessionMetadataV1(
     DateTimeOffset LastSeenAt,
     HistoricalSessionCapabilitiesV1 Capabilities,
     IReadOnlyList<HistoricalEvidenceLocationV1> EvidenceLocations,
-    IReadOnlyList<string> InstructionFindingIds);
+    IReadOnlyList<string> InstructionFindingIds)
+{
+    internal DateTimeOffset? EndedAt { get; init; }
+    internal IReadOnlyList<SessionSourceSurface> SourceSurfaces { get; init; } = [];
+    internal IReadOnlyList<HistoricalSourceProvenanceV1> SourceProvenance { get; init; } = [];
+    internal IReadOnlyList<HistoricalRawModelObservationV1> ModelObservations { get; init; } = [];
+    internal IReadOnlyList<HistoricalRawDurationObservationV1> DurationObservations { get; init; } = [];
+}
+
+internal sealed record HistoricalSourceProvenanceV1(
+    [property: JsonPropertyOrder(0)] SessionSourceSurface SourceSurface,
+    [property: JsonPropertyOrder(1)] string? SourceApplicationVersion,
+    [property: JsonPropertyOrder(2)] string? AdapterVersion);
+
+internal sealed record HistoricalRawModelObservationV1(string Model, HistoricalRawEvidenceReferenceV1 EvidenceRef);
+internal sealed record HistoricalRawDurationObservationV1(long DurationMs, HistoricalRawEvidenceReferenceV1 EvidenceRef);
+
+internal sealed record HistoricalModelObservationV1(
+    [property: JsonPropertyOrder(0)] string Model,
+    [property: JsonPropertyOrder(1)] HistoricalEvidenceReferenceV1 EvidenceRef);
+
+internal sealed record HistoricalDurationObservationV1(
+    [property: JsonPropertyOrder(0)] long DurationMs,
+    [property: JsonPropertyOrder(1)] HistoricalEvidenceReferenceV1 EvidenceRef);
+
+internal sealed record HistoricalDecisionMetadataV1(
+    [property: JsonPropertyOrder(0)] string? Repository,
+    [property: JsonPropertyOrder(1)] string? Workspace,
+    [property: JsonPropertyOrder(2)] DateTimeOffset? StartedAt,
+    [property: JsonPropertyOrder(3)] DateTimeOffset? EndedAt,
+    [property: JsonPropertyOrder(4)] DateTimeOffset LastSeenAt,
+    [property: JsonPropertyOrder(5)] IReadOnlyList<SessionSourceSurface> SourceSurfaces,
+    [property: JsonPropertyOrder(6)] IReadOnlyList<HistoricalSourceProvenanceV1> SourceProvenance,
+    [property: JsonPropertyOrder(7)] IReadOnlyList<HistoricalModelObservationV1> ModelObservations,
+    [property: JsonPropertyOrder(8)] IReadOnlyList<HistoricalDurationObservationV1> DurationObservations,
+    [property: JsonPropertyOrder(9)] SessionCompleteness Completeness,
+    [property: JsonPropertyOrder(10)] IReadOnlyList<string> CompletenessReasons,
+    [property: JsonPropertyOrder(11)] HistoricalEvidenceSourceKindV1 SourceKind,
+    [property: JsonPropertyOrder(12)] SessionContentState ContentState,
+    [property: JsonPropertyOrder(13)] HistoricalSessionCapabilitiesV1 Capabilities);
 
 internal sealed record HistoricalEvidenceGroupDraftV1(
     HistoricalEvidenceGroupKindV1 Kind,
@@ -148,7 +188,9 @@ internal sealed record HistoricalEvidenceGroupDraftV1(
     string? CanonicalCallHash,
     string? ExactOwnershipId,
     string? FindingId,
-    string? RawDescriptor);
+    string? RawDescriptor,
+    InstructionFindingReceiptV1? FindingReceipt = null,
+    InstructionRuleCandidateV1? FindingCandidate = null);
 
 internal interface IHistoricalEvidenceSnapshotSourceV1
 {
@@ -181,11 +223,13 @@ internal sealed record HistoricalEvidenceSessionV1(
     [property: JsonPropertyOrder(7)] SessionContentState ContentState,
     [property: JsonPropertyOrder(8)] HistoricalDescriptorStateV1 DescriptorState,
     [property: JsonPropertyOrder(9)] string? RawLocalDescriptor,
-    [property: JsonPropertyOrder(10)] HistoricalSessionCapabilitiesV1 Capabilities);
+    [property: JsonPropertyOrder(10)] HistoricalSessionCapabilitiesV1 Capabilities,
+    [property: JsonPropertyOrder(11)] HistoricalDecisionMetadataV1 Metadata);
 
 internal sealed record HistoricalExcludedSessionV1(
     [property: JsonPropertyOrder(0)] string SessionId,
-    [property: JsonPropertyOrder(1)] HistoricalSessionExclusionReasonV1 Reason);
+    [property: JsonPropertyOrder(1)] HistoricalSessionExclusionReasonV1 Reason,
+    [property: JsonPropertyOrder(2)] HistoricalDecisionMetadataV1? Metadata);
 
 internal sealed record HistoricalEvidenceGroupV1(
     [property: JsonPropertyOrder(0)] string GroupId,
@@ -198,7 +242,9 @@ internal sealed record HistoricalEvidenceGroupV1(
     [property: JsonPropertyOrder(7)] string? ExactCallId,
     [property: JsonPropertyOrder(8)] string? CanonicalCallHash,
     [property: JsonPropertyOrder(9)] string? ExactOwnershipId,
-    [property: JsonPropertyOrder(10)] string? FindingId);
+    [property: JsonPropertyOrder(10)] string? FindingId,
+    [property: JsonPropertyOrder(11)] InstructionFindingReceiptV1? FindingReceipt,
+    [property: JsonPropertyOrder(12)] InstructionRuleCandidateV1? FindingCandidate);
 
 internal sealed record HistoricalDistributionCountV1(
     [property: JsonPropertyOrder(0)] string Key,

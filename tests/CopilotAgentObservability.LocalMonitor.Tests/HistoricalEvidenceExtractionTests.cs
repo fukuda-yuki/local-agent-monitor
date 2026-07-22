@@ -46,8 +46,20 @@ public sealed class HistoricalEvidenceExtractionTests
         Assert.Single(result.RawLocal.Sessions);
         Assert.Collection(
             result.RawLocal.ExcludedSessions,
-            item => { Assert.Equal(mismatch.SessionId.ToString(), item.SessionId); Assert.Equal(HistoricalSessionExclusionReasonV1.FilterMismatch, item.Reason); },
-            item => { Assert.Equal(missing.ToString(), item.SessionId); Assert.Equal(HistoricalSessionExclusionReasonV1.MissingSessionReference, item.Reason); });
+            item =>
+            {
+                Assert.Equal(mismatch.SessionId.ToString(), item.SessionId);
+                Assert.Equal(HistoricalSessionExclusionReasonV1.FilterMismatch, item.Reason);
+                Assert.Equal("repo-b", Assert.IsType<HistoricalDecisionMetadataV1>(item.Metadata).Repository);
+            },
+            item =>
+            {
+                Assert.Equal(missing.ToString(), item.SessionId);
+                Assert.Equal(HistoricalSessionExclusionReasonV1.MissingSessionReference, item.Reason);
+                Assert.Null(item.Metadata);
+            });
+        Assert.StartsWith("repository-ref-", result.RepositorySafe.ExcludedSessions[0].Metadata!.Repository);
+        Assert.Null(result.RepositorySafe.ExcludedSessions[1].Metadata);
         Assert.Equal([included.SessionId], source.ReadSessionIds);
     }
 
@@ -184,6 +196,9 @@ public sealed class HistoricalEvidenceExtractionTests
     [InlineData("C:\\secret.txt")]
     [InlineData("\\\\server\\share\\secret.txt")]
     [InlineData("/secret")]
+    [InlineData("../secret.txt")]
+    [InlineData("~/.config/secret")]
+    [InlineData("C:secret.txt")]
     [InlineData("github_pat_abcdefghijklmnopqrstuvwxyz123456")]
     [InlineData("AKIAIOSFODNN7EXAMPLE")]
     [InlineData("password=correct-horse-battery-staple")]
@@ -232,9 +247,9 @@ public sealed class HistoricalEvidenceExtractionTests
             CancellationToken.None);
 
         Assert.Equal("historical-extraction-723e7878a6d85fea9dffc2282bd46761", result.RawLocal.ExtractionId);
-        Assert.Equal("historical-group-a45d16030831049eb241ad91bfa47478", Assert.Single(result.RawLocal.EvidenceGroups).GroupId);
-        Assert.Equal("872d77ae9405bcd3fbbe76a7a2bf1b0284d25a57b33d128eb446d9a80c5a2c37", result.RawLocalSha256);
-        Assert.Equal("20779a0cc87299bc4ed0e02d1e69120774369a189b415e42dff33196c8fedded", result.RepositorySafeSha256);
+        Assert.Equal("historical-group-03ceab92561b879ce10ff5db999279d2", Assert.Single(result.RawLocal.EvidenceGroups).GroupId);
+        Assert.Equal("54b95650a59eab2099187de842bad0a382e0879244eb98287fd19972cc4ba1bc", result.RawLocalSha256);
+        Assert.Equal("69bbb9f8df52156b906340a29abb500de157966e89a40a275d384cfd2297953b", result.RepositorySafeSha256);
     }
 
     [Fact]
@@ -371,6 +386,151 @@ public sealed class HistoricalEvidenceExtractionTests
     }
 
     [Fact]
+    public async Task ExtractAsync_InstructionFindingCarriesExactIssue59ReceiptAssociation()
+    {
+        var session = Metadata(1);
+        var reference = Reference(session);
+        var secondReference = reference with { SpanId = "span-2", TurnIndex = 2 };
+        var instructionReference = new InstructionRawEvidenceReferenceV1(
+            session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+            InstructionEvidenceRelativePositionV1.Anchor);
+        var secondInstructionReference = new InstructionRawEvidenceReferenceV1(
+            session.SessionId.ToString(), secondReference.TraceId, secondReference.SpanId, secondReference.TurnIndex,
+            InstructionEvidenceRelativePositionV1.Anchor);
+        var handoff = InstructionFindingPipelineV1.Generate(
+            72,
+            new InstructionFindingEvidenceIndexV1(reference.TraceId,
+            [
+                new(session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+                    InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.Turn),
+                new(session.SessionId.ToString(), secondReference.TraceId, secondReference.SpanId, secondReference.TurnIndex,
+                    InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.Turn),
+            ]),
+            [new(InstructionFindingCategoryV1.GoalClarity, InstructionFindingVerdictV1.Supported,
+                InstructionFindingExtractorSourceV1.DeterministicPrepass, [instructionReference, secondInstructionReference])]);
+        var receipt = Assert.Single(handoff.Findings);
+        var candidate = Assert.Single(handoff.Candidates);
+        session = session with
+        {
+            InstructionFindingIds = [receipt.FindingId],
+            EvidenceLocations = [.. session.EvidenceLocations, new(secondReference.SessionId, secondReference.TraceId, secondReference.SpanId, secondReference.TurnIndex, secondReference.RelativePosition)],
+        };
+        var source = new RecordingSnapshotSource("snapshot-finding-associated", [session], _ =>
+        [
+            Group(HistoricalEvidenceGroupKindV1.InstructionFinding, [reference, secondReference], findingId: receipt.FindingId,
+                findingReceipt: receipt, findingCandidate: candidate),
+        ]);
+
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None);
+
+        var raw = Assert.Single(result.RawLocal.EvidenceGroups);
+        var safe = Assert.Single(result.RepositorySafe.EvidenceGroups);
+        Assert.Equal(receipt, raw.FindingReceipt);
+        Assert.Equal(receipt, safe.FindingReceipt);
+        Assert.Equal(candidate, raw.FindingCandidate);
+        Assert.Equal(candidate, safe.FindingCandidate);
+        Assert.Equal(receipt.EvidenceRefs, safe.FindingReceipt!.EvidenceRefs);
+        var schemaPath = Path.Combine(AppContext.BaseDirectory, "TestData", "HistoricalEvidence", "historical-evidence-dataset.schema.json");
+        var rawPath = Path.Combine(Path.GetTempPath(), $"historical-finding-raw-{Guid.NewGuid():N}.json");
+        var safePath = Path.Combine(Path.GetTempPath(), $"historical-finding-safe-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllBytes(rawPath, result.RawLocalBytes);
+            File.WriteAllBytes(safePath, result.RepositorySafeBytes);
+            Assert.True(ValidateWithPowerShellJsonSchema(rawPath, schemaPath));
+            Assert.True(ValidateWithPowerShellJsonSchema(safePath, schemaPath));
+        }
+        finally
+        {
+            File.Delete(rawPath);
+            File.Delete(safePath);
+        }
+    }
+
+    [Fact]
+    public async Task ExtractAsync_InstructionFindingRejectsReceiptWhoseEvidenceDoesNotMatchGroup()
+    {
+        var session = Metadata(1);
+        var reference = Reference(session);
+        var instructionReference = new InstructionRawEvidenceReferenceV1(
+            session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+            InstructionEvidenceRelativePositionV1.Anchor);
+        var handoff = InstructionFindingPipelineV1.Generate(
+            72,
+            new InstructionFindingEvidenceIndexV1(reference.TraceId,
+            [
+                new(session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+                    InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.Turn),
+            ]),
+            [new(InstructionFindingCategoryV1.GoalClarity, InstructionFindingVerdictV1.Incomplete,
+                InstructionFindingExtractorSourceV1.PromptOnly, [instructionReference])]);
+        var receipt = Assert.Single(handoff.Findings);
+        var mismatched = reference with { SpanId = "different-span" };
+        session = session with
+        {
+            InstructionFindingIds = [receipt.FindingId],
+            EvidenceLocations = [.. session.EvidenceLocations, new(mismatched.SessionId, mismatched.TraceId, mismatched.SpanId, mismatched.TurnIndex, mismatched.RelativePosition)],
+        };
+        var source = new RecordingSnapshotSource("snapshot-finding-mismatch", [session], _ =>
+        [
+            Group(HistoricalEvidenceGroupKindV1.InstructionFinding, [mismatched], findingId: receipt.FindingId,
+                findingReceipt: receipt),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_InstructionFindingRejectsBothNullReceiptAndCandidate()
+    {
+        const string findingId = "instruction-finding-0123456789abcdef01234567";
+        var session = Metadata(1, findingIds: [findingId]);
+        var source = new RecordingSnapshotSource("snapshot-finding-null-pair", [session], _ =>
+        [
+            Group(HistoricalEvidenceGroupKindV1.InstructionFinding, [Reference(session)], findingId: findingId),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_InstructionFindingRejectsInvalidReceiptAnchor()
+    {
+        var session = Metadata(1);
+        var reference = Reference(session);
+        var instructionReference = new InstructionRawEvidenceReferenceV1(
+            session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+            InstructionEvidenceRelativePositionV1.Anchor);
+        var handoff = InstructionFindingPipelineV1.Generate(
+            72,
+            new InstructionFindingEvidenceIndexV1(reference.TraceId,
+            [
+                new(session.SessionId.ToString(), reference.TraceId, reference.SpanId, reference.TurnIndex,
+                    InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.Turn),
+            ]),
+            [new(InstructionFindingCategoryV1.GoalClarity, InstructionFindingVerdictV1.Incomplete,
+                InstructionFindingExtractorSourceV1.PromptOnly, [instructionReference])]);
+        var receipt = Assert.Single(handoff.Findings);
+        session = session with { InstructionFindingIds = [receipt.FindingId] };
+        var source = new RecordingSnapshotSource("snapshot-finding-invalid-anchor", [session], _ =>
+        [
+            Group(HistoricalEvidenceGroupKindV1.InstructionFinding, [reference], findingId: receipt.FindingId,
+                findingReceipt: receipt with { AnchorTraceId = "trace-ref-00000000000000000000000000000000" }),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
     public async Task Deserialize_RejectsUnknownContractProperty()
     {
         var session = Metadata(1);
@@ -425,6 +585,10 @@ public sealed class HistoricalEvidenceExtractionTests
         var forgedSession = result.RawLocal.Sessions[0] with
         {
             Capabilities = result.RawLocal.Sessions[0].Capabilities with { TurnRollup = false },
+            Metadata = result.RawLocal.Sessions[0].Metadata with
+            {
+                Capabilities = result.RawLocal.Sessions[0].Metadata.Capabilities with { TurnRollup = false },
+            },
         };
         var forgedDistribution = result.RawLocal.Distribution with
         {
@@ -459,6 +623,54 @@ public sealed class HistoricalEvidenceExtractionTests
             HistoricalEvidenceJsonV1.Serialize(result.RawLocal with { Sessions = [forgedSession] }));
 
         Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task Serialize_RejectsCompletenessReasonAboveItsDeclaredCeilingInDecisionMetadata()
+    {
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(), new RecordingSnapshotSource("snapshot-reason-ceiling", [Metadata(1)], Evidence), CancellationToken.None);
+        var session = result.RawLocal.Sessions[0];
+        var forged = session with
+        {
+            Metadata = session.Metadata with
+            {
+                Completeness = SessionCompleteness.Full,
+                CompletenessReasons = ["historical_summary_only"],
+            },
+        };
+
+        var exception = Assert.Throws<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceJsonV1.Serialize(result.RawLocal with { Sessions = [forged] }));
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_RejectsNonUuidV7ExplicitSessionIdBeforeOpeningSnapshot()
+    {
+        var source = new RecordingSnapshotSource("snapshot-non-v7", [Metadata(1)], Evidence);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(
+                Selection(explicitIds: [Guid.Parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")]), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+        Assert.Empty(source.ReadSessionIds);
+    }
+
+    [Fact]
+    public async Task Deserialize_NullRequiredGraphMapsToInvalidSerialization()
+    {
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(), new RecordingSnapshotSource("snapshot-null-graph", [Metadata(1)], Evidence), CancellationToken.None);
+        var node = JsonNode.Parse(result.RawLocalBytes)!.AsObject();
+        node["sessions"] = null;
+
+        var exception = Assert.Throws<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceJsonV1.Deserialize(Encoding.UTF8.GetBytes(node.ToJsonString())));
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidSerialization, exception.Code);
     }
 
     [Fact]
@@ -497,21 +709,19 @@ public sealed class HistoricalEvidenceExtractionTests
     }
 
     [Fact]
-    public async Task Serialize_RejectsTruncatedCountWithoutReturnedWindowExclusion()
+    public async Task ExtractAsync_OmittedEarlierWithReturnedIneligibleSuffixNeedsNoWindowExclusion()
     {
+        var sessions = Enumerable.Range(1, 3).Select(index => Metadata(index, completeness: SessionCompleteness.Unbound)).ToArray();
+        var source = new RecordingSnapshotSource("snapshot-truncation-without-window", sessions, Evidence, omittedEarlierMatchingSessionCount: 4);
+
         var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
-            Selection(),
-            new RecordingSnapshotSource("snapshot-truncation-without-window", [Metadata(1)], Evidence),
-            CancellationToken.None);
+            Selection(maximum: 2), source, CancellationToken.None);
 
-        var exception = Assert.Throws<HistoricalEvidenceValidationException>(() =>
-            HistoricalEvidenceJsonV1.Serialize(result.RawLocal with
-            {
-                TruncatedBefore = true,
-                TruncatedSessionCount = 1,
-            }));
-
-        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+        Assert.True(result.RawLocal.TruncatedBefore);
+        Assert.Equal(4, result.RawLocal.TruncatedSessionCount);
+        Assert.All(result.RawLocal.ExcludedSessions, value => Assert.Equal(HistoricalSessionExclusionReasonV1.Unbound, value.Reason));
+        Assert.DoesNotContain(result.RawLocal.ExcludedSessions, value => value.Reason == HistoricalSessionExclusionReasonV1.WindowTruncated);
+        Assert.Empty(source.ReadSessionIds);
     }
 
     [Fact]
@@ -704,8 +914,11 @@ public sealed class HistoricalEvidenceExtractionTests
         string? canonicalCallHash = null,
         string? exactOwnershipId = null,
         string? findingId = null,
-        string? rawDescriptor = null) =>
-        new(kind, references ?? [], numericValue, unit, status, exactCallId, canonicalCallHash, exactOwnershipId, findingId, rawDescriptor);
+        string? rawDescriptor = null,
+        InstructionFindingReceiptV1? findingReceipt = null,
+        InstructionRuleCandidateV1? findingCandidate = null) =>
+        new(kind, references ?? [], numericValue, unit, status, exactCallId, canonicalCallHash, exactOwnershipId,
+            findingId, rawDescriptor, findingReceipt, findingCandidate);
 
     private static HistoricalRawEvidenceReferenceV1 Reference(HistoricalSessionMetadataV1 session) =>
         new(session.SessionId, $"trace-{SessionNumber(session.SessionId)}", $"span-{SessionNumber(session.SessionId)}", 1, HistoricalEvidenceRelativePositionV1.Anchor);
