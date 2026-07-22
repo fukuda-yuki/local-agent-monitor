@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -114,10 +115,23 @@ public static partial class AlertLifecycleValidation
     public static bool IsSanitizedComment(string? value)
     {
         if (value is null) return true;
-        if (value.Length == 0 || value.EnumerateRunes().Count() > MaximumCommentScalars) return false;
+        if (value.Length == 0 || !HasValidBoundedUtf16(value)) return false;
         if (value.Any(character => char.IsControl(character) || character is '<' or '>' or '`' or '[' or ']' or '{' or '}')) return false;
         if (value.Contains('/') || value.Contains('\\') || UriOrDrivePrefix().IsMatch(value) || Email().IsMatch(value)) return false;
         return !SensitiveMarkers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool HasValidBoundedUtf16(string value)
+    {
+        var remaining = value.AsSpan();
+        var scalarCount = 0;
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out _, out var consumed) != OperationStatus.Done) return false;
+            if (++scalarCount > MaximumCommentScalars) return false;
+            remaining = remaining[consumed..];
+        }
+        return true;
     }
 
     [GeneratedRegex(@"[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.IgnoreCase)]

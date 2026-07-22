@@ -15,8 +15,10 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     public SqliteAlertLifecycleStoreTests() => Directory.CreateDirectory(directory);
 
     [Fact]
-    public void Initialize_FreshDatabase_CreatesSeparateV1ComponentAndAppendOnlyTable()
+    public void Initialize_AfterFreshParentInitialization_CreatesSeparateV1ComponentAndAppendOnlyTable()
     {
+        Assert.Equal(AlertStoreStatus.Success, new SqliteAlertEngineStore(ConnectionString).Initialize().Status);
+
         var result = Store().Initialize();
 
         Assert.Equal(AlertLifecycleStoreStatus.Success, result.Status);
@@ -25,6 +27,22 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         Assert.Equal(["alert_lifecycle_events"], Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'alert_lifecycle_%' ORDER BY name;"));
         Assert.Equal(2L, Scalar<long>(connection, "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND tbl_name='alert_lifecycle_events';"));
         AssertActorVocabulary(connection);
+    }
+
+    [Fact]
+    public void Initialize_CounterfeitReceiptTableWithoutAcceptedParent_FailsClosedWithoutLifecycleObjects()
+    {
+        using (var connection = Open())
+        {
+            Execute(connection, "CREATE TABLE alert_receipts(alert_id TEXT PRIMARY KEY,canonical_json TEXT NOT NULL);");
+        }
+
+        var result = Store().Initialize();
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        using var check = Open();
+        Assert.Equal(0L, Scalar<long>(check, "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'alert_lifecycle_%';"));
     }
 
     [Fact]
@@ -143,6 +161,23 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
 
         Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
         Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        Assert.Empty(store.History(AlertA).Events);
+    }
+
+    [Fact]
+    public void Mutate_RejectsByteDistinctMalformedUtf16CommentsBeforeIdempotencyHashing()
+    {
+        SeedReceipts();
+        var store = Store();
+        store.Initialize();
+        var first = Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a') with { Comment = "high \ud800 surrogate" };
+        var second = first with { Comment = "low \udc00 surrogate" };
+
+        var firstResult = store.Mutate(first);
+        var secondResult = store.Mutate(second);
+
+        Assert.Equal("alert_comment_not_sanitized", firstResult.Code);
+        Assert.Equal("alert_comment_not_sanitized", secondResult.Code);
         Assert.Empty(store.History(AlertA).Events);
     }
 
@@ -314,6 +349,104 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     }
 
     [Fact]
+    public void Initialize_ExtraLifecycleInsertTriggerFailsClosed()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        using (var connection = Open())
+        {
+            Execute(connection,
+                "CREATE TRIGGER counterfeit_receipt_rewrite AFTER INSERT ON alert_lifecycle_events BEGIN UPDATE alert_receipts SET canonical_json=canonical_json WHERE alert_id=NEW.alert_id; END;");
+        }
+
+        var result = store.Initialize();
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+    }
+
+    [Fact]
+    public void Operations_DefinitionMismatchedParentFailClosedWithoutAppend()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        using (var connection = Open()) Execute(connection, "DROP TABLE alert_suppressions;");
+
+        var read = store.Get(AlertA);
+        var history = store.History(AlertA);
+        var mutation = store.Mutate(Command(AlertA, AlertLifecycleAction.Acknowledge, 0, 'a'));
+
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (read.Status, read.Code));
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (history.Status, history.Code));
+        Assert.Empty(history.Events);
+        Assert.Equal((AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"), (mutation.Status, mutation.Code));
+        using var check = Open();
+        Assert.Equal(0L, Scalar<long>(check, "SELECT count(*) FROM alert_lifecycle_events;"));
+    }
+
+    [Fact]
+    public void Get_NonCanonicalPersistedUtcReturnsUnavailableWithoutLifecycleData()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00Z", 1L, 0L);
+
+        var result = store.Get(AlertA);
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        Assert.Null(result.Lifecycle);
+    }
+
+    [Fact]
+    public void History_NonIntegerPersistedRevisionReturnsUnavailableWithoutPartialEvents()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", 1.5d, 0.5d, ignoreChecks: true);
+
+        var result = store.History(AlertA);
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        Assert.Empty(result.Events);
+    }
+
+    [Fact]
+    public void Append_MaximumPersistedRevisionReturnsUnavailableWithoutOverflowOrInsert()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        InsertEvent("2026-07-22T00:00:00.0000000+00:00", long.MaxValue, long.MaxValue - 1);
+
+        var result = store.Mutate(Command(AlertA, AlertLifecycleAction.Resolve, long.MaxValue, 'b'));
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+        using var check = Open();
+        Assert.Equal(1L, Scalar<long>(check, "SELECT count(*) FROM alert_lifecycle_events;"));
+    }
+
+    [Fact]
+    public void Initialize_OverflowingLifecycleVersionReturnsUnavailableWithoutThrowing()
+    {
+        SeedReceipts();
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        using (var connection = Open()) Execute(connection, "UPDATE schema_version SET version=1e100 WHERE component='alert_lifecycle';");
+
+        var result = store.Initialize();
+
+        Assert.Equal(AlertLifecycleStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_lifecycle_store_unavailable", result.Code);
+    }
+
+    [Fact]
     public void Initialize_NewerOrBrokenLifecycleSchema_FailsClosedWithoutRepair()
     {
         using (var connection = Open()) Execute(connection, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('alert_lifecycle',2); CREATE TABLE kept(value TEXT); INSERT INTO kept VALUES('same');");
@@ -363,6 +496,23 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
         var engine = new SqliteAlertEngineStore(ConnectionString);
         Assert.Equal(AlertStoreStatus.Success, engine.Initialize().Status);
         Assert.Equal(AlertStoreStatus.Success, engine.Append(Evaluation()).Status);
+    }
+
+    private void InsertEvent(string occurredAt, object revision, object expectedRevision, bool ignoreChecks = false)
+    {
+        using var connection = Open();
+        if (ignoreChecks) Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "INSERT INTO alert_lifecycle_events(event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,request_hash,old_alert_id,new_alert_id,result_code) VALUES($event,$alert,$revision,$expected,'acknowledge','open','acknowledged',$occurred,'local_user','user_reviewed',NULL,$key,$hash,NULL,NULL,'alert_lifecycle_updated');";
+        command.Parameters.AddWithValue("$event", new string('f', 64));
+        command.Parameters.AddWithValue("$alert", AlertA);
+        command.Parameters.AddWithValue("$revision", revision);
+        command.Parameters.AddWithValue("$expected", expectedRevision);
+        command.Parameters.AddWithValue("$occurred", occurredAt);
+        command.Parameters.AddWithValue("$key", "aid1_" + new string('z', 43));
+        command.Parameters.AddWithValue("$hash", new string('1', 64));
+        command.ExecuteNonQuery();
     }
 
     private string ReceiptJson(string alertId)

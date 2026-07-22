@@ -23,6 +23,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
+            if (!AlertSchemaV1.IsValid(connection, transaction)) return Unavailable();
             var version = AlertLifecycleSchemaV1.ReadVersion(connection, transaction);
             if (version is null)
             {
@@ -37,6 +38,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         catch (SqliteException) { return Unavailable(); }
         catch (InvalidOperationException) { return Unavailable(); }
         catch (FormatException) { return Unavailable(); }
+        catch (OverflowException) { return Unavailable(); }
     }
 
     public AlertLifecycleStoreResult Get(string alertId)
@@ -45,13 +47,16 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         try
         {
             using var connection = Open();
-            if (!AlertLifecycleSchemaV1.IsValid(connection, null)) return Unavailable();
+            if (!SchemasValid(connection, null)) return Unavailable();
             if (!ReceiptExists(connection, null, alertId)) return NotFound();
             var latest = ReadLatest(connection, null, alertId);
             return new(AlertLifecycleStoreStatus.Success, Lifecycle: latest is null ? LazyOpen(alertId) : View(latest));
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return Busy(); }
         catch (SqliteException) { return Unavailable(); }
+        catch (InvalidOperationException) { return Unavailable(); }
+        catch (FormatException) { return Unavailable(); }
+        catch (OverflowException) { return Unavailable(); }
     }
 
     public AlertLifecycleHistoryResult History(string alertId, int limit = 50)
@@ -61,7 +66,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         try
         {
             using var connection = Open();
-            if (!AlertLifecycleSchemaV1.IsValid(connection, null)) return HistoryUnavailable();
+            if (!SchemasValid(connection, null)) return HistoryUnavailable();
             if (!ReceiptExists(connection, null, alertId)) return new(AlertLifecycleStoreStatus.NotFound, [], "alert_not_found");
             using var command = Command(connection, null,
                 "SELECT event_id,alert_id,revision,expected_revision,action,previous_state,state,occurred_at,actor,reason_code,comment,idempotency_key,old_alert_id,new_alert_id,result_code FROM alert_lifecycle_events WHERE alert_id=$alert ORDER BY revision DESC LIMIT $limit;",
@@ -73,6 +78,9 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertLifecycleStoreStatus.Busy, [], "alert_lifecycle_store_busy"); }
         catch (SqliteException) { return HistoryUnavailable(); }
+        catch (InvalidOperationException) { return HistoryUnavailable(); }
+        catch (FormatException) { return HistoryUnavailable(); }
+        catch (OverflowException) { return HistoryUnavailable(); }
     }
 
     public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) =>
@@ -118,7 +126,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            if (!AlertLifecycleSchemaV1.IsValid(connection, transaction)) return Unavailable();
+            if (!SchemasValid(connection, transaction)) return Unavailable();
 
             var prior = ReadByIdempotencyKey(connection, transaction, mutation.IdempotencyKey);
             if (prior is not null)
@@ -136,6 +144,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
             var current = latest?.State ?? AlertLifecycleState.Open;
             var revision = latest?.Revision ?? 0;
             if (revision != mutation.ExpectedRevision) return Conflict("alert_revision_conflict");
+            if (revision == long.MaxValue) return Unavailable();
             if (!AlertLifecycleTransition.TryApply(current, mutation.Action, out var next)) return Conflict("alert_invalid_transition");
 
             var occurredAt = timeProvider.GetUtcNow().ToUniversalTime();
@@ -155,6 +164,9 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return Busy(); }
         catch (SqliteException) { return Unavailable(); }
+        catch (InvalidOperationException) { return Unavailable(); }
+        catch (FormatException) { return Unavailable(); }
+        catch (OverflowException) { return Unavailable(); }
     }
 
     private static AlertLifecycleStoreResult? Validate(AlertLifecycleMutation value)
@@ -186,14 +198,72 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
     private static string? ReadRequestHash(SqliteConnection connection, SqliteTransaction transaction, string key)
     {
         using var command = Command(connection, transaction, "SELECT request_hash FROM alert_lifecycle_events WHERE idempotency_key=$key;", ("$key", key));
-        return command.ExecuteScalar() as string;
+        return command.ExecuteScalar() switch
+        {
+            null or DBNull => null,
+            string value when AlertLifecycleValidation.IsCanonicalAlertId(value) => value,
+            _ => throw new FormatException(),
+        };
     }
 
-    private static AlertLifecycleEvent ReadEvent(SqliteDataReader reader) => new(
-        AlertLifecycleContractVersions.Lifecycle, reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3), Action(reader.GetString(4)),
-        State(reader.GetString(5)), State(reader.GetString(6)), DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-        reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.GetString(11),
-        reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13), reader.GetString(14));
+    private static AlertLifecycleEvent ReadEvent(SqliteDataReader reader)
+    {
+        var eventId = Text(reader, 0);
+        var alertId = Text(reader, 1);
+        var revision = Integer(reader, 2);
+        var expectedRevision = Integer(reader, 3);
+        var action = Action(Text(reader, 4));
+        var previousState = State(Text(reader, 5));
+        var state = State(Text(reader, 6));
+        var occurredAt = CanonicalUtc(Text(reader, 7));
+        var actor = Text(reader, 8);
+        var reasonCode = Text(reader, 9);
+        var comment = NullableText(reader, 10);
+        var idempotencyKey = Text(reader, 11);
+        var oldAlertId = NullableText(reader, 12);
+        var newAlertId = NullableText(reader, 13);
+        var resultCode = Text(reader, 14);
+
+        if (!AlertLifecycleValidation.IsCanonicalAlertId(eventId)
+            || !AlertLifecycleValidation.IsCanonicalAlertId(alertId)
+            || revision < 1 || expectedRevision < 0 || expectedRevision != revision - 1
+            || actor is not ("local_user" or "local_system")
+            || !AlertLifecycleValidation.IsReasonCode(reasonCode)
+            || !AlertLifecycleValidation.IsSanitizedComment(comment)
+            || !AlertLifecycleValidation.IsIdempotencyKey(idempotencyKey)
+            || oldAlertId is not null && !AlertLifecycleValidation.IsCanonicalAlertId(oldAlertId)
+            || newAlertId is not null && !AlertLifecycleValidation.IsCanonicalAlertId(newAlertId)
+            || resultCode != "alert_lifecycle_updated")
+        {
+            throw new FormatException();
+        }
+
+        return new(AlertLifecycleContractVersions.Lifecycle, eventId, alertId, revision, expectedRevision, action,
+            previousState, state, occurredAt, actor, reasonCode, comment, idempotencyKey, oldAlertId, newAlertId, resultCode);
+    }
+
+    private static bool SchemasValid(SqliteConnection connection, SqliteTransaction? transaction) =>
+        AlertSchemaV1.IsValid(connection, transaction) && AlertLifecycleSchemaV1.IsValid(connection, transaction);
+
+    private static long Integer(SqliteDataReader reader, int ordinal) =>
+        reader.GetValue(ordinal) is long value ? value : throw new FormatException();
+
+    private static string Text(SqliteDataReader reader, int ordinal) =>
+        reader.GetValue(ordinal) is string value ? value : throw new FormatException();
+
+    private static string? NullableText(SqliteDataReader reader, int ordinal) =>
+        reader.GetValue(ordinal) switch { DBNull => null, string value => value, _ => throw new FormatException() };
+
+    private static DateTimeOffset CanonicalUtc(string value)
+    {
+        if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
+            || parsed.Offset != TimeSpan.Zero
+            || value != parsed.ToString("O", CultureInfo.InvariantCulture))
+        {
+            throw new FormatException();
+        }
+        return parsed;
+    }
 
     private static bool ReceiptExists(SqliteConnection connection, SqliteTransaction? transaction, string alertId)
     {

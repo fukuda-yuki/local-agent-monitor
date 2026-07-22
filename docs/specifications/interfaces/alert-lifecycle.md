@@ -63,8 +63,11 @@ local actor label, bounded reason code and optional sanitized comment,
 idempotency key and canonical request hash, optional explicitly supplied old
 and new alert IDs, and a bounded result code. Rows are append-only: application
 code exposes no update/delete operation and database triggers reject update or
-delete. The actor column is a closed `local_user | local_system` vocabulary;
-the actor is part of the idempotency request hash.
+delete. Schema validation requires the exact two owned trigger names and
+definitions and rejects every additional trigger on `alert_lifecycle_events`,
+including an INSERT trigger that could mutate an engine-owned receipt. The
+actor column is a closed `local_user | local_system` vocabulary; the actor is
+part of the idempotency request hash.
 
 Rule version, configuration version/hash, and evaluation ID are not duplicated
 into lifecycle rows. The `alert_id` foreign key is the exact reference to the
@@ -82,10 +85,32 @@ is detected before insert. Any unexpected SQLite constraint or integrity error
 is `alert_lifecycle_store_unavailable`, not a revision conflict.
 
 Initialization is additive and transactional. Fresh databases and databases
-with the accepted `alert_engine` v1 component are supported. Existing
-`schema_version` rows and all non-lifecycle tables/rows are preserved. Missing,
-newer, or definition-mismatched lifecycle components fail closed with
-`alert_lifecycle_store_unavailable`; they are not repaired or downgraded.
+with the accepted `alert_engine` v1 component are supported through route-local
+composition. Every lifecycle route first invokes the Issue #80 engine store's
+existing initialize/validate operation, then initializes/validates the
+lifecycle component, and only then performs a read or mutation. The lifecycle
+store also refuses to initialize or operate unless the accepted engine v1
+schema validates; it consumes the Issue #80 validator and does not reproduce or
+relax its table definitions. Therefore a fresh host creates the engine parent
+before the lifecycle child and returns `404 alert_not_found` for an unknown
+receipt, while a counterfeit `alert_receipts` table without a valid engine
+component returns the fixed lifecycle unavailable error and creates no
+lifecycle objects. Existing `schema_version` rows and all non-lifecycle
+tables/rows are preserved. Missing, newer, or definition-mismatched lifecycle
+components fail closed with `alert_lifecycle_store_unavailable`; they are not
+repaired or downgraded.
+
+Persisted lifecycle version and revision fields must be SQLite integers in
+their documented bounds: component version is exactly `1`, event revision is
+`1..Int64.MaxValue`, expected revision is `0..Int64.MaxValue-1`, and
+`expected_revision = revision - 1`. An event at `Int64.MaxValue` is readable
+but cannot be advanced; an attempted append returns unavailable without an
+insert rather than overflowing. Persisted `occurred_at` is exact round-trip
+format (`O`) UTC with offset `+00:00`; alternate parseable spellings, non-UTC
+offsets, invalid values, and wrong SQLite types are corruption. Get, history,
+idempotent replay, and append map any malformed persisted row or numeric
+conversion/overflow to fixed `alert_lifecycle_store_unavailable`, return no
+partial event/lifecycle data, and do not write.
 
 ## Idempotency
 
@@ -144,6 +169,9 @@ or the fixed case-insensitive raw/credential markers `authorization:`,
 `password`, `secret`, `token=`, `token:`, `prompt:`, `response:`, `content:`,
 `tool argument`, or `tool result` is rejected as
 `alert_comment_not_sanitized`. Input is not truncated or partially persisted.
+Malformed UTF-16 (an unpaired surrogate) is rejected before scalar counting or
+request hashing; encoding replacement must not make two byte-distinct requests
+idempotently equivalent. A valid U+FFFD scalar is not malformed UTF-16.
 Logs and error responses never include a comment, evidence body, provider
 exception, path, or database text.
 
@@ -160,9 +188,11 @@ The POST body is strict JSON containing exactly `schema_version` =
 `comment`. It requires
 `Content-Type: application/json`, same-origin request metadata,
 `x-monitor-csrf: local-monitor`, and an `Idempotency-Key` header. Unknown or missing fields,
-invalid enum values, and bodies over 64 KiB fail closed. User HTTP actions are
-exactly acknowledge, dismiss, resolve, and reopen; internal supersede and
-source-deletion seams are not HTTP routes.
+duplicate properties, invalid enum values, and bodies over 64 KiB fail closed.
+User HTTP actions are exactly acknowledge, dismiss, resolve, and reopen;
+internal supersede and source-deletion seams are not HTTP routes. A route-local
+Kestrel `BadHttpRequestException` for HTTP 413 is mapped before the generic
+lifecycle exception fallback and returns only `413 request_too_large`.
 
 All lifecycle responses use `Cache-Control: no-store`, strict bounded DTOs,
 canonical UTC timestamps, and no arbitrary message/detail field. History is
@@ -183,6 +213,14 @@ limit. The fixed status mapping is:
 | Oversized body | `413 request_too_large` |
 | Busy/unavailable lifecycle store | `503 alert_lifecycle_store_busy` / `503 alert_lifecycle_store_unavailable` |
 
+Route adapters use a closed allowlist of store status/code pairs. Only the
+documented pair for a not-found, invalid, conflict, busy, or unavailable result
+is projected. An unknown status, unknown code, mismatched pair, missing code,
+or a non-success initialization result outside the accepted engine/lifecycle
+pairs maps to `503 alert_lifecycle_store_unavailable`; store-supplied text is
+never reflected. Engine `alert_store_busy` is translated to the lifecycle busy
+code, while every other malformed engine result is lifecycle unavailable.
+
 Lifecycle initialization and route failures are route-local. They do not
 change ingestion acceptance, monitor liveness, readiness, or unrelated route
 behavior.
@@ -193,9 +231,12 @@ Tests pin the transition table, lazy revision zero, append-only derivation,
 optimistic concurrency, exact replay and mismatched idempotency, immutable
 receipt bytes, explicit-only supersession, no dismissal inheritance, explicit
 source-deletion callback, comment leakage rejection, bounded history order,
-fresh database creation, supported engine-v1 upgrade/coexistence, broken/newer
-schema refusal, strict API DTOs, loopback/same-origin/CSRF/no-store controls,
-and route-local 503 behavior.
+fresh host parent-first creation, supported engine-v1 upgrade/coexistence,
+counterfeit parent refusal, exact lifecycle trigger inventory, persisted
+timestamp/revision/version corruption and overflow refusal, malformed UTF-16
+rejection, broken/newer schema refusal, strict duplicate-free API DTOs,
+closed status/code projection, loopback/same-origin/CSRF/no-store controls,
+route-local 413, and route-local 503 behavior.
 
 Issue #84 consumes `alert.lifecycle.v1`, revision-descending bounded history,
 and `sanitized-alert-lifecycle.v1`. Concrete rule packs and retention producers

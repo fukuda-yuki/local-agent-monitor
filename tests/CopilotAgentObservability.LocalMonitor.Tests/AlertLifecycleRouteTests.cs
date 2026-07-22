@@ -12,6 +12,36 @@ public sealed class AlertLifecycleRouteTests
     private const string AlertId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     [Fact]
+    public async Task FreshHost_InitializesAcceptedParentThenReturnsNotFoundForMissingReceipt()
+    {
+        using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+
+        await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle"), HttpStatusCode.NotFound, "alert_not_found");
+    }
+
+    [Fact]
+    public async Task CounterfeitReceiptTableWithoutAcceptedParent_FailsClosedWithoutLifecycleCreation()
+    {
+        using var temp = NewTemp();
+        await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString()))
+        {
+            await connection.OpenAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE alert_receipts(alert_id TEXT PRIMARY KEY,canonical_json TEXT NOT NULL);";
+            await command.ExecuteNonQueryAsync();
+        }
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+
+        await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle"), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
+        await using var check = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString());
+        await check.OpenAsync();
+        using var count = check.CreateCommand();
+        count.CommandText = "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'alert_lifecycle_%';";
+        Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
     public async Task ReadAndMutationRoutes_ReturnStrictVersionedNoStoreDtos()
     {
         using var temp = NewTemp();
@@ -73,6 +103,9 @@ public sealed class AlertLifecycleRouteTests
         using var internalActor = Request(valid[..^1] + ",\"actor\":\"local_system\"}");
         await AssertError(await host.Client.SendAsync(internalActor), HttpStatusCode.BadRequest, "alert_invalid_request");
 
+        using var duplicate = Request(valid.Replace("\"expected_revision\":0", "\"expected_revision\":0,\"expected_revision\":0", StringComparison.Ordinal));
+        await AssertError(await host.Client.SendAsync(duplicate), HttpStatusCode.BadRequest, "alert_invalid_request");
+
         using var sensitive = Request(valid.Replace("null", "\"C:\\\\Users\\\\person\\\\raw.json\"", StringComparison.Ordinal));
         await AssertError(await host.Client.SendAsync(sensitive), HttpStatusCode.BadRequest, "alert_comment_not_sanitized");
     }
@@ -129,6 +162,32 @@ public sealed class AlertLifecycleRouteTests
         Assert.Equal(HttpStatusCode.OK, live.StatusCode);
         using var ready = await host.Client.GetAsync("/health/ready");
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+    }
+
+    [Fact]
+    public async Task MalformedStoreStatusCodePairs_MapToFixedUnavailableWithoutReflection()
+    {
+        using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new MalformedResultStore()));
+
+        await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle"), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
+        await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle/history"), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
+        using var mutation = Request("""{"schema_version":"alert.lifecycle.v1","action":"acknowledge","expected_revision":0,"reason_code":"user_reviewed","comment":null}""");
+        await AssertError(await host.Client.SendAsync(mutation), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
+    }
+
+    [Fact]
+    public async Task KestrelOversizedLifecycleBody_MapsRouteLocallyToFixedRequestTooLarge()
+    {
+        using var temp = NewTemp();
+        SeedReceipt(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, maxRequestBodyBytes: 128, testOptions: Options());
+        using var request = Request(new string('x', 1024));
+
+        using var response = await host.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal("{\"schema_version\":\"alert.lifecycle.v1\",\"error\":\"request_too_large\"}", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -202,5 +261,16 @@ public sealed class AlertLifecycleRouteTests
         public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => Unavailable();
         public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => Unavailable();
         public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => Unavailable();
+    }
+
+    private sealed class MalformedResultStore : IAlertLifecycleStore
+    {
+        public AlertLifecycleStoreResult Initialize() => new(AlertLifecycleStoreStatus.Success);
+        public AlertLifecycleStoreResult Get(string alertId) => new(AlertLifecycleStoreStatus.NotFound, "raw_secret");
+        public AlertLifecycleHistoryResult History(string alertId, int limit = 50) => new(AlertLifecycleStoreStatus.Invalid, [], "raw_secret");
+        public AlertLifecycleStoreResult Mutate(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
+        public AlertLifecycleStoreResult ResolveFromReevaluation(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
+        public AlertLifecycleStoreResult Supersede(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
+        public AlertLifecycleStoreResult SourceDeleted(AlertLifecycleMutation mutation) => new(AlertLifecycleStoreStatus.Conflict, "raw_secret");
     }
 }

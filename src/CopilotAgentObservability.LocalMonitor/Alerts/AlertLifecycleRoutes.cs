@@ -15,15 +15,16 @@ internal static class AlertLifecycleRoutes
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         RespectRequiredConstructorParameters = true,
+        AllowDuplicateProperties = false,
     };
 
     internal static bool IsAlertPath(PathString path) => path.StartsWithSegments("/api/alerts/v1");
 
-    internal static void Map(WebApplication app, IAlertLifecycleStore store)
+    internal static void Map(WebApplication app, IAlertEngineStore engineStore, IAlertLifecycleStore lifecycleStore)
     {
-        app.MapGet("/api/alerts/v1/{alertId}/lifecycle", (string alertId, HttpContext context) => ReadAsync(context, store, alertId));
-        app.MapGet("/api/alerts/v1/{alertId}/lifecycle/history", (string alertId, HttpContext context) => HistoryAsync(context, store, alertId));
-        app.MapPost("/api/alerts/v1/{alertId}/lifecycle/actions", (string alertId, HttpContext context) => MutateAsync(context, store, alertId));
+        app.MapGet("/api/alerts/v1/{alertId}/lifecycle", (string alertId, HttpContext context) => ReadAsync(context, engineStore, lifecycleStore, alertId));
+        app.MapGet("/api/alerts/v1/{alertId}/lifecycle/history", (string alertId, HttpContext context) => HistoryAsync(context, engineStore, lifecycleStore, alertId));
+        app.MapPost("/api/alerts/v1/{alertId}/lifecycle/actions", (string alertId, HttpContext context) => MutateAsync(context, engineStore, lifecycleStore, alertId));
     }
 
     internal static Task WriteErrorAsync(HttpContext context, int status, string code)
@@ -33,16 +34,16 @@ internal static class AlertLifecycleRoutes
         return context.Response.Body.WriteAsync(Encoding.UTF8.GetBytes($"{{\"schema_version\":\"alert.lifecycle.v1\",\"error\":\"{code}\"}}"), context.RequestAborted).AsTask();
     }
 
-    private static async Task ReadAsync(HttpContext context, IAlertLifecycleStore store, string alertId)
+    private static async Task ReadAsync(HttpContext context, IAlertEngineStore engineStore, IAlertLifecycleStore lifecycleStore, string alertId)
     {
         if (!await AuthorizeReadAsync(context)) return;
-        if (!EnsureInitialized(store, out var initialization)) { await WriteStoreErrorAsync(context, initialization); return; }
-        var result = store.Get(alertId);
-        if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteStoreErrorAsync(context, result); return; }
+        if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
+        var result = lifecycleStore.Get(alertId);
+        if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteReadErrorAsync(context, result); return; }
         await WriteJsonAsync(context, LifecycleDto(result.Lifecycle!));
     }
 
-    private static async Task HistoryAsync(HttpContext context, IAlertLifecycleStore store, string alertId)
+    private static async Task HistoryAsync(HttpContext context, IAlertEngineStore engineStore, IAlertLifecycleStore lifecycleStore, string alertId)
     {
         if (!await AuthorizeReadAsync(context)) return;
         var limit = 50;
@@ -53,8 +54,8 @@ internal static class AlertLifecycleRoutes
             await WriteErrorAsync(context, StatusCodes.Status400BadRequest, "alert_invalid_limit");
             return;
         }
-        if (!EnsureInitialized(store, out var initialization)) { await WriteStoreErrorAsync(context, initialization); return; }
-        var result = store.History(alertId, limit);
+        if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
+        var result = lifecycleStore.History(alertId, limit);
         if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteHistoryErrorAsync(context, result); return; }
         await WriteJsonAsync(context, new
         {
@@ -64,7 +65,7 @@ internal static class AlertLifecycleRoutes
         });
     }
 
-    private static async Task MutateAsync(HttpContext context, IAlertLifecycleStore store, string alertId)
+    private static async Task MutateAsync(HttpContext context, IAlertEngineStore engineStore, IAlertLifecycleStore lifecycleStore, string alertId)
     {
         Prepare(context.Response);
         if (MonitorHost.IsCrossSiteRequest(context)) { await WriteErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden"); return; }
@@ -85,9 +86,9 @@ internal static class AlertLifecycleRoutes
         }
         var key = context.Request.Headers["Idempotency-Key"].ToString();
         var mutation = new AlertLifecycleMutation(alertId, action, request.ExpectedRevision, request.ReasonCode, request.Comment, key);
-        if (!EnsureInitialized(store, out var initialization)) { await WriteStoreErrorAsync(context, initialization); return; }
-        var result = store.Mutate(mutation);
-        if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteStoreErrorAsync(context, result); return; }
+        if (!EnsureInitialized(engineStore, lifecycleStore, out var initialization)) { await WriteInitializationErrorAsync(context, initialization); return; }
+        var result = lifecycleStore.Mutate(mutation);
+        if (result.Status != AlertLifecycleStoreStatus.Success) { await WriteMutationErrorAsync(context, result); return; }
         await WriteJsonAsync(context, new
         {
             schema_version = AlertLifecycleContractVersions.Lifecycle,
@@ -108,10 +109,19 @@ internal static class AlertLifecycleRoutes
         return false;
     }
 
-    private static bool EnsureInitialized(IAlertLifecycleStore store, out AlertLifecycleStoreResult result)
+    private static bool EnsureInitialized(IAlertEngineStore engineStore, IAlertLifecycleStore lifecycleStore, out AlertLifecycleStoreResult result)
     {
-        result = store.Initialize();
-        return result.Status == AlertLifecycleStoreStatus.Success;
+        var engine = engineStore.Initialize();
+        if (engine.Status != AlertStoreStatus.Success || engine.Code is not null)
+        {
+            result = engine.Status == AlertStoreStatus.Busy && engine.Code == "alert_store_busy"
+                ? new(AlertLifecycleStoreStatus.Busy, "alert_lifecycle_store_busy")
+                : new(AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable");
+            return false;
+        }
+
+        result = lifecycleStore.Initialize();
+        return result.Status == AlertLifecycleStoreStatus.Success && result.Code is null;
     }
 
     private static async Task<byte[]?> ReadBodyAsync(HttpContext context)
@@ -130,26 +140,49 @@ internal static class AlertLifecycleRoutes
         return buffer.ToArray();
     }
 
-    private static async Task WriteStoreErrorAsync(HttpContext context, AlertLifecycleStoreResult result)
-    {
-        var status = result.Status switch
+    private static Task WriteInitializationErrorAsync(HttpContext context, AlertLifecycleStoreResult result) =>
+        result.Status == AlertLifecycleStoreStatus.Busy && result.Code == "alert_lifecycle_store_busy"
+            ? WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_busy")
+            : WriteUnavailableAsync(context);
+
+    private static Task WriteReadErrorAsync(HttpContext context, AlertLifecycleStoreResult result) =>
+        (result.Status, result.Code) switch
         {
-            AlertLifecycleStoreStatus.NotFound => StatusCodes.Status404NotFound,
-            AlertLifecycleStoreStatus.Invalid => StatusCodes.Status400BadRequest,
-            AlertLifecycleStoreStatus.Conflict => StatusCodes.Status409Conflict,
-            AlertLifecycleStoreStatus.Busy or AlertLifecycleStoreStatus.Unavailable => StatusCodes.Status503ServiceUnavailable,
-            _ => StatusCodes.Status503ServiceUnavailable,
+            (AlertLifecycleStoreStatus.NotFound, "alert_not_found") => WriteErrorAsync(context, StatusCodes.Status404NotFound, "alert_not_found"),
+            (AlertLifecycleStoreStatus.Busy, "alert_lifecycle_store_busy") => WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_busy"),
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable") => WriteUnavailableAsync(context),
+            _ => WriteUnavailableAsync(context),
         };
-        await WriteErrorAsync(context, status, result.Code ?? "alert_lifecycle_store_unavailable");
+
+    private static Task WriteMutationErrorAsync(HttpContext context, AlertLifecycleStoreResult result)
+    {
+        return (result.Status, result.Code) switch
+        {
+            (AlertLifecycleStoreStatus.NotFound, "alert_not_found") => WriteErrorAsync(context, StatusCodes.Status404NotFound, "alert_not_found"),
+            (AlertLifecycleStoreStatus.Invalid, "alert_invalid_request" or "alert_invalid_action" or "alert_invalid_actor"
+                or "alert_invalid_reevaluation" or "alert_invalid_supersession" or "alert_invalid_source_deletion"
+                or "alert_invalid_reason_code" or "alert_comment_not_sanitized" or "alert_invalid_idempotency_key") =>
+                WriteErrorAsync(context, StatusCodes.Status400BadRequest, result.Code),
+            (AlertLifecycleStoreStatus.Conflict, "alert_invalid_transition" or "alert_revision_conflict" or "alert_idempotency_conflict") =>
+                WriteErrorAsync(context, StatusCodes.Status409Conflict, result.Code),
+            (AlertLifecycleStoreStatus.Busy, "alert_lifecycle_store_busy") => WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_busy"),
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable") => WriteUnavailableAsync(context),
+            _ => WriteUnavailableAsync(context),
+        };
     }
 
-    private static Task WriteHistoryErrorAsync(HttpContext context, AlertLifecycleHistoryResult result) => WriteErrorAsync(context, result.Status switch
-    {
-        AlertLifecycleStoreStatus.NotFound => StatusCodes.Status404NotFound,
-        AlertLifecycleStoreStatus.Invalid => StatusCodes.Status400BadRequest,
-        AlertLifecycleStoreStatus.Busy or AlertLifecycleStoreStatus.Unavailable => StatusCodes.Status503ServiceUnavailable,
-        _ => StatusCodes.Status503ServiceUnavailable,
-    }, result.Code ?? "alert_lifecycle_store_unavailable");
+    private static Task WriteHistoryErrorAsync(HttpContext context, AlertLifecycleHistoryResult result) =>
+        (result.Status, result.Code) switch
+        {
+            (AlertLifecycleStoreStatus.NotFound, "alert_not_found") => WriteErrorAsync(context, StatusCodes.Status404NotFound, "alert_not_found"),
+            (AlertLifecycleStoreStatus.Invalid, "alert_invalid_limit") => WriteErrorAsync(context, StatusCodes.Status400BadRequest, "alert_invalid_limit"),
+            (AlertLifecycleStoreStatus.Busy, "alert_lifecycle_store_busy") => WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_busy"),
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable") => WriteUnavailableAsync(context),
+            _ => WriteUnavailableAsync(context),
+        };
+
+    private static Task WriteUnavailableAsync(HttpContext context) =>
+        WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_unavailable");
 
     private static async Task WriteJsonAsync<T>(HttpContext context, T value)
     {

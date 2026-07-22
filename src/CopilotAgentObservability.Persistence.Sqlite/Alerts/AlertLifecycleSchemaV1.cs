@@ -39,7 +39,12 @@ internal static class AlertLifecycleSchemaV1
         if (!Exists(connection, transaction, "table", "schema_version")) return null;
         using var command = Command(connection, transaction, "SELECT version FROM schema_version WHERE component='alert_lifecycle';");
         var value = command.ExecuteScalar();
-        return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        return value switch
+        {
+            null or DBNull => null,
+            long version => version,
+            _ => throw new FormatException(),
+        };
     }
 
     public static bool AnyObjectsExist(SqliteConnection connection, SqliteTransaction? transaction) =>
@@ -60,7 +65,18 @@ internal static class AlertLifecycleSchemaV1
         ReadVersion(connection, transaction) == Version
         && Definition(connection, transaction, "table", "alert_lifecycle_events") is { } table && Normalize(table) == Normalize(TableSql)
         && Definition(connection, transaction, "trigger", "alert_lifecycle_events_no_update") is { } update && Normalize(update) == Normalize(UpdateTriggerSql)
-        && Definition(connection, transaction, "trigger", "alert_lifecycle_events_no_delete") is { } delete && Normalize(delete) == Normalize(DeleteTriggerSql);
+        && Definition(connection, transaction, "trigger", "alert_lifecycle_events_no_delete") is { } delete && Normalize(delete) == Normalize(DeleteTriggerSql)
+        && HasExactTriggerInventory(connection, transaction);
+
+    private static bool HasExactTriggerInventory(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        using var command = Command(connection, transaction,
+            "SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name='alert_lifecycle_events' ORDER BY name;");
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        while (reader.Read()) names.Add(reader.GetString(0));
+        return names.SequenceEqual(["alert_lifecycle_events_no_delete", "alert_lifecycle_events_no_update"], StringComparer.Ordinal);
+    }
 
     private static string? Definition(SqliteConnection connection, SqliteTransaction? transaction, string type, string name)
     {

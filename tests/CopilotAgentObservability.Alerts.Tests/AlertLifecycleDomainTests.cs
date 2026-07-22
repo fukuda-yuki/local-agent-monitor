@@ -99,5 +99,8 @@ public sealed class AlertLifecycleDomainTests
     {
         Assert.True(AlertLifecycleValidation.IsSanitizedComment(string.Concat(Enumerable.Repeat("😀", 256))));
         Assert.False(AlertLifecycleValidation.IsSanitizedComment(string.Concat(Enumerable.Repeat("😀", 257))));
+        Assert.True(AlertLifecycleValidation.IsSanitizedComment("valid � scalar"));
+        Assert.False(AlertLifecycleValidation.IsSanitizedComment("high \ud800 surrogate"));
+        Assert.False(AlertLifecycleValidation.IsSanitizedComment("low \udc00 surrogate"));
     }
 }
