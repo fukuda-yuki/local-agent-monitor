@@ -47,6 +47,12 @@
     return traceId.length <= 8 ? traceId : `${traceId.slice(0, 8)}…`;
   }
 
+  function formatTime(value) {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.valueOf()) ? value : `${parsed.toLocaleString("ja-JP", { timeZone: "UTC" })} UTC`;
+  }
+
   /* ── KPI + mid/low cards from /api/monitor/overview ── */
 
   function renderKpi(overview, period) {
@@ -239,6 +245,50 @@
     });
   }
 
+  /* ── Latest critical alert from the sanitized Alert Center DTO ── */
+
+  async function renderAlertOverview(period) {
+    const body = document.getElementById("overview-alert-body");
+    const heading = document.getElementById("overview-alert-title");
+    const allLink = document.querySelector("#overview-alert-card .panel-link");
+    if (!body) return;
+    if (allLink) allLink.href = `/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}`;
+    body.replaceChildren(emptyState("アラートを読み込んでいます。"));
+    try {
+      const response = await fetch(`/api/alert-center/v1/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}&limit=1`, { cache: "no-store" });
+      if (!response.ok) throw new Error("alert-center");
+      const snapshot = await response.json();
+      const alert = snapshot.alerts?.[0];
+      const incomplete = snapshot.snapshot_state === "incomplete";
+      if (heading) heading.textContent = incomplete ? "取得範囲の critical alert" : "最新の critical alert";
+      body.replaceChildren();
+      if (!alert) {
+        body.append(emptyState(incomplete
+          ? "不完全なスナップショットの取得範囲では open の critical alert は見つかりませんでした。全体として 0 件とは断定できません。"
+          : "この期間に open の critical alert はありません。"));
+        return;
+      }
+
+      const link = document.createElement("a");
+      link.href = `/alerts?alert=${encodeURIComponent(alert.alert_id)}`;
+      const alertTitle = document.createElement("strong");
+      alertTitle.textContent = alert.rule.title ?? alert.rule.rule_id;
+      const alertState = document.createElement("span");
+      alertState.className = "monitor-subtle";
+      alertState.textContent = `${alert.severity} · ${alert.lifecycle.state} · ${alert.source.surface}@${alert.source.version}`;
+      const timing = document.createElement("span");
+      timing.className = "monitor-subtle";
+      timing.textContent = incomplete
+        ? `取得範囲の観測 ${formatTime(alert.last_observed_at)} · 最新とは断定できません`
+        : `最終観測 ${formatTime(alert.last_observed_at)}`;
+      link.append(alertTitle, alertState, timing);
+      body.append(link);
+    } catch {
+      if (heading) heading.textContent = "critical alert";
+      body.replaceChildren(emptyState("Alert Center を読み込めませんでした。"));
+    }
+  }
+
   /* ── Period toggle ── */
 
   let currentPeriod = "today";
@@ -249,13 +299,17 @@
       button.classList.toggle("active", button.dataset.period === period);
     }
 
-    const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store" });
-    if (!resp.ok) return;
-    const overview = await resp.json();
-    renderKpi(overview, period);
-    renderModels(overview);
-    renderHourly(overview);
-    await renderTopTraces(period);
+    const supplementalRefresh = Promise.allSettled([renderTopTraces(period), renderAlertOverview(period)]);
+    try {
+      const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store" });
+      if (!resp.ok) return;
+      const overview = await resp.json();
+      renderKpi(overview, period);
+      renderModels(overview);
+      renderHourly(overview);
+    } finally {
+      await supplementalRefresh;
+    }
   }
 
   document.getElementById("period-toggle")?.addEventListener("click", (event) => {
@@ -267,4 +321,5 @@
 
   // New projections arriving over SSE refresh the current period in place.
   document.addEventListener("cao-monitor-refresh", () => applyPeriod(currentPeriod));
+  renderAlertOverview(currentPeriod);
 })();

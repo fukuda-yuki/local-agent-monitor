@@ -25,6 +25,7 @@
         <a href="/traces">トレース</a><span class="breadcrumb-sep">›</span>
         <span class="breadcrumb-current">@title</span>
         <span class="breadcrumb-actions">
+            <a class="nav-adjacent" asp-page="/Alerts" asp-route-trace_id="@Model.TraceId">関連 Alert</a>
             @if (Model.RawAvailable)
             {
                 <button type="button" class="copilot-open-btn" id="copilot-open" aria-haspopup="dialog">

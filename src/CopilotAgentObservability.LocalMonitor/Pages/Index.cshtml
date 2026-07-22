@@ -151,6 +151,16 @@
     </div>
 
     <div class="overview-low">
+        <div class="panel" id="overview-alert-card">
+            <div class="panel-head">
+                <span class="panel-title" id="overview-alert-title">最新の critical alert</span>
+                <a class="panel-link" href="/alerts?severity=critical&amp;state=open&amp;period=today">Alert Center →</a>
+            </div>
+            <div class="overview-alert-body" id="overview-alert-body" role="status" aria-live="polite">
+                <p class="empty-state">アラートを読み込んでいます。</p>
+            </div>
+        </div>
+
         <div class="panel" id="hourly-card">
             <div class="panel-head">
                 <span class="panel-title">時間帯別トークン</span>

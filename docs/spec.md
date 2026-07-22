@@ -502,6 +502,37 @@ same-origin, CSRF, bounded audit values, fixed no-leak failures, and
 `Cache-Control: no-store`. Rule logic, Alert Center UI, and notification are
 outside #83.
 
+## Alert Center
+
+Issue #84 freezes the metadata-only [Alert Center](specifications/interfaces/alert-center.md)
+as a consumer of #80 typed bounded receipt/evaluation/suppression projections,
+#81/#82 descriptors, #83 lifecycle, exact Session records, sanitized monitor
+rows, and #61 source-compatibility observations. `GET
+/api/alert-center/v1/alerts` provides a bounded filterable snapshot and
+`/alerts` renders its list/detail, exact evidence state, lifecycle actions,
+coverage facts, and recurring groups. Recurrence requires at least two exact
+distinct Sessions under the same rule/version, exact repository/workspace,
+source/version, and UTC observation date. A snapshot that reaches the 2,000
+receipt acquisition ceiling is explicitly incomplete and does not estimate the
+unseen count or claim supported recurrence.
+
+Evaluation is initiated only by a same-origin, CSRF-protected `POST
+/api/alert-center/v1/evaluations` naming one canonical UUIDv7 Session and exact
+trace. The coordinator verifies ownership, loads every trace span and each
+span `raw_record_id`'s #61 row, and requires one exact surface/application
+version partition before calling #80 evaluate-and-append. The persisted span
+row count must exactly equal the trace projection's positive span count; zero
+or partial projection state is rejected. The default `raw-otlp` receiver has
+no application version and therefore fails this partition gate rather than
+inventing one from its adapter version. Generic projection
+facts bind the input hash as unknown-status row references but do not promote
+any current semantic capability. There is no evaluation on ingestion, startup,
+GET, page navigation, or in browser code; no second alert state store, custom
+receipt parser, notification, or recommendation surface is introduced. The
+metadata-only surface remains available under `--sanitized-only`. D042's
+two-item sidebar remains unchanged; Overview, trace detail, and exact Session
+diagnostics provide contextual links.
+
 ## Sanitized evidence export
 
 Issue #85 sanitized evidence export is an export-only consumer of the #58 safe
@@ -587,6 +618,7 @@ sanitized. The canonical contract is
 | Tool/retry/permission alert rules | [specifications/interfaces/tool-alert-rules.md](specifications/interfaces/tool-alert-rules.md) |
 | Token/context/cache alert rules | [specifications/interfaces/token-context-cache-alert-rules.md](specifications/interfaces/token-context-cache-alert-rules.md) |
 | Alert lifecycle interface | [specifications/interfaces/alert-lifecycle.md](specifications/interfaces/alert-lifecycle.md) |
+| Alert Center interface | [specifications/interfaces/alert-center.md](specifications/interfaces/alert-center.md) |
 | Sanitized evidence export interface | [specifications/interfaces/sanitized-evidence-export.md](specifications/interfaces/sanitized-evidence-export.md) |
 | Source schema drift and Claude Code interface | [specifications/interfaces/source-schema-drift-claude-code.md](specifications/interfaces/source-schema-drift-claude-code.md) |
 | Canvas Session workspace interface | [specifications/interfaces/canvas-session-workspace.md](specifications/interfaces/canvas-session-workspace.md) |
@@ -671,6 +703,13 @@ Publicly documented interfaces are:
   `x-monitor-csrf: local-monitor`, and return `Cache-Control: no-store`.
   These routes remain available under `--sanitized-only` and do not expose or
   mutate receipt evidence.
+- Alert Center endpoints: `GET /api/alert-center/v1/alerts` and `POST
+  /api/alert-center/v1/evaluations`. The read returns only bounded sanitized
+  receipt/lifecycle/evidence/coverage/recurrence projections. The write accepts
+  only the closed `alert.center.evaluation-request.v1`, requires same-origin
+  plus `x-monitor-csrf: local-monitor`, and returns only evaluation ID, ordered
+  receipt IDs, suppressions, and rejected matches. Both use `Cache-Control:
+  no-store`; `/alerts` remains metadata-only under `--sanitized-only`.
 - Sanitized export CLI commands:
   `sanitized-export preview --database <monitor.db> --request <request.json>`,
   `sanitized-export export --database <monitor.db> --request <request.json>

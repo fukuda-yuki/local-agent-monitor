@@ -2409,6 +2409,17 @@ This trusted local acquisition does not add
 signing, authentication, or provenance attestation, and #84 receives no direct
 SQL authority.
 
+Issue #84 consumes this authority without creating a parallel parser or state
+store. Evaluation occurs only after an explicit same-origin/CSRF request names
+one exact Session and trace; every monitor-span raw-record owner must resolve to
+one agreeing #61 source/application-version observation. Generic projection
+rows bind the deterministic input as unknown-status evidence but cannot promote
+semantic rule capabilities. Reads use bounded typed #80 projections plus #83
+lifecycle, and evidence navigation requires persisted row identity together
+with the exact Session/trace/span/time/source tuple. Ingestion, startup, GET,
+navigation, and browser code never evaluate alerts. The canonical behavior is
+[Alert Center](specifications/interfaces/alert-center.md).
+
 ## D068: Sanitized export separates trusted capture from structural inspection
 
 Status: Accepted (2026-07-22)

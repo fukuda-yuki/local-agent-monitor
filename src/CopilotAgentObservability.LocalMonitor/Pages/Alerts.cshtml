@@ -1,0 +1,97 @@
+@page "/alerts"
+@model AlertsModel
+
+<section class="alert-center-page" id="alert-center-root" data-sanitized-only="@(Model.SanitizedOnly ? "true" : "false")">
+    <div class="overview-head alert-center-head">
+        <div>
+            <nav class="breadcrumb" aria-label="パンくず"><a href="/">概要</a><span class="breadcrumb-sep">›</span><span>Alert Center</span></nav>
+            <h2 class="overview-title">Alert Center</h2>
+            <p class="monitor-subtle">frozen receipt と lifecycle の sanitized read surface</p>
+        </div>
+        <span class="monitor-badge" id="alert-sanitized-state">@(Model.SanitizedOnly ? "sanitized-only" : "raw-default · sanitized DTO")</span>
+    </div>
+
+    <form class="panel alert-filter-panel" id="alert-filters" aria-label="アラートの絞り込み">
+        <div class="alert-filter-grid">
+            <label>重大度
+                <select id="alert-filter-severity" name="severity">
+                    <option value="">すべて</option><option value="critical">critical</option><option value="warning">warning</option><option value="info">info</option>
+                </select>
+            </label>
+            <label>状態
+                <select id="alert-filter-state" name="state">
+                    <option value="">すべて</option><option value="open">open</option><option value="acknowledged">acknowledged</option><option value="dismissed">dismissed</option><option value="resolved">resolved</option><option value="superseded">superseded</option>
+                </select>
+            </label>
+            <label>ルール
+                <select id="alert-filter-rule" name="rule_id"><option value="">すべて</option></select>
+            </label>
+            <label>ソース
+                <select id="alert-filter-source" name="source_surface"><option value="">すべて</option></select>
+            </label>
+            <label>完全性
+                <select id="alert-filter-completeness" name="completeness">
+                    <option value="">すべて</option><option value="unbound">unbound</option><option value="partial">partial</option><option value="rich">rich</option><option value="full">full</option>
+                </select>
+            </label>
+            <label>期間
+                <select id="alert-filter-period" name="period"><option value="today">今日</option><option value="7d">7日</option><option value="30d" selected>30日</option><option value="custom">指定</option></select>
+            </label>
+            <label>Repository
+                <input id="alert-filter-repository" name="repository" type="text" maxlength="256" autocomplete="off" />
+            </label>
+            <label>Workspace
+                <input id="alert-filter-workspace" name="workspace" type="text" maxlength="256" autocomplete="off" />
+            </label>
+            <label class="alert-custom-date" hidden>開始（UTC）
+                <input id="alert-filter-from" name="from" type="date" />
+            </label>
+            <label class="alert-custom-date" hidden>終了（UTC）
+                <input id="alert-filter-to" name="to" type="date" />
+            </label>
+        </div>
+        <div class="alert-filter-actions">
+            <button type="submit" class="monitor-btn monitor-btn-primary">適用</button>
+            <a class="monitor-btn" href="/alerts">解除</a>
+        </div>
+    </form>
+
+    <p id="alert-status" class="monitor-subtle" role="status">アラートを読み込んでいます。</p>
+    <div id="alert-error" class="error-strip" role="alert" hidden>Alert Center を読み込めませんでした。再読み込みしてください。</div>
+    <div id="alert-empty" class="panel empty-state" hidden>この条件のアラートはありません。</div>
+
+    <div class="alert-center-grid" id="alert-content" hidden>
+        <div class="panel alert-list-panel">
+            <div class="panel-head"><span class="panel-title">アラート</span><span class="panel-meta" id="alert-count"></span></div>
+            <div class="monitor-table-wrapper">
+                <table class="monitor-table alert-table">
+                    <thead><tr><th>重大度 / 状態</th><th>ルール</th><th>Session / trace</th><th>観測 / 閾値</th><th>ソース / 完全性</th><th>初回 / 最終 / Evidence</th></tr></thead>
+                    <tbody id="alert-rows"></tbody>
+                </table>
+            </div>
+            <nav class="alert-pagination" id="alert-pagination" aria-label="アラートページ">
+                <button type="button" class="monitor-btn" id="alert-page-previous" disabled>前へ</button>
+                <span class="panel-meta" id="alert-page-info"></span>
+                <button type="button" class="monitor-btn" id="alert-page-next" disabled>次へ</button>
+            </nav>
+        </div>
+        <aside class="panel alert-detail-panel" id="alert-detail" aria-live="off">
+            <h3 id="alert-detail-heading" tabindex="-1">詳細</h3>
+            <div id="alert-detail-body"></div>
+        </aside>
+    </div>
+
+    <section class="panel alert-recurring-panel" aria-labelledby="alert-recurring-heading">
+        <div class="panel-head"><span class="panel-title" id="alert-recurring-heading">Recurring patterns</span><span class="panel-meta">exact scope · minimum 2 Sessions</span></div>
+        <div id="alert-recurring"><p class="empty-state">集計を読み込んでいます。</p></div>
+    </section>
+
+    <section class="panel alert-coverage-panel" aria-labelledby="alert-coverage-heading">
+        <div class="panel-head"><span class="panel-title" id="alert-coverage-heading">Coverage / suppressions</span><span class="panel-meta">フィルター対象外 · アラートではありません</span></div>
+        <div id="alert-coverage"><p class="empty-state">coverage を読み込んでいます。</p></div>
+    </section>
+
+    <p id="alert-live" class="doctor-live" role="status" aria-live="polite" aria-atomic="true"></p>
+</section>
+
+<script src="/alert-center.js" defer></script>

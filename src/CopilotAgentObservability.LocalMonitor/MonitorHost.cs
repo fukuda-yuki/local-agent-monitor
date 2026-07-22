@@ -215,6 +215,27 @@ internal static class MonitorHost
         var alertConnectionString = new SqliteConnectionStringBuilder { DataSource = options.DatabasePath, Pooling = false }.ToString();
         var alertEngineStore = testOptions?.AlertEngineStore ?? new SqliteAlertEngineStore(alertConnectionString);
         var alertLifecycleStore = testOptions?.AlertLifecycleStore ?? new SqliteAlertLifecycleStore(alertConnectionString, timeProvider);
+        var alertEvidenceResolver = new AlertCenterEvidenceResolver(sessionStore, projectionStore, compatibilityStore);
+        var alertEngineQueryStore = alertEngineStore as IAlertEngineQueryStore;
+        var alertCenterReadModel = testOptions?.AlertCenterReadModel
+            ?? (alertEngineQueryStore is null
+                ? new UnavailableAlertCenterReadModel()
+                : new SqliteAlertCenterReadModel(
+                    alertEngineStore,
+                    alertEngineQueryStore,
+                    alertLifecycleStore,
+                    projectionStore,
+                    sessionStore,
+                    alertEvidenceResolver,
+                    timeProvider));
+        var alertCenterPolicy = AlertCenterEvaluationPolicy.Create();
+        var alertCenterEvaluationCoordinator = testOptions?.AlertCenterEvaluationCoordinator ?? new AlertCenterEvaluationCoordinator(
+            new AlertCenterEvaluationSnapshotComposer(sessionStore, projectionStore, compatibilityStore),
+            new AlertEvaluationApplication(
+                alertCenterPolicy.Registry,
+                alertCenterPolicy.Configuration,
+                alertEvidenceResolver,
+                alertEngineStore));
 
         var app = builder.Build();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
@@ -261,6 +282,11 @@ internal static class MonitorHost
                     await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, HistoricalImportErrorCodes.StoreUnavailable);
                     return;
                 }
+                if (AlertCenterRoutes.IsPath(context.Request.Path))
+                {
+                    await AlertCenterRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_center_store_unavailable");
+                    return;
+                }
                 if (AlertLifecycleRoutes.IsAlertPath(context.Request.Path)
                     && exception is BadHttpRequestException alertBodyException
                     && alertBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge)
@@ -289,7 +315,8 @@ internal static class MonitorHost
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
             var alertPath = AlertLifecycleRoutes.IsAlertPath(context.Request.Path);
             var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath || alertPath || historicalImportPath)
+            var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
+            if (retentionPath || sanitizedExportPath || alertPath || historicalImportPath || alertCenterPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -310,6 +337,10 @@ internal static class MonitorHost
                 else if (alertPath)
                 {
                     await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (alertCenterPath)
+                {
+                    await AlertCenterRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (DoctorUiRoutes.IsDoctorUiPath(context.Request.Path))
                 {
@@ -338,6 +369,7 @@ internal static class MonitorHost
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
+        AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1746,6 +1778,10 @@ internal sealed class MonitorHostTestOptions
     public IAlertEngineStore? AlertEngineStore { get; set; }
 
     public IAlertLifecycleStore? AlertLifecycleStore { get; set; }
+
+    public IAlertCenterReadModel? AlertCenterReadModel { get; init; }
+
+    public IAlertCenterEvaluationCoordinator? AlertCenterEvaluationCoordinator { get; init; }
 
     public Func<RetentionCatalogStore, TimeProvider, RetentionMutationApplicationService>? RetentionMutationApplicationFactory { get; init; }
 

@@ -96,6 +96,23 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
+    public async Task TraceDetail_RelatedAlertLinkPreservesOpaqueTraceIdAsOneQueryValue()
+    {
+        const string opaqueTraceId = "trace&scope";
+        using var temp = new MonitorTempDirectory();
+        SeedProjectedTrace(
+            temp,
+            AgentTracePayload.Replace(TraceId, opaqueTraceId, StringComparison.Ordinal),
+            rawRecordTraceId: opaqueTraceId);
+        await using var host = await StartHostAsync(temp);
+
+        var body = await host.Client.GetStringAsync($"/traces/{Uri.EscapeDataString(opaqueTraceId)}");
+
+        Assert.Contains("href=\"/alerts?trace_id=trace%26scope\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"/alerts?trace_id=trace&amp;scope\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TraceDetail_RendersCopilotDrawerUnderRawDefault()
     {
         using var temp = new MonitorTempDirectory();

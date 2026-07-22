@@ -397,13 +397,23 @@ trusted alert_engine v1 query
   -> strict #80 owner validation + fully typed receipt/suppression projections
   -> #84 server-side projection without direct SQL
 
+explicit Session + trace evaluation request
+  -> exact Session ownership + complete monitor-span rows
+  -> exact #61 source observation for each raw_record_id
+  -> unknown-capability #80 evaluate-and-append
+  -> typed #80 receipt/suppression query + #83 lifecycle
+  -> bounded #84 Alert Center API/UI and exact recurrence
+
 trusted read-only SQLite snapshot (#58 + optional #59 / #80)
   -> deterministic #85 dependency closure + canonical members
   -> fail-closed scanner + checksums
   -> atomic CLI file or loopback HTTP archive publication
 ```
 
-The historical and lifecycle flows do not mutate their parent evidence.
+The historical, lifecycle, and Alert Center flows do not mutate their parent evidence.
+The Alert Center has no background evaluator and no independent state store;
+its generic monitor facts remain unknown capability until a named #61
+source/version adapter is promoted.
 Sanitized bundle inspection proves structure and checksums, not origin or store
 provenance.
 
