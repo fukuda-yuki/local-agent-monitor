@@ -1,7 +1,7 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "3e17ea0b235a6dbfe8f9e0b0954c105ccb83989c",
-  "final_validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+  "final_validation_sha": "905b7b750a655daff7cbe73bbf5ad770bf29fce9",
   "inventory_date": "2026-07-22",
   "environment_boundary": "Windows native current-user Issue #85 worktree; deterministic synthetic fixtures and server-managed loopback test hosts only.",
   "active_rows": [
@@ -16,7 +16,7 @@
         "compatibility": ["sanitized-evidence-bundle.v1"],
         "hook": [],
         "otel": [],
-        "binding": ["immutable-source-snapshot"],
+        "binding": ["trusted-owner-snapshot-provider"],
         "restart": ["process-local-result-state"],
         "retention": []
       },
@@ -32,18 +32,18 @@
       "evidence": [
         {
           "kind": "automated",
-          "reference": "Issue #85 focused candidate evidence: solution build 0 warnings/0 errors; LocalMonitor sanitized export 53/53; ConfigCli sanitized export 1/1; CLI preview/export/result and exact golden/schema checks passed.",
+          "reference": "Corrected Issue #85 checkpoint: solution build 0 warnings/0 errors; LocalMonitor authority/service/API/archive/scanner 47/47; ConfigCli 3/3; schema and exact golden inspection passed.",
           "compatibility_basis": "Executed from the exact implementation tree committed as the validation SHA; the repository full test command was intentionally deferred for coordinator serialization."
         }
       ],
-      "actual_result": "Focused CLI, API, archive, schema, fixture, and publication behavior passed. The required unchanged-candidate integrated full solution gate has not yet executed.",
+      "actual_result": "Focused authority, CLI, API, archive, schema, fixture, and publication behavior passed. Public requests reject snapshot/record bytes and production fails closed because no trusted owner provider is wired. The required unchanged-candidate integrated full solution gate has not executed.",
       "classification": "not_attempted",
       "severity": "medium",
-      "blocker": "The coordinator deferred the full solution test while concurrent lanes were active, so the repository close gate is incomplete.",
-      "retry_condition": "Coordinator integrates the accepted candidate, runs build/bootstrap/full plus the listed focused CLI/API/fixture filters at one clean evidence SHA, then promotes 91-E-085 to passed and recomputes release decision before Issue close.",
-      "unverified_capability": "Unchanged-candidate integrated full solution regression result for the accepted Issue #85 revision.",
+      "blocker": "Trusted #58/#59/#80 owner/store snapshot providers are not wired, #59 shared validation is not integrated, and the coordinator-deferred full solution test is incomplete.",
+      "retry_condition": "Integrate the owner/store providers and shared #59 validator, demonstrate working preview/export from one coherent local snapshot, then run build/bootstrap/full plus focused authority/CLI/API/fixture filters at one clean evidence SHA.",
+      "unverified_capability": "Working production snapshot capture and unchanged-candidate integrated full solution regression result.",
       "owner": "Issue #85 sanitized evidence export",
-      "validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+      "validation_sha": "905b7b750a655daff7cbe73bbf5ad770bf29fce9",
       "validation_date": "2026-07-22",
       "environment_boundary": "Exact candidate build and deterministic synthetic focused tests; no live provider, real telemetry, or remote publication."
     },
@@ -74,18 +74,18 @@
       "evidence": [
         {
           "kind": "automated",
-          "reference": "Issue #85 LocalMonitor sanitized export service and surface tests passed 53/53, including all Issue #91 corpus cases across declared transformations and negative archive/publication cases.",
+          "reference": "Corrected Issue #85 authority/service/surface tests passed 47/47 and ConfigCli tests passed 3/3, including Issue #91 marker transformations, caller-injection rejection, producer profiles, strict ZIP/inventory/bounds, and stored-download negatives.",
           "compatibility_basis": "The tests execute the exact repository corpus, scanner, manifest validator, archive inspector, and publication implementation at the validation SHA."
         }
       ],
-      "actual_result": "Independent review rejected the candidate: arbitrary caller bytes and markers could mint repository_safe_validation=passed without an accepted producer contract, and archive, dependency, path, inventory, bounds, preview, and stored-download negative cases were incomplete.",
+      "actual_result": "The corrected checkpoint closes caller-byte injection and passes the available #58/#80 producer, scanner, archive, dependency, inventory, bounds, preview, and stored-download negative matrix. End-to-end production validation remains unavailable because the trusted owner providers and shared #59 validator are not integrated.",
       "classification": "failed",
       "severity": "high",
-      "blocker": "The candidate did not establish producer-authorized sanitized evidence and therefore could not support its repository-safe validation claim.",
-      "retry_condition": "Freeze a closed producer/profile grammar, add the corrected negative matrix first, pass exact producer/canonical-envelope validation plus strict archive/inventory/bounds/download checks at one implementation SHA, and rerun the Issue #91 scanner corpus before promotion.",
-      "unverified_capability": "Producer-authorized canonical carrier validation and the corrected fail-closed negative matrix.",
+      "blocker": "Production cannot yet capture a coherent producer-owned #58/#59/#80 snapshot, and instruction_finding_handoff remains fail-closed until the shared #59 validator is integrated.",
+      "retry_condition": "Wire trusted owner/store snapshot adapters, integrate the shared #59 consumer validator without copying its logic, rerun the full carrier/scanner matrix from a working production preview/export, and only then consider promotion.",
+      "unverified_capability": "End-to-end producer-owned snapshot provenance and #59 carrier validation in the production export path.",
       "owner": "Issue #85 sanitized evidence export",
-      "validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+      "validation_sha": "905b7b750a655daff7cbe73bbf5ad770bf29fce9",
       "validation_date": "2026-07-22",
       "environment_boundary": "Deterministic synthetic repository corpus and generated in-memory/file-system bundles; no general DLP, recursive transformation, encryption, or live-data claim."
     }

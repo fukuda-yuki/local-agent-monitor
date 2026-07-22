@@ -1,11 +1,13 @@
-# Issue #85 M1 — Rejected Candidate Review
+# Issue #85 M1 — Rejected Candidate and Corrected Checkpoint Review
 
-This record is superseded as pass evidence. Independent review rejected the
-candidate because arbitrary caller bytes and caller markers could establish a
+The first candidate is superseded as pass evidence. Independent review rejected
+it because arbitrary caller bytes and caller markers could establish a
 `repository_safe_validation=passed` claim without exact accepted producer
 validation. Matrix row `91-S-085` is temporarily `failed` / high severity and
-the release remains blocked until the corrected negative matrix passes at a new
-implementation SHA.
+the release remains blocked. Corrected checkpoint `905b7b750a655daff7cbe73bbf5ad770bf29fce9`
+closes caller-byte injection and the independent hardening findings, but it is
+not Issue-complete: production snapshot providers and shared #59 validation are
+not integrated.
 
 Scope: shared sanitized-export service and contracts, Config CLI commands,
 Local Monitor loopback routes, canonical schema/golden fixtures, focused tests,
@@ -16,7 +18,41 @@ future-registry edit was added.
 Implementation candidate:
 `48d3734106fb572c5d8f013f8935c4288147ee23`.
 
-## Validation executed
+Corrected fail-closed checkpoint:
+`905b7b750a655daff7cbe73bbf5ad770bf29fce9`.
+
+## Corrected checkpoint evidence
+
+The public HTTP and CLI requests now contain only creation time, selection, and
+supplemental markers. Snapshot, records, dependencies, capabilities, and
+canonical bytes are rejected as unknown input. Creation captures one stable
+snapshot through an application-wired trusted provider; the pure snapshot
+service is internal/test-only. Production composition currently uses an
+unavailable provider and returns `snapshot_provider_unavailable`, so no bundle
+can be minted from caller-provided bytes while owner adapters are absent.
+
+Fresh validation at the corrected checkpoint:
+
+- Claude skill mirror check passed (five shared skills).
+- Solution build passed with zero warnings and zero errors.
+- Playwright Chromium bootstrap passed.
+- Local Monitor authority/service/API/archive/scanner tests passed 47/47.
+- Config CLI sanitized export tests passed 3/3.
+- Manifest JSON Schema validation and executable golden bundle inspection
+  passed; golden SHA-256 is
+  `cfa37600ed5973c295d8920679d9dd99de9c669b4cdb77140957b35548f23769`.
+- #58 and #80 closed producer checks, strict ZIP headers/inventory, dependency
+  resolution, bounded reads, and stored-download reinspection passed.
+- #59 remains fail-closed as `producer_validator_unavailable` without copied
+  validator logic.
+
+The coordinator explicitly deferred `dotnet test CopilotAgentObservability.slnx`;
+focused tests do not replace it. Runtime preview/export also remain unavailable
+until coherent #58/#59/#80 owner/store providers and the shared #59 validator are
+integrated. Rows `91-E-085` and `91-S-085` therefore remain `not_attempted` and
+`failed`, and the release remains blocked.
+
+## Rejected candidate validation
 
 ```powershell
 pwsh scripts\agent\sync-claude-skills.ps1 -Check
@@ -73,13 +109,12 @@ secure-erasure proof.
 
 ## Foundation boundary
 
-The v1 public request intentionally contains an immutable source-neutral
-snapshot and exact canonical record bytes. The Local Monitor database path is
-used only to derive the server-controlled sibling output directory; routes do
-not query or rediscover database records. This establishes deterministic
-selection, exact dependency closure, and adapter-independent validation without
-adding a migration. Snapshot construction, completeness, and source
-authorization remain caller-owned until a later source adapter is specified.
+The v1 public request intentionally excludes the source snapshot and canonical
+record bytes. A trusted application-owned provider is the only creation
+authority. Bundle inspection verifies canonical profiles, framing, inventory,
+checksums, and scanner rules but does not claim source/store provenance. The
+current unavailable provider is an intermediate safety checkpoint, not the
+working Wave 2 runtime capability.
 
 ## Integration-owner handoff
 
@@ -93,19 +128,19 @@ The top-level source-of-truth files were intentionally not edited in this lane.
 The coordinator should make these exact promotions:
 
 - `docs/requirements.md`: add a required sanitized evidence sharing capability
-  covering explicit selection/dependency closure, deterministic versioned
-  bundle/manifest, fail-closed repository-safe validation, CLI and loopback API,
-  explicit unavailable optional capabilities, and the no upload/sign/encrypt/
-  import/replay/backup/restore boundary.
+  covering trusted owner/store snapshot capture, explicit selection/dependency
+  closure, deterministic versioned bundle/manifest, fail-closed repository-safe
+  validation, CLI and loopback API, explicit unavailable optional capabilities,
+  and the no upload/sign/encrypt/import/replay/backup/restore boundary.
 - `docs/spec.md`: add Sanitized Evidence Export to current product shape and the
   public-interface map, pointing to
   `docs/specifications/interfaces/sanitized-evidence-export.md`.
-- `docs/decisions.md`: record the accepted source-neutral immutable-snapshot
-  foundation, deterministic ZIP-store/checksum contract, bounded negative
-  scanner limitations, and caller-owned snapshot authenticity boundary.
-- `docs/task.md`: mark Issue #85 implementation at the accepted candidate and
-  retain the integrated full-gate / Issue #91 registry transition as pending
-  until coordinator evidence is complete.
+- `docs/decisions.md`: record the trusted owner-provider boundary, deterministic
+  ZIP-store/checksum contract, bounded negative scanner limitations, and the
+  distinction between structural bundle inspection and source provenance.
+- `docs/task.md`: keep Issue #85 blocked until owner providers, #59 validation,
+  and the integrated full gate are complete; record the corrected checkpoint as
+  partial evidence only.
 
 Self-review found no change to the four files above, no real data or credential,
 no sensitive bundle path, no generated runtime artifact, and no unrelated diff.
