@@ -40,9 +40,9 @@
       "else": {
         "properties": {
           "schema_version": { "const": "historical-evidence.repository-safe.v1" },
-          "selection": { "properties": { "explicit_session_ids": { "items": { "$ref": "#/$defs/sessionRef" } } } },
-          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "raw_local_descriptor": { "type": "null" } } } },
-          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" } } } },
+          "selection": { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" }, "task_label": { "$ref": "#/$defs/nullableTaskRef" }, "experiment_label": { "$ref": "#/$defs/nullableExperimentRef" }, "explicit_session_ids": { "items": { "$ref": "#/$defs/sessionRef" } } } },
+          "sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "raw_local_descriptor": { "type": "null" }, "metadata": { "allOf": [{ "$ref": "#/$defs/decisionMetadata" }, { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" } } }] } } } },
+          "excluded_sessions": { "items": { "properties": { "session_id": { "$ref": "#/$defs/sessionRef" }, "metadata": { "oneOf": [{ "type": "null" }, { "allOf": [{ "$ref": "#/$defs/decisionMetadata" }, { "properties": { "repository": { "$ref": "#/$defs/nullableRepositoryRef" }, "workspace": { "$ref": "#/$defs/nullableWorkspaceRef" } } }] }] } } } },
           "evidence_groups": {
             "items": {
               "properties": {
@@ -69,8 +69,12 @@
     "sessionRef": { "type": "string", "pattern": "^session-ref-[0-9a-f]{32}$" },
     "traceRef": { "type": "string", "pattern": "^trace-ref-[0-9a-f]{32}$" },
     "spanRef": { "type": "string", "pattern": "^span-ref-[0-9a-f]{32}$" },
+    "nullableRepositoryRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^repository-ref-[0-9a-f]{32}$" }] },
+    "nullableWorkspaceRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^workspace-ref-[0-9a-f]{32}$" }] },
+    "nullableTaskRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^task-ref-[0-9a-f]{32}$" }] },
+    "nullableExperimentRef": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^experiment-ref-[0-9a-f]{32}$" }] },
     "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
-    "rawId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$" },
+    "rawId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$" },
     "time": { "type": "string", "format": "date-time" },
     "nullableString": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 256 }] },
     "nullableTime": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },

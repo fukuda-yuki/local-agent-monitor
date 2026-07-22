@@ -144,7 +144,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             if (raw.References.Count != safe.References.Count || safe.ExactCallId is not null || safe.ExactOwnershipId is not null
                 || raw.NumericValue != safe.NumericValue || raw.Unit != safe.Unit || raw.Status != safe.Status
                 || raw.CanonicalCallHash != safe.CanonicalCallHash || raw.FindingId != safe.FindingId
-                || raw.FindingReceipt != safe.FindingReceipt || raw.FindingCandidate != safe.FindingCandidate)
+                || !FindingAssociationMatches(raw.FindingReceipt, raw.FindingCandidate, safe.FindingReceipt, safe.FindingCandidate))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
             for (var refIndex = 0; refIndex < raw.References.Count; refIndex++)
             {
@@ -161,6 +161,22 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
         }
         if (!DistributionMatches(extraction.RawLocal.Distribution, extraction.RepositorySafe.Distribution))
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
+    }
+
+    private static bool FindingAssociationMatches(
+        InstructionFindingReceiptV1? rawReceipt,
+        InstructionRuleCandidateV1? rawCandidate,
+        InstructionFindingReceiptV1? safeReceipt,
+        InstructionRuleCandidateV1? safeCandidate)
+    {
+        if (rawReceipt is null || safeReceipt is null)
+            return rawReceipt is null && safeReceipt is null && rawCandidate is null && safeCandidate is null;
+        if ((rawCandidate is null) != (safeCandidate is null)) return false;
+        var raw = new InstructionFindingHandoffV1(InstructionFindingContractsV1.HandoffSchemaVersion, rawReceipt.AnalysisRunId,
+            [rawReceipt], rawCandidate is null ? [] : [rawCandidate]);
+        var safe = new InstructionFindingHandoffV1(InstructionFindingContractsV1.HandoffSchemaVersion, safeReceipt.AnalysisRunId,
+            [safeReceipt], safeCandidate is null ? [] : [safeCandidate]);
+        return InstructionFindingJsonV1.Serialize(raw).SequenceEqual(InstructionFindingJsonV1.Serialize(safe));
     }
 
     private static string SafeSession(Guid id) => InstructionFindingReferenceTokenizationV1.Tokenize(new(

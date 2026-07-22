@@ -11,6 +11,12 @@ internal static class HistoricalEvidenceContractsV1
     internal const int MaximumSessions = 200;
     internal const int MaximumGroupsPerSession = 256;
     internal const int MaximumReferencesPerGroup = 16;
+    internal const int MaximumNativeIdsPerSession = 256;
+    internal const int MaximumRunsPerSession = 256;
+    internal const int MaximumEventsPerSession = MaximumGroupsPerSession * MaximumReferencesPerGroup;
+    internal const int MaximumInstructionFindingHandoffs = MaximumSessions * MaximumGroupsPerSession;
+    internal const int MaximumInstructionFindingPayloadBytes = MaximumPayloadBytes;
+    internal const int MaximumInstructionFindingTotalBytes = MaximumPayloadBytes;
     internal const int MaximumDescriptorLength = 160;
     internal const int MaximumPayloadBytes = 64 * 1024 * 1024;
 }

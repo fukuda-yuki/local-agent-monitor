@@ -202,6 +202,7 @@ public sealed class HistoricalEvidenceExtractionTests
     [InlineData("github_pat_abcdefghijklmnopqrstuvwxyz123456")]
     [InlineData("AKIAIOSFODNN7EXAMPLE")]
     [InlineData("password=correct-horse-battery-staple")]
+    [InlineData("Customer SSN 123-45-6789")]
     public async Task ExtractAsync_RejectsSensitiveDescriptorFromBothRepresentations(string descriptor)
     {
         var session = Metadata(1);
@@ -236,6 +237,91 @@ public sealed class HistoricalEvidenceExtractionTests
         Assert.Matches("^session-ref-[0-9a-f]{32}$", projected.SessionId);
         Assert.Matches("^trace-ref-[0-9a-f]{32}$", projected.TraceId);
         Assert.Matches("^span-ref-[0-9a-f]{32}$", projected.SpanId);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_UsesAnyCapturedSurfaceAndDoesNotAuthorizeDescriptorsWithoutCapability()
+    {
+        var session = Metadata(1, surface: SessionSourceSurface.CopilotSdk, capabilities: Capabilities(all: true) with { RawLocalDescriptor = false }) with
+        {
+            SourceSurfaces = new[] { SessionSourceSurface.ClaudeCode, SessionSourceSurface.CopilotSdk }.Order().ToArray(),
+            SourceProvenance = new HistoricalSourceProvenanceV1[]
+            {
+                new(SessionSourceSurface.ClaudeCode, "1.0.0", "adapter.v1"),
+                new(SessionSourceSurface.CopilotSdk, "1.0.0", "adapter.v1"),
+            }.OrderBy(value => value.SourceSurface).ToArray(),
+        };
+        var source = new RecordingSnapshotSource("snapshot-multi-surface", [session], Evidence);
+
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(surfaces: [SessionSourceSurface.ClaudeCode]), source, CancellationToken.None);
+
+        Assert.Single(result.RawLocal.Sessions);
+        Assert.Equal([false], source.IncludeDescriptors);
+    }
+
+    [Theory]
+    [InlineData("C:device-relative", null)]
+    [InlineData(null, "C:device-relative")]
+    public async Task ExtractAsync_RejectsDeviceRelativeExactCarriers(string? callId, string? ownershipId)
+    {
+        var session = Metadata(1);
+        var kind = callId is null ? HistoricalEvidenceGroupKindV1.SubagentFanOut : HistoricalEvidenceGroupKindV1.RepeatedToolCall;
+        var source = new RecordingSnapshotSource("snapshot-device-relative", [session], _ =>
+        [
+            Group(kind, [Reference(session)], exactCallId: callId, exactOwnershipId: ownershipId),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(Selection(), source, CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
+    }
+
+    [Fact]
+    public async Task Deserialize_RejectsNullModelProperty()
+    {
+        var session = Metadata(1);
+        session = session with { ModelObservations = [new("gpt-5", Reference(session))] };
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(), new RecordingSnapshotSource("snapshot-null-model", [session], Evidence), CancellationToken.None);
+        var node = JsonNode.Parse(result.RawLocalBytes)!.AsObject();
+        node["sessions"]!.AsArray()[0]!["metadata"]!["model_observations"]!.AsArray()[0]!["model"] = null;
+
+        var exception = Assert.Throws<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceJsonV1.Deserialize(Encoding.UTF8.GetBytes(node.ToJsonString())));
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidSerialization, exception.Code);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_OmitsSsnShapedRepositoryMetadataFromSafeBytes()
+    {
+        const string sensitive = "Customer SSN 123-45-6789";
+        var session = Metadata(1, repository: sensitive);
+
+        var result = await HistoricalEvidenceExtractorV1.ExtractAsync(
+            Selection(repository: sensitive), new RecordingSnapshotSource("snapshot-safe-ssn", [session], Evidence), CancellationToken.None);
+
+        Assert.Equal(sensitive, result.RawLocal.Selection.Repository);
+        Assert.Null(result.RepositorySafe.Selection.Repository);
+        Assert.Null(Assert.Single(result.RepositorySafe.Sessions).Metadata.Repository);
+        Assert.DoesNotContain(sensitive, Encoding.UTF8.GetString(result.RepositorySafeBytes));
+    }
+
+    [Fact]
+    public async Task ExtractAsync_RejectsDurationWithoutExactEvidenceReference()
+    {
+        var session = Metadata(1) with
+        {
+            DurationObservations = [new HistoricalRawDurationObservationV1(1, null!)],
+        };
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            HistoricalEvidenceExtractorV1.ExtractAsync(
+                Selection(), new RecordingSnapshotSource("snapshot-null-duration-ref", [session], Evidence), CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidContract, exception.Code);
     }
 
     [Fact]

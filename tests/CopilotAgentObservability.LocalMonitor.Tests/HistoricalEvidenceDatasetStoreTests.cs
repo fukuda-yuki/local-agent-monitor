@@ -296,6 +296,38 @@ public sealed class HistoricalEvidenceDatasetStoreTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public async Task Get_MapsChecksumMatchedNullModelToFixedPersistenceFailure()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"history-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            var store = new SqliteHistoricalEvidenceDatasetStoreV1(path);
+            store.CreateSchema();
+            var extraction = await HistoricalEvidenceTestFixture.CreateAsync(CancellationToken.None, model: "gpt-5");
+            store.Save(extraction, DateTimeOffset.UtcNow);
+            using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                connection.Open();
+                using var select = connection.CreateCommand();
+                select.CommandText = "SELECT payload_json FROM historical_evidence_datasets WHERE representation='raw_local';";
+                var node = JsonNode.Parse((string)select.ExecuteScalar()!)!.AsObject();
+                node["sessions"]!.AsArray()[0]!["metadata"]!["model_observations"]!.AsArray()[0]!["model"] = null;
+                var payload = node.ToJsonString();
+                using var update = connection.CreateCommand();
+                update.CommandText = "UPDATE historical_evidence_datasets SET payload_json=$payload,payload_sha256=$checksum WHERE representation='raw_local';";
+                update.Parameters.AddWithValue("$payload", payload);
+                update.Parameters.AddWithValue("$checksum", HistoricalEvidenceExtractorV1.Sha256(Encoding.UTF8.GetBytes(payload)));
+                Assert.Equal(1, update.ExecuteNonQuery());
+            }
+
+            var exception = Assert.Throws<HistoricalEvidenceValidationException>(() => store.Get(extraction.RawLocal.ExtractionId));
+            Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception.Code);
+            Assert.Null(exception.InnerException);
+        }
+        finally { File.Delete(path); }
+    }
 }
 
 internal static class HistoricalEvidenceTestFixture
@@ -303,7 +335,8 @@ internal static class HistoricalEvidenceTestFixture
     internal static async Task<HistoricalEvidenceExtractionV1> CreateAsync(
         CancellationToken cancellationToken,
         string status = "error",
-        string? rawDescriptor = null)
+        string? rawDescriptor = null,
+        string? model = null)
     {
         var sessionId = Guid.Parse("018f0000-0000-7000-8000-000000000001");
         var metadata = new HistoricalSessionMetadataV1(
@@ -318,7 +351,12 @@ internal static class HistoricalEvidenceTestFixture
             new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
             new(true, true, true, true, true, true, true, true, true, true, true, true),
             [new(sessionId, "trace-1", "span-1", 1, HistoricalEvidenceRelativePositionV1.Anchor)],
-            []);
+            [])
+        {
+            ModelObservations = model is null
+                ? []
+                : [new(model, new(sessionId, "trace-1", "span-1", 1, HistoricalEvidenceRelativePositionV1.Anchor))],
+        };
         var source = new SingleSource(metadata, status, rawDescriptor);
         var selection = new HistoricalEvidenceSelectionV1(
             "repo", null, null, null, [], [], null, null, 50, false);

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
@@ -19,6 +20,12 @@ internal static partial class HistoricalEvidenceExtractorV1
 
     [GeneratedRegex(@"(?i)(?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+|[a-z]:[^\s]*|\\\\[^\s]+|(?<![a-z0-9])/[a-z0-9._~/-]+|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|glpat-[a-z0-9_-]{20,}|sk-[a-z0-9_-]{20,}|akia[a-z0-9]{16}|(?:authorization\s*:\s*bearer|bearer\s+)[a-z0-9._~+/-]{8,}|(?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*\S+)", RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveDescriptorPattern();
+
+    [GeneratedRegex(@"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)", RegexOptions.CultureInvariant)]
+    private static partial Regex SocialSecurityNumberPattern();
+
+    [GeneratedRegex(@"(?i)(?:^|\s)[a-z]:[^\\/\s]", RegexOptions.CultureInvariant)]
+    private static partial Regex DeviceRelativePathPattern();
 
     internal static async ValueTask<HistoricalEvidenceExtractionV1> ExtractAsync(
         HistoricalEvidenceSelectionV1 selection,
@@ -75,11 +82,15 @@ internal static partial class HistoricalEvidenceExtractorV1
         foreach (var metadata in eligible)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var drafts = await snapshot.ReadEvidenceAsync(metadata.SessionId, !selection.SanitizedOnly, cancellationToken).ConfigureAwait(false);
+            var capabilities = EffectiveCapabilities(metadata);
+            var includeDescriptors = !selection.SanitizedOnly
+                && capabilities.RawLocalDescriptor
+                && metadata.ContentState == SessionContentState.Available
+                && metadata.SourceKind != HistoricalEvidenceSourceKindV1.HistoricalSummary;
+            var drafts = await snapshot.ReadEvidenceAsync(metadata.SessionId, includeDescriptors, cancellationToken).ConfigureAwait(false);
             if (drafts.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession)
                 throw Invalid();
 
-            var capabilities = EffectiveCapabilities(metadata);
             var descriptor = Descriptor(selection.SanitizedOnly, drafts);
             rawSessions.Add(ProjectSession(metadata, metadata.SessionId.ToString(), capabilities, descriptor.State, descriptor.Value));
             safeSessions.Add(ProjectSession(metadata, SafeSession(metadata.SessionId), capabilities, descriptor.State, null));
@@ -159,6 +170,8 @@ internal static partial class HistoricalEvidenceExtractorV1
                         || descriptor.EnumerateRunes().Count() > HistoricalEvidenceContractsV1.MaximumDescriptorLength
                         || descriptor.Any(char.IsControl)
                         || SensitiveDescriptorPattern().IsMatch(descriptor)
+                        || SocialSecurityNumberPattern().IsMatch(descriptor)
+                        || DeviceRelativePathPattern().IsMatch(descriptor)
                         || !AllowedDescriptorPattern().IsMatch(descriptor))
                 || raw && (session.DescriptorState == HistoricalDescriptorStateV1.Available) != (session.RawLocalDescriptor is not null)
                 || !SafeOptionalToken(session.SourceVersion)
@@ -262,7 +275,7 @@ internal static partial class HistoricalEvidenceExtractorV1
                 || !rows.Select(item => item.Key).SequenceEqual(rows.Select(item => item.Key).Order(StringComparer.Ordinal))) throw Invalid();
     }
 
-    private static HistoricalEvidenceSelectionV1 CanonicalInputSelection(HistoricalEvidenceSelectionV1 selection) => selection with
+    internal static HistoricalEvidenceSelectionV1 CanonicalInputSelection(HistoricalEvidenceSelectionV1 selection) => selection with
     {
         ExplicitSessionIds = selection.ExplicitSessionIds.Distinct().OrderBy(item => item.ToString(), StringComparer.Ordinal).ToArray(),
         SourceSurfaces = selection.SourceSurfaces.Distinct().Order().ToArray(),
@@ -371,7 +384,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             || metadata.SourceProvenance.Any(value => value is null || !allSurfaces.Contains(value.SourceSurface)
                 || !SafeOptionalToken(value.SourceApplicationVersion) || !SafeOptionalToken(value.AdapterVersion))
             || metadata.ModelObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
-            || metadata.ModelObservations.Any(value => value is null || !SafeOptionalToken(value.Model)
+            || metadata.ModelObservations.Any(value => value is null || value.Model is null || !SafeOptionalToken(value.Model)
                 || !RawReferenceInIndex(value.EvidenceRef, metadata))
             || metadata.DurationObservations.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession
             || metadata.DurationObservations.Any(value => value is null || value.DurationMs < 0
@@ -431,7 +444,7 @@ internal static partial class HistoricalEvidenceExtractorV1
             throw Invalid();
         foreach (var observation in metadata.ModelObservations)
         {
-            if (observation is null || !SafeOptionalToken(observation.Model)) throw Invalid();
+            if (observation is null || observation.Model is null || !SafeOptionalToken(observation.Model)) throw Invalid();
             ValidateEvidenceReference(observation.EvidenceRef, raw, sessionId);
         }
         foreach (var observation in metadata.DurationObservations)
@@ -529,7 +542,8 @@ internal static partial class HistoricalEvidenceExtractorV1
             || selection.Workspace is not null && !string.Equals(selection.Workspace, item.Workspace, StringComparison.Ordinal)
             || selection.TaskLabel is not null && !string.Equals(selection.TaskLabel, item.TaskLabel, StringComparison.Ordinal)
             || selection.ExperimentLabel is not null && !string.Equals(selection.ExperimentLabel, item.ExperimentLabel, StringComparison.Ordinal)
-            || selection.SourceSurfaces.Count > 0 && !selection.SourceSurfaces.Contains(item.SourceSurface)
+            || selection.SourceSurfaces.Count > 0
+                && !selection.SourceSurfaces.Any(surface => item.SourceSurfaces.Append(item.SourceSurface).Contains(surface))
             || selection.From is { } from && time < from
             || selection.To is { } to && time >= to);
     }
@@ -557,7 +571,9 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptor(string candidate)
     {
         var firstLine = candidate.Split('\n', 2)[0].TrimEnd('\r').Trim();
-        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || SensitiveDescriptorPattern().IsMatch(firstLine) || !AllowedDescriptorPattern().IsMatch(firstLine))
+        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || SensitiveDescriptorPattern().IsMatch(firstLine)
+            || SocialSecurityNumberPattern().IsMatch(firstLine) || DeviceRelativePathPattern().IsMatch(firstLine)
+            || !AllowedDescriptorPattern().IsMatch(firstLine))
             return (HistoricalDescriptorStateV1.RejectedSensitive, null);
         var bounded = string.Concat(firstLine.EnumerateRunes().Take(HistoricalEvidenceContractsV1.MaximumDescriptorLength).Select(rune => rune.ToString()));
         return (HistoricalDescriptorStateV1.Available, bounded);
@@ -652,7 +668,7 @@ internal static partial class HistoricalEvidenceExtractorV1
     };
 
     private static bool SafeOptionalToken(string? value) => value is null || value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
-    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
+    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && RawIdentifierPattern().IsMatch(value);
     private static bool SafeLabel(string? value) => value is null
         || value.Length is > 0 and <= 256
             && !string.IsNullOrWhiteSpace(value)
@@ -751,7 +767,14 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static bool SafeProjectedLabel(string kind, string? value) => value is null || Regex.IsMatch(value, "^" + kind + "-ref-[0-9a-f]{32}$", RegexOptions.CultureInvariant);
 
     private static string SafeSession(Guid id) => InstructionFindingReferenceTokenizationV1.Tokenize(new(id.ToString(), "x", null, 1, InstructionEvidenceRelativePositionV1.Anchor)).SessionId!;
-    internal static string? TokenizeLabel(string kind, string? value) => value is null ? null : kind + "-ref-" + Digest("copilot-agent-observability/historical-safe-label/v1", kind, value);
+    internal static string? TokenizeLabel(string kind, string? value) => value is null || !RepositorySafeMetadataValue(value)
+        ? null
+        : kind + "-ref-" + Digest("copilot-agent-observability/historical-safe-label/v1", kind, value);
+
+    private static bool RepositorySafeMetadataValue(string value) =>
+        MeasurementSanitizer.SanitizeFreeFormName(value) is not null
+        && !SocialSecurityNumberPattern().IsMatch(value)
+        && !DeviceRelativePathPattern().IsMatch(value);
     private static string ExtractionDigest(string snapshotId, ReadOnlySpan<byte> selectionBytes)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -798,7 +821,7 @@ internal static partial class HistoricalEvidenceExtractorV1
     [GeneratedRegex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant)] private static partial Regex HashPattern();
     [GeneratedRegex("^instruction-finding-[0-9a-f]{24}$", RegexOptions.CultureInvariant)] private static partial Regex FindingIdPattern();
     [GeneratedRegex("^[A-Za-z0-9._:+-]+$", RegexOptions.CultureInvariant)] private static partial Regex SafeTokenPattern();
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$", RegexOptions.CultureInvariant)] private static partial Regex RawIdentifierPattern();
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$", RegexOptions.CultureInvariant)] private static partial Regex RawIdentifierPattern();
     [GeneratedRegex("^[\\p{L}\\p{N}][\\p{L}\\p{N} .,;:!?()'\"_-]*$", RegexOptions.CultureInvariant)] private static partial Regex AllowedDescriptorPattern();
 
     private sealed class HistoricalRawReferenceComparer : IComparer<HistoricalRawEvidenceReferenceV1>

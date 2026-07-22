@@ -69,6 +69,16 @@ extractor re-applies every filter defensively and invokes `ReadEvidenceAsync`
 only for the final included Session IDs; an implementation that reads an
 excluded or metadata-omitted Session violates this contract.
 
+The SQLite source reads at most 256 native IDs, 256 runs, and 4,096 events per
+returned Session, using `limit + 1` probes inside the same read transaction and
+rejecting overflow before constructing the extra row or reading any body. It
+also reads at most 51,200 Issue #59 handoffs relevant to exact selected trace
+IDs. Evidence-group capacity is checked before descriptor body reads; no later
+`Take` or silent truncation may hide an overflow.
+The handoff payload length is inspected before SQLite text materialization;
+both each payload and the aggregate selected handoff bytes are capped at
+67,108,864 bytes.
+
 Candidate ordering is ascending by `started_at` when present, otherwise
 `last_seen_at`, then canonical lowercase Session UUID ordinal. All returned
 matching candidates are ordered first. If the count exceeds the requested
@@ -139,6 +149,10 @@ reference set must equal the receipt reference set exactly; each representation
 retains its own canonical order because opaque-token order need not equal raw-ID
 order. The candidate must name that receipt. A both-null span/turn reference, invalid anchor relation, token-only
 membership, or parallel historical reference vocabulary is rejected.
+Production extraction reads those bounded, checksum-verified Issue #59
+handoffs in the coherent SQLite snapshot, resolves their opaque references to
+exact selected Session trace/span evidence, and embeds the receipt/candidate;
+reopening the stored extraction performs no out-of-band finding lookup.
 
 Groups sort by Session order, closed kind order, then group ID. References sort
 by Session, trace, nullable span, nullable turn, and Issue #59 relative-position
@@ -172,6 +186,10 @@ canonical UUIDv7. Repository-safe labels and identifier-like metadata are null,
 fixed allowlisted values, or domain-separated opaque tokens. Relative, device,
 home, UNC, and absolute paths; credentials; PII; and malicious carrier strings
 reject before serialization rather than relying on a permissive blacklist.
+Repository-safe label eligibility reuses the Issue #58 measurement sanitizer,
+with narrow rejection for SSN-shaped values and device-relative paths; unsafe
+labels are omitted rather than hashed. Raw descriptors apply the same narrow
+SSN and device-relative rejection.
 
 `sanitized_only=true` never asks the snapshot lease for descriptor-bearing
 content and both forms record `not_requested`. Repository-safe output contains
@@ -185,6 +203,11 @@ bytes over domain
 `copilot-agent-observability/historical-extraction/v1` and length-framed
 canonical snapshot ID plus canonical selection bytes. Group IDs use a separate
 domain and the first 16 digest bytes over the canonical group identity.
+The production snapshot ID binds the canonical input selection, exact matching,
+returned, and omitted counts, every returned Session revision, and each loaded
+Issue #59 handoff analysis-run/checksum revision. A change confined to an
+omitted earlier match or handoff therefore cannot collide with the prior
+snapshot/extraction identity.
 
 Canonical JSON is UTF-8 without BOM, indentation, or trailing newline, with
 the exact schema property order. Arrays use the orders above; timestamps are

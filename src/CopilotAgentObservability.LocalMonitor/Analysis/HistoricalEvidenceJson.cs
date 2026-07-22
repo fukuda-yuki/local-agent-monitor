@@ -33,6 +33,10 @@ internal static class HistoricalEvidenceJsonV1
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidSerialization);
             return dataset;
         }
+        catch (HistoricalEvidenceValidationException exception) when (exception.Code == HistoricalEvidenceValidationCodeV1.InvalidContract)
+        {
+            throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidSerialization);
+        }
         catch (HistoricalEvidenceValidationException) { throw; }
         catch (Exception exception) when (exception is JsonException or NotSupportedException or ArgumentException
             or NullReferenceException or InvalidOperationException or OverflowException)
