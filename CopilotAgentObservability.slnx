@@ -4,6 +4,7 @@
     <Project Path="src/CopilotAgentObservability.AppHost/CopilotAgentObservability.AppHost.csproj" />
     <Project Path="src/CopilotAgentObservability.ConfigCli/CopilotAgentObservability.ConfigCli.csproj" />
     <Project Path="src/CopilotAgentObservability.Doctor/CopilotAgentObservability.Doctor.csproj" />
+    <Project Path="src/CopilotAgentObservability.InstructionFindings/CopilotAgentObservability.InstructionFindings.csproj" />
     <Project Path="src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj" />
     <Project Path="src/CopilotAgentObservability.Telemetry/CopilotAgentObservability.Telemetry.csproj" />
     <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
@@ -12,6 +13,7 @@
     <Project Path="tests/CopilotAgentObservability.Alerts.Tests/CopilotAgentObservability.Alerts.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.ConfigCli.Tests/CopilotAgentObservability.ConfigCli.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.Doctor.Tests/CopilotAgentObservability.Doctor.Tests.csproj" />
+    <Project Path="tests/CopilotAgentObservability.InstructionFindings.Tests/CopilotAgentObservability.InstructionFindings.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" />
   </Folder>
 </Solution>

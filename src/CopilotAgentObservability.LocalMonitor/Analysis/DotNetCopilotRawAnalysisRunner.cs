@@ -512,7 +512,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
                 context.Focus == MonitorAnalysisFocus.InstructionDiagnosis
                     ? new InstructionFindingSubmissionCollectorV1(
                         context.RunId,
-                        InstructionFindingEvidenceIndexV1.FromInstructionEvidence(context.TraceId, instructionEvidence))
+                        InstructionFindingEvidenceIndexFactoryV1.FromInstructionEvidence(context.TraceId, instructionEvidence))
                     : null,
                 rawLease);
         }

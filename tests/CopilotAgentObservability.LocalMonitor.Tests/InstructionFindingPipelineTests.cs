@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using CopilotAgentObservability.InstructionFindings;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -116,6 +118,36 @@ public class InstructionFindingPipelineTests
         Assert.Equal(InstructionFindingVerdictV1.Supported, Assert.Single(handoff.Findings).Verdict);
         Assert.Equal(InstructionCandidateEligibilityV1.Eligible, handoff.Findings[0].CandidateEligibility);
         Assert.Single(handoff.Candidates);
+    }
+
+    [Fact]
+    public void Generate_AllClosedCategories_ReconstructsTheSemanticMaximumOfEightCandidates()
+    {
+        var error = new InstructionFindingEvidenceLocationV1(
+            null, AnchorTraceId, "span-error", null, InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.ErrorOrRetrySpan);
+        var instruction = new InstructionFindingEvidenceLocationV1(
+            null, AnchorTraceId, "span-instruction", null, InstructionEvidenceRelativePositionV1.Anchor, InstructionFindingEvidenceKindV1.InstructionSpan);
+        var drafts = Enum.GetValues<InstructionFindingCategoryV1>()
+            .Select(category => Draft(
+                category,
+                InstructionFindingVerdictV1.Supported,
+                category switch
+                {
+                    InstructionFindingCategoryV1.ScopeBoundaryMissing or InstructionFindingCategoryV1.EnvironmentAssumptionMissing =>
+                        [Ref("span-turn-1", 1), error.ToReference()],
+                    InstructionFindingCategoryV1.TaskTooLarge =>
+                        [Ref("span-turn-1", 1), Ref("span-turn-2", 2), instruction.ToReference()],
+                    _ => [Ref("span-turn-1", 1), Ref("span-turn-2", 2)],
+                }))
+            .ToArray();
+
+        var handoff = InstructionFindingPipelineV1.Generate(
+            AnalysisRunId,
+            EvidenceIndex(Turn("span-turn-1", 1), Turn("span-turn-2", 2), error, instruction),
+            drafts);
+
+        Assert.Equal(8, handoff.Findings.Count);
+        Assert.Equal(8, handoff.Candidates.Count);
     }
 
     [Fact]
@@ -379,8 +411,11 @@ public class InstructionFindingPipelineTests
     public void FrozenFixture_AndJsonSchema_MatchTheVersionedHandoffContract()
     {
         var fixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "InstructionFindings", "instruction-finding-handoff.v1.json");
+        var canonicalFixturePath = Path.Combine(AppContext.BaseDirectory, "TestData", "InstructionFindings", "instruction-finding-handoff.canonical.base64");
+        var canonicalShaPath = Path.Combine(AppContext.BaseDirectory, "TestData", "InstructionFindings", "instruction-finding-handoff.canonical.sha256");
         var schemaPath = Path.Combine(AppContext.BaseDirectory, "TestData", "InstructionFindings", "instruction-finding-handoff.schema.json");
-        var fixture = InstructionFindingJsonV1.Deserialize(File.ReadAllBytes(fixturePath));
+        var canonicalFixtureBytes = Convert.FromBase64String(File.ReadAllText(canonicalFixturePath).Trim());
+        var fixture = InstructionFindingJsonV1.Deserialize(canonicalFixtureBytes);
         var expected = InstructionFindingPipelineV1.Generate(
             AnalysisRunId,
             EvidenceIndex(Turn("span-turn-1", 1), Turn("span-turn-2", 2)),
@@ -388,12 +423,28 @@ public class InstructionFindingPipelineTests
         using var schema = JsonDocument.Parse(File.ReadAllBytes(schemaPath));
         var root = schema.RootElement;
 
+        Assert.Equal(canonicalFixtureBytes, InstructionFindingJsonV1.Serialize(expected));
+        Assert.Equal(
+            File.ReadAllText(canonicalShaPath).Trim(),
+            Convert.ToHexString(SHA256.HashData(InstructionFindingJsonV1.Serialize(expected))).ToLowerInvariant());
         Assert.Equal(InstructionFindingJsonV1.Serialize(expected), InstructionFindingJsonV1.Serialize(fixture));
+        Assert.Throws<InstructionFindingValidationException>(() =>
+            InstructionFindingJsonV1.Deserialize(File.ReadAllBytes(fixturePath)));
         Assert.Equal("https://json-schema.org/draft/2020-12/schema", root.GetProperty("$schema").GetString());
         Assert.Equal(InstructionFindingContractsV1.HandoffSchemaVersion, root.GetProperty("properties").GetProperty("schema_version").GetProperty("const").GetString());
         Assert.Equal(
             Enum.GetValues<InstructionFindingCategoryV1>().Select(value => value.ToWireValue()).Order(StringComparer.Ordinal),
             root.GetProperty("$defs").GetProperty("category").GetProperty("enum").EnumerateArray().Select(value => value.GetString()!).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void ConsumerValidator_AndLocalMonitorContractUseOneRuntimeAuthority()
+    {
+        var authority = typeof(InstructionFindingHandoffConsumerV1).Assembly;
+
+        Assert.Same(authority, typeof(InstructionFindingJsonV1).Assembly);
+        Assert.Same(authority, typeof(InstructionFindingPipelineV1).Assembly);
+        Assert.Same(authority, typeof(InstructionFindingContractsV1).Assembly);
     }
 
     [Fact]
@@ -489,7 +540,7 @@ public class InstructionFindingPipelineTests
                     new InstructionEvidenceConversationTrace("trace-previous", -1, false, null, "raw sibling descriptor", 1, 1, 1, 2, 1, 0, ["span-previous-error"], []),
                     new InstructionEvidenceConversationTrace(AnchorTraceId, 0, true, null, "raw anchor descriptor", 1, 10, 5, 15, 1, 1, ["span-error"], ["shell"]),
                 ]));
-        var index = InstructionFindingEvidenceIndexV1.FromInstructionEvidence(AnchorTraceId, evidence);
+        var index = InstructionFindingEvidenceIndexFactoryV1.FromInstructionEvidence(AnchorTraceId, evidence);
 
         var environment = InstructionFindingPipelineV1.Generate(
             AnalysisRunId,

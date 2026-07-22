@@ -143,6 +143,22 @@ to Config CLI and no new Local Monitor route.
 - Issues #103/#104 produce only the twelve shared fact families and shared
   source-neutral evidence candidates. Issue #105 owns proxy/UI consumption.
 
+### Instruction Finding Contract Domain
+
+- `CopilotAgentObservability.InstructionFindings` is a package-free,
+  source-neutral lower-level project that owns the unchanged
+  `instruction-finding-handoff.v1` wire types, serializer/deserializer,
+  fixed-template catalog, identity/reference hashing, candidate reconstruction,
+  and semantic validation. The decoded immutable canonical-wire resource, not
+  a runtime reserialization of the older semantic fixture, pins producer bytes.
+- Local Monitor is the producer and uses friend-assembly access to the same
+  internal authority. Cross-component consumers receive only the public
+  canonical-byte validator, whose successful result is a positive analysis-run
+  ID and not provenance or historical raw-reference evidence.
+- The project reads no SQLite, raw store, source path, telemetry, environment,
+  or network. Caller-side trusted acquisition and producer-side
+  pre-tokenization evidence resolution remain separate responsibilities.
+
 ### Doctor SQLite Store
 
 - Implemented by `CopilotAgentObservability.Persistence.Sqlite` in the existing
@@ -241,6 +257,21 @@ CopilotAgentObservability.ConfigCli    CopilotAgentObservability.LocalMonitor
 Local Monitor. Persistence may reference the Doctor contracts; upper adapters
 may reference both. The existing Telemetry dependency direction remains
 unchanged.
+
+Issue #59 adds another independent lower-level domain without a dependency
+cycle:
+
+```text
+CopilotAgentObservability.InstructionFindings  v1 canonical/semantic authority
+        ^                                ^
+        |                                |
+CopilotAgentObservability.LocalMonitor   downstream sanitized consumers
+```
+
+`InstructionFindings` references no Local Monitor assembly or persistence
+component. The Local Monitor producer excludes the shared source files from
+its own compilation and delegates to the lower-level assembly; downstream
+consumers must not copy the hash/template/schema logic.
 
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。

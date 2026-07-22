@@ -457,6 +457,62 @@ JSON is UTF-8 without BOM, indentation, or trailing newline. It includes null
 evidence-reference fields, uses the exact snake_case names above, and rejects
 unknown properties and non-string enum values on read.
 
+The accepted byte authority is the owner serializer output, including the
+default `System.Text.Json` escaping of non-ASCII template text; changing the
+encoder changes v1 bytes and is prohibited. The exact accepted golden is the
+decoded content of
+[`instruction-finding-handoff.canonical.base64`](../contracts/instruction-findings/v1/instruction-finding-handoff.canonical.base64),
+whose SHA-256 is pinned by
+[`instruction-finding-handoff.canonical.sha256`](../contracts/instruction-findings/v1/instruction-finding-handoff.canonical.sha256)
+as `ede92634f2a3417e7cac1a8d841fa77dfbd34a2cb39cb9c85adb20a72ca08821`.
+The pre-existing literal
+`tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/InstructionFindings/instruction-finding-handoff.v1.json`
+remains unchanged as a human-readable semantic/JSON-Schema fixture. Its literal
+UTF-8 Japanese spelling and terminal newline were never the serializer-byte
+golden; those unchanged file bytes have SHA-256
+`b6a632df8d2a33e743dcf359bad7ee522e6c549b1287af695b62a406fc150987`, and
+strict public validation rejects them as noncanonical.
+Tests must compare the decoded immutable canonical resource directly and must
+not parse/reserialize the semantic fixture to manufacture expected wire bytes.
+
+The source-neutral .NET consumer surface is
+`InstructionFindingHandoffConsumerV1.Validate(ReadOnlySpan<byte>)`. It accepts
+only the exact canonical JSON bytes produced by the v1 owner serializer and
+returns only the positive `analysis_run_id` as a .NET `long`. The input ceiling
+is 1048576 bytes inclusive and the JSON
+depth ceiling is 16 inclusive. Empty input, a larger carrier, deeper JSON,
+invalid UTF-8, BOM, whitespace or property-order changes, duplicate or unknown
+properties, an unknown schema/enum value, a noncanonical number, or any
+derived-identity, template, association, ordering, reference-token, or
+candidate/source-finding inconsistency is rejected with the bounded public
+`InstructionFindingHandoffConsumerValidationException`. The exception exposes
+no carrier content, path, or field value.
+
+The consumer API, Local Monitor producer serialization/deserialization, and
+SQLite read verification use one shared v1 validation authority. A consumer
+must not copy the schema, identity hash, reference-token, fixed-template, or
+ordering logic into its own project. This additive API does not change the
+three v1 schema-version strings, JSON shape, bytes, IDs, templates, ordering,
+or persistence schema, and it grants no raw read, capture, export, effect,
+apply, or promotion authority.
+
+Validation proves only canonical structure and semantic self-consistency of
+the supplied bytes. Opaque tokens, hashes, and fixed templates are
+deterministic, not authenticity primitives: validation does not establish
+producer identity, store provenance, or that a historical raw reference was
+resolved. The caller must acquire exact bytes from the trusted owner/store.
+Only the producer pipeline resolves raw-local references against its exact
+evidence index before tokenization.
+
+The 1048576-byte envelope and depth 16 bound the single-pass JSON read and all
+finite semantic reconstruction. Candidate reconstruction has a semantic
+maximum of eight because v1 has exactly eight categories and one candidate per
+category deduplication key. Frozen v1 intentionally has no separate maximum
+for drafts, findings, evidence references, source-finding IDs, or trace refs:
+its accepted duplicate-collapse and collection behavior predates this API, so
+adding a per-collection ceiling would be a breaking contract change. Producer
+pre-serialization draft admission is unchanged by this consumer repair.
+
 Local persistence is additive table `instruction_finding_handoffs`:
 
 ```text
@@ -486,9 +542,10 @@ Consumer handoff:
   supplies the exact evidence index, and consumes `InstructionFindingHandoffV1`.
   It may add no category or field locally. Invalid citations are rejected;
   zero findings is a valid handoff with empty arrays.
-- Issue #85 may export only the canonical handoff JSON after its own bundle
-  repository-safe scanner succeeds. It must preserve IDs, provenance, schema
-  versions, nulls, and byte ordering.
+- Issue #85 may export only handoff JSON accepted by the shared v1 consumer
+  validator after its own bundle repository-safe scanner succeeds. It must
+  preserve IDs, provenance, schema versions, nulls, and byte ordering, and may
+  not maintain a second copy of the v1 schema/hash/template validation rules.
 
 ## Safety Boundary
 
