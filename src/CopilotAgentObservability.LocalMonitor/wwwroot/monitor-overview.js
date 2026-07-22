@@ -299,7 +299,7 @@
       button.classList.toggle("active", button.dataset.period === period);
     }
 
-    const supplementalRefresh = Promise.allSettled([renderTopTraces(period), renderAlertOverview(period)]);
+    const alertRefresh = renderAlertOverview(period);
     try {
       const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store" });
       if (!resp.ok) return;
@@ -307,8 +307,9 @@
       renderKpi(overview, period);
       renderModels(overview);
       renderHourly(overview);
+      await renderTopTraces(period);
     } finally {
-      await supplementalRefresh;
+      await alertRefresh;
     }
   }
 
