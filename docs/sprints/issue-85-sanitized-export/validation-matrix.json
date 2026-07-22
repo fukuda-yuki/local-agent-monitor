@@ -1,0 +1,101 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "3e17ea0b235a6dbfe8f9e0b0954c105ccb83989c",
+  "final_validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+  "inventory_date": "2026-07-22",
+  "environment_boundary": "Windows native current-user Issue #85 worktree; deterministic synthetic fixtures and server-managed loopback test hosts only.",
+  "active_rows": [
+    {
+      "row_id": "91-E-085",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "sanitized-evidence-export",
+      "operation": "Config CLI preview/export/result and Local Monitor preview/export/result/archive routes",
+      "profiles": {
+        "collection": ["config-cli", "local-monitor-http"],
+        "content_access": ["sanitized-only"],
+        "compatibility": ["sanitized-evidence-bundle.v1"],
+        "hook": [],
+        "otel": [],
+        "binding": ["immutable-source-snapshot"],
+        "restart": ["process-local-result-state"],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "sanitized-evidence-bundle.v1",
+        "manifest": "sanitized-evidence-manifest.v1",
+        "archive": "sanitized-evidence-zip-store.v1"
+      },
+      "expected_invariant": "The exact candidate provides deterministic source-neutral selection, scanner-gated atomic publication, strict archive inspection, and bounded same-origin loopback HTTP results without server path disclosure.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Issue #85 focused candidate evidence: solution build 0 warnings/0 errors; LocalMonitor sanitized export 53/53; ConfigCli sanitized export 1/1; CLI preview/export/result and exact golden/schema checks passed.",
+          "compatibility_basis": "Executed from the exact implementation tree committed as the validation SHA; the repository full test command was intentionally deferred for coordinator serialization."
+        }
+      ],
+      "actual_result": "Focused CLI, API, archive, schema, fixture, and publication behavior passed. The required unchanged-candidate integrated full solution gate has not yet executed.",
+      "classification": "not_attempted",
+      "severity": "medium",
+      "blocker": "The coordinator deferred the full solution test while concurrent lanes were active, so the repository close gate is incomplete.",
+      "retry_condition": "Coordinator integrates the accepted candidate, runs build/bootstrap/full plus the listed focused CLI/API/fixture filters at one clean evidence SHA, then promotes 91-E-085 to passed and recomputes release decision before Issue close.",
+      "unverified_capability": "Unchanged-candidate integrated full solution regression result for the accepted Issue #85 revision.",
+      "owner": "Issue #85 sanitized evidence export",
+      "validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+      "validation_date": "2026-07-22",
+      "environment_boundary": "Exact candidate build and deterministic synthetic focused tests; no live provider, real telemetry, or remote publication."
+    },
+    {
+      "row_id": "91-S-085",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "sanitized-evidence-export-scanner",
+      "operation": "Fail-closed payload, metadata, manifest, archive, credential, PII, path, and Issue #91 corpus validation",
+      "profiles": {
+        "collection": ["bundle-create", "bundle-inspect"],
+        "content_access": ["sanitized-only", "scanner-failure"],
+        "compatibility": ["validation-secret-corpus.v1"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-record-dependency"],
+        "restart": [],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "scanner": "repository-safe-scanner.v1",
+        "corpus": "validation-secret-corpus.v1",
+        "checksum": "sha256.v1"
+      },
+      "expected_invariant": "Every selected payload, manifest, and completed archive fails closed on declared raw, secret, PII, path, marker-transform, canonicalization, inventory, size, and checksum violations without returning success bytes or leaving a partial artifact.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "Issue #85 LocalMonitor sanitized export service and surface tests passed 53/53, including all Issue #91 corpus cases across declared transformations and negative archive/publication cases.",
+          "compatibility_basis": "The tests execute the exact repository corpus, scanner, manifest validator, archive inspector, and publication implementation at the validation SHA."
+        }
+      ],
+      "actual_result": "The exact candidate rejected every declared corpus transformation and bounded raw, credential, PII, path, malformed UTF-8, noncanonical manifest, non-store ZIP, size, checksum, and publication failure case.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #85 sanitized evidence export",
+      "validation_sha": "48d3734106fb572c5d8f013f8935c4288147ee23",
+      "validation_date": "2026-07-22",
+      "environment_boundary": "Deterministic synthetic repository corpus and generated in-memory/file-system bundles; no general DLP, recursive transformation, encryption, or live-data claim."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/sprints/issue-85-sanitized-export/milestones/M1-sanitized-evidence-export/review.md"
+  ],
+  "release_decision": {
+    "decision": "release_blocked",
+    "external_blockers": []
+  }
+}
