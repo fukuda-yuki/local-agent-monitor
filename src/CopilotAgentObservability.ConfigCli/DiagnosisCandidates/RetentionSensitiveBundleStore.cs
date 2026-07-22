@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Globalization;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.RawReplay;
 
 namespace CopilotAgentObservability.ConfigCli;
 
@@ -81,6 +82,57 @@ internal sealed class RetentionSensitiveBundleStore
         }
         catch (ArgumentException) { throw; }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or PathTooLongException)
+        {
+            throw new InvalidOperationException(Failure);
+        }
+    }
+
+    internal RetentionSensitiveBundleCaptureResult CaptureRawReplay(
+        string replayId,
+        byte[] archive,
+        RawReplayExecutionResult execution,
+        string? parentLocator = null)
+    {
+        if (string.IsNullOrWhiteSpace(replayId) || archive is null || execution is not { Success: true, Result: not null })
+            throw new ArgumentException(Failure);
+        var parent = CanonicalParent(parentLocator);
+        try
+        {
+            Recover();
+            EnsureSafeAncestors(parent, requireExisting: false);
+            var reservation = catalog.ReserveSensitiveBundle(parent, captureId: RetentionRawReplayStore.CaptureId(replayId));
+            LastCaptureId = reservation.CaptureId;
+            SensitiveBundlePlan plan;
+            try { plan = RawReplaySensitiveBundlePlanBuilder.Build(reservation, replayId, archive, execution); }
+            catch (SensitiveBundlePlanLimitException)
+            {
+                catalog.RecordSensitiveBundleBlocker(reservation, RetentionErrorCode.ItemLimitExceeded);
+                throw new ArgumentException(Failure);
+            }
+            if (catalog.PlanSensitiveBundle(reservation, plan.ToCapturePlanInput()) != RetentionCaptureMutationDisposition.Applied)
+                throw new InvalidOperationException();
+            EnsureSafeAncestors(parent, requireExisting: false);
+            if (Exists(reservation.StagingLocator) || Exists(reservation.FinalLocator))
+            {
+                catalog.RecordSensitiveBundleBlocker(reservation, RetentionErrorCode.OwnershipMismatch);
+                throw new InvalidOperationException();
+            }
+            Directory.CreateDirectory(parent);
+            EnsureDirectorySafe(parent);
+            Directory.CreateDirectory(reservation.StagingLocator);
+            EnsureDirectorySafe(reservation.StagingLocator);
+            try { WritePlan(reservation, plan); }
+            catch (RetentionSensitiveBundleOwnershipCollisionException)
+            {
+                catalog.RecordSensitiveBundleBlocker(reservation, RetentionErrorCode.OwnershipMismatch);
+                throw;
+            }
+            Publish(reservation, plan.MarkerSha256, plan.ManifestSha256, plan.Members.Select(static member => member.ToCaptureMember()).ToArray());
+            return new(reservation.CaptureId, reservation.FinalLocator, plan.EntriesByCandidateId);
+        }
+        catch (ArgumentException) { throw; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException
+            or NotSupportedException or PathTooLongException or Microsoft.Data.Sqlite.SqliteException)
         {
             throw new InvalidOperationException(Failure);
         }

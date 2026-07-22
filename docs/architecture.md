@@ -144,6 +144,8 @@ Config CLI は repository-local な中核ツールである。
 - Claude Code CLI detection and bounded user-settings ownership for Windows
   native and explicitly opted-in WSL2; Agent SDK remains caller-managed
   Python/TypeScript guidance.
+- Explicit raw-local replay preview/export/archive inspection. Config CLI does
+  not own import or durable replay staging.
 
 The setup framework lives in the Config CLI rather than Local Monitor HTTP/UI.
 The Windows Release ZIP publishes the Config CLI beside the Local Monitor app
@@ -204,6 +206,20 @@ to Config CLI and no new Local Monitor route.
 - saved raw OTLP JSON を file-based ingest する。
 - `raw-local-receiver` profile から受信した raw telemetry も保存できる。
 - PostgreSQL は共有環境、長期保持、検索性能が必要になった場合の将来候補に留める。
+
+### Raw Local Replay Domain
+
+- `CopilotAgentObservability.RawReplay` owns the versioned raw bundle, canonical
+  archive/manifest inspection, deterministic normalization/projection/dashboard
+  replay, preview/consent binding, credential rejection guard, and no-leak
+  result contracts.
+- `Persistence.Sqlite` supplies an exact read-only source snapshot under one
+  composite Retention operation lease. Upper Config CLI and Local Monitor
+  adapters cannot accept caller-supplied source rows or bypass that lease.
+- Local Monitor durable staging delegates to the existing Retention
+  `sensitive_bundle` capture and cleanup implementation. The replay domain adds
+  no store kind, migration, queue, worker, deletion adapter, or live-database
+  merge path.
 
 ### Session Subsystem
 
@@ -356,6 +372,25 @@ fully typed #80-owned Alert Center projection. #84 remains an
 upper-layer projection/UI consumer and receives neither arbitrary SQL nor a
 source-specific snapshot adapter from this repair.
 
+Issue #87 adds a raw-only sibling without changing the sanitized export domain:
+
+```text
+CopilotAgentObservability.Telemetry
+                  ^
+                  |
+CopilotAgentObservability.RawReplay
+                  ^
+                  |
+CopilotAgentObservability.Persistence.Sqlite
+             ^                 ^
+             |                 |
+CopilotAgentObservability.ConfigCli   CopilotAgentObservability.LocalMonitor
+```
+
+The Local Monitor upper adapter alone coordinates isolated replay publication
+with the existing Retention sensitive-bundle store. `RawReplay` never references
+Config CLI or Local Monitor and does not mutate the source SQLite database.
+
 - `Telemetry` と `Persistence.Sqlite` は `ConfigCli` を参照しない（単方向依存）。
 - 抽出した型は internal のままとし、`InternalsVisibleTo` で `ConfigCli` / `ConfigCli.Tests`（および将来の `LocalMonitor`）にのみ可視とする。public な共有 API は M1 では定義しない。
 - Sprint8 の Local Ingestion Monitor（ASP.NET Core host、M2 以降）はこれらの共有 module を再利用する前提とする。ConfigCli の外部動作・CLI 表面は M1 で変更しない。
@@ -408,6 +443,12 @@ trusted read-only SQLite snapshot (#58 + optional #59 / #80)
   -> deterministic #85 dependency closure + canonical members
   -> fail-closed scanner + checksums
   -> atomic CLI file or loopback HTTP archive publication
+
+exact Retention-authorized raw/optional Session-content snapshot
+  -> explicit warning + preview-bound #87 raw archive export
+  -> strict whole-archive inspection + pinned deterministic replay
+  -> isolated existing sensitive_bundle namespace (7-day policy)
+  -> existing Retention lease / queue / cleanup / recovery path
 ```
 
 The historical, lifecycle, and Alert Center flows do not mutate their parent evidence.
@@ -612,6 +653,11 @@ Sensitive local output may be generated only by explicit opt-in commands.
 Its retention metadata and deletion authority remain private to Retention catalog
 v1; automatic physical cleanup uses exact catalog ownership rather than paths
 carried in an output artifact.
+
+Raw local replay bundles are caller-owned local files and never cleanup targets.
+Their replayed artifacts are isolated `sensitive_bundle` runtime items with the
+existing 7-day policy; they never enter the live raw/Session/projection database
+or repository-safe artifact flow.
 
 Issue #51 Session content is another local raw-bearing storage class. It is
 secret-filtered, stored separately from Session metadata, and expires for reads

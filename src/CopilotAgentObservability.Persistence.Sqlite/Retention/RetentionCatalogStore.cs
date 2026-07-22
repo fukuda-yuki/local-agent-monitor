@@ -861,6 +861,17 @@ public sealed partial class RetentionCatalogStore
     {
         var catalogReceipt = CatalogReceipt(c, t, key);
         if (catalogReceipt is null) return SourceReceiptProof.InvalidIdentity;
+        if (key.StoreKind == RetentionStoreKind.SensitiveBundle)
+        {
+            using var item = c.CreateCommand();
+            item.Transaction = t;
+            item.CommandText = "SELECT item_id FROM retention_items WHERE store_instance_id=$store AND store_kind='sensitive_bundle' AND source_item_id=$source;";
+            item.Parameters.AddWithValue("$store", key.StoreInstanceId);
+            item.Parameters.AddWithValue("$source", key.SourceItemId);
+            return item.ExecuteScalar() is string itemId
+                ? ValidateSensitiveBundleFirstIntentEvidence(c, t, itemId, key.StoreInstanceId, key.SourceItemId, catalogReceipt)
+                : SourceReceiptProof.Missing;
+        }
         using var q = c.CreateCommand(); q.Transaction = t;
         q.CommandText = key.StoreKind switch
         {
@@ -890,9 +901,15 @@ public sealed partial class RetentionCatalogStore
             RetentionStoreKind.SessionEventContent => "SELECT retention_owner_token FROM session_event_content WHERE event_id=$id;",
             RetentionStoreKind.RawRecord => "SELECT retention_owner_token FROM raw_records WHERE id=$id;",
             RetentionStoreKind.AnalysisRunRaw => "SELECT retention_owner_token FROM monitor_analysis_runs WHERE id=$id;",
+            RetentionStoreKind.SensitiveBundle => "SELECT owner_token FROM retention_file_capture_reservations WHERE capture_id=$capture AND store_instance_id=$store AND store_kind='sensitive_bundle' AND source_item_id=$capture AND phase='complete';",
             _ => "SELECT NULL WHERE 0;"
         };
-        if (key.StoreKind == RetentionStoreKind.SessionEventContent) command.Parameters.AddWithValue("$id", key.SourceItemId);
+        if (key.StoreKind == RetentionStoreKind.SensitiveBundle)
+        {
+            command.Parameters.AddWithValue("$capture", key.SourceItemId);
+            command.Parameters.AddWithValue("$store", key.StoreInstanceId);
+        }
+        else if (key.StoreKind == RetentionStoreKind.SessionEventContent) command.Parameters.AddWithValue("$id", key.SourceItemId);
         else if (TrySourceId(key.SourceItemId, out var id)) command.Parameters.AddWithValue("$id", id);
         else return null;
         return command.ExecuteScalar() is byte[] token && token.Length == 32 ? token : null;

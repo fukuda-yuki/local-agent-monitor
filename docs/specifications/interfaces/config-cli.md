@@ -238,6 +238,36 @@ idempotency, persistence, and no-leak mapping are canonical in
 not activate a producer profile, prove live source compatibility, or authorize
 content capture.
 
+## Raw Replay Commands
+
+```text
+config-cli raw-replay preview --database <monitor.db> --request <request.json>
+config-cli raw-replay export --database <monitor.db> --request <request.json> --output <raw-local-replay.zip>
+config-cli raw-replay result --bundle <raw-local-replay.zip>
+```
+
+`preview` and `export` read one strict 1 MiB-bounded
+`raw-local-replay-export-control.v1` request. The request can select exact
+Session IDs, exact trace IDs, positive raw-record IDs, closed raw source values,
+and a half-open UTC receive-time range. It cannot supply raw records, Session
+content, snapshot bytes, a retention identity, or a server output path.
+`preview` is non-mutating. `export` requires the matching current preview digest,
+the persistent raw warning acknowledgement, and the exact confirmation phrase;
+it captures the whole selection under one composite Retention operation lease
+and publishes only through sibling `.partial` plus strict self-inspection and
+atomic rename. Output names are `raw-local-replay.zip` or
+`raw-local-replay-<12-lowercase-hex>.zip`.
+
+`result` performs bounded independent archive, manifest, canonical-member,
+inventory, checksum, pinned-version, and credential-guard inspection. It does
+not stage or replay data and does not claim producer/store provenance. Config
+CLI deliberately has no replay/import command; staging requires the running
+loopback Local Monitor raw-replay surface. `preview` and `export` reject a
+`sanitized_only: true` control before raw read/write. None of the three commands
+emits raw bodies, credentials, private filenames, or local paths in result/error
+output. The full contract is canonical in
+[raw-local-replay.md](raw-local-replay.md).
+
 ## Raw Data Commands
 
 ```text

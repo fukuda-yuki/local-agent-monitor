@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/raw-local-replay/v1/control.schema.json",
+  "title": "Raw local replay control v1",
+  "oneOf": [
+    { "$ref": "#/$defs/export_control" },
+    { "$ref": "#/$defs/replay_control" }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\x00-\\x1f\\x7f/\\\\?#]+$"
+    },
+    "identifier_array": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      ]
+    },
+    "raw_record_id_array": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 }
+        }
+      ]
+    },
+    "source_array": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "enum": ["raw-otlp", "collector-output", "langfuse-export"] }
+        }
+      ]
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_ids", "trace_ids", "raw_record_ids", "sources",
+        "start_inclusive", "end_exclusive"
+      ],
+      "properties": {
+        "session_ids": { "$ref": "#/$defs/identifier_array" },
+        "trace_ids": { "$ref": "#/$defs/identifier_array" },
+        "raw_record_ids": { "$ref": "#/$defs/raw_record_id_array" },
+        "sources": { "$ref": "#/$defs/source_array" },
+        "start_inclusive": {
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "end_exclusive": {
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        }
+      },
+      "anyOf": [
+        { "properties": { "session_ids": { "type": "array", "minItems": 1 } } },
+        { "properties": { "trace_ids": { "type": "array", "minItems": 1 } } },
+        { "properties": { "raw_record_ids": { "type": "array", "minItems": 1 } } },
+        { "properties": { "sources": { "type": "array", "minItems": 1 } } },
+        { "properties": { "start_inclusive": { "$ref": "#/$defs/timestamp" } } },
+        { "properties": { "end_exclusive": { "$ref": "#/$defs/timestamp" } } }
+      ]
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullable_sha256": {
+      "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
+    },
+    "consent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "warning_acknowledged", "confirmation_phrase"],
+      "properties": {
+        "profile": { "const": "raw-local-replay" },
+        "warning_acknowledged": { "const": true },
+        "confirmation_phrase": { "const": "I UNDERSTAND THIS IS RAW LOCAL DATA" }
+      }
+    },
+    "nullable_consent": {
+      "oneOf": [{ "$ref": "#/$defs/consent" }, { "type": "null" }]
+    },
+    "export_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "profile", "created_at", "selection",
+        "include_session_content", "sanitized_only", "preview_digest", "consent"
+      ],
+      "properties": {
+        "schema_version": { "const": "raw-local-replay-export-control.v1" },
+        "profile": { "const": "raw-local-replay" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "selection": { "$ref": "#/$defs/selection" },
+        "include_session_content": { "type": "boolean" },
+        "sanitized_only": { "type": "boolean" },
+        "preview_digest": { "$ref": "#/$defs/nullable_sha256" },
+        "consent": { "$ref": "#/$defs/nullable_consent" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "include_session_content": { "const": true } },
+            "required": ["include_session_content"]
+          },
+          "then": {
+            "properties": {
+              "selection": {
+                "properties": { "session_ids": { "type": "array", "minItems": 1 } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "replay_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "profile", "replay_id", "archive_sha256",
+        "normalization_version", "projection_version", "dashboard_version",
+        "sanitized_only", "preview_digest", "consent"
+      ],
+      "properties": {
+        "schema_version": { "const": "raw-local-replay-control.v1" },
+        "profile": { "const": "raw-local-replay" },
+        "replay_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+        },
+        "archive_sha256": { "$ref": "#/$defs/sha256" },
+        "normalization_version": { "const": "raw-measurement-normalization.v1" },
+        "projection_version": { "const": "raw-replay-monitor-projection.v1" },
+        "dashboard_version": { "const": "raw-replay-dashboard.v1" },
+        "sanitized_only": { "type": "boolean" },
+        "preview_digest": { "$ref": "#/$defs/nullable_sha256" },
+        "consent": { "$ref": "#/$defs/nullable_consent" }
+      }
+    }
+  }
+}

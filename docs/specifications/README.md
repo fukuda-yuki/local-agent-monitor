@@ -42,6 +42,7 @@
 | Token/context/cache alert rules | [interfaces/token-context-cache-alert-rules.md](interfaces/token-context-cache-alert-rules.md) |
 | Alert lifecycle | [interfaces/alert-lifecycle.md](interfaces/alert-lifecycle.md) |
 | Sanitized evidence export | [interfaces/sanitized-evidence-export.md](interfaces/sanitized-evidence-export.md) |
+| Raw local replay | [interfaces/raw-local-replay.md](interfaces/raw-local-replay.md) |
 | Security and data boundaries | [security-data-boundaries.md](security-data-boundaries.md) |
 | Validation and release matrix | [validation-release-matrix.md](validation-release-matrix.md) |
 

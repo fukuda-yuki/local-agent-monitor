@@ -8,6 +8,7 @@
     <Project Path="src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj" />
     <Project Path="src/CopilotAgentObservability.Telemetry/CopilotAgentObservability.Telemetry.csproj" />
     <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
+    <Project Path="src/CopilotAgentObservability.RawReplay/CopilotAgentObservability.RawReplay.csproj" />
     <Project Path="src/CopilotAgentObservability.SanitizedExport/CopilotAgentObservability.SanitizedExport.csproj" />
   </Folder>
   <Folder Name="/tests/">

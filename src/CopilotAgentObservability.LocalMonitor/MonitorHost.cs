@@ -19,6 +19,7 @@ using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.SanitizedExport;
+using CopilotAgentObservability.RawReplay;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
@@ -299,6 +300,15 @@ internal static class MonitorHost
                     await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_lifecycle_store_unavailable");
                     return;
                 }
+                if (RawReplayRoutes.IsPath(context.Request.Path))
+                {
+                    var tooLarge = exception is BadHttpRequestException rawBodyException
+                        && rawBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge;
+                    await RawReplayRoutes.ErrorAsync(context,
+                        tooLarge ? StatusCodes.Status413PayloadTooLarge : StatusCodes.Status503ServiceUnavailable,
+                        tooLarge ? "request_too_large" : "raw_replay_unavailable");
+                    return;
+                }
                 if (exception is BadHttpRequestException badRequestException
                     && badRequestException.StatusCode == StatusCodes.Status413PayloadTooLarge)
                 {
@@ -313,10 +323,11 @@ internal static class MonitorHost
         {
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
+            var rawReplayPath = RawReplayRoutes.IsPath(context.Request.Path);
             var alertPath = AlertLifecycleRoutes.IsAlertPath(context.Request.Path);
             var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
             var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
-            if (retentionPath || sanitizedExportPath || alertPath || historicalImportPath || alertCenterPath)
+            if (retentionPath || sanitizedExportPath || rawReplayPath || alertPath || historicalImportPath || alertCenterPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -333,6 +344,10 @@ internal static class MonitorHost
                 else if (sanitizedExportPath)
                 {
                     await SanitizedExportRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (rawReplayPath)
+                {
+                    await RawReplayRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (alertPath)
                 {
@@ -367,6 +382,7 @@ internal static class MonitorHost
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
+        RawReplayRoutes.Map(app, options.DatabasePath, retentionCatalog, options.SanitizedOnly, timeProvider, testOptions?.RawReplaySnapshotProvider);
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);
@@ -1775,6 +1791,7 @@ internal sealed class MonitorHostTestOptions
     public IHistoricalImportApplication? HistoricalImportApplication { get; init; }
 
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
+    public IRawReplaySnapshotProvider? RawReplaySnapshotProvider { get; init; }
     public IAlertEngineStore? AlertEngineStore { get; set; }
 
     public IAlertLifecycleStore? AlertLifecycleStore { get; set; }

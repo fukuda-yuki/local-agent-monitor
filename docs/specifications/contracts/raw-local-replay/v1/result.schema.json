@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/raw-local-replay/v1/result.schema.json",
+  "title": "Raw local replay execution result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["success", "error_code", "idempotent_replay", "result"],
+  "properties": {
+    "success": { "type": "boolean" },
+    "error_code": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9_]+$" }
+      ]
+    },
+    "idempotent_replay": { "type": "boolean" },
+    "result": {
+      "oneOf": [{ "$ref": "#/$defs/receipt" }, { "type": "null" }]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "success": { "const": true } }, "required": ["success"] },
+      "then": {
+        "properties": {
+          "error_code": { "type": "null" },
+          "result": { "$ref": "#/$defs/receipt" }
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": { "type": "string", "minLength": 1 },
+          "idempotent_replay": { "const": false },
+          "result": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "replay_id", "profile", "archive_sha256",
+        "source_versions",
+        "normalization_version", "projection_version", "dashboard_version",
+        "normalized_sha256", "projection_sha256", "dashboard_sha256",
+        "raw_record_count", "session_content_count", "external_model_invocations"
+      ],
+      "properties": {
+        "schema_version": { "const": "raw-local-replay-result.v1" },
+        "replay_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+        },
+        "profile": { "const": "raw-local-replay" },
+        "archive_sha256": { "$ref": "#/$defs/sha256" },
+        "source_versions": {
+          "type": "array",
+          "maxItems": 255,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1536,
+            "pattern": "^[^\\x00-\\x1f\\x7f]+$"
+          }
+        },
+        "normalization_version": { "const": "raw-measurement-normalization.v1" },
+        "projection_version": { "const": "raw-replay-monitor-projection.v1" },
+        "dashboard_version": { "const": "raw-replay-dashboard.v1" },
+        "normalized_sha256": { "$ref": "#/$defs/sha256" },
+        "projection_sha256": { "$ref": "#/$defs/sha256" },
+        "dashboard_sha256": { "$ref": "#/$defs/sha256" },
+        "raw_record_count": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "session_content_count": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "external_model_invocations": { "const": 0 }
+      }
+    }
+  }
+}

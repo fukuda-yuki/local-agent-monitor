@@ -45,6 +45,9 @@ internal static class CliHelpText
           config-cli historical-import result --database <monitor.db> --operation-id <hop_...>
           config-cli historical-import history --database <monitor.db> [--limit <1..100>]
           config-cli historical-import observations --database <monitor.db> [--limit <1..100>] [--cursor <hoc_...>]
+          config-cli raw-replay preview --database <monitor.db> --request <request.json>
+          config-cli raw-replay export --database <monitor.db> --request <request.json> --output <raw-local-replay.zip>
+          config-cli raw-replay result --bundle <raw-local-replay.zip>
           config-cli ingest-raw <raw.json> --db <raw-store.db>
           config-cli normalize-raw <raw-store.db|raw.json> [--csv <output.csv>] [--json <output.json>]
           config-cli serve-raw-local-receiver [--db <raw-store.db>] [--url <loopback-http-url>]

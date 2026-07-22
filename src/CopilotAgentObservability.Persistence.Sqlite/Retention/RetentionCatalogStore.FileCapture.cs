@@ -59,12 +59,13 @@ public sealed partial class RetentionCatalogStore
         FileCaptureExec(c, t, "INSERT INTO retention_legacy_bundle_blockers(root_locator,classification,recorded_at) VALUES($root,'legacy_bundle_unverifiable',$at) ON CONFLICT(root_locator) DO NOTHING;", ("$root", Path.GetFullPath(rootLocator)), ("$at", Timestamp(timeProvider.GetUtcNow())));
         t.Commit();
     }
-    internal RetentionFileCaptureReservation ReserveSensitiveBundle(string parentLocator, DateTimeOffset? reservedAt = null, string? finalLocator = null, bool legacyV1 = false)
+    internal RetentionFileCaptureReservation ReserveSensitiveBundle(string parentLocator, DateTimeOffset? reservedAt = null, string? finalLocator = null, bool legacyV1 = false, string? captureId = null)
     {
         if (context is null) throw new RetentionCatalogUnavailableException();
         if (string.IsNullOrWhiteSpace(parentLocator)) throw new ArgumentException("Invalid retention file capture parent.", nameof(parentLocator));
         try { parentLocator = Path.GetFullPath(parentLocator); } catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException) { throw new ArgumentException("Invalid retention file capture parent.", nameof(parentLocator)); }
-        var now = reservedAt ?? timeProvider.GetUtcNow(); var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(); var token = RandomNumberGenerator.GetBytes(32); var reserved = Timestamp(now);
+        if (captureId is not null && !CanonicalId(captureId)) throw new ArgumentException("Invalid retention file capture id.", nameof(captureId));
+        var now = reservedAt ?? timeProvider.GetUtcNow(); var id = captureId ?? Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(); var token = RandomNumberGenerator.GetBytes(32); var reserved = Timestamp(now);
         var final = legacyV1 ? Path.Combine(parentLocator, id) : finalLocator ?? Path.Combine(parentLocator, id);
         var staging = legacyV1 ? Path.Combine(Path.GetDirectoryName(parentLocator)!, $".{id}.legacy-staging") : Path.Combine(parentLocator, $".{id}.staging");
         using var c = OpenExisting(); using var t = c.BeginTransaction(); var store = StoreId(c, t); if (store != context.StoreInstanceId) throw new RetentionCatalogUnavailableException();

@@ -1,0 +1,142 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "0000000000000000000000000000000000000000",
+  "inventory_date": "2026-07-23",
+  "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER: replace the all-zero final_validation_sha after Issue #87 validation is run from one immutable candidate. Current evidence is limited to deterministic synthetic fixtures and disposable local worktree state; no real content-enabled producer capture is authorized or claimed.",
+  "active_rows": [
+    {
+      "row_id": "91-R-087",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "raw-local-replay",
+      "operation": "Exact raw export, strict archive inspection, isolated deterministic replay, and same-ID idempotent result",
+      "profiles": {
+        "collection": ["config-cli", "local-monitor-http"],
+        "content_access": ["raw-default", "sanitized-only-denied"],
+        "compatibility": ["raw-local-replay-bundle.v1", "source-versioned"],
+        "hook": [],
+        "otel": ["stored-raw-otlp"],
+        "binding": ["exact-session-trace-raw-record", "composite-operation-lease"],
+        "restart": ["retained-namespace-recovery"],
+        "retention": ["sensitive-bundle-7d", "reader-and-operation-leases"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "raw-local-replay-bundle.v1",
+        "manifest": "raw-local-replay-manifest.v1",
+        "normalization": "raw-measurement-normalization.v1",
+        "projection": "raw-replay-monitor-projection.v1",
+        "dashboard": "raw-replay-dashboard.v1"
+      },
+      "expected_invariant": "One preview-bound, consented, exact Retention-leased snapshot produces a strictly inspectable deterministic archive and an isolated retained replay without changing live raw, Session, projection, analysis, or evidence stores or invoking an external model.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #87 raw local replay",
+      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER pending exact-candidate focused and full validation; no raw artifact or sensitive path is recorded."
+    },
+    {
+      "row_id": "91-S-087",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "raw-local-replay-security-and-cleanup",
+      "operation": "Consent, sanitized-only denial, credential rejection, no-leak errors, source/version conflicts, Retention capture recovery, leases, and physical cleanup",
+      "profiles": {
+        "collection": ["bundle-create", "bundle-inspect", "local-monitor-http"],
+        "content_access": ["raw-default", "sanitized-only-denied", "credential-rejected"],
+        "compatibility": ["supported", "version-mismatch", "archive-corrupt"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-source-id", "no-heuristic-session-merge"],
+        "restart": ["capture-journal-recovery", "cleanup-retry"],
+        "retention": ["sensitive-bundle-7d", "read-denied", "cleanup-leased"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "archive": "raw-local-replay-zip-store.v1",
+        "checksum": "sha256.v1",
+        "credential_scan": "raw-replay-credential-scan.v1",
+        "retention_policy": "sensitive-bundle-7d"
+      },
+      "expected_invariant": "Every raw operation fails closed before publication on consent, profile, selection, archive, inventory, checksum, credential, conflict, or version failure; cleanup uses only the existing exact-owned sensitive-bundle path and never targets the caller archive or live evidence.",
+      "evidence": [],
+      "actual_result": "",
+      "classification": "not_attempted",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #87 raw local replay",
+      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "WORK-IN-PROGRESS PLACEHOLDER pending exact-candidate security, recovery, lease, and cleanup validation with synthetic bounded data only."
+    },
+    {
+      "row_id": "91-L-087",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "raw-local-replay-live-content",
+      "operation": "Content-authorized real local producer capture through exact export and isolated replay",
+      "profiles": {
+        "collection": ["local-monitor-http"],
+        "content_access": ["content-authorized"],
+        "compatibility": ["source-versioned"],
+        "hook": [],
+        "otel": ["real-source-producer"],
+        "binding": ["exact-session-trace-raw-record"],
+        "restart": ["retained-namespace-recovery"],
+        "retention": ["sensitive-bundle-7d"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "raw-local-replay-bundle.v1",
+        "credential_scan": "raw-replay-credential-scan.v1"
+      },
+      "expected_invariant": "With separate operator authorization, one real content-enabled local source can be selected exactly, exported with truthful provenance, replayed only in an isolated retained namespace, and inspected without raw values entering repository-safe evidence.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "Not executed on 2026-07-23: content-enabled live capture was not authorized and OTEL_LOG_USER_PROMPTS=1 was not enabled.",
+          "compatibility_basis": "The raw-local-replay contract requires separate operator authorization; synthetic automated coverage cannot establish the real producer content/provenance behavior."
+        }
+      ],
+      "actual_result": "The live operation stopped before producer configuration or raw capture. No raw data, credential, local path, or reversible identifier was recorded.",
+      "classification": "blocked_external",
+      "severity": "medium",
+      "blocker": "No operator authorization was provided for content-enabled real-source capture.",
+      "retry_condition": "An operator explicitly authorizes a bounded local content-enabled producer run and repository-safe evidence handling for the exact candidate SHA.",
+      "unverified_capability": "Real producer content/provenance preservation through exact export, isolated replay, restart recovery, and cleanup without repository-safe leakage.",
+      "owner": "Issue #87 raw local replay",
+      "validation_sha": "0000000000000000000000000000000000000000",
+      "validation_date": "2026-07-23",
+      "environment_boundary": "No content-enabled producer process, live raw payload capture, external model, remote endpoint, or shared artifact was used."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/sprints/issue-87-raw-replay/README.md",
+    "docs/specifications/contracts/raw-local-replay/v1/issue-91-validation-handoff.json"
+  ],
+  "release_decision": {
+    "decision": "release_blocked",
+    "external_blockers": [
+      {
+        "row_id": "91-L-087",
+        "severity": "medium",
+        "blocker": "No operator authorization was provided for content-enabled real-source capture.",
+        "retry_condition": "An operator explicitly authorizes a bounded local content-enabled producer run and repository-safe evidence handling for the exact candidate SHA.",
+        "unverified_capability": "Real producer content/provenance preservation through exact export, isolated replay, restart recovery, and cleanup without repository-safe leakage."
+      }
+    ]
+  }
+}

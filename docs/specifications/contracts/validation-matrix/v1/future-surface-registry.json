@@ -21,15 +21,6 @@
       "expected_evidence_location": "docs/sprints/issue-86-sanitized-import/validation-matrix.json"
     },
     {
-      "surface_id": "raw-replay",
-      "title": "Raw replay",
-      "owner_issue": 87,
-      "state": "not_available",
-      "entry_condition": "Issue #87 replay surface and executable safety tests are present in a candidate SHA.",
-      "required_profiles": ["raw-local-replay", "raw-default", "content-authorized", "sanitized-only-denied", "source-versioned"],
-      "expected_evidence_location": "docs/sprints/issue-87-raw-replay/validation-matrix.json"
-    },
-    {
       "surface_id": "backup-restore",
       "title": "Backup and restore",
       "owner_issue": 88,

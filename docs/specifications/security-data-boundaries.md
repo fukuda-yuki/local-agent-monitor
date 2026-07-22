@@ -1286,6 +1286,37 @@ The v1 surface does not upload, sign, encrypt, import, replay, back up, restore,
 or persist new database state. The complete contract is canonical in
 [`interfaces/sanitized-evidence-export.md`](interfaces/sanitized-evidence-export.md).
 
+## Raw Local Replay Boundary
+
+Issue #87 is intentionally outside the repository-safe export boundary. Every
+preview, export, archive inspection, import, replay, status, and download is a
+raw-bearing local operation with the persistent warning and exact confirmation
+binding defined by
+[`interfaces/raw-local-replay.md`](interfaces/raw-local-replay.md). Known
+credential patterns reject the operation without returning the match; a passing
+scan is only a narrow guard and never classifies the remaining bundle as safe.
+Raw bundles, members, replay artifacts, paths, private retention identities,
+and selected raw-store IDs must not enter logs, errors, screenshots, Issue or
+review evidence, repository files, CI artifacts, sanitized bundles, or static
+dashboard output. Repository-safe evidence is limited to bounded statuses,
+counts, contract versions, and non-reversible hashes.
+
+The Local Monitor raw-replay routes remain loopback-only with Host validation,
+no CORS, same-origin reads, CSRF on writes, and `Cache-Control: no-store`; they
+are separate from `/api/monitor/*`. `--sanitized-only` denies the complete
+surface before reading caller archives or source raw/content rows. Config CLI
+can only preview/export/inspect; import/replay goes through the running Local
+Monitor. Caller-owned archive files are never catalog items or cleanup targets.
+
+Durable replay staging reuses the existing Retention catalog v1
+`sensitive_bundle` item and `sensitive-bundle-7d` policy, including its private
+reservation, capture marker, isolated locator, operation leases, queue,
+store-specific deletion adapter, retry, and restart recovery. No replay value
+can authorize deletion by path, repository, timestamp, prompt, similarity, or
+generic adapter label. Replay never writes or merges into the live raw,
+Session, projection, analysis, or evidence stores; it never reconstructs a
+heuristic Session and never sends raw data to an external model.
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

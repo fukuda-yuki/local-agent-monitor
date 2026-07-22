@@ -2440,3 +2440,28 @@ or carrier bytes, a safety marker, or a server output path. V1 exports only the
 closed #58/#59/#80 profiles; #72 datasets and #83 lifecycle events require a
 named future profile. The interface is
 [sanitized evidence export](specifications/interfaces/sanitized-evidence-export.md).
+
+## D069: Raw replay is explicit, isolated, deterministic, and retention-owned
+
+Status: Accepted (2026-07-23)
+
+Issue #87 uses a separate `raw-local-replay` profile rather than extending the
+repository-safe sanitized bundle. Export and replay each require a persistent
+raw-data warning, exact preview binding, and fixed confirmation phrase. Exact
+Session/trace/raw-record/source/time selection is materialized all-or-none under
+one Retention operation lease; original identities, timestamps, and observed
+source/adapter/schema/content provenance are preserved without repository,
+workspace, path, time-proximity, prompt, or similarity inference.
+
+Replay validates the complete deterministic archive, pins normalization,
+projection, and dashboard target versions, and binds observed adapter/schema
+version evidence to the exact members before publishing an isolated namespace.
+The namespace reuses the existing `sensitive_bundle` item,
+`sensitive-bundle-7d` policy, reserve-to-complete capture journal, operation
+leases, queue, cleanup adapter, retry, and recovery. It adds no store kind,
+migration, worker, or deletion path; caller archives are not cleanup targets.
+Replay never mutates or merges into live raw, Session, projection, analysis, or
+evidence stores and performs zero external-model calls. Same replay ID plus the
+same archive/options/versions is idempotent; differing input is a conflict.
+`--sanitized-only` rejects the whole surface before raw access. The canonical
+interface is [raw local replay](specifications/interfaces/raw-local-replay.md).

@@ -1,0 +1,29 @@
+{
+  "schema_version": "raw-local-replay-validation-handoff.v1",
+  "surface_id": "raw-replay",
+  "owner_issue": 87,
+  "future_registry_state_at_kickoff": "not_available",
+  "production_surface_state": "implemented_candidate",
+  "active_row_ids": [
+    "91-R-087",
+    "91-S-087",
+    "91-L-087"
+  ],
+  "required_profiles": [
+    "raw-local-replay",
+    "raw-default",
+    "content-authorized",
+    "sanitized-only-denied",
+    "source-versioned"
+  ],
+  "automated_test_filters": [
+    "FullyQualifiedName~RawReplayArchiveServiceTests",
+    "FullyQualifiedName~RawReplayCliTests",
+    "FullyQualifiedName~RawReplayEngineTests",
+    "FullyQualifiedName~SqliteRawReplaySnapshotProviderTests",
+    "FullyQualifiedName~RetentionRawReplayStoreTests",
+    "FullyQualifiedName~RawReplaySurfaceTests"
+  ],
+  "expected_evidence_location": "docs/sprints/issue-87-raw-replay/validation-matrix.json",
+  "canonical_transition": "The raw-replay placeholder was removed from the v1 future registry only when the Issue #87 production candidate and executable archive, deterministic replay, and trusted SQLite snapshot tests became present. Active classifications live only in the Issue #87 validation matrix. The registry was not changed to an active state, no pass was inherited from the placeholder, and the live content-authorized row remains blocked_external until separately authorized."
+}
