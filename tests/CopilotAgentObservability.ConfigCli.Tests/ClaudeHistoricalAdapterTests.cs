@@ -301,11 +301,17 @@ public sealed class ClaudeHistoricalAdapterTests
         new StackOverflowException("fatal runtime state"),
         new BadImageFormatException("fatal runtime state"),
         CreateThreadAbortException(),
+        CreateExecutionEngineException(),
+        new ThreadInterruptedException("thread interruption is control flow"),
         new OperationCanceledException("caller canceled metadata inspection")
     };
 
     private static Exception CreateThreadAbortException() =>
         (Exception)Activator.CreateInstance(typeof(System.Threading.ThreadAbortException), nonPublic: true)!;
+
+    private static Exception CreateExecutionEngineException() =>
+        (Exception)Activator.CreateInstance(
+            Type.GetType("System.ExecutionEngineException", throwOnError: true)!)!;
 
     private static ClaudeHistoricalProbeRequest AuthorizedRequest(
         ClaudeTranscriptReferenceKind kind,

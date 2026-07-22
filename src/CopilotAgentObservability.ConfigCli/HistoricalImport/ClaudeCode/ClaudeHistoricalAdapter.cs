@@ -126,7 +126,8 @@ internal sealed partial class ClaudeHistoricalAdapter
     private static string? NormalizeVersion(string? version) =>
         version is not null && SemanticVersion().IsMatch(version) ? version : null;
 
-    private static bool IsFatalOrControlFlow(Exception exception) => exception is
+    private static bool IsFatalOrControlFlow(Exception exception) =>
+        IsLegacyFatal(exception) || exception is
         OutOfMemoryException or
         StackOverflowException or
         AccessViolationException or
@@ -135,7 +136,12 @@ internal sealed partial class ClaudeHistoricalAdapter
         CannotUnloadAppDomainException or
         InvalidProgramException or
         System.Threading.ThreadAbortException or
+        ThreadInterruptedException or
         OperationCanceledException;
+
+#pragma warning disable CS0618 // Callers can still inject this obsolete fatal type even though the runtime no longer raises it.
+    private static bool IsLegacyFatal(Exception exception) => exception is ExecutionEngineException;
+#pragma warning restore CS0618
 
     [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$", RegexOptions.CultureInvariant)]
     private static partial Regex SemanticVersion();
