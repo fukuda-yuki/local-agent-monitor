@@ -30,7 +30,7 @@ internal enum HistoricalInstructionAnalysisStateV1
 }
 
 internal enum HistoricalInstructionProviderCompletionV1 { Complete, Partial }
-internal enum HistoricalInstructionSupportKindV1 { Recurring, SingleSession }
+internal enum HistoricalInstructionSupportKindV1 { Recurring, SingleSession, InsufficientSupport }
 
 internal enum HistoricalInstructionAnalysisValidationCodeV1
 {
@@ -102,7 +102,7 @@ internal static class HistoricalInstructionAnalysisPromptV1
         Historical instruction analysis contract: historical-instruction-analysis.prompt.v1.
         Analyze only the supplied persisted historical-evidence.raw-local.v1 dataset. Do not search, query, or infer any Session, trace, repository, workspace, source, or history outside that dataset.
         Reuse only the instruction-finding.v1 categories: goal_clarity, ambiguity, acceptance_criteria_missing, scope_boundary_missing, task_too_large, test_requirement_missing, evidence_requirement_missing, and environment_assumption_missing.
-        Every submission must use one shared exact anchor trace, exact anchor evidence references present in included evidence groups, exact supporting group IDs, one closed verdict (supported, weak, or incomplete), and one closed extractor source (deterministic_prepass or prompt_only).
+        Every submission must use one shared exact anchor trace, exact evidence references from the unique Session owning that anchor (at least one anchor reference plus only same-Session non-anchor context valid under instruction-finding.v1), exact supporting group IDs, one closed verdict (supported, weak, or incomplete), and one closed extractor source (deterministic_prepass or prompt_only). Other Sessions are recurrence-only and cannot contribute final finding references.
         A recurring claim requires the same category to meet its instruction-finding.v1 evidence minimum independently inside at least two distinct included Sessions. Unrelated or under-minimum supporting groups do not count. One-Session support cannot be Recommended-equivalent. Do not upgrade weak or incomplete evidence.
         Submit no title, summary, explanation, instruction, target, rule text, source excerpt, prompt/response body, tool body, credential, personal data, or local path. Code generates fixed instruction-finding.v1 templates after exact citation validation.
         A complete response with zero submissions is valid. Mark an interrupted or incomplete response partial; do not present partial output as success.

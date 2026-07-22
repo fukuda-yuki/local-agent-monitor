@@ -30,6 +30,51 @@
       "expected_support_kind": "single_session",
       "expected_verdict": "weak",
       "expected_candidate_eligible": false
+    },
+    {
+      "id": "D",
+      "session_count": 1,
+      "grounded_session_count": 1,
+      "per_session_category_minimum_met": [true],
+      "expected_support_kind": "single_session",
+      "expected_verdict": "weak",
+      "expected_candidate_eligible": false
+    },
+    {
+      "id": "E",
+      "session_count": 1,
+      "grounded_session_count": 0,
+      "per_session_category_minimum_met": [false],
+      "expected_support_kind": "insufficient_support",
+      "expected_verdict": "weak",
+      "expected_candidate_eligible": false
+    },
+    {
+      "id": "F",
+      "session_count": 1,
+      "grounded_session_count": 0,
+      "per_session_category_minimum_met": [false],
+      "expected_support_kind": "insufficient_support",
+      "expected_verdict": "weak",
+      "expected_candidate_eligible": false
+    },
+    {
+      "id": "G",
+      "session_count": 1,
+      "grounded_session_count": 0,
+      "per_session_category_minimum_met": [false],
+      "expected_support_kind": "insufficient_support",
+      "expected_verdict": "incomplete",
+      "expected_candidate_eligible": false
+    },
+    {
+      "id": "H",
+      "session_count": 2,
+      "grounded_session_count": 2,
+      "per_session_category_minimum_met": [true, true],
+      "expected_support_kind": "recurring",
+      "expected_verdict": "supported",
+      "expected_candidate_eligible": true
     }
   ]
 }

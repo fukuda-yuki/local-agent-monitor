@@ -90,6 +90,17 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
             return;
         }
 
+        HistoricalEvidenceDatasetV1 providerDataset;
+        try
+        {
+            providerDataset = HistoricalEvidenceJsonV1.Deserialize(extraction.RawLocalBytes);
+        }
+        catch (HistoricalEvidenceValidationException)
+        {
+            Complete(runId, HistoricalInstructionAnalysisStateV1.ExtractionInvalid);
+            return;
+        }
+
         HistoricalInstructionProviderResultV1 providerResult;
         using var timeoutSource = new CancellationTokenSource();
         using var providerCancellation = new CancellationTokenSource();
@@ -108,7 +119,7 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
             var request = new HistoricalInstructionProviderRequestV1(
                 runId,
                 run.Request,
-                extraction.RawLocal,
+                providerDataset,
                 extraction.RawLocalBytes.ToArray(),
                 HistoricalInstructionAnalysisPromptV1.Template);
             var providerTask = provider.AnalyzeAsync(request, providerCancellation.Token);
@@ -206,17 +217,29 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
         if (rawGroups.Count != safeGroups.Count || rawGroups.Keys.Any(key => !safeGroups.ContainsKey(key))) throw InvalidCitation();
         var sessionPairs = PairSessions(extraction);
 
+        var anchorSessionIds = extraction.RawLocal.EvidenceGroups
+            .Where(group => EvidenceKind(group.Kind) is not null)
+            .SelectMany(group => group.References)
+            .Where(reference => reference.TraceId == providerResult.AnchorTraceId
+                && reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Anchor)
+            .Select(reference => reference.SessionId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (anchorSessionIds.Length != 1) throw InvalidCitation();
+        var anchorSessionId = anchorSessionIds[0];
+
         var locations = extraction.RawLocal.EvidenceGroups
             .SelectMany(group => EvidenceKind(group.Kind) is { } kind
                 ? group.References
-                    .Where(reference => reference.TraceId == providerResult.AnchorTraceId
-                        && reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Anchor)
+                    .Where(reference => reference.SessionId == anchorSessionId
+                        && (reference.RelativePosition == HistoricalEvidenceRelativePositionV1.Anchor)
+                            == (reference.TraceId == providerResult.AnchorTraceId))
                     .Select(reference => new InstructionFindingEvidenceLocationV1(
                         reference.SessionId,
                         reference.TraceId,
                         reference.SpanId,
                         reference.TurnIndex,
-                        InstructionEvidenceRelativePositionV1.Anchor,
+                        (InstructionEvidenceRelativePositionV1)(int)reference.RelativePosition,
                         kind))
                 : [])
             .Distinct()
@@ -243,12 +266,19 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
                 .ToArray();
             if (supportGroupIds.Any(groupId => !rawGroups.ContainsKey(groupId))) throw InvalidCitation();
             var supportGroups = supportGroupIds.Select(groupId => rawGroups[groupId]).ToArray();
-            var supportReferences = supportGroups.SelectMany(group => group.References).Select(ToInstructionReference).ToHashSet();
+            var supportReferences = supportGroups
+                .Where(group => EvidenceKind(group.Kind) is not null)
+                .SelectMany(group => group.References)
+                .Select(ToInstructionReference)
+                .ToHashSet();
             var references = submission.EvidenceRefs.Distinct().Order(InstructionRawEvidenceReferenceComparerV1.Instance).ToArray();
+            if (!references.Any(reference => reference.RelativePosition == InstructionEvidenceRelativePositionV1.Anchor))
+                throw InvalidCitation();
             foreach (var reference in references)
             {
-                if (reference.TraceId != providerResult.AnchorTraceId
-                    || reference.RelativePosition != InstructionEvidenceRelativePositionV1.Anchor
+                if (reference.SessionId != anchorSessionId
+                    || (reference.RelativePosition == InstructionEvidenceRelativePositionV1.Anchor)
+                        != (reference.TraceId == providerResult.AnchorTraceId)
                     || !supportReferences.Contains(reference)
                     || !evidenceIndex.TryResolve(reference, out _))
                     throw InvalidCitation();
@@ -282,17 +312,28 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
                     first.Draft.Category,
                     first.Draft.ExtractorSource,
                     submittedGroupIds.Select(groupId => rawGroups[groupId]).ToArray());
-                if (grounding.Count == 0) throw InvalidCitation();
+                var exactEvidence = first.Draft.EvidenceRefs.ToHashSet();
+                var exactGroupIds = submittedGroupIds
+                    .Where(groupId => EvidenceKind(rawGroups[groupId].Kind) is not null
+                        && rawGroups[groupId].References
+                            .Select(ToInstructionReference)
+                            .Any(exactEvidence.Contains))
+                    .ToArray();
+                if (exactGroupIds.Length == 0) throw InvalidCitation();
                 var assessedVerdict = group.Select(value => value.Draft.AssessedVerdict)
                     .Aggregate(LeastStrong);
                 var verdict = assessedVerdict == InstructionFindingVerdictV1.Supported && grounding.Count < 2
                     ? InstructionFindingVerdictV1.Weak
                     : assessedVerdict;
+                var supportGroupIds = grounding.Count == 0
+                    ? exactGroupIds
+                    : grounding.SelectMany(value => value.GroupIds)
+                        .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
                 return new AssessedSubmission(
                     first.FindingId,
                     first.Draft with { AssessedVerdict = verdict },
-                    grounding.SelectMany(value => value.GroupIds)
-                        .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+                    supportGroupIds,
+                    grounding.Count);
             })
             .OrderBy(value => value.FindingId, StringComparer.Ordinal)
             .ToArray();
@@ -304,9 +345,9 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
         var supports = handoff.Findings.Select(finding =>
         {
             var matches = assessed.Where(value => value.FindingId == finding.FindingId).ToArray();
-            if (matches.Length == 0) throw InvalidCitation();
-            var groupIds = matches.SelectMany(value => value.SupportingGroupIds)
-                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            if (matches.Length != 1) throw InvalidCitation();
+            var assessedFinding = matches[0];
+            var groupIds = assessedFinding.SupportingGroupIds;
             var rawSupportGroups = groupIds.Select(groupId => rawGroups[groupId]).ToArray();
             var rawSessionIds = rawSupportGroups.Select(group => group.SessionId)
                 .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
@@ -317,10 +358,15 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
                 finding.FindingId,
                 finding.Verdict,
                 finding.CandidateEligibility,
-                rawSessionIds.Length >= 2 ? HistoricalInstructionSupportKindV1.Recurring : HistoricalInstructionSupportKindV1.SingleSession,
+                assessedFinding.RecurringCount switch
+                {
+                    0 => HistoricalInstructionSupportKindV1.InsufficientSupport,
+                    1 => HistoricalInstructionSupportKindV1.SingleSession,
+                    _ => HistoricalInstructionSupportKindV1.Recurring,
+                },
                 safeSessions.Select(session => session.SessionId).Order(StringComparer.Ordinal).ToArray(),
                 groupIds,
-                rawSessionIds.Length,
+                assessedFinding.RecurringCount,
                 Distribution(safeSessions.Select(session => SessionWire.ToWire(session.SourceSurface))),
                 Distribution(safeSessions.Select(session => session.SourceVersion ?? "unavailable")),
                 Distribution(safeSessions.Select(session => Snake(session.SourceKind))),
@@ -526,7 +572,11 @@ internal sealed class HistoricalInstructionAnalysisApplicationServiceV1
         new(HistoricalInstructionAnalysisValidationCodeV1.InvalidCitation);
 
     private sealed record ValidatedSubmission(string FindingId, InstructionFindingDraftV1 Draft, IReadOnlyList<string> SupportingGroupIds);
-    private sealed record AssessedSubmission(string FindingId, InstructionFindingDraftV1 Draft, IReadOnlyList<string> SupportingGroupIds);
+    private sealed record AssessedSubmission(
+        string FindingId,
+        InstructionFindingDraftV1 Draft,
+        IReadOnlyList<string> SupportingGroupIds,
+        int RecurringCount);
     private sealed record GroundedSession(IReadOnlyList<string> GroupIds);
     private sealed record BuiltResult(HistoricalInstructionAnalysisReceiptV1 Receipt, byte[] HandoffBytes);
 

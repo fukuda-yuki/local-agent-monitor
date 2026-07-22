@@ -41,11 +41,58 @@ public class MonitorHostTests
             30_000,
             HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion));
 
+        var queued = Assert.IsType<HistoricalInstructionAnalysisReadV1>(composition.Get(runId));
+        Assert.Equal(HistoricalInstructionAnalysisStateV1.Queued, queued.State);
+        Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(queued));
+
         await runner.RunAsync(runId, CancellationToken.None);
 
         var read = Assert.IsType<HistoricalInstructionAnalysisReadV1>(composition.Get(runId));
         Assert.Equal(HistoricalInstructionAnalysisStateV1.StaleExtraction, read.State);
         Assert.Equal(runId, HistoricalInstructionAnalysisReadConsumerV1.Validate(read));
+    }
+
+    [Fact]
+    public async Task Build_SanitizedOnlyCompositionRejectsRunnerForPreexistingRawExtraction()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var extractionStore = new SqliteHistoricalEvidenceDatasetStoreV1(tempDirectory.DatabasePath);
+        extractionStore.CreateSchema();
+        var extractionService = new HistoricalEvidenceApplicationServiceV1(
+            new RawHistoricalSnapshotSource(), extractionStore);
+        var extraction = await extractionService.CreateAsync(
+            HistoricalEvidenceSelectionV1.Create(
+                explicitSessionIds: [RawHistoricalSnapshotSource.SessionId]),
+            CancellationToken.None);
+        Assert.False(extraction.RawLocal.Selection.SanitizedOnly);
+        Assert.Contains("preexisting raw descriptor", Encoding.UTF8.GetString(extraction.RawLocalBytes), StringComparison.Ordinal);
+
+        var analysisStore = new SqliteHistoricalInstructionAnalysisStoreV1(tempDirectory.DatabasePath);
+        analysisStore.CreateSchema();
+        var queuedRunId = new HistoricalInstructionAnalysisApplicationServiceV1(
+            extractionService,
+            analysisStore,
+            new UnusedHistoricalInstructionProvider()).Start(new HistoricalInstructionAnalysisRequestV1(
+                HistoricalInstructionAnalysisContractsV1.RequestSchemaVersion,
+                extraction.RawLocal.ExtractionId,
+                extraction.RawLocalSha256,
+                "gpt-5",
+                "copilot",
+                new string('a', 64),
+                30_000,
+                HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion));
+
+        using var app = MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", true, 31_457_280),
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, UseUserSecrets = false });
+        var composition = app.Services.GetRequiredService<HistoricalInstructionAnalysisCompositionV1>();
+
+        var queued = Assert.IsType<HistoricalInstructionAnalysisReadV1>(composition.Get(queuedRunId));
+        Assert.Equal(HistoricalInstructionAnalysisStateV1.Queued, queued.State);
+        Assert.Equal(queuedRunId, HistoricalInstructionAnalysisReadConsumerV1.Validate(queued));
+        var exception = Assert.Throws<HistoricalInstructionAnalysisValidationException>(() =>
+            composition.CreateRunner(new UnusedHistoricalInstructionProvider()));
+        Assert.Equal(HistoricalInstructionAnalysisValidationCodeV1.InvalidContract, exception.Code);
     }
 
     [Fact]
@@ -776,6 +823,84 @@ public class MonitorHostTests
             HistoricalInstructionProviderRequestV1 request,
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("The host composition test must not execute a provider.");
+    }
+
+    private sealed class RawHistoricalSnapshotSource : IHistoricalEvidenceSnapshotSourceV1
+    {
+        internal static readonly Guid SessionId = Guid.Parse("018f0000-0000-7000-8000-000000000073");
+
+        public ValueTask<IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(
+            HistoricalEvidenceSelectionV1 selection,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IHistoricalEvidenceSnapshotLeaseV1>(new Lease());
+
+        private sealed class Lease : IHistoricalEvidenceSnapshotLeaseV1
+        {
+            private static readonly DateTimeOffset ObservedAt =
+                new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+            public string SnapshotId => "snapshot-host-raw-issue-73";
+
+            public IReadOnlyList<HistoricalSessionMetadataV1> Sessions { get; } =
+            [
+                new HistoricalSessionMetadataV1(
+                    SessionId,
+                    SessionSourceSurface.CopilotSdk,
+                    "1.0.0",
+                    "adapter.v1",
+                    SessionCompleteness.Full,
+                    [],
+                    HistoricalEvidenceSourceKindV1.LiveOtel,
+                    SessionContentState.Available,
+                    "owner/repository",
+                    "workspace",
+                    null,
+                    null,
+                    ObservedAt,
+                    ObservedAt,
+                    new HistoricalSessionCapabilitiesV1(true, false, false, false, false, false, false, false, true, false, false, false),
+                    [new HistoricalEvidenceLocationV1(SessionId, "trace-1", "span-1", 1, HistoricalEvidenceRelativePositionV1.Anchor)],
+                    []),
+            ];
+
+            public long OmittedEarlierMatchingSessionCount => 0;
+
+            public ValueTask<IReadOnlyList<HistoricalEvidenceGroupDraftV1>> ReadEvidenceAsync(
+                Guid sessionId,
+                bool includeDescriptors,
+                CancellationToken cancellationToken)
+            {
+                var reference = new HistoricalRawEvidenceReferenceV1(
+                    SessionId, "trace-1", "span-1", 1, HistoricalEvidenceRelativePositionV1.Anchor);
+                return ValueTask.FromResult<IReadOnlyList<HistoricalEvidenceGroupDraftV1>>(
+                [
+                    new HistoricalEvidenceGroupDraftV1(
+                        HistoricalEvidenceGroupKindV1.TurnRollup,
+                        [reference],
+                        1,
+                        "turn",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null),
+                    new HistoricalEvidenceGroupDraftV1(
+                        HistoricalEvidenceGroupKindV1.UserCorrection,
+                        [reference],
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        includeDescriptors ? "preexisting raw descriptor" : null),
+                ]);
+            }
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
     }
 
     private sealed class ThrowingCommitStore : IIngestionCommitStore

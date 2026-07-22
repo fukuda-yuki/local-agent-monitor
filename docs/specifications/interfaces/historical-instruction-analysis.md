@@ -113,15 +113,21 @@ constructing provider input.
 
 The provider receives only:
 
-- the exact persisted Issue #72 raw-local dataset and canonical bytes;
+- an independently deserialized view of the exact persisted Issue #72
+  raw-local canonical bytes, plus a separate byte-array copy;
 - its already-bounded included/excluded Sessions, capability/completeness
   distribution, evidence groups/references, and allowed descriptors;
 - the immutable run provenance and prompt-template version;
 - a run-local closed submission carrier.
 
 It receives no store, query service, filesystem path, repository handle, or
-history-search tool. Tests must prove a completed run can use a persisted
-extraction after its original Session/finding sources are unavailable.
+history-search tool. The provider view and byte array share no mutable object
+with the owner-validated extraction retained for post-validation. Provider
+mutation of a list element or nested value therefore cannot change the #72
+facts against which citations and recurrence are derived. Tests must prove a
+completed run can use a persisted extraction after its original
+Session/finding sources are unavailable and that hostile provider mutation
+cannot enter the #59/#73 result.
 
 If the extraction is absent or its expected checksum differs, the state is
 `stale_extraction` and the provider is not called. If the extraction is
@@ -139,15 +145,26 @@ The provider may submit only closed data:
 
 - one exact anchor trace ID shared by every submission in the run;
 - one Issue #59 category, assessed verdict, and extractor source;
-- one or more exact raw-local anchor evidence references;
+- exact raw-local evidence references from the unique Session owning that
+  anchor: at least one anchor ref, plus only mapped non-anchor refs whose trace
+  relation is valid under the unchanged #59 contract;
 - one or more exact Issue #72 supporting group IDs.
 
 It cannot submit a title, summary, explanation, instruction, target, rule text,
 source excerpt, or arbitrary metadata. A complete response with no submissions
 is valid.
 
-The runner builds the #59 evidence index only from exact references present in
-the included raw-local groups for the selected anchor. `turn_rollup` supplies
+The runner resolves exactly one included Session that owns an anchor-position
+reference for the provider anchor trace. Zero or multiple owning Sessions reject
+the result. It builds the final #59 evidence index only from mapped groups in
+that Session: anchor-position refs must use the provider anchor trace and
+non-anchor refs must use another trace, exactly as #59 requires. Submitted
+final refs must resolve to that same Session and include an anchor ref. Other
+Sessions never contribute final finding refs; they participate only in the
+independent recurrence check below. This is a named #59-compatible v1 extension
+inside #73 evidence, not broader historical search or a change to #59 storage.
+
+`turn_rollup` supplies
 `turn`, `error_span` and `retry_chain` supply `error_or_retry_span`, and
 `user_correction` supplies `instruction_span`. Other groups neither count nor
 enter the historical recurrence projection and do not invent a #59 evidence
@@ -161,6 +178,9 @@ Before invoking the #59 producer, the runner rejects the whole result when:
   index;
 - a supporting group ID is absent, excluded, or belongs to a different
   extraction;
+- the provider anchor has zero or multiple owning Sessions, a final evidence
+  ref belongs to another Session, no anchor ref is submitted, or a ref violates
+  #59's anchor/non-anchor trace relation;
 - an evidence reference cannot resolve uniquely to its included Session,
   trace, span/turn, and relative position;
 - submissions use different anchors;
@@ -174,22 +194,37 @@ supporting groups. The unchanged #59 producer applies the same category-specific
 minimum to a Session-local draft. A Session counts toward recurrence only when
 that same-category draft remains `supported`.
 
-Unrelated, unmapped, redundant, or category-under-minimum groups are excluded
-from the recurrence count and historical support projection. For each grounded
-Session, the persisted support groups are the deterministic minimal ordered set
-whose removal would make the unchanged #59 category check no longer supported.
-A recurring claim requires
-at least two independently grounded distinct Sessions. A provider-assessed
-`supported` submission with one grounded Session is passed to #59 as `weak`,
-which makes it ineligible; a submission with no grounded Session is rejected.
+Unrelated, unmapped, or redundant groups are excluded from the recurrence
+count. For each grounded Session, the persisted support groups are the
+deterministic minimal ordered set whose removal would make the unchanged #59
+category check no longer supported. When no Session is grounded, the runner
+instead retains the deterministic ordered subset of submitted groups that
+contains the exact resolved provider evidence references; unrelated submitted
+groups remain excluded. This fallback is evidence projection, not recurrence.
+
+`recurring_count` is the exact number of independently grounded distinct
+Sessions. `support_kind` is `insufficient_support` for zero, `single_session`
+for exactly one, and `recurring` for two or more. Supporting Session/group IDs,
+evidence refs, and source/completeness distributions describe the retained
+exact support projection and may therefore be non-empty when
+`recurring_count` is zero. For grounded projections the recurring count equals
+the supporting Session count; the zero-grounded fallback has exactly one
+supporting Session because every retained exact reference belongs to the unique
+provider-anchor Session. No other non-empty support projection may have a zero
+recurring count. A provider-assessed `supported` submission with
+fewer than two grounded Sessions is passed to #59 as `weak`, which makes it
+ineligible. Exact/resolved citations with zero grounding are not
+`invalid_citation`; structurally invalid or unresolved references remain so.
 Provider-assessed `weak` and `incomplete` verdicts are preserved and never
-upgraded. Candidate eligibility is copied from the resulting #59 receipt;
-Issue #73 has no promotion shortcut.
+upgraded, including at zero grounding. Candidate eligibility is copied from
+the resulting #59 receipt and additionally requires `recurring_count >= 2`;
+the receipt/read validators reject an otherwise canonical supported/eligible
+finding with zero or one grounded Session. Issue #73 has no promotion shortcut.
 
 Source-version, source-surface, source-kind, and completeness distributions are
-derived only from the exact grounded supporting Sessions/groups. Mixed values remain explicit in
-the historical finding projection; missing or partial evidence is never
-interpreted as zero or full evidence.
+derived only from the retained exact support projection. Mixed values remain
+explicit in the historical finding projection; missing or partial evidence is
+never interpreted as zero or full evidence.
 
 ## Repository-safe receipt
 
@@ -202,7 +237,8 @@ interpreted as zero or full evidence.
 - extraction truncation and content-availability flags;
 - exact Issue #72 repository-safe completeness/source distributions;
 - for each emitted #59 finding: finding ID, final verdict, candidate
-  eligibility, support kind (`recurring` or `single_session`), supporting
+  eligibility, support kind (`recurring`, `single_session`, or
+  `insufficient_support`), supporting
   Session tokens, supporting group IDs, recurring count, source/version/kind
   and completeness distributions, and exact repository-safe evidence refs;
 - canonical #59 handoff SHA-256 and trusted-store linkage for successful or
@@ -236,7 +272,15 @@ invariants, the safe dataset projection, success-receipt linkage, and canonical
 `content_unavailable` requires `sanitized_only=true` and
 `content_available=false`; `no_eligible_sessions` requires a non-sanitized,
 content-capable projection with empty dataset distributions. Provider-stage
-terminal states require the non-sanitized content-capable projection.
+terminal states require the non-sanitized content-capable projection and a
+positive Session total. `sanitized_only=false` with
+`content_available=false` is the unavailable projection and requires all three
+distribution lists to be empty.
+
+The read boundary derives the Session total from completeness counts. That
+total must equal the source-kind total, and every capability count must be no
+greater than it. These relationships are revalidated independently of #72 so
+a forged or corrupted #73 row cannot expose contradictory owner facts to #75.
 
 Persistence is insert/new-run plus compare-and-set transitions. There is no
 retry rewrite, partial-result promotion, or insert-or-replace path.
@@ -283,6 +327,13 @@ raw-content execution, HTTP route, background worker, or UI is enabled by
 default. Automated fake-provider coverage is not genuine provider execution;
 the latter remains `blocked_external` until separate live evidence exists.
 
+The composition also receives the current host raw-execution permission.
+Under `--sanitized-only`, read/status remains available but `CreateRunner`
+fails closed before a run or provider call, even when the database contains a
+raw extraction created by an earlier non-sanitized host. A persisted extraction
+selection is evidence provenance, not authority to override the current
+runtime mode.
+
 ## Privacy and validation matrix
 
 Focused fixtures cover:
@@ -293,6 +344,20 @@ Focused fixtures cover:
   ineligible;
 - an unrelated or category-under-minimum second Session cannot promote A to
   recurring and is absent from the support projection;
+- an exact/resolved provider-assessed `supported` submission with zero grounded
+  Sessions is retained as `insufficient_support`, `weak`, and ineligible;
+  provider-assessed `weak` / `incomplete` remain unchanged at the same boundary;
+- `scope_boundary_missing` is grounded only when one Session independently
+  supplies both its required anchor Turn and anchor error/retry evidence;
+- two distinct Sessions whose `ambiguity` minimum depends on one anchor Turn
+  plus exact context each can produce a final supported/eligible recurrence,
+  while context from a non-anchor Session cannot enter the final #59 finding;
+- a canonical #59 supported/eligible handoff paired with a zero/one-grounded
+  #73 receipt is rejected at receipt, store/read, and #75 consumer boundaries;
+- provider attempts to replace evidence-group list elements or nested refs do
+  not mutate the owner snapshot and cannot enter the #59/#73 result;
+- a sanitized-only host with a preexisting raw extraction cannot construct a
+  runner or invoke an explicitly supplied provider, while safe reads remain;
 - provider-complete zero findings;
 - exact timeout bounds (`3,600,000` accepted; `3,600,001` rejected), owned
   timeout, immediate provider self-cancellation, caller cancellation, provider
@@ -308,7 +373,9 @@ Focused fixtures cover:
   values are rejected rather than persisted;
 - canonical #59 consumer compatibility;
 - exact read-consumer compatibility for queued, running, and every terminal
-  state, plus provider-free production composition resolution.
+  state, rejection of unavailable/nonempty, provider-stage/empty, mismatched
+  Session totals, and over-counted capability projections, plus provider-free
+  production composition resolution.
 
 The A/B expected judgement is the Issue #73 human-review record: recurrence is
 supported only for A; B must not be presented as a Recommended-equivalent

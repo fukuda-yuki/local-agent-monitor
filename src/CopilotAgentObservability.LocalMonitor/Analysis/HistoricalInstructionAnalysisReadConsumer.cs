@@ -42,7 +42,9 @@ internal static class HistoricalInstructionAnalysisReadConsumerV1
                         || !read.DatasetProjection.ContentAvailable
                         || HasDatasetRows(read.DatasetProjection.DatasetDistribution))
                 || RequiresProviderInput(read.State)
-                    && (read.DatasetProjection.SanitizedOnly || !read.DatasetProjection.ContentAvailable))
+                    && (read.DatasetProjection.SanitizedOnly
+                        || !read.DatasetProjection.ContentAvailable
+                        || read.DatasetProjection.DatasetDistribution.Completeness.Count == 0))
                 throw Invalid();
 
             var successful = read.State is HistoricalInstructionAnalysisStateV1.Succeeded

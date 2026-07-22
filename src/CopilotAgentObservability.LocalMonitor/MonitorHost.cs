@@ -143,7 +143,8 @@ internal static class MonitorHost
         builder.Services.AddSingleton(new HistoricalInstructionAnalysisCompositionV1(
             historicalEvidenceService,
             historicalInstructionAnalysisStore,
-            timeProvider));
+            rawExecutionAllowed: !options.SanitizedOnly,
+            timeProvider: timeProvider));
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
         var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);
         builder.Services.AddSingleton(proposalApplyService);

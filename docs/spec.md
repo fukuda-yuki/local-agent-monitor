@@ -393,13 +393,26 @@ Issue #73 freezes the persisted-#72-only runner at
 [historical instruction analysis](specifications/interfaces/historical-instruction-analysis.md).
 The existing #59 producer evaluates the same category independently inside
 each supporting Session, and only two or more independently supported Sessions
-may become recurring. Provenance passes the shared sensitive-carrier gate,
+may become recurring and eligible. One independently supported Session is
+`single_session`; zero is `insufficient_support`. Exact, resolved citations at
+either level remain a valid weak/incomplete #59 finding and exact support
+projection. Provider input is a deep reconstruction from canonical #72 bytes,
+while post-validation retains a separately owned snapshot as its sole
+authority. Final #59 refs come only from the unique Session owning the provider
+anchor, with at least one anchor ref and only #59-valid bounded context refs
+from that same Session; other Sessions are recurrence-only. Provenance passes the shared sensitive-carrier gate,
 timeout is bounded to one hour, and stale/owner-invalid/caller-canceled/owned-
 timeout outcomes remain distinct. The exact
 `historical-instruction-analysis.read.v1` DTO preserves repository-safe dataset
-projection for queued, running, and every terminal state. Local Monitor
+projection for queued, running, and every terminal state, while revalidating
+equal completeness/source-kind Session totals and bounded capability counts.
+Unavailable projections are empty and every provider-stage state has a
+positive Session total. Local Monitor
 registers the component-v1 store and provider-free composition, but configures
-no provider, credential, raw execution, route, worker, or UI by default.
+no provider, credential, raw execution, route, worker, or UI by default. The
+composition retains read/status access but refuses runner creation whenever
+the current host is `--sanitized-only`, including for raw extractions persisted
+by an earlier host mode.
 
 ## Historical efficiency analysis
 

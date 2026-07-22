@@ -36,6 +36,24 @@ Repository-safe records may reference only:
 - `sensitive_bundle_present=true`。
 - non-sensitive summary。
 
+## Historical Instruction Analysis Boundary
+
+Issue #73 may send one persisted Issue #72 raw-local extraction to an
+explicitly supplied provider only when the current Local Monitor host permits
+raw execution. The provider receives an independently deserialized view plus a
+separate canonical-byte copy; neither shares a mutable object with the
+owner-validated #72 snapshot retained for citation and recurrence validation.
+Provider mutation therefore cannot redefine persisted evidence.
+
+Under `--sanitized-only`, the #73 composition keeps repository-safe read/status
+access but refuses runner construction before a run or provider call, including
+when the database contains raw extractions created by an earlier host mode.
+The repository-safe #73 receipt/#59 handoff pair contains only tokenized
+Session/trace/span refs, closed metadata, distributions, hashes, and fixed #59
+templates. It never contains raw descriptors, provider
+credentials/configuration, prompt/response
+bodies, tool bodies, source excerpts, local paths, or exception text.
+
 ## Raw Local Receiver Boundary
 
 The `raw-local-receiver` profile receives raw telemetry directly from local

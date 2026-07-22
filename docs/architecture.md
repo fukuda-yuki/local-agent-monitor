@@ -315,7 +315,7 @@ source-specific snapshot adapter from this repair.
 
 ## 3. Data Flows
 
-### Wave 2 Evidence And Alert Flows
+### Wave 2/3 Evidence And Alert Flows
 
 ```text
 exact-bound Session metadata + sanitized monitor facts + #59 handoffs
@@ -323,9 +323,10 @@ exact-bound Session metadata + sanitized monitor facts + #59 handoffs
   -> raw-local + repository-safe canonical datasets
   -> insert-or-identical local persistence
 persisted #72 raw-local/repository-safe pair
-  -> registered #73 composition (explicit provider only)
-  -> bounded provider execution
-  -> per-Session #59 grounding + canonical handoff
+  -> registered #73 composition (explicit provider + current raw host mode)
+  -> canonical-byte-isolated provider view
+  -> owner-snapshot validation + per-Session #59 grounding
+  -> canonical #59 handoff
   -> historical_instruction_analysis component v1
   -> exact #75 read DTO
 

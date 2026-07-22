@@ -89,9 +89,9 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
         if (projection is null
             || projection.SanitizedOnly && projection.ContentAvailable
             || projection.DatasetDistribution is null
-            || !ValidDistribution(projection.DatasetDistribution.Completeness)
-            || !ValidDistribution(projection.DatasetDistribution.SourceKinds)
-            || !ValidDistribution(projection.DatasetDistribution.Capabilities))
+            || !ValidDatasetDistribution(projection.DatasetDistribution)
+            || !projection.SanitizedOnly && !projection.ContentAvailable
+                && HasDistributionRows(projection.DatasetDistribution))
             throw Invalid();
     }
 
@@ -111,9 +111,8 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
             || receipt.TimeoutMilliseconds is <= 0 or > HistoricalInstructionAnalysisContractsV1.MaximumTimeoutMilliseconds
             || receipt.PromptTemplateVersion != HistoricalInstructionAnalysisContractsV1.PromptTemplateVersion
             || receipt.DatasetDistribution is null
-            || !ValidDistribution(receipt.DatasetDistribution.Completeness)
-            || !ValidDistribution(receipt.DatasetDistribution.SourceKinds)
-            || !ValidDistribution(receipt.DatasetDistribution.Capabilities)
+            || !ValidDatasetDistribution(receipt.DatasetDistribution)
+            || DatasetSessionCount(receipt.DatasetDistribution) <= 0
             || !HashPattern().IsMatch(receipt.HandoffSha256 ?? string.Empty)
             || receipt.Findings is null
             || receipt.Findings.Any(finding => finding is null)
@@ -136,11 +135,17 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
                 || finding.SupportingSessionIds is null
                 || finding.SupportingGroupIds is null
                 || finding.EvidenceRefs is null
-                || finding.RecurringCount != finding.SupportingSessionIds.Count
-                || finding.RecurringCount <= 0
-                || (finding.SupportKind == HistoricalInstructionSupportKindV1.Recurring) != (finding.RecurringCount >= 2)
+                || finding.RecurringCount < 0
+                || finding.RecurringCount == 0
+                    && finding.SupportingSessionIds.Count != 1
+                || finding.RecurringCount > 0
+                    && finding.RecurringCount != finding.SupportingSessionIds.Count
+                || finding.SupportingGroupIds.Count < finding.SupportingSessionIds.Count
+                || finding.SupportKind != SupportKind(finding.RecurringCount)
                 || (finding.CandidateEligibility == InstructionCandidateEligibilityV1.Eligible)
                     != (finding.Verdict == InstructionFindingVerdictV1.Supported)
+                || finding.Verdict == InstructionFindingVerdictV1.Supported
+                    && finding.RecurringCount < 2
                 || finding.SupportingSessionIds.Any(value => !SessionReferencePattern().IsMatch(value ?? string.Empty))
                 || finding.SupportingGroupIds.Any(value => !GroupIdPattern().IsMatch(value ?? string.Empty))
                 || finding.SupportingSessionIds.Distinct(StringComparer.Ordinal).Count() != finding.SupportingSessionIds.Count
@@ -157,13 +162,40 @@ internal static partial class HistoricalInstructionAnalysisJsonV1
                     || reference.TurnIndex is <= 0
                     || !Enum.IsDefined(reference.RelativePosition))
                 || !finding.EvidenceRefs.Distinct().Order(HistoricalEvidenceReferenceComparerV1.Instance).SequenceEqual(finding.EvidenceRefs)
-                || !ValidDistribution(finding.SourceSurfaceDistribution, finding.RecurringCount)
-                || !ValidDistribution(finding.SourceVersionDistribution, finding.RecurringCount)
-                || !ValidDistribution(finding.SourceKindDistribution, finding.RecurringCount)
-                || !ValidDistribution(finding.CompletenessDistribution, finding.RecurringCount))
+                || !finding.SupportingSessionIds.ToHashSet(StringComparer.Ordinal).SetEquals(
+                    finding.EvidenceRefs.Select(reference => reference.SessionId))
+                || !ValidDistribution(finding.SourceSurfaceDistribution, finding.SupportingSessionIds.Count)
+                || !ValidDistribution(finding.SourceVersionDistribution, finding.SupportingSessionIds.Count)
+                || !ValidDistribution(finding.SourceKindDistribution, finding.SupportingSessionIds.Count)
+                || !ValidDistribution(finding.CompletenessDistribution, finding.SupportingSessionIds.Count))
                 throw Invalid();
         }
     }
+
+    private static HistoricalInstructionSupportKindV1 SupportKind(int recurringCount) => recurringCount switch
+    {
+        0 => HistoricalInstructionSupportKindV1.InsufficientSupport,
+        1 => HistoricalInstructionSupportKindV1.SingleSession,
+        _ => HistoricalInstructionSupportKindV1.Recurring,
+    };
+
+    private static bool ValidDatasetDistribution(HistoricalEvidenceDistributionV1 distribution)
+    {
+        if (!ValidDistribution(distribution.Completeness)
+            || !ValidDistribution(distribution.SourceKinds)
+            || !ValidDistribution(distribution.Capabilities)) return false;
+        var sessionCount = DatasetSessionCount(distribution);
+        return sessionCount == distribution.SourceKinds.Sum(value => (long)value.Count)
+            && distribution.Capabilities.All(value => value.Count <= sessionCount);
+    }
+
+    private static long DatasetSessionCount(HistoricalEvidenceDistributionV1 distribution) =>
+        distribution.Completeness.Sum(value => (long)value.Count);
+
+    private static bool HasDistributionRows(HistoricalEvidenceDistributionV1 distribution) =>
+        distribution.Completeness.Count != 0
+        || distribution.SourceKinds.Count != 0
+        || distribution.Capabilities.Count != 0;
 
     private static bool ValidDistribution(
         IReadOnlyList<HistoricalDistributionCountV1>? values,
