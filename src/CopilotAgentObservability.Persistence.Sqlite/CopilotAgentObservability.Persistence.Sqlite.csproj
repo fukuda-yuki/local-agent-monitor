@@ -9,6 +9,8 @@
   <ItemGroup>
     <ProjectReference Include="..\CopilotAgentObservability.Alerts\CopilotAgentObservability.Alerts.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Doctor\CopilotAgentObservability.Doctor.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.InstructionFindings\CopilotAgentObservability.InstructionFindings.csproj" />
+    <ProjectReference Include="..\CopilotAgentObservability.SanitizedExport\CopilotAgentObservability.SanitizedExport.csproj" />
     <ProjectReference Include="..\CopilotAgentObservability.Telemetry\CopilotAgentObservability.Telemetry.csproj" />
   </ItemGroup>
 

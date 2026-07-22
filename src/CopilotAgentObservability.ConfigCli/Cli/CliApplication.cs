@@ -46,6 +46,8 @@ internal static class CliApplication
 
         if (args[0] == "first-trace") return FirstTrace.FirstTraceCli.Run(args[1..], output, error);
 
+        if (args[0] == "sanitized-export") return SanitizedExportCli.Run(args[1..], output, error);
+
         switch (args[0])
         {
             case "list-collection-profiles":

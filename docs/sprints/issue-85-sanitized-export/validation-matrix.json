@@ -1,0 +1,111 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "3e17ea0b235a6dbfe8f9e0b0954c105ccb83989c",
+  "final_validation_sha": "56c2033257a04751bc52468efa249c4058b20e7d",
+  "inventory_date": "2026-07-22",
+  "environment_boundary": "Exact functional SHA in the Windows native current-user Issue #85 worktree; deterministic synthetic fixtures, disposable SQLite databases, file-system bundles, and server-managed loopback test hosts only.",
+  "active_rows": [
+    {
+      "row_id": "91-E-085",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "sanitized-evidence-export",
+      "operation": "Config CLI preview/export/result and Local Monitor preview/export/result/archive routes",
+      "profiles": {
+        "collection": ["config-cli", "local-monitor-http"],
+        "content_access": ["sanitized-only"],
+        "compatibility": ["sanitized-evidence-bundle.v1"],
+        "hook": [],
+        "otel": [],
+        "binding": ["trusted-owner-snapshot-provider"],
+        "restart": ["process-local-result-state"],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "bundle_schema": "sanitized-evidence-bundle.v1",
+        "manifest": "sanitized-evidence-manifest.v1",
+        "archive": "sanitized-evidence-zip-store.v1"
+      },
+      "expected_invariant": "The exact candidate provides deterministic source-neutral selection, scanner-gated atomic publication, strict archive inspection, and bounded same-origin loopback HTTP results without server path disclosure.",
+      "evidence": [
+        {
+          "kind": "historical",
+          "reference": "Corrected Issue #85 checkpoint: solution build 0 warnings/0 errors; LocalMonitor authority/service/API/archive/scanner 47/47; ConfigCli 3/3; schema and exact golden inspection passed.",
+          "compatibility_basis": "Executed from historical checkpoint 905b7b750a655daff7cbe73bbf5ad770bf29fce9; the repository full test command was intentionally deferred for coordinator serialization."
+        },
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 56c2033257a04751bc52468efa249c4058b20e7d: Claude mirror 5/5, build 0 warnings/0 errors, Playwright bootstrap, full solution 7216/7216, LocalMonitor sanitized export plus Issue #91 86/86, ConfigCli sanitized export 10/10, Issue #59 consumer 20/20, and Issue #80 consumer 49/49 all passed with zero skips.",
+          "compatibility_basis": "Every acceptance command was freshly executed from the clean functional SHA; no pass was inherited from the historical 905b7b750a655daff7cbe73bbf5ad770bf29fce9 checkpoint or the independently rejected 05d35ff817b34aa386104e3f38aade473e366594 candidate."
+        }
+      ],
+      "actual_result": "The exact functional SHA passed the full solution gate and fresh provider, authority, CLI, loopback API, archive, schema, golden, timestamp, request-bound, and dependency-carrier tests. Production capture uses the read-only trusted SQLite provider; public control requests cannot supply snapshot or record bytes.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #85 sanitized evidence export",
+      "validation_sha": "56c2033257a04751bc52468efa249c4058b20e7d",
+      "validation_date": "2026-07-22",
+      "environment_boundary": "Exact functional SHA build, full suite, deterministic synthetic fixtures, disposable SQLite provider databases, and loopback test hosts; no real telemetry, live user data, or remote publication was exercised or claimed."
+    },
+    {
+      "row_id": "91-S-085",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "sanitized-evidence-export-scanner",
+      "operation": "Fail-closed payload, metadata, manifest, archive, credential, PII, path, and Issue #91 corpus validation",
+      "profiles": {
+        "collection": ["bundle-create", "bundle-inspect"],
+        "content_access": ["sanitized-only", "scanner-failure"],
+        "compatibility": ["validation-secret-corpus.v1"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-record-dependency"],
+        "restart": [],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "scanner": "repository-safe-scanner.v1",
+        "corpus": "validation-secret-corpus.v1",
+        "checksum": "sha256.v1"
+      },
+      "expected_invariant": "Every selected payload, manifest, and completed archive fails closed on declared raw, secret, PII, path, marker-transform, canonicalization, inventory, size, and checksum violations without returning success bytes or leaving a partial artifact.",
+      "evidence": [
+        {
+          "kind": "historical",
+          "reference": "Corrected Issue #85 authority/service/surface tests passed 47/47 and ConfigCli tests passed 3/3, including Issue #91 marker transformations, caller-injection rejection, producer profiles, strict ZIP/inventory/bounds, and stored-download negatives.",
+          "compatibility_basis": "The tests executed the repository corpus, scanner, manifest validator, archive inspector, and publication implementation at historical checkpoint 905b7b750a655daff7cbe73bbf5ad770bf29fce9."
+        },
+        {
+          "kind": "automated",
+          "reference": "Exact functional SHA 56c2033257a04751bc52468efa249c4058b20e7d: LocalMonitor sanitized export and Issue #91 contract tests passed 86/86; ConfigCli sanitized export passed 10/10; the full solution passed 7216/7216. The scanner cases include one-segment and nested POSIX paths alongside every declared Issue #91 marker transform.",
+          "compatibility_basis": "Fresh execution exercised the repository corpus, scanner, public parser, canonical manifest/schema, ZIP inspector, trusted provider, and atomic publication implementation from the exact functional SHA."
+        }
+      ],
+      "actual_result": "The exact functional SHA passed fresh scanner, provider, producer-boundary, manifest, archive, canonical timestamp, checksum, size-bound, and publication-failure tests. The prior failed classification is retained only as historical evidence and was not inherited as a pass.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #85 sanitized evidence export",
+      "validation_sha": "56c2033257a04751bc52468efa249c4058b20e7d",
+      "validation_date": "2026-07-22",
+      "environment_boundary": "Exact functional SHA with deterministic synthetic repository corpus and generated in-memory/file-system bundles; no general DLP, recursive transformation, encryption, or live-data claim."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/sprints/issue-85-sanitized-export/milestones/M1-sanitized-evidence-export/review.md"
+  ],
+  "release_decision": {
+    "decision": "release_ready",
+    "external_blockers": []
+  }
+}

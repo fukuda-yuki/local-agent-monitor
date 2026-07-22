@@ -33,6 +33,20 @@ Profile の一覧は [collection profile specification](specifications/interface
 | Raw Data Loop | trace を再現可能に集計したい | `ingest-raw`, `normalize-raw` |
 | Static Dashboard | 複数 run の傾向を俯瞰したい | `generate-dashboard-dataset`, `generate-static-dashboard` |
 | Diagnosis / Improvement Support | 失敗傾向と改善候補を整理したい | `generate-diagnosis-candidates`, `generate-improvement-candidates`, `generate-auto-decisions` |
+| Sanitized Evidence Sharing | scanner 検証済みの evidence bundle を共有したい | `sanitized-export preview`, `sanitized-export export`, `sanitized-export result` |
+
+Sanitized Evidence Sharing の `preview` / `export` では、既存 Local Monitor
+database と `sanitized-export-control.v1` request を明示します。request に
+snapshot、record bytes、output path は含めません。
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --database data\local-monitor.db --request request.json
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export export --database data\local-monitor.db --request request.json --output bundle.zip
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export result --bundle bundle.zip
+```
+
+`result` は archive の canonical carrier、inventory、checksum を検証しますが、
+artifact の origin / provenance を証明するものではありません。
 
 ## Claude Code の guided setup
 

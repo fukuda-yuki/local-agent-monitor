@@ -1,0 +1,26 @@
+{
+  "schema_version": "sanitized-export-validation-handoff.v1",
+  "surface_id": "sanitized-evidence-export",
+  "owner_issue": 85,
+  "future_registry_state_at_kickoff": "not_available",
+  "production_surface_state": "implemented_candidate",
+  "active_row_ids": [
+    "91-E-085",
+    "91-S-085"
+  ],
+  "required_profiles": [
+    "sanitized-evidence",
+    "raw-default-source",
+    "sanitized-only-source",
+    "scanner-failure"
+  ],
+  "automated_test_filters": [
+    "FullyQualifiedName~SanitizedExportAuthorizationTests",
+    "FullyQualifiedName~SanitizedExportServiceTests",
+    "FullyQualifiedName~SanitizedExportSurfaceTests",
+    "FullyQualifiedName~SanitizedExportCliTests",
+    "FullyQualifiedName~SqliteSanitizedExportSnapshotProviderTests"
+  ],
+  "expected_evidence_location": "docs/sprints/issue-85-sanitized-export/validation-matrix.json",
+  "canonical_transition": "The sanitized-evidence-export placeholder was removed from the v1 future registry when the production SQLite snapshot provider and executable export/scanner evidence became present. Active results live only in the Issue #85 validation matrix; no active state was written into the v1 future registry and no passing result was inherited from the placeholder."
+}

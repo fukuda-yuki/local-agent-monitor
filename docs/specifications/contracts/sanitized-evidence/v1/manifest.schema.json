@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/sanitized-evidence/v1/manifest.schema.json",
+  "title": "Sanitized evidence manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "bundle_schema_version", "bundle_profile", "created_at", "snapshot_id",
+    "source_local_monitor_version", "source_agent_versions", "selection", "date_range", "source_labels",
+    "record_counts", "known_missing_evidence", "capabilities", "completeness_distribution",
+    "content_state_distribution", "retention_state_distribution", "processing_versions", "serialization",
+    "compatibility", "repository_safe_validation", "files"
+  ],
+  "properties": {
+    "schema_version": { "const": "sanitized-evidence-manifest.v1" },
+    "bundle_schema_version": { "const": "sanitized-evidence-bundle.v1" },
+    "bundle_profile": { "const": "sanitized-evidence" },
+    "created_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$" },
+    "snapshot_id": { "$ref": "#/$defs/id" },
+    "source_local_monitor_version": { "$ref": "#/$defs/id" },
+    "source_agent_versions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/agent_version" } },
+    "selection": { "$ref": "#/$defs/selection" },
+    "date_range": { "$ref": "#/$defs/date_range" },
+    "source_labels": { "type": "array", "maxItems": 255, "items": { "$ref": "#/$defs/source_label" } },
+    "record_counts": { "$ref": "#/$defs/record_count_map" },
+    "known_missing_evidence": { "type": "array", "maxItems": 255, "items": { "$ref": "#/$defs/unresolved" } },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "completeness_distribution": { "$ref": "#/$defs/count_map" },
+    "content_state_distribution": { "$ref": "#/$defs/count_map" },
+    "retention_state_distribution": { "$ref": "#/$defs/count_map" },
+    "processing_versions": { "type": "object", "maxProperties": 256, "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/id" } },
+    "serialization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["canonical_json", "archive", "checksum"],
+      "properties": {
+        "canonical_json": { "const": "sanitized-evidence-canonical-json.v1" },
+        "archive": { "const": "sanitized-evidence-zip-store.v1" },
+        "checksum": { "const": "sha256.v1" }
+      }
+    },
+    "compatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum_reader_major", "maximum_reader_major"],
+      "properties": { "minimum_reader_major": { "const": "1" }, "maximum_reader_major": { "const": "1" } }
+    },
+    "repository_safe_validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["producer_profile", "scanner_profile", "result"],
+      "properties": {
+        "producer_profile": { "const": "sanitized-evidence-producers.v1" },
+        "scanner_profile": { "const": "repository-safe-scanner.v1" },
+        "result": { "const": "passed" }
+      }
+    },
+    "files": { "type": "array", "maxItems": 255, "items": { "$ref": "#/$defs/file" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\x00-\\x1f\\x7f/\\\\?#]+$" },
+    "nullable_id": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}Z$" },
+    "agent_version": {
+      "type": "object", "additionalProperties": false, "required": ["source_surface", "version"],
+      "properties": { "source_surface": { "$ref": "#/$defs/id" }, "version": { "$ref": "#/$defs/id" } }
+    },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_ids", "trace_ids", "source_surfaces", "repository_names", "workspace_labels", "receipt_types", "start_inclusive", "end_exclusive"],
+      "properties": {
+        "session_ids": { "$ref": "#/$defs/string_array" }, "trace_ids": { "$ref": "#/$defs/string_array" },
+        "source_surfaces": { "$ref": "#/$defs/string_array" }, "repository_names": { "$ref": "#/$defs/string_array" },
+        "workspace_labels": { "$ref": "#/$defs/string_array" }, "receipt_types": { "$ref": "#/$defs/record_type_array" },
+        "start_inclusive": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "end_exclusive": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+      }
+    },
+    "date_range": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": { "start": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "end": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] } }
+    },
+    "source_label": {
+      "type": "object", "additionalProperties": false, "required": ["repository_name", "workspace_label", "repo_snapshot"],
+      "properties": { "repository_name": { "$ref": "#/$defs/nullable_id" }, "workspace_label": { "$ref": "#/$defs/nullable_id" }, "repo_snapshot": { "$ref": "#/$defs/nullable_id" } }
+    },
+    "count_map": { "type": "object", "maxProperties": 255, "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 255 } },
+    "record_count_map": { "type": "object", "maxProperties": 3, "propertyNames": { "$ref": "#/$defs/record_type" }, "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 255 } },
+    "capability_state": { "enum": ["available", "missing", "unavailable"] },
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instruction_findings", "alert_receipts", "historical_instruction_analysis", "historical_efficiency_analysis", "alert_center"],
+      "properties": {
+        "instruction_findings": { "$ref": "#/$defs/capability_state" }, "alert_receipts": { "$ref": "#/$defs/capability_state" },
+        "historical_instruction_analysis": { "$ref": "#/$defs/capability_state" }, "historical_efficiency_analysis": { "$ref": "#/$defs/capability_state" },
+        "alert_center": { "$ref": "#/$defs/capability_state" }
+      }
+    },
+    "unresolved": {
+      "type": "object", "additionalProperties": false, "required": ["record_type", "record_id", "state"],
+      "properties": { "record_type": { "$ref": "#/$defs/record_type" }, "record_id": { "$ref": "#/$defs/id" }, "state": { "enum": ["missing", "external"] } }
+    },
+    "file": {
+      "type": "object", "additionalProperties": false, "required": ["path", "record_type", "record_id", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 320, "pattern": "^(repository-metadata|instruction-findings|alert-receipts)/[^/\\\\?#\\x00-\\x1f\\x7f]{1,256}\\.json$" }, "record_type": { "$ref": "#/$defs/record_type" },
+        "record_id": { "$ref": "#/$defs/id" }, "size": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "oneOf": [
+        { "properties": { "path": { "pattern": "^repository-metadata/" }, "record_type": { "const": "repository_metadata_projection" } } },
+        { "properties": { "path": { "pattern": "^instruction-findings/" }, "record_type": { "const": "instruction_finding_handoff" } } },
+        { "properties": { "path": { "pattern": "^alert-receipts/" }, "record_type": { "const": "alert_receipt" } } }
+      ]
+    },
+    "record_type": { "enum": ["repository_metadata_projection", "instruction_finding_handoff", "alert_receipt"] },
+    "record_type_array": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "$ref": "#/$defs/record_type" } },
+    "string_array": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+  }
+}
