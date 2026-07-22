@@ -149,7 +149,8 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         var capabilities = new HistoricalSessionCapabilitiesV1(
             TurnRollup: spans.Any(IsTurn),
             TokenRollup: spans.Any(span => IsTurn(span) && (span.TotalTokens is not null || span.InputTokens is not null || span.OutputTokens is not null))
-                || detail.Runs.Any(run => run.TotalTokens is not null && eventByRun.GetValueOrDefault(run.RunId) is not null),
+                || detail.Runs.Any(run => (run.TotalTokens is not null || run.InputTokens is not null || run.OutputTokens is not null)
+                    && eventByRun.GetValueOrDefault(run.RunId) is not null),
             CacheRollup: spans.Any(span => span.CacheReadTokens is not null || span.CacheCreationTokens is not null),
             ErrorSpan: spans.Any(span => span.Status == "error" && span.SpanId is not null),
             RetryChain: accepted.Any(evidence => evidence.RetryChains.Any(chain => chain.SpanIds.Count is > 1 and <= HistoricalEvidenceContractsV1.MaximumReferencesPerGroup && chain.SpanIds.All(id => id is not null))),

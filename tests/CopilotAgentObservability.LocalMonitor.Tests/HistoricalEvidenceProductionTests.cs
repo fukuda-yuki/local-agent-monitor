@@ -399,6 +399,48 @@ public sealed class HistoricalEvidenceProductionTests
         Assert.DoesNotContain(tokens, value => value.Unit == "total_token");
     }
 
+    [Theory]
+    [InlineData(5, null, "input_token", 5L, "output_token")]
+    [InlineData(null, 7, "output_token", 7L, "input_token")]
+    [InlineData(0, null, "input_token", 0L, "output_token")]
+    [InlineData(null, 0, "output_token", 0L, "input_token")]
+    public async Task HostApplication_RunOnlyTokenComponentPreservesKnownZeroAndMissingAcrossReopen(
+        int? inputTokens, int? outputTokens, string presentUnit, long presentValue, string missingUnit)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var app = BuildHost(temp.DatabasePath);
+        var store = app.Services.GetRequiredService<ISessionStore>();
+        var now = new DateTimeOffset(2026, 7, 23, 0, 15, 0, TimeSpan.Zero);
+        var sessionId = Guid.CreateVersion7();
+        var runId = Guid.CreateVersion7();
+        const string traceId = "a223456789abcdef0123456789abcdee";
+        const string spanId = "a223456789abcdee";
+        var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
+            "owner/run-components", null, now, now, now, SessionRawRetentionState.NotCaptured, now, now);
+        var run = new ObservedSessionRun(runId, sessionId, SessionSourceSurface.ClaudeCode, "run", traceId, null,
+            null, ObservedSessionStatus.Completed, now, now, inputTokens, outputTokens, null);
+        var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.ClaudeCode,
+            null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now,
+            SessionContentState.NotCaptured, "2.1.215", "adapter.v1", MatchKind: SessionMatchKind.ExactNative);
+        store.Write(new(new(session, [], [run], [@event]), []));
+        var service = app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>();
+
+        var extractionId = (await service.CreateAsync(
+            HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]), CancellationToken.None))
+            .RawLocal.ExtractionId;
+        var reopened = Assert.IsType<HistoricalEvidenceExtractionV1>(service.Get(extractionId));
+
+        foreach (var dataset in new[] { reopened.RawLocal, reopened.RepositorySafe })
+        {
+            Assert.True(Assert.Single(dataset.Sessions).Capabilities.TokenRollup);
+            var token = Assert.Single(dataset.EvidenceGroups, group => group.Kind == HistoricalEvidenceGroupKindV1.TokenRollup);
+            Assert.Equal(presentUnit, token.Unit);
+            Assert.Equal(presentValue, token.NumericValue);
+            Assert.DoesNotContain(dataset.EvidenceGroups, group => group.Kind == HistoricalEvidenceGroupKindV1.TokenRollup
+                && (group.Unit is "total_token" || group.Unit == missingUnit));
+        }
+    }
+
     [Fact]
     public async Task SnapshotSource_DoesNotTreatUnmatchedAdapterNamedEventAsExactOtel()
     {
