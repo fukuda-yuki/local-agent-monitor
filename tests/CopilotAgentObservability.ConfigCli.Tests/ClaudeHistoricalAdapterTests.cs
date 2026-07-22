@@ -1,5 +1,7 @@
+using System.Security;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CopilotAgentObservability.ConfigCli.HistoricalImport.ClaudeCode;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
@@ -10,6 +12,12 @@ public sealed class ClaudeHistoricalAdapterTests
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
         "docs", "specifications", "contracts", "historical-import", "v1");
+
+    [Fact]
+    public void Constructor_null_filesystem_is_rejected_at_the_boundary()
+    {
+        Assert.Throws<ArgumentNullException>(() => new ClaudeHistoricalAdapter(null!));
+    }
 
     [Fact]
     public void Missing_consent_returns_reference_required_without_filesystem_io()
@@ -26,6 +34,13 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal("missing", result.SourceReferenceState);
         Assert.Equal(["historical_source_reference_required"], result.Diagnostics);
         AssertNoFileSystemIo(fileSystem);
+        AssertMatchesGolden(
+            adapter.ProbeUtf8(new(
+                new(ClaudeTranscriptReferenceKind.OfficialHook, "C:/private/transcript.jsonl"),
+                Consent: null,
+                SourceApplicationVersion: "2.1.215")),
+            "missing-source-reference.json",
+            "historical-adapter-result.schema.json");
     }
 
     [Fact]
@@ -136,6 +151,12 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal(0, fileSystem.BodyReadCount);
         Assert.Equal(0, fileSystem.EnumerationCount);
         Assert.Equal(0, fileSystem.WriteCount);
+        AssertMatchesGolden(
+            adapter.ProbeUtf8(AuthorizedRequest(
+                ClaudeTranscriptReferenceKind.ExplicitUserSelection,
+                "C:/private/transcript.jsonl")),
+            "malformed-source.json",
+            "historical-adapter-result.schema.json");
     }
 
     [Theory]
@@ -160,6 +181,64 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal(0, fileSystem.WriteCount);
     }
 
+    [Theory]
+    [MemberData(nameof(NonFatalUnexpectedInspectionFailures))]
+    public void Nonfatal_unexpected_metadata_failures_are_sanitized_and_fail_closed(Exception failure)
+    {
+        var fileSystem = new RecordingFileSystem { InspectionFailure = failure };
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+
+        var resultBytes = adapter.ProbeUtf8(AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            "C:/private/transcript.jsonl"));
+        var json = Encoding.UTF8.GetString(resultBytes);
+        using var result = JsonDocument.Parse(resultBytes);
+
+        Assert.Equal("historical_source_malformed", result.RootElement
+            .GetProperty("diagnostics")[0].GetString());
+        Assert.False(result.RootElement.GetProperty("support_authorized").GetBoolean());
+        Assert.Equal(0, result.RootElement.GetProperty("candidate_count").GetInt32());
+        Assert.Equal("not_read", result.RootElement.GetProperty("content_risk").GetString());
+        Assert.DoesNotContain(failure.Message, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("transcript.jsonl", json, StringComparison.Ordinal);
+        Assert.Equal(0, fileSystem.BodyReadCount);
+        Assert.Equal(0, fileSystem.EnumerationCount);
+        Assert.Equal(0, fileSystem.WriteCount);
+        AssertMatchesGolden(
+            resultBytes,
+            "malformed-source.json",
+            "historical-adapter-result.schema.json");
+    }
+
+    [Theory]
+    [MemberData(nameof(FatalOrControlFlowInspectionFailures))]
+    public void Fatal_and_control_flow_metadata_failures_are_not_misreported_as_malformed(Exception failure)
+    {
+        var fileSystem = new RecordingFileSystem { InspectionFailure = failure };
+        var adapter = new ClaudeHistoricalAdapter(fileSystem);
+
+        var thrown = Assert.Throws(failure.GetType(), () => adapter.Probe(AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.OfficialHook,
+            "C:/private/transcript.jsonl")));
+
+        Assert.Same(failure, thrown);
+    }
+
+    [Fact]
+    public void Production_filesystem_invalid_metadata_reference_is_sanitized_without_opening_content()
+    {
+        var adapter = new ClaudeHistoricalAdapter(new SystemClaudeHistoricalFileSystem());
+
+        var resultBytes = adapter.ProbeUtf8(AuthorizedRequest(
+            ClaudeTranscriptReferenceKind.ExplicitUserSelection,
+            "SYNTHETIC_INVALID\0TRANSCRIPT"));
+        var json = Encoding.UTF8.GetString(resultBytes);
+
+        Assert.Equal("historical_source_malformed", JsonDocument.Parse(resultBytes).RootElement
+            .GetProperty("diagnostics")[0].GetString());
+        Assert.DoesNotContain("SYNTHETIC_INVALID", json, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Unsupported_result_and_zero_candidate_preview_are_deterministic_and_contain_no_synthetic_authority()
     {
@@ -181,6 +260,10 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.Equal(firstResult, secondResult);
         Assert.Equal(firstPreview, secondPreview);
         AssertExactUnsupportedResult(firstResult);
+        AssertMatchesGolden(
+            firstResult,
+            "detected-unsupported.json",
+            "historical-adapter-result.schema.json");
         AssertExactZeroCandidatePreview(firstPreview);
 
         var combined = Encoding.UTF8.GetString(firstResult) + Encoding.UTF8.GetString(firstPreview);
@@ -204,6 +287,25 @@ public sealed class ClaudeHistoricalAdapterTests
         new IOException("malformed source contains TOP_SECRET"),
         new PathTooLongException("oversize reference contains TOP_SECRET")
     };
+
+    public static TheoryData<Exception> NonFatalUnexpectedInspectionFailures() => new()
+    {
+        new SecurityException("security policy exposed TOP_SECRET"),
+        new InvalidOperationException("metadata adapter exposed TOP_SECRET")
+    };
+
+    public static TheoryData<Exception> FatalOrControlFlowInspectionFailures() => new()
+    {
+        new OutOfMemoryException("fatal runtime state"),
+        new AccessViolationException("fatal runtime state"),
+        new StackOverflowException("fatal runtime state"),
+        new BadImageFormatException("fatal runtime state"),
+        CreateThreadAbortException(),
+        new OperationCanceledException("caller canceled metadata inspection")
+    };
+
+    private static Exception CreateThreadAbortException() =>
+        (Exception)Activator.CreateInstance(typeof(System.Threading.ThreadAbortException), nonPublic: true)!;
 
     private static ClaudeHistoricalProbeRequest AuthorizedRequest(
         ClaudeTranscriptReferenceKind kind,
@@ -257,6 +359,17 @@ public sealed class ClaudeHistoricalAdapterTests
         Assert.False(root.GetProperty("commit_allowed").GetBoolean());
         Assert.Equal("historical_import_no_eligible_candidates", root.GetProperty("rejection_code").GetString());
         Assert.Equal("not_read", root.GetProperty("content_risk").GetString());
+    }
+
+    private static void AssertMatchesGolden(byte[] actualUtf8, string fixtureName, string schemaName)
+    {
+        var fixturePath = Path.Combine(ContractRoot, "fixtures", "claude-code", fixtureName);
+        using var actual = JsonDocument.Parse(actualUtf8);
+        using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(ContractRoot, schemaName)));
+        Assert.Empty(HistoricalContractSchemaValidator.Validate(schema, actual));
+        Assert.True(
+            JsonNode.DeepEquals(JsonNode.Parse(actualUtf8), JsonNode.Parse(File.ReadAllText(fixturePath))),
+            $"Production output did not match {fixtureName}.");
     }
 
     private sealed class RecordingFileSystem : IClaudeHistoricalFileSystem

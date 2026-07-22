@@ -14,7 +14,7 @@ internal sealed partial class ClaudeHistoricalAdapter
 
     public ClaudeHistoricalAdapter(IClaudeHistoricalFileSystem fileSystem)
     {
-        this.fileSystem = fileSystem;
+        this.fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
     }
 
     public ClaudeHistoricalAdapterResult Probe(ClaudeHistoricalProbeRequest request)
@@ -46,7 +46,7 @@ internal sealed partial class ClaudeHistoricalAdapter
                     version,
                     "historical_source_malformed");
         }
-        catch (Exception exception) when (IsSanitizedReferenceFailure(exception))
+        catch (Exception exception) when (!IsFatalOrControlFlow(exception))
         {
             return new(
                 "detected",
@@ -126,11 +126,16 @@ internal sealed partial class ClaudeHistoricalAdapter
     private static string? NormalizeVersion(string? version) =>
         version is not null && SemanticVersion().IsMatch(version) ? version : null;
 
-    private static bool IsSanitizedReferenceFailure(Exception exception) => exception is
-        UnauthorizedAccessException or
-        IOException or
-        ArgumentException or
-        NotSupportedException;
+    private static bool IsFatalOrControlFlow(Exception exception) => exception is
+        OutOfMemoryException or
+        StackOverflowException or
+        AccessViolationException or
+        AppDomainUnloadedException or
+        BadImageFormatException or
+        CannotUnloadAppDomainException or
+        InvalidProgramException or
+        System.Threading.ThreadAbortException or
+        OperationCanceledException;
 
     [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$", RegexOptions.CultureInvariant)]
     private static partial Regex SemanticVersion();
