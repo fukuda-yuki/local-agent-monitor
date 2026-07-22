@@ -1,7 +1,10 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.InstructionFindings;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 
@@ -63,7 +66,7 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         this.contentReader = contentReader ?? new HistoricalSessionContentReaderV1(sessionStore);
     }
 
-    public ValueTask<IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(
+    public async ValueTask<IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(
         HistoricalEvidenceSelectionV1 selection,
         CancellationToken cancellationToken)
     {
@@ -79,36 +82,56 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
             .OrderBy(row => row.StartedAt ?? row.LastSeenAt)
             .ThenBy(row => row.SessionId.ToString(), StringComparer.Ordinal)
             .ToArray();
+        var returnedMatchingCount = CountMatchingReturned(connection, transaction, selection, rows);
         var details = new Dictionary<Guid, SessionDetail>();
         foreach (var row in rows)
         {
             cancellationToken.ThrowIfCancellationRequested();
             details.Add(row.SessionId, ReadBoundedDetail(connection, transaction, row));
         }
+        var spans = details.ToDictionary(pair => pair.Key, pair => FilterExactSpans(pair.Value, ReadBoundedSpans(connection, transaction, pair.Key)));
+        if (details.SelectMany(pair => ExactTraceIds(pair.Value).Select(traceId => (traceId, pair.Key)))
+            .GroupBy(item => item.traceId, StringComparer.Ordinal).Any(group => group.Select(item => item.Key).Distinct().Count() > 1))
+            throw ChildOverflow();
+        var objectives = details.ToDictionary(pair => pair.Key, pair => ReadBoundedObjectives(connection, transaction, pair.Key));
         var handoffRows = ReadBoundedHandoffs(connection, transaction, rows);
-        var associations = AssociateFindings(details, handoffRows);
+        var associations = AssociateFindings(details, spans, handoffRows);
         transaction.Commit();
 
-        var metadata = rows.Select(row => ProjectMetadata(details[row.SessionId], associations.GetValueOrDefault(row.SessionId, []))).ToArray();
-        var omitted = Math.Max(0, matchingCount - matching.Count);
-        var snapshotId = SnapshotId(selection, rows, matchingCount, matching.Count, omitted, handoffRows);
-        return ValueTask.FromResult<IHistoricalEvidenceSnapshotLeaseV1>(new Lease(snapshotId, metadata, omitted, details, associations, sessionStore, contentReader));
+        var retention = rows.ToDictionary(row => row.SessionId, row => sessionStore.GetRawRetentionState(row.SessionId));
+        var descriptorSessionIds = DescriptorSessionIds(selection, rows, details, spans, associations);
+        var descriptors = await ReadDescriptorsAsync(selection, details, spans, objectives, associations, retention, descriptorSessionIds, cancellationToken).ConfigureAwait(false);
+        var metadata = rows.Select(row => ProjectMetadata(details[row.SessionId], spans[row.SessionId], objectives[row.SessionId], retention[row.SessionId], descriptors[row.SessionId], associations.GetValueOrDefault(row.SessionId, []))).ToArray();
+        var omitted = Math.Max(0, matchingCount - returnedMatchingCount);
+        var snapshotId = SnapshotId(selection, rows, matchingCount, returnedMatchingCount, omitted, details, spans, objectives, retention, descriptors, handoffRows);
+        return new Lease(snapshotId, metadata, omitted, details, spans, objectives, associations, descriptors);
     }
 
-    private static HistoricalSessionMetadataV1 ProjectMetadata(SessionDetail detail, IReadOnlyList<InstructionFindingAssociation> findings)
+    private static HistoricalSessionMetadataV1 ProjectMetadata(SessionDetail detail, IReadOnlyList<MonitorSpanRow> spans,
+        IReadOnlyList<SnapshotObjectiveRow> objectives,
+        SessionRawRetentionState retentionState, IReadOnlyList<HistoricalEvidenceGroupDraftV1> descriptors,
+        IReadOnlyList<InstructionFindingAssociation> findings)
     {
-        var exactEvents = detail.Events.Select(TryExactReference).Where(value => value is not null).Cast<HistoricalRawEvidenceReferenceV1>().ToArray();
+        var exactEvents = ExactLocations(detail, spans).Distinct().ToArray();
         var eventByRun = detail.Events.Where(value => value.RunId is not null)
             .GroupBy(value => value.RunId!.Value).ToDictionary(group => group.Key, group => group.Select(TryExactReference).FirstOrDefault(value => value is not null));
-        var provenance = detail.Events.Select(value => new HistoricalSourceProvenanceV1(
-                value.SourceSurface ?? detail.NativeIds.Select(item => (SessionSourceSurface?)item.SourceSurface).FirstOrDefault() ?? SessionSourceSurface.HookUnknown,
+        var provenance = detail.Events.Where(value => value.SourceSurface is not null).Select(value => new HistoricalSourceProvenanceV1(
+                value.SourceSurface!.Value,
                 value.SourceApplicationVersion,
                 value.AdapterVersion))
             .Distinct().OrderBy(value => value.SourceSurface).ThenBy(value => value.SourceApplicationVersion, StringComparer.Ordinal).ThenBy(value => value.AdapterVersion, StringComparer.Ordinal).ToArray();
         var models = detail.Runs.Where(run => run.Model is not null && eventByRun.GetValueOrDefault(run.RunId) is not null)
-            .Select(run => new HistoricalRawModelObservationV1(run.Model!, eventByRun[run.RunId]!)).ToArray();
-        var durations = detail.Runs.Where(run => run.StartedAt is not null && run.EndedAt is not null && run.EndedAt >= run.StartedAt && eventByRun.GetValueOrDefault(run.RunId) is not null)
-            .Select(run => new HistoricalRawDurationObservationV1(checked((long)(run.EndedAt!.Value - run.StartedAt!.Value).TotalMilliseconds), eventByRun[run.RunId]!)).ToArray();
+            .Select(run => new HistoricalRawModelObservationV1(run.Model!, eventByRun[run.RunId]!))
+            .Concat(spans.Where(span => span.SpanId is not null && (span.ResponseModel is not null || span.RequestModel is not null)).Select(span => new HistoricalRawModelObservationV1(
+                span.ResponseModel ?? span.RequestModel!, new(detail.Session.SessionId, span.TraceId, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor))))
+            .Distinct().ToArray();
+        var durations = detail.Runs.Select(run => (Run: run, Duration: run.StartedAt is not null && run.EndedAt >= run.StartedAt
+                ? IntegralMilliseconds((run.EndedAt.Value - run.StartedAt.Value).TotalMilliseconds) : null))
+            .Where(item => item.Duration is not null && eventByRun.GetValueOrDefault(item.Run.RunId) is not null)
+            .Select(item => new HistoricalRawDurationObservationV1(item.Duration!.Value, eventByRun[item.Run.RunId]!))
+            .Concat(spans.Where(span => span.SpanId is not null && IntegralMilliseconds(span.DurationMs) is not null).Select(span => new HistoricalRawDurationObservationV1(
+                IntegralMilliseconds(span.DurationMs)!.Value, new(detail.Session.SessionId, span.TraceId, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor))))
+            .Distinct().ToArray();
         var surfaces = detail.NativeIds.Select(value => value.SourceSurface)
             .Concat(detail.Runs.Select(value => value.SourceSurface).OfType<SessionSourceSurface>())
             .Concat(detail.Events.Select(value => value.SourceSurface).OfType<SessionSourceSurface>())
@@ -121,19 +144,24 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
             .ThenBy(value => value.AdapterVersion, StringComparer.Ordinal)
             .ToArray();
         var primary = surfaces.Length == 0 ? SessionSourceSurface.HookUnknown : surfaces[0];
-        var availableDescriptor = detail.Events.Any(value => value.ContentState == SessionContentState.Available
-            && value.Type is "user.message" or "UserPromptSubmit" or "userPromptSubmitted"
-            && TryExactReference(value) is not null);
+        var accepted = spans.GroupBy(span => span.TraceId, StringComparer.Ordinal)
+            .Select(group => InstructionEvidenceExtractor.Extract(group.Key, group.ToArray(), [], [])).ToArray();
         var capabilities = new HistoricalSessionCapabilitiesV1(
-            TurnRollup: exactEvents.Length > 0,
-            TokenRollup: detail.Runs.Any(run => run.TotalTokens is not null && eventByRun.GetValueOrDefault(run.RunId) is not null),
-            CacheRollup: false, ErrorSpan: false, RetryChain: false, RepeatedToolCall: false,
-            PermissionWait: false, SubagentFanOut: false, RawLocalDescriptor: availableDescriptor,
-            QualityReference: false, SourceComparison: provenance.Length > 1, InstructionFindingReference: findings.Count > 0);
+            TurnRollup: spans.Any(IsTurn),
+            TokenRollup: spans.Any(span => IsTurn(span) && (span.TotalTokens is not null || span.InputTokens is not null || span.OutputTokens is not null))
+                || detail.Runs.Any(run => run.TotalTokens is not null && eventByRun.GetValueOrDefault(run.RunId) is not null),
+            CacheRollup: spans.Any(span => span.CacheReadTokens is not null || span.CacheCreationTokens is not null),
+            ErrorSpan: spans.Any(span => span.Status == "error" && span.SpanId is not null),
+            RetryChain: accepted.Any(evidence => evidence.RetryChains.Any(chain => chain.SpanIds.Count is > 1 and <= HistoricalEvidenceContractsV1.MaximumReferencesPerGroup && chain.SpanIds.All(id => id is not null))),
+            RepeatedToolCall: false, PermissionWait: false, SubagentFanOut: false,
+            RawLocalDescriptor: descriptors.Count > 0,
+            QualityReference: objectives.Any(objective => exactEvents.Any(reference => reference.TraceId == objective.TraceId)),
+            SourceComparison: false, InstructionFindingReference: findings.Count > 0);
         return new HistoricalSessionMetadataV1(
             detail.Session.SessionId, primary, provenance.FirstOrDefault()?.SourceApplicationVersion,
-            provenance.FirstOrDefault()?.AdapterVersion, detail.Session.Completeness, [], HistoricalEvidenceSourceKindV1.LiveOtel,
-            detail.Events.Any(value => value.ContentState == SessionContentState.Available) ? SessionContentState.Available : detail.Events.FirstOrDefault()?.ContentState ?? SessionContentState.NotCaptured,
+            provenance.FirstOrDefault()?.AdapterVersion, detail.Session.Completeness, CompletenessReasons(detail, spans),
+            spans.Count > 0 ? HistoricalEvidenceSourceKindV1.LiveOtel : HistoricalEvidenceSourceKindV1.SavedRaw,
+            CapturedContentState(detail, retentionState),
             detail.Session.Repository, detail.Session.Workspace, null, null, detail.Session.StartedAt, detail.Session.LastSeenAt,
             capabilities, exactEvents.Concat(findings.SelectMany(value => value.References)).Distinct()
                 .Select(value => new HistoricalEvidenceLocationV1(value.SessionId, value.TraceId, value.SpanId, value.TurnIndex, value.RelativePosition)).ToArray(),
@@ -147,13 +175,187 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         };
     }
 
+    private static IReadOnlyList<string> CompletenessReasons(SessionDetail detail, IReadOnlyList<MonitorSpanRow> spans)
+    {
+        if (detail.Session.Completeness == SessionCompleteness.Full) return [];
+        var reasons = new List<string>();
+        if (detail.Session.Completeness == SessionCompleteness.Unbound && detail.NativeIds.Count == 0) reasons.Add("missing_native_session_id");
+        if (spans.Count == 0) reasons.Add("missing_trace_context");
+        if (detail.Events.All(value => value.ContentState != SessionContentState.Available)) reasons.Add("content_capture_disabled");
+        if (detail.Events.Any(value => value.Status == "gap_before_capture")) reasons.Add("ingest_gap");
+        if (detail.Events.Any(value => value.ContentState == SessionContentState.Unsupported)) reasons.Add("unsupported_source_version");
+        if (spans.Count == 0 && detail.Events.Count > 0) reasons.Add("hook_only");
+        return reasons.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static SessionContentState CapturedContentState(SessionDetail detail, SessionRawRetentionState retentionState)
+    {
+        if (detail.Events.Any(value => value.ContentState == SessionContentState.Redacted)) return SessionContentState.Redacted;
+        if (detail.Events.Any(value => value.ContentState == SessionContentState.Available))
+            return retentionState == SessionRawRetentionState.Expiring
+                ? SessionContentState.Available
+                : SessionContentState.ExpiredPendingDeletion;
+        if (detail.Events.Any(value => value.ContentState == SessionContentState.Unsupported)) return SessionContentState.Unsupported;
+        return SessionContentState.NotCaptured;
+    }
+
+    private static IEnumerable<ObservedSessionEvent> CorrectionEvents(SessionDetail detail) => detail.Events
+        .Where(value => value.Type is "user.message" or "UserPromptSubmit" or "userPromptSubmitted")
+        .Where(value => TryExactReference(value) is not null)
+        .OrderBy(value => value.OccurredAt).ThenBy(value => value.EventId)
+        .Skip(1);
+
+    private async ValueTask<IReadOnlyDictionary<Guid, IReadOnlyList<HistoricalEvidenceGroupDraftV1>>> ReadDescriptorsAsync(
+        HistoricalEvidenceSelectionV1 selection,
+        IReadOnlyDictionary<Guid, SessionDetail> details,
+        IReadOnlyDictionary<Guid, IReadOnlyList<MonitorSpanRow>> spans,
+        IReadOnlyDictionary<Guid, IReadOnlyList<SnapshotObjectiveRow>> objectives,
+        IReadOnlyDictionary<Guid, IReadOnlyList<InstructionFindingAssociation>> findings,
+        IReadOnlyDictionary<Guid, SessionRawRetentionState> retention,
+        IReadOnlySet<Guid> includedSessionIds,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, IReadOnlyList<HistoricalEvidenceGroupDraftV1>>();
+        foreach (var (sessionId, detail) in details)
+        {
+            var groups = new List<HistoricalEvidenceGroupDraftV1>();
+            var correctionEvents = CorrectionEvents(detail).Where(value => value.ContentState == SessionContentState.Available).ToArray();
+            if (includedSessionIds.Contains(sessionId)
+                && CountNonDescriptorGroups(detail, spans[sessionId], objectives[sessionId], findings.GetValueOrDefault(sessionId, [])) + correctionEvents.Length
+                    > HistoricalEvidenceContractsV1.MaximumGroupsPerSession)
+                throw ChildOverflow();
+            if (includedSessionIds.Contains(sessionId) && !selection.SanitizedOnly
+                && CapturedContentState(detail, retention[sessionId]) == SessionContentState.Available
+                && retention[sessionId] == SessionRawRetentionState.Expiring)
+            {
+                foreach (var item in correctionEvents)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (groups.Count == HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
+                    var read = await contentReader.ReadContentAsync(sessionId, item.EventId, cancellationToken).ConfigureAwait(false);
+                    if (read.Disposition != SessionContentReadDisposition.Granted || read.Lease is null) continue;
+                    await using var lease = read.Lease;
+                    var descriptor = ReadDescriptor(lease.Content.ContentJson);
+                    var reference = TryExactReference(item);
+                    var projected = descriptor is null
+                        ? (HistoricalDescriptorStateV1.Unavailable, (string?)null)
+                        : HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(false, [descriptor]);
+                    if (projected.Item1 == HistoricalDescriptorStateV1.Available && descriptor is not null && reference is not null)
+                        groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null, descriptor));
+                }
+            }
+            result.Add(sessionId, groups);
+        }
+        return result;
+    }
+
+    private static IReadOnlySet<Guid> DescriptorSessionIds(HistoricalEvidenceSelectionV1 selection, IReadOnlyList<SnapshotRow> rows,
+        IReadOnlyDictionary<Guid, SessionDetail> details, IReadOnlyDictionary<Guid, IReadOnlyList<MonitorSpanRow>> spans,
+        IReadOnlyDictionary<Guid, IReadOnlyList<InstructionFindingAssociation>> findings)
+    {
+        var eligible = rows.Where(row => MatchesSourceSelection(selection, details[row.SessionId])
+                && details[row.SessionId].Session.Completeness != SessionCompleteness.Unbound
+                && (ExactLocations(details[row.SessionId], spans[row.SessionId]).Any() || findings.ContainsKey(row.SessionId)))
+            .Select(row => row.SessionId).ToArray();
+        return eligible.TakeLast(selection.MaximumSessionCount).ToHashSet();
+    }
+
+    private static bool MatchesSourceSelection(HistoricalEvidenceSelectionV1 selection, SessionDetail detail)
+    {
+        var time = detail.Session.StartedAt ?? detail.Session.LastSeenAt;
+        var surfaces = detail.NativeIds.Select(item => item.SourceSurface)
+            .Concat(detail.Runs.Select(item => item.SourceSurface).OfType<SessionSourceSurface>())
+            .Concat(detail.Events.Select(item => item.SourceSurface).OfType<SessionSourceSurface>()).ToHashSet();
+        return !(!HasNonIdScope(selection) && selection.ExplicitSessionIds.Count > 0 && !selection.ExplicitSessionIds.Contains(detail.Session.SessionId)
+            || selection.Repository is not null && selection.Repository != detail.Session.Repository
+            || selection.Workspace is not null && selection.Workspace != detail.Session.Workspace
+            || selection.TaskLabel is not null || selection.ExperimentLabel is not null
+            || selection.SourceSurfaces.Count > 0 && !selection.SourceSurfaces.Any(surfaces.Contains)
+            || selection.From is { } from && time < from
+            || selection.To is { } to && time >= to);
+    }
+
+    private static int CountNonDescriptorGroups(SessionDetail detail, IReadOnlyList<MonitorSpanRow> spans,
+        IReadOnlyList<SnapshotObjectiveRow> objectives, IReadOnlyList<InstructionFindingAssociation> findings)
+    {
+        var count = findings.Count;
+        foreach (var trace in spans.GroupBy(span => span.TraceId, StringComparer.Ordinal))
+        {
+            var ordered = trace.OrderBy(span => span.RawRecordId).ThenBy(span => span.SpanOrdinal).ToArray();
+            var evidence = InstructionEvidenceExtractor.Extract(trace.Key, ordered, [], []);
+            var turnSpans = ordered.Where(IsTurn).ToArray();
+            for (var index = 0; index < evidence.TurnTokens.Count; index++)
+            {
+                var turn = evidence.TurnTokens[index];
+                count++;
+                var span = turnSpans[index];
+                if (span.TotalTokens is not null || span.InputTokens is not null || span.OutputTokens is not null) count++;
+                if (span.CacheReadTokens is not null || span.CacheCreationTokens is not null) count++;
+            }
+            count += ordered.Count(span => !IsTurn(span) && span.SpanId is not null
+                && (span.CacheReadTokens is not null || span.CacheCreationTokens is not null));
+            count += ordered.Count(span => span.Status == "error" && span.SpanId is not null);
+            count += evidence.RetryChains.Count(chain => chain.SpanIds.Count is > 1 and <= HistoricalEvidenceContractsV1.MaximumReferencesPerGroup && chain.SpanIds.All(id => id is not null));
+        }
+        count += detail.Runs.Count(run => run.TotalTokens is not null && !spans.Any(span => span.TraceId == run.TraceId && IsTurn(span))
+            && detail.Events.Where(value => value.RunId == run.RunId).Select(TryExactReference).Any(value => value is not null));
+        var exactTraceIds = ExactLocations(detail, spans).Select(location => location.TraceId).ToHashSet(StringComparer.Ordinal);
+        count += objectives.Count(objective => exactTraceIds.Contains(objective.TraceId));
+        return count;
+    }
+
+    private static string? ReadDescriptor(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 16 });
+            foreach (var name in new[] { "text", "prompt", "message" })
+                if (document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+                    return value.GetString();
+        }
+        catch (JsonException) { }
+        return null;
+    }
+
     private static HistoricalRawEvidenceReferenceV1? TryExactReference(ObservedSessionEvent value)
     {
-        if (value.SourceAdapter is not ("otel-exact" or "claude-code-otel") || value.TraceId is null
+        if (value.MatchKind is not (SessionMatchKind.ExactNative or SessionMatchKind.ExplicitLink)
+            || value.SourceAdapter is not ("otel-exact" or "claude-code-otel") || value.TraceId is null
             || value.SourceEventId.Split('/') is not [var trace, var span]
             || !string.Equals(trace, value.TraceId, StringComparison.Ordinal) || span.Length == 0)
             return null;
         return new(value.SessionId, trace, span, null, HistoricalEvidenceRelativePositionV1.Anchor);
+    }
+
+    private static bool IsTurn(MonitorSpanRow span) => span.Operation == "chat" || span.Category == "llm_call";
+    private static IReadOnlySet<string> ExactTraceIds(SessionDetail detail) => detail.Events.Select(TryExactReference)
+        .OfType<HistoricalRawEvidenceReferenceV1>().Select(reference => reference.TraceId).ToHashSet(StringComparer.Ordinal);
+    private static IReadOnlyList<MonitorSpanRow> FilterExactSpans(SessionDetail detail, IReadOnlyList<MonitorSpanRow> spans)
+    {
+        var exactTraceIds = ExactTraceIds(detail);
+        return spans.Where(span => exactTraceIds.Contains(span.TraceId)).ToArray();
+    }
+    private static long? IntegralMilliseconds(double? value) => value is { } duration && double.IsFinite(duration)
+        && duration >= 0 && duration <= long.MaxValue && duration == Math.Truncate(duration) ? checked((long)duration) : null;
+
+    private static IEnumerable<HistoricalRawEvidenceReferenceV1> ExactLocations(SessionDetail detail, IReadOnlyList<MonitorSpanRow> spans)
+    {
+        var exactTraces = detail.Events.Select(TryExactReference).OfType<HistoricalRawEvidenceReferenceV1>()
+            .Select(reference => reference.TraceId).ToHashSet(StringComparer.Ordinal);
+        foreach (var trace in spans.Where(span => exactTraces.Contains(span.TraceId)).GroupBy(span => span.TraceId, StringComparer.Ordinal))
+        {
+            var ordered = trace.OrderBy(span => span.RawRecordId).ThenBy(span => span.SpanOrdinal).ToArray();
+            var evidence = InstructionEvidenceExtractor.Extract(trace.Key, ordered, [], []);
+            foreach (var span in ordered.Where(span => span.SpanId is not null))
+                yield return new(detail.Session.SessionId, trace.Key, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor);
+            foreach (var turn in evidence.TurnTokens)
+            {
+                yield return new(detail.Session.SessionId, trace.Key, turn.SpanId, turn.TurnIndex, HistoricalEvidenceRelativePositionV1.Anchor);
+                yield return new(detail.Session.SessionId, trace.Key, null, turn.TurnIndex, HistoricalEvidenceRelativePositionV1.Anchor);
+            }
+        }
+        foreach (var reference in detail.Events.Select(TryExactReference).OfType<HistoricalRawEvidenceReferenceV1>())
+            yield return reference;
     }
 
     private static string SnapshotId(
@@ -162,17 +364,41 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         long matchingCount,
         int returnedMatchingCount,
         long omitted,
+        IReadOnlyDictionary<Guid, SessionDetail> details,
+        IReadOnlyDictionary<Guid, IReadOnlyList<MonitorSpanRow>> spans,
+        IReadOnlyDictionary<Guid, IReadOnlyList<SnapshotObjectiveRow>> objectives,
+        IReadOnlyDictionary<Guid, SessionRawRetentionState> retention,
+        IReadOnlyDictionary<Guid, IReadOnlyList<HistoricalEvidenceGroupDraftV1>> descriptors,
         IReadOnlyList<SnapshotHandoffRow> handoffs)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(Encoding.UTF8.GetBytes("copilot-agent-observability/session-snapshot/v1\0"));
-        hash.AppendData(HistoricalEvidenceJsonV1.SerializeSelection(HistoricalEvidenceExtractorV1.CanonicalInputSelection(selection)));
-        hash.AppendData(Encoding.UTF8.GetBytes($"\nmatching={matchingCount}\nreturned={returnedMatchingCount}\nomitted={omitted}\n"));
+        AppendSnapshotFact(hash, "domain", Encoding.UTF8.GetBytes("copilot-agent-observability/session-snapshot/v1"));
+        AppendSnapshotFact(hash, "selection", HistoricalEvidenceJsonV1.SerializeSelection(HistoricalEvidenceExtractorV1.CanonicalInputSelection(selection)));
+        AppendSnapshotFact(hash, "selection-counts", JsonSerializer.SerializeToUtf8Bytes(new { matchingCount, returnedMatchingCount, omitted }));
         foreach (var row in rows)
-            hash.AppendData(Encoding.UTF8.GetBytes($"{row.SessionId:D}|{row.UpdatedAt:O}\n"));
+        {
+            AppendSnapshotFact(hash, "session-detail", JsonSerializer.SerializeToUtf8Bytes(details[row.SessionId]));
+            AppendSnapshotFact(hash, "exact-spans", JsonSerializer.SerializeToUtf8Bytes(spans[row.SessionId]));
+            AppendSnapshotFact(hash, "objectives", JsonSerializer.SerializeToUtf8Bytes(objectives[row.SessionId]));
+            AppendSnapshotFact(hash, "retention", JsonSerializer.SerializeToUtf8Bytes(retention[row.SessionId]));
+            var descriptor = HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(
+                selection.SanitizedOnly, descriptors[row.SessionId].Select(group => group.RawDescriptor).OfType<string>());
+            AppendSnapshotFact(hash, "descriptor", JsonSerializer.SerializeToUtf8Bytes(new { descriptor.State, descriptor.Value }));
+        }
         foreach (var handoff in handoffs)
-            hash.AppendData(Encoding.UTF8.GetBytes($"handoff={handoff.AnalysisRunId}|{handoff.Checksum}\n"));
+            AppendSnapshotFact(hash, "handoff", JsonSerializer.SerializeToUtf8Bytes(new { handoff.AnalysisRunId, handoff.TraceId, handoff.Checksum }));
         return "session-snapshot-" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()[..32];
+    }
+
+    private static void AppendSnapshotFact(IncrementalHash hash, string label, ReadOnlySpan<byte> payload)
+    {
+        var labelBytes = Encoding.UTF8.GetBytes(label);
+        Span<byte> lengths = stackalloc byte[12];
+        BinaryPrimitives.WriteInt32BigEndian(lengths[..4], labelBytes.Length);
+        BinaryPrimitives.WriteInt64BigEndian(lengths[4..], payload.Length);
+        hash.AppendData(lengths);
+        hash.AppendData(labelBytes);
+        hash.AppendData(payload);
     }
 
     private static IReadOnlyList<SnapshotHandoffRow> ReadBoundedHandoffs(
@@ -185,11 +411,14 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         command.Transaction = transaction;
         var parameters = rows.Select((_, index) => "$session" + index).ToArray();
         command.CommandText = $"""
-            SELECT DISTINCT h.analysis_run_id,length(CAST(h.payload_json AS BLOB)),h.payload_json,h.payload_sha256
+            SELECT h.analysis_run_id,r.trace_id,length(CAST(h.payload_json AS BLOB)),h.payload_json,h.payload_sha256
             FROM instruction_finding_handoffs h
             JOIN monitor_analysis_runs r ON r.id=h.analysis_run_id
-            JOIN session_events e ON e.trace_id=r.trace_id
-            WHERE e.session_id IN ({string.Join(',', parameters)})
+            WHERE EXISTS(SELECT 1 FROM session_events e
+                WHERE e.trace_id=r.trace_id
+                    AND e.session_id IN ({string.Join(',', parameters)})
+                    AND e.match_kind IN ('exact_native','explicit_link')
+                    AND e.source_adapter IN ('otel-exact','claude-code-otel'))
             ORDER BY h.analysis_run_id
             LIMIT $limit;
             """;
@@ -203,64 +432,97 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         {
             if (result.Count == HistoricalEvidenceContractsV1.MaximumInstructionFindingHandoffs) throw ChildOverflow();
             var runId = reader.GetInt64(0);
-            var payloadLength = reader.GetInt64(1);
-            if (payloadLength is < 1 or > HistoricalEvidenceContractsV1.MaximumInstructionFindingPayloadBytes) throw ChildOverflow();
+            var traceId = reader.GetString(1);
+            var payloadLength = reader.GetInt64(2);
+            if (payloadLength is < 1 or > InstructionFindingHandoffConsumerV1.MaxPayloadBytes) throw ChildOverflow();
             try { totalBytes = checked(totalBytes + payloadLength); }
             catch (OverflowException) { throw ChildOverflow(); }
             if (totalBytes > HistoricalEvidenceContractsV1.MaximumInstructionFindingTotalBytes) throw ChildOverflow();
-            var payload = Encoding.UTF8.GetBytes(reader.GetString(2));
+            var payload = Encoding.UTF8.GetBytes(reader.GetString(3));
             if (payload.Length != payloadLength) throw ChildOverflow();
-            var checksum = reader.GetString(3);
+            var checksum = reader.GetString(4);
             if (!string.Equals(HistoricalEvidenceExtractorV1.Sha256(payload), checksum, StringComparison.Ordinal)) throw ChildOverflow();
             InstructionFindingHandoffV1 handoff;
-            try { handoff = InstructionFindingJsonV1.Deserialize(payload); }
-            catch (InstructionFindingValidationException) { throw ChildOverflow(); }
+            try
+            {
+                if (InstructionFindingHandoffConsumerV1.Validate(payload) != runId) throw ChildOverflow();
+                handoff = InstructionFindingJsonV1.Deserialize(payload);
+            }
+            catch (InstructionFindingHandoffConsumerValidationException) { throw ChildOverflow(); }
             if (handoff.AnalysisRunId != runId) throw ChildOverflow();
-            result.Add(new(runId, checksum, handoff));
+            result.Add(new(runId, traceId, checksum, handoff));
         }
         return result;
     }
 
     private static IReadOnlyDictionary<Guid, IReadOnlyList<InstructionFindingAssociation>> AssociateFindings(
         IReadOnlyDictionary<Guid, SessionDetail> details,
+        IReadOnlyDictionary<Guid, IReadOnlyList<MonitorSpanRow>> spans,
         IReadOnlyList<SnapshotHandoffRow> handoffs)
     {
-        var result = new Dictionary<Guid, IReadOnlyList<InstructionFindingAssociation>>();
+        var locationIndex = new Dictionary<InstructionEvidenceReferenceV1, List<(Guid SessionId, HistoricalRawEvidenceReferenceV1 Reference)>>();
         foreach (var (sessionId, detail) in details)
         {
-            var locations = detail.Events.Select(TryExactReference).OfType<HistoricalRawEvidenceReferenceV1>().ToArray();
-            var found = new List<InstructionFindingAssociation>();
-            foreach (var handoff in handoffs.Select(value => value.Handoff))
+            foreach (var location in ExactLocations(detail, spans[sessionId]).Distinct())
             {
-                foreach (var receipt in handoff.Findings)
+                foreach (var relativePosition in Enum.GetValues<HistoricalEvidenceRelativePositionV1>())
                 {
-                    var resolved = new List<HistoricalRawEvidenceReferenceV1>();
-                    foreach (var safeReference in receipt.EvidenceRefs)
+                    var positioned = location with { RelativePosition = relativePosition };
+                    foreach (var raw in new[]
                     {
-                        var reference = locations.Select(location => location with
-                            {
-                                TurnIndex = safeReference.TurnIndex,
-                                RelativePosition = (HistoricalEvidenceRelativePositionV1)(int)safeReference.RelativePosition,
-                            })
-                            .FirstOrDefault(location => InstructionFindingReferenceTokenizationV1.Tokenize(new(
-                                location.SessionId.ToString(), location.TraceId, location.SpanId, location.TurnIndex,
-                                (InstructionEvidenceRelativePositionV1)(int)location.RelativePosition)) == safeReference);
-                        if (reference is null) break;
-                        resolved.Add(reference);
+                        new InstructionRawEvidenceReferenceV1(null, positioned.TraceId, positioned.SpanId, positioned.TurnIndex, (InstructionEvidenceRelativePositionV1)(int)relativePosition),
+                        new InstructionRawEvidenceReferenceV1(sessionId.ToString(), positioned.TraceId, positioned.SpanId, positioned.TurnIndex, (InstructionEvidenceRelativePositionV1)(int)relativePosition),
+                    })
+                    {
+                        var key = InstructionFindingReferenceTokenizationV1.Tokenize(raw);
+                        if (!locationIndex.TryGetValue(key, out var candidates)) locationIndex.Add(key, candidates = []);
+                        if (!candidates.Contains((sessionId, positioned))) candidates.Add((sessionId, positioned));
                     }
-                    if (resolved.Count != receipt.EvidenceRefs.Count) continue;
-                    var references = resolved.Distinct().OrderBy(value => value.TraceId, StringComparer.Ordinal)
-                        .ThenBy(value => value.SpanId, StringComparer.Ordinal).ThenBy(value => value.TurnIndex).ToArray();
-                    if (references.Length != receipt.EvidenceRefs.Count) continue;
-                    var candidate = handoff.Candidates.SingleOrDefault(value => value.SourceFindingIds.Contains(receipt.FindingId, StringComparer.Ordinal));
-                    found.Add(new(receipt, candidate, references));
                 }
             }
-            if (found.Count > HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
-            if (found.Count > 0)
-                result.Add(sessionId, found.OrderBy(value => value.Receipt.FindingId, StringComparer.Ordinal).ToArray());
         }
-        return result;
+
+        var foundBySession = details.Keys.ToDictionary(id => id, _ => new List<InstructionFindingAssociation>());
+        foreach (var row in handoffs)
+        {
+            if (row.Handoff.Findings.Any(receipt => receipt.AnchorTraceId != InstructionFindingReferenceTokenizationV1.TokenizeTrace(row.TraceId)))
+                throw ChildOverflow();
+            var resolved = new Dictionary<string, (Guid SessionId, IReadOnlyList<HistoricalRawEvidenceReferenceV1> References)>(StringComparer.Ordinal);
+            foreach (var receipt in row.Handoff.Findings)
+            {
+                var locations = new List<(Guid SessionId, HistoricalRawEvidenceReferenceV1 Reference)>();
+                foreach (var safeReference in receipt.EvidenceRefs)
+                {
+                    if (!locationIndex.TryGetValue(safeReference, out var matches)) throw ChildOverflow();
+                    var unique = matches.Distinct().ToArray();
+                    if (unique.Length != 1) throw ChildOverflow();
+                    locations.Add(unique[0]);
+                }
+                if (locations.Select(item => item.SessionId).Distinct().Count() != 1) throw ChildOverflow();
+                var sessionId = locations[0].SessionId;
+                var references = locations.Select(item => item.Reference).Distinct()
+                    .OrderBy(value => value.TraceId, StringComparer.Ordinal).ThenBy(value => value.SpanId, StringComparer.Ordinal)
+                    .ThenBy(value => value.TurnIndex).ThenBy(value => value.RelativePosition).ToArray();
+                if (references.Length != receipt.EvidenceRefs.Count) throw ChildOverflow();
+                resolved.Add(receipt.FindingId, (sessionId, references));
+            }
+            var candidateByFindingId = new Dictionary<string, InstructionRuleCandidateV1>(StringComparer.Ordinal);
+            foreach (var candidate in row.Handoff.Candidates)
+                foreach (var findingId in candidate.SourceFindingIds)
+                    if (!candidateByFindingId.TryAdd(findingId, candidate)) throw ChildOverflow();
+            foreach (var receipt in row.Handoff.Findings)
+            {
+                var item = resolved[receipt.FindingId];
+                candidateByFindingId.TryGetValue(receipt.FindingId, out var candidate);
+                if (candidate is not null && candidate.SourceFindingIds.Any(id => !resolved.ContainsKey(id))) throw ChildOverflow();
+                var found = foundBySession[item.SessionId];
+                if (found.Count == HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
+                found.Add(new(receipt, candidate, item.References));
+            }
+        }
+        return foundBySession.Where(pair => pair.Value.Count > 0).ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<InstructionFindingAssociation>)pair.Value.OrderBy(value => value.Receipt.FindingId, StringComparer.Ordinal).ToArray());
     }
 
     private static IReadOnlyList<SnapshotRow> ReadMatchingRows(SqliteConnection connection, SqliteTransaction transaction, HistoricalEvidenceSelectionV1 selection, int limit)
@@ -278,6 +540,21 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
     {
         using var command = BuildSelectionCommand(connection, transaction, selection, count: true);
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static int CountMatchingReturned(SqliteConnection connection, SqliteTransaction transaction,
+        HistoricalEvidenceSelectionV1 selection, IReadOnlyList<SnapshotRow> rows)
+    {
+        if (rows.Count == 0) return 0;
+        using var command = BuildSelectionCommand(connection, transaction, selection, count: true);
+        var names = rows.Select((_, index) => "$returned" + index).ToArray();
+        command.CommandText = command.CommandText.TrimEnd(';');
+        command.CommandText += command.CommandText.Contains(" WHERE ", StringComparison.Ordinal)
+            ? $" AND s.session_id IN ({string.Join(',', names)});"
+            : $" WHERE s.session_id IN ({string.Join(',', names)});";
+        for (var index = 0; index < names.Length; index++)
+            command.Parameters.AddWithValue(names[index], rows[index].SessionId.ToString("D"));
+        return checked((int)(long)command.ExecuteScalar()!);
     }
 
     private static SqliteCommand BuildSelectionCommand(SqliteConnection connection, SqliteTransaction transaction, HistoricalEvidenceSelectionV1 selection, bool count)
@@ -325,6 +602,58 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture), DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture));
     private static string Where(IReadOnlyList<string> filters) => filters.Count == 0 ? "" : " WHERE " + string.Join(" AND ", filters);
     private static bool HasNonIdScope(HistoricalEvidenceSelectionV1 value) => value.Repository is not null || value.Workspace is not null || value.From is not null || value.To is not null || value.SourceSurfaces.Count > 0 || value.TaskLabel is not null || value.ExperimentLabel is not null;
+
+    private static IReadOnlyList<MonitorSpanRow> ReadBoundedSpans(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT DISTINCT m.id,m.raw_record_id,m.trace_id,m.span_id,m.parent_span_id,m.span_ordinal,m.operation,m.category,
+                m.tool_name,m.tool_type,m.mcp_tool_name,m.mcp_server_hash,m.agent_name,m.request_model,m.response_model,
+                m.input_tokens,m.output_tokens,m.total_tokens,m.reasoning_tokens,m.cache_read_tokens,m.cache_creation_tokens,
+                m.status,m.error_type,m.finish_reasons,m.conversation_id,m.duration_ms,m.start_time,m.end_time,m.projected_at
+            FROM monitor_spans m
+            JOIN session_events e ON e.trace_id=m.trace_id
+            WHERE e.session_id=$session
+                AND e.match_kind IN ('exact_native','explicit_link')
+                AND e.source_adapter IN ('otel-exact','claude-code-otel')
+            ORDER BY m.raw_record_id,m.span_ordinal,m.id
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        command.Parameters.AddWithValue("$limit", HistoricalEvidenceContractsV1.MaximumEventsPerSession + 1);
+        using var reader = command.ExecuteReader();
+        var result = new List<MonitorSpanRow>();
+        while (reader.Read())
+        {
+            if (result.Count == HistoricalEvidenceContractsV1.MaximumEventsPerSession) throw ChildOverflow();
+            result.Add(new(
+                reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), NullableString(reader, 3), NullableString(reader, 4), reader.GetInt32(5),
+                NullableString(reader, 6), NullableString(reader, 7), NullableString(reader, 8), NullableString(reader, 9), NullableString(reader, 10), NullableString(reader, 11),
+                NullableString(reader, 12), NullableString(reader, 13), NullableString(reader, 14), NullableInt32(reader, 15), NullableInt32(reader, 16), NullableInt32(reader, 17),
+                NullableInt32(reader, 18), NullableInt32(reader, 19), NullableInt32(reader, 20), NullableString(reader, 21), NullableString(reader, 22), NullableString(reader, 23),
+                NullableString(reader, 24), NullableDouble(reader, 25), NullableString(reader, 26), NullableString(reader, 27), reader.GetString(28)));
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<SnapshotObjectiveRow> ReadBoundedObjectives(SqliteConnection connection, SqliteTransaction transaction, Guid sessionId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT objective_evaluation_id,trace_id,result,recorded_at FROM objective_evaluations WHERE session_id=$session ORDER BY recorded_at,objective_evaluation_id LIMIT $limit;";
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        command.Parameters.AddWithValue("$limit", HistoricalEvidenceContractsV1.MaximumGroupsPerSession + 1);
+        using var reader = command.ExecuteReader();
+        var result = new List<SnapshotObjectiveRow>();
+        while (reader.Read())
+        {
+            if (result.Count == HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
+            result.Add(new(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), Timestamp(reader.GetString(3))));
+        }
+        return result;
+    }
+
     private static SessionDetail ReadBoundedDetail(SqliteConnection connection, SqliteTransaction transaction, SnapshotRow row)
     {
         ObservedSession session;
@@ -399,6 +728,8 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
     private static string? NullableString(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
     private static Guid? NullableGuid(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : Guid.Parse(reader.GetString(ordinal));
     private static long? NullableInt64(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
+    private static int? NullableInt32(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
+    private static double? NullableDouble(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetDouble(ordinal);
     private static DateTimeOffset Timestamp(string value) => DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
     private static DateTimeOffset? NullableTimestamp(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : Timestamp(reader.GetString(ordinal));
     private static SessionSourceSurface? NullableSurface(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : SessionWire.ParseSourceSurface(reader.GetString(ordinal));
@@ -417,7 +748,8 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
     }
     private SqliteConnection Open() { var value = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()); value.Open(); return value; }
     private sealed record SnapshotRow(Guid SessionId, DateTimeOffset? StartedAt, DateTimeOffset LastSeenAt, DateTimeOffset UpdatedAt);
-    private sealed record SnapshotHandoffRow(long AnalysisRunId, string Checksum, InstructionFindingHandoffV1 Handoff);
+    private sealed record SnapshotObjectiveRow(Guid ObjectiveEvaluationId, string TraceId, string Result, DateTimeOffset RecordedAt);
+    private sealed record SnapshotHandoffRow(long AnalysisRunId, string TraceId, string Checksum, InstructionFindingHandoffV1 Handoff);
     private sealed record InstructionFindingAssociation(
         InstructionFindingReceiptV1 Receipt,
         InstructionRuleCandidateV1? Candidate,
@@ -428,64 +760,75 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
         IReadOnlyList<HistoricalSessionMetadataV1> sessions,
         long omitted,
         IReadOnlyDictionary<Guid, SessionDetail> details,
+        IReadOnlyDictionary<Guid, IReadOnlyList<MonitorSpanRow>> spans,
+        IReadOnlyDictionary<Guid, IReadOnlyList<SnapshotObjectiveRow>> objectives,
         IReadOnlyDictionary<Guid, IReadOnlyList<InstructionFindingAssociation>> findings,
-        ISessionStore sessionStore,
-        IHistoricalSessionContentReaderV1 contentReader) : IHistoricalEvidenceSnapshotLeaseV1
+        IReadOnlyDictionary<Guid, IReadOnlyList<HistoricalEvidenceGroupDraftV1>> descriptors) : IHistoricalEvidenceSnapshotLeaseV1
     {
         public string SnapshotId => snapshotId;
         public IReadOnlyList<HistoricalSessionMetadataV1> Sessions => sessions;
         public long OmittedEarlierMatchingSessionCount => omitted;
 
-        public async ValueTask<IReadOnlyList<HistoricalEvidenceGroupDraftV1>> ReadEvidenceAsync(Guid sessionId, bool includeDescriptors, CancellationToken cancellationToken)
+        public ValueTask<IReadOnlyList<HistoricalEvidenceGroupDraftV1>> ReadEvidenceAsync(Guid sessionId, bool includeDescriptors, CancellationToken cancellationToken)
         {
             if (!details.TryGetValue(sessionId, out var detail)) throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.UnresolvedEvidenceReference);
-            var metadata = sessions.Single(value => value.SessionId == sessionId);
-            var references = metadata.EvidenceLocations.Select(value => new HistoricalRawEvidenceReferenceV1(value.SessionId, value.TraceId, value.SpanId, value.TurnIndex, value.RelativePosition)).ToArray();
+            cancellationToken.ThrowIfCancellationRequested();
             var groups = new List<HistoricalEvidenceGroupDraftV1>();
-            foreach (var referencePage in references.Chunk(HistoricalEvidenceContractsV1.MaximumReferencesPerGroup))
-                groups.Add(new(HistoricalEvidenceGroupKindV1.TurnRollup, referencePage, referencePage.Length, "event", null, null, null, null, null, null));
-            foreach (var run in detail.Runs.Where(value => value.TotalTokens is not null))
+            foreach (var trace in spans[sessionId].GroupBy(span => span.TraceId, StringComparer.Ordinal))
+            {
+                var ordered = trace.OrderBy(span => span.RawRecordId).ThenBy(span => span.SpanOrdinal).ToArray();
+                var evidence = InstructionEvidenceExtractor.Extract(trace.Key, ordered, [], []);
+                var turnSpans = ordered.Where(IsTurn).ToArray();
+                for (var index = 0; index < evidence.TurnTokens.Count; index++)
+                {
+                    var turn = evidence.TurnTokens[index];
+                    var reference = new HistoricalRawEvidenceReferenceV1(sessionId, trace.Key, turn.SpanId, turn.TurnIndex, HistoricalEvidenceRelativePositionV1.Anchor);
+                    Add(groups, new(HistoricalEvidenceGroupKindV1.TurnRollup, [reference], 1, "turn", null, null, null, null, null, null));
+                    var span = turnSpans[index];
+                    var tokens = span.TotalTokens is not null ? (long?)span.TotalTokens : span.InputTokens is not null || span.OutputTokens is not null
+                        ? checked((long)(span.InputTokens ?? 0) + (span.OutputTokens ?? 0)) : null;
+                    if (tokens is not null) Add(groups, new(HistoricalEvidenceGroupKindV1.TokenRollup, [reference], tokens, "token", null, null, null, null, null, null));
+                    if (span.CacheReadTokens is not null || span.CacheCreationTokens is not null)
+                        Add(groups, new(HistoricalEvidenceGroupKindV1.CacheRollup, [reference], checked((long)(span.CacheReadTokens ?? 0) + (span.CacheCreationTokens ?? 0)), "cache_token", null, null, null, null, null, null));
+                }
+                foreach (var span in ordered.Where(span => !IsTurn(span) && span.SpanId is not null
+                    && (span.CacheReadTokens is not null || span.CacheCreationTokens is not null)))
+                    Add(groups, new(HistoricalEvidenceGroupKindV1.CacheRollup,
+                        [new(sessionId, trace.Key, span.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor)],
+                        checked((long)(span.CacheReadTokens ?? 0) + (span.CacheCreationTokens ?? 0)), "cache_token", null, null, null, null, null, null));
+                foreach (var error in ordered.Where(span => span.Status == "error" && span.SpanId is not null))
+                    Add(groups, new(HistoricalEvidenceGroupKindV1.ErrorSpan,
+                        [new(sessionId, trace.Key, error.SpanId, null, HistoricalEvidenceRelativePositionV1.Anchor)], null, null,
+                        "error", null, null, null, null, null));
+                foreach (var retry in evidence.RetryChains.Where(chain => chain.SpanIds.Count is > 1 and <= HistoricalEvidenceContractsV1.MaximumReferencesPerGroup && chain.SpanIds.All(id => id is not null)))
+                    Add(groups, new(HistoricalEvidenceGroupKindV1.RetryChain,
+                        retry.SpanIds.Select(id => new HistoricalRawEvidenceReferenceV1(sessionId, trace.Key, id, null, HistoricalEvidenceRelativePositionV1.Anchor)).ToArray(),
+                        retry.SpanIds.Count, "attempt", retry.FinalOutcome, null, null, null, null, null));
+            }
+            foreach (var run in detail.Runs.Where(value => value.TotalTokens is not null && !spans[sessionId].Any(span => span.TraceId == value.TraceId && IsTurn(span))))
             {
                 var reference = detail.Events.Where(value => value.RunId == run.RunId).Select(TryExactReference).FirstOrDefault(value => value is not null);
-                if (reference is not null) groups.Add(new(HistoricalEvidenceGroupKindV1.TokenRollup, [reference], run.TotalTokens, "token", null, null, null, null, null, null));
+                if (reference is not null) Add(groups, new(HistoricalEvidenceGroupKindV1.TokenRollup, [reference], run.TotalTokens, "token", null, null, null, null, null, null));
+            }
+            var exactLocations = ExactLocations(detail, spans[sessionId]).Distinct().ToArray();
+            foreach (var objective in objectives[sessionId])
+            {
+                var reference = exactLocations.FirstOrDefault(item => item.TraceId == objective.TraceId);
+                if (reference is not null)
+                    Add(groups, new(HistoricalEvidenceGroupKindV1.QualityReference, [reference], null, null, objective.Result, null, null, null, null, null));
             }
             foreach (var finding in findings.GetValueOrDefault(sessionId, []))
-                groups.Add(new(HistoricalEvidenceGroupKindV1.InstructionFinding, finding.References, null, null, null, null, null, null,
+                Add(groups, new(HistoricalEvidenceGroupKindV1.InstructionFinding, finding.References, null, null, null, null, null, null,
                     finding.Receipt.FindingId, null, finding.Receipt, finding.Candidate));
-            var descriptorEvents = detail.Events
-                .Where(value => value.ContentState == SessionContentState.Available && value.Type is "user.message" or "UserPromptSubmit" or "userPromptSubmitted")
-                .Where(value => TryExactReference(value) is not null)
-                .ToArray();
-            if (groups.Count + (includeDescriptors ? descriptorEvents.Length : 0) > HistoricalEvidenceContractsV1.MaximumGroupsPerSession)
-                throw ChildOverflow();
-            if (includeDescriptors && metadata.Capabilities.RawLocalDescriptor && metadata.ContentState == SessionContentState.Available
-                && metadata.SourceKind != HistoricalEvidenceSourceKindV1.HistoricalSummary
-                && sessionStore.GetRawRetentionState(sessionId) == SessionRawRetentionState.Expiring)
-            {
-                foreach (var item in descriptorEvents)
-                {
-                    var reference = TryExactReference(item); if (reference is null) continue;
-                    var read = await contentReader.ReadContentAsync(sessionId, item.EventId, cancellationToken).ConfigureAwait(false);
-                    if (read.Disposition != SessionContentReadDisposition.Granted || read.Lease is null) continue;
-                    await using var contentLease = read.Lease;
-                    var descriptor = Descriptor(contentLease.Content.ContentJson);
-                    if (descriptor is not null) groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null, descriptor));
-                }
-            }
-            return groups;
+            if (includeDescriptors)
+                foreach (var descriptor in descriptors[sessionId]) Add(groups, descriptor);
+            return ValueTask.FromResult<IReadOnlyList<HistoricalEvidenceGroupDraftV1>>(groups);
         }
 
-        private static string? Descriptor(string json)
+        private static void Add(List<HistoricalEvidenceGroupDraftV1> groups, HistoricalEvidenceGroupDraftV1 group)
         {
-            try
-            {
-                using var document = JsonDocument.Parse(json);
-                foreach (var name in new[] { "text", "prompt", "message" })
-                    if (document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
-                        return value.GetString();
-                return null;
-            }
-            catch (JsonException) { return null; }
+            if (groups.Count == HistoricalEvidenceContractsV1.MaximumGroupsPerSession) throw ChildOverflow();
+            groups.Add(group);
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

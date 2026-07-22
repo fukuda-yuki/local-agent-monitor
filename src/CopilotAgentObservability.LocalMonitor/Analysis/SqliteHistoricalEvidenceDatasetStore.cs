@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
@@ -125,7 +126,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
                 || raw.Completeness != safe.Completeness || raw.SourceKind != safe.SourceKind || raw.ContentState != safe.ContentState
                 || !raw.CompletenessReasons.SequenceEqual(safe.CompletenessReasons) || raw.DescriptorState != safe.DescriptorState
                 || raw.Capabilities != safe.Capabilities || safe.RawLocalDescriptor is not null
-                || !MetadataPairMatches(raw.Metadata, safe.Metadata, raw.SessionId, safe.SessionId))
+                || !MetadataPairMatches(raw.Metadata, safe.Metadata, safe.SessionId))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
         for (var index = 0; index < extraction.RawLocal.ExcludedSessions.Count; index++)
@@ -134,7 +135,7 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             var safe = extraction.RepositorySafe.ExcludedSessions[index];
             if (!Guid.TryParse(raw.SessionId, out var rawId) || SafeSession(rawId) != safe.SessionId || raw.Reason != safe.Reason
                 || (raw.Metadata is null) != (safe.Metadata is null)
-                || raw.Metadata is not null && !MetadataPairMatches(raw.Metadata, safe.Metadata!, raw.SessionId, safe.SessionId))
+                || raw.Metadata is not null && !MetadataPairMatches(raw.Metadata, safe.Metadata!, safe.SessionId))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
         for (var groupIndex = 0; groupIndex < extraction.RawLocal.EvidenceGroups.Count; groupIndex++)
@@ -146,18 +147,20 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
                 || raw.CanonicalCallHash != safe.CanonicalCallHash || raw.FindingId != safe.FindingId
                 || !FindingAssociationMatches(raw.FindingReceipt, raw.FindingCandidate, safe.FindingReceipt, safe.FindingCandidate))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
-            for (var refIndex = 0; refIndex < raw.References.Count; refIndex++)
+            var expectedReferences = raw.References.Select(rawRef =>
             {
-                var rawRef = raw.References[refIndex];
-                var safeRef = safe.References[refIndex];
                 if (!Guid.TryParse(rawRef.SessionId, out var rawSessionId)) throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
-                var expected = InstructionFindingReferenceTokenizationV1.Tokenize(new(
+                var tokenized = InstructionFindingReferenceTokenizationV1.Tokenize(new(
                     rawSessionId.ToString(), rawRef.TraceId, rawRef.SpanId, rawRef.TurnIndex,
                     (InstructionEvidenceRelativePositionV1)(int)rawRef.RelativePosition));
-                if (safeRef.SessionId != expected.SessionId || safeRef.TraceId != expected.TraceId || safeRef.SpanId != expected.SpanId
-                    || safeRef.TurnIndex != rawRef.TurnIndex || safeRef.RelativePosition != rawRef.RelativePosition)
-                    throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
-            }
+                return new HistoricalEvidenceReferenceV1(tokenized.SessionId!, tokenized.TraceId, tokenized.SpanId, tokenized.TurnIndex, rawRef.RelativePosition);
+            }).OrderBy(reference => reference.SessionId, StringComparer.Ordinal)
+                .ThenBy(reference => reference.TraceId, StringComparer.Ordinal)
+                .ThenBy(reference => reference.SpanId, StringComparer.Ordinal)
+                .ThenBy(reference => reference.TurnIndex)
+                .ThenBy(reference => reference.RelativePosition).ToArray();
+            if (!expectedReferences.SequenceEqual(safe.References))
+                throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
         }
         if (!DistributionMatches(extraction.RawLocal.Distribution, extraction.RepositorySafe.Distribution))
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidPersistence);
@@ -172,11 +175,8 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
         if (rawReceipt is null || safeReceipt is null)
             return rawReceipt is null && safeReceipt is null && rawCandidate is null && safeCandidate is null;
         if ((rawCandidate is null) != (safeCandidate is null)) return false;
-        var raw = new InstructionFindingHandoffV1(InstructionFindingContractsV1.HandoffSchemaVersion, rawReceipt.AnalysisRunId,
-            [rawReceipt], rawCandidate is null ? [] : [rawCandidate]);
-        var safe = new InstructionFindingHandoffV1(InstructionFindingContractsV1.HandoffSchemaVersion, safeReceipt.AnalysisRunId,
-            [safeReceipt], safeCandidate is null ? [] : [safeCandidate]);
-        return InstructionFindingJsonV1.Serialize(raw).SequenceEqual(InstructionFindingJsonV1.Serialize(safe));
+        return JsonSerializer.SerializeToUtf8Bytes(rawReceipt).SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(safeReceipt))
+            && JsonSerializer.SerializeToUtf8Bytes(rawCandidate).SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(safeCandidate));
     }
 
     private static string SafeSession(Guid id) => InstructionFindingReferenceTokenizationV1.Tokenize(new(
@@ -185,7 +185,6 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
     private static bool MetadataPairMatches(
         HistoricalDecisionMetadataV1 raw,
         HistoricalDecisionMetadataV1 safe,
-        string rawSessionId,
         string safeSessionId)
     {
         if (safe.Repository != HistoricalEvidenceExtractorV1.TokenizeLabel("repository", raw.Repository)
@@ -200,25 +199,25 @@ internal sealed class SqliteHistoricalEvidenceDatasetStoreV1
             || raw.ModelObservations.Count != safe.ModelObservations.Count
             || raw.DurationObservations.Count != safe.DurationObservations.Count)
             return false;
-        for (var index = 0; index < raw.ModelObservations.Count; index++)
-            if (raw.ModelObservations[index].Model != safe.ModelObservations[index].Model
-                || !ReferencePairMatches(raw.ModelObservations[index].EvidenceRef, safe.ModelObservations[index].EvidenceRef, rawSessionId, safeSessionId))
-                return false;
-        for (var index = 0; index < raw.DurationObservations.Count; index++)
-            if (raw.DurationObservations[index].DurationMs != safe.DurationObservations[index].DurationMs
-                || !ReferencePairMatches(raw.DurationObservations[index].EvidenceRef, safe.DurationObservations[index].EvidenceRef, rawSessionId, safeSessionId))
-                return false;
-        return true;
+        var expectedModels = raw.ModelObservations.Select(value => new HistoricalModelObservationV1(
+                value.Model, TokenizeReference(value.EvidenceRef, safeSessionId)))
+            .OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef.SessionId, StringComparer.Ordinal)
+            .ThenBy(value => value.EvidenceRef.TraceId, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef.SpanId, StringComparer.Ordinal)
+            .ThenBy(value => value.EvidenceRef.TurnIndex).ThenBy(value => value.EvidenceRef.RelativePosition).ToArray();
+        var expectedDurations = raw.DurationObservations.Select(value => new HistoricalDurationObservationV1(
+                value.DurationMs, TokenizeReference(value.EvidenceRef, safeSessionId)))
+            .OrderBy(value => value.DurationMs).ThenBy(value => value.EvidenceRef.SessionId, StringComparer.Ordinal)
+            .ThenBy(value => value.EvidenceRef.TraceId, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef.SpanId, StringComparer.Ordinal)
+            .ThenBy(value => value.EvidenceRef.TurnIndex).ThenBy(value => value.EvidenceRef.RelativePosition).ToArray();
+        return expectedModels.SequenceEqual(safe.ModelObservations) && expectedDurations.SequenceEqual(safe.DurationObservations);
     }
 
-    private static bool ReferencePairMatches(HistoricalEvidenceReferenceV1 raw, HistoricalEvidenceReferenceV1 safe, string rawSessionId, string safeSessionId)
+    private static HistoricalEvidenceReferenceV1 TokenizeReference(HistoricalEvidenceReferenceV1 raw, string safeSessionId)
     {
-        if (raw.SessionId != rawSessionId || safe.SessionId != safeSessionId) return false;
         var expected = InstructionFindingReferenceTokenizationV1.Tokenize(new(
             raw.SessionId, raw.TraceId, raw.SpanId, raw.TurnIndex,
             (InstructionEvidenceRelativePositionV1)(int)raw.RelativePosition));
-        return safe.TraceId == expected.TraceId && safe.SpanId == expected.SpanId
-            && safe.TurnIndex == raw.TurnIndex && safe.RelativePosition == raw.RelativePosition;
+        return new(safeSessionId, expected.TraceId, expected.SpanId, raw.TurnIndex, raw.RelativePosition);
     }
 
     private static bool SelectionPairMatches(HistoricalEvidenceSelectionProjectionV1 raw, HistoricalEvidenceSelectionProjectionV1 safe) =>

@@ -203,6 +203,10 @@ public sealed class HistoricalEvidenceExtractionTests
     [InlineData("AKIAIOSFODNN7EXAMPLE")]
     [InlineData("password=correct-horse-battery-staple")]
     [InlineData("Customer SSN 123-45-6789")]
+    [InlineData("Call Alice at 555-123-4567")]
+    [InlineData("Alice Smith, 123 Main Street")]
+    [InlineData("Alice Smith")]
+    [InlineData("password=hunter2; call Alice at +1 555-123-4567")]
     public async Task ExtractAsync_RejectsSensitiveDescriptorFromBothRepresentations(string descriptor)
     {
         var session = Metadata(1);
@@ -915,7 +919,7 @@ public sealed class HistoricalEvidenceExtractionTests
     }
 
     [Fact]
-    public async Task ExtractAsync_PreservesRawCanonicalSessionAndReferenceOrderInRepositorySafeForm()
+    public async Task ExtractAsync_CanonicalizesRepositorySafeReferencesAfterTokenization()
     {
         var first = Metadata(1, startedAt: At(1));
         var second = Metadata(2, startedAt: At(1));
@@ -945,7 +949,7 @@ public sealed class HistoricalEvidenceExtractionTests
         var safeReferences = result.RepositorySafe.EvidenceGroups.Single(item => item.Kind == HistoricalEvidenceGroupKindV1.RetryChain).References;
         Assert.Equal(["trace-a", "trace-b"], rawReferences.Select(item => item.TraceId));
         Assert.Equal(
-            rawReferences.Select(item => InstructionFindingReferenceTokenizationV1.TokenizeTrace(item.TraceId)),
+            rawReferences.Select(item => InstructionFindingReferenceTokenizationV1.TokenizeTrace(item.TraceId)).Order(StringComparer.Ordinal),
             safeReferences.Select(item => item.TraceId));
     }
 

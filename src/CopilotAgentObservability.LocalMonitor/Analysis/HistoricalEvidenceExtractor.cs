@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.InstructionFindings;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
 
@@ -26,6 +27,15 @@ internal static partial class HistoricalEvidenceExtractorV1
 
     [GeneratedRegex(@"(?i)(?:^|\s)[a-z]:[^\\/\s]", RegexOptions.CultureInvariant)]
     private static partial Regex DeviceRelativePathPattern();
+
+    [GeneratedRegex(@"(?<!\d)(?:(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{3}\)?[ .-])\d{3}[ .-]\d{4}|\+\d{10,15})(?!\d)", RegexOptions.CultureInvariant)]
+    private static partial Regex PhoneNumberPattern();
+
+    [GeneratedRegex(@"(?i)\b\d{1,6}\s+[\p{L}][\p{L} .'-]{0,48}\s+(?:street|st|road|rd|avenue|ave|boulevard|blvd|lane|ln|drive|dr|way)\b", RegexOptions.CultureInvariant)]
+    private static partial Regex StreetAddressPattern();
+
+    [GeneratedRegex(@"(?:(?i:call|contact|ask|email|meet|tell)\s+\p{Lu}[\p{L}'-]+(?:\s+\p{Lu}[\p{L}'-]+)?\b|^\p{Lu}[\p{L}'-]+\s+\p{Lu}[\p{L}'-]+(?:[,;].*)?$)", RegexOptions.CultureInvariant)]
+    private static partial Regex PersonNamePattern();
 
     internal static async ValueTask<HistoricalEvidenceExtractionV1> ExtractAsync(
         HistoricalEvidenceSelectionV1 selection,
@@ -169,9 +179,13 @@ internal static partial class HistoricalEvidenceExtractorV1
                     && (string.IsNullOrWhiteSpace(descriptor)
                         || descriptor.EnumerateRunes().Count() > HistoricalEvidenceContractsV1.MaximumDescriptorLength
                         || descriptor.Any(char.IsControl)
+                        || MeasurementSanitizer.IsUnsafeStringValue(descriptor)
                         || SensitiveDescriptorPattern().IsMatch(descriptor)
                         || SocialSecurityNumberPattern().IsMatch(descriptor)
                         || DeviceRelativePathPattern().IsMatch(descriptor)
+                        || PhoneNumberPattern().IsMatch(descriptor)
+                        || StreetAddressPattern().IsMatch(descriptor)
+                        || PersonNamePattern().IsMatch(descriptor)
                         || !AllowedDescriptorPattern().IsMatch(descriptor))
                 || raw && (session.DescriptorState == HistoricalDescriptorStateV1.Available) != (session.RawLocalDescriptor is not null)
                 || !SafeOptionalToken(session.SourceVersion)
@@ -216,7 +230,7 @@ internal static partial class HistoricalEvidenceExtractorV1
                 || group.References.Count is < 1 or > HistoricalEvidenceContractsV1.MaximumReferencesPerGroup
                 || group.SessionId != group.References[0].SessionId
                 || !includedIds.Contains(group.SessionId)
-                || raw && !group.References.SequenceEqual(group.References.OrderBy(item => item, HistoricalReferenceComparer.Instance))
+                || !group.References.SequenceEqual(group.References.OrderBy(item => item, HistoricalReferenceComparer.Instance))
                 || raw && group.Kind == HistoricalEvidenceGroupKindV1.RepeatedToolCall && group.ExactCallId is null && !HashPattern().IsMatch(group.CanonicalCallHash ?? "")
                 || raw && group.Kind == HistoricalEvidenceGroupKindV1.SubagentFanOut && group.ExactOwnershipId is null
                 || group.Kind == HistoricalEvidenceGroupKindV1.InstructionFinding && !FindingIdPattern().IsMatch(group.FindingId ?? "")
@@ -245,9 +259,33 @@ internal static partial class HistoricalEvidenceExtractorV1
             if (raw && group.GroupId != ComputeGroupId(group))
                 throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidDerivedIdentity);
         }
+        ValidateCompleteInstructionFindingHandoffs(dataset.EvidenceGroups);
         ValidateDistribution(dataset.Distribution, dataset.Sessions.Count);
         if (!DistributionEquals(dataset.Distribution, Distribution(dataset.Sessions)))
             throw new HistoricalEvidenceValidationException(HistoricalEvidenceValidationCodeV1.InvalidDerivedIdentity);
+    }
+
+    private static void ValidateCompleteInstructionFindingHandoffs(IReadOnlyList<HistoricalEvidenceGroupV1> groups)
+    {
+        foreach (var run in groups.Where(group => group.Kind == HistoricalEvidenceGroupKindV1.InstructionFinding)
+                     .GroupBy(group => group.FindingReceipt?.AnalysisRunId ?? 0))
+        {
+            if (run.Key <= 0) throw Invalid();
+            var receipts = run.Select(group => group.FindingReceipt).OfType<InstructionFindingReceiptV1>()
+                .GroupBy(receipt => receipt.FindingId, StringComparer.Ordinal).Select(group => group.First())
+                .OrderBy(receipt => receipt.FindingId, StringComparer.Ordinal).ToArray();
+            var candidates = run.Select(group => group.FindingCandidate).OfType<InstructionRuleCandidateV1>()
+                .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal).Select(group => group.First())
+                .OrderBy(candidate => candidate.CandidateId, StringComparer.Ordinal).ToArray();
+            try
+            {
+                var bytes = InstructionFindingJsonV1.Serialize(new(
+                    InstructionFindingContractsV1.HandoffSchemaVersion, run.Key, receipts, candidates));
+                if (InstructionFindingHandoffConsumerV1.Validate(bytes) != run.Key) throw Invalid();
+            }
+            catch (InstructionFindingValidationException) { throw Invalid(); }
+            catch (InstructionFindingHandoffConsumerValidationException) { throw Invalid(); }
+        }
     }
 
     internal static string ComputeExtractionId(string snapshotId, HistoricalEvidenceSelectionProjectionV1 rawSelection)
@@ -460,8 +498,8 @@ internal static partial class HistoricalEvidenceExtractorV1
             || reference.SpanId is null && reference.TurnIndex is null || reference.TurnIndex is <= 0) throw Invalid();
         if (raw)
         {
-            if (!IsCanonicalSessionId(reference.SessionId) || !RawIdentifierPattern().IsMatch(reference.TraceId)
-                || reference.SpanId is not null && !RawIdentifierPattern().IsMatch(reference.SpanId)) throw Invalid();
+            if (!IsCanonicalSessionId(reference.SessionId) || !SafeLocalCarrier(reference.TraceId)
+                || reference.SpanId is not null && !SafeLocalCarrier(reference.SpanId)) throw Invalid();
         }
         else if (!InstructionFindingReferenceTokenizationV1.IsSessionReference(reference.SessionId)
             || !InstructionFindingReferenceTokenizationV1.IsTraceReference(reference.TraceId)
@@ -500,17 +538,23 @@ internal static partial class HistoricalEvidenceExtractorV1
         InstructionFindingReceiptV1? receipt,
         InstructionRuleCandidateV1? candidate)
     {
-        if (receipt is null || receipt.FindingId != findingId || references.Count != receipt.EvidenceRefs.Count
-            || !references.ToHashSet().SetEquals(receipt.EvidenceRefs)) throw Invalid();
-        try
+        if (receipt is null || receipt.FindingId != findingId || references.Count != receipt.EvidenceRefs.Count)
+            throw Invalid();
+        var unmatched = references.ToList();
+        foreach (var expected in receipt.EvidenceRefs)
         {
-            InstructionFindingPipelineV1.ValidateHandoff(new(
-                InstructionFindingContractsV1.HandoffSchemaVersion,
-                receipt.AnalysisRunId,
-                [receipt],
-                candidate is null ? [] : [candidate]));
+            var index = unmatched.FindIndex(actual =>
+                (expected.SessionId is null || expected.SessionId == actual.SessionId)
+                && expected.TraceId == actual.TraceId
+                && expected.SpanId == actual.SpanId
+                && expected.TurnIndex == actual.TurnIndex
+                && expected.RelativePosition == actual.RelativePosition);
+            if (index < 0) throw Invalid();
+            unmatched.RemoveAt(index);
         }
-        catch (InstructionFindingValidationException) { throw Invalid(); }
+        if (unmatched.Count != 0
+            || candidate is not null && (!candidate.SourceFindingIds.Contains(findingId, StringComparer.Ordinal)
+                || candidate.Provenance.AnalysisRunId != receipt.AnalysisRunId)) throw Invalid();
     }
 
     private static int CompletenessRank(SessionCompleteness value) => value switch { SessionCompleteness.Unbound => 0, SessionCompleteness.Partial => 1, SessionCompleteness.Rich => 2, SessionCompleteness.Full => 3, _ => throw Invalid() };
@@ -558,9 +602,13 @@ internal static partial class HistoricalEvidenceExtractorV1
             : item.Capabilities;
 
     private static (HistoricalDescriptorStateV1 State, string? Value) Descriptor(bool sanitizedOnly, IReadOnlyList<HistoricalEvidenceGroupDraftV1> drafts)
+        => ProjectDescriptorCandidates(sanitizedOnly, drafts.Select(item => item.RawDescriptor).OfType<string>());
+
+    internal static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptorCandidates(
+        bool sanitizedOnly, IEnumerable<string> rawCandidates)
     {
         if (sanitizedOnly) return (HistoricalDescriptorStateV1.NotRequested, null);
-        var candidates = drafts.Select(item => item.RawDescriptor).OfType<string>().Select(ProjectDescriptor).ToArray();
+        var candidates = rawCandidates.Select(ProjectDescriptor).ToArray();
         if (candidates.Length == 0) return (HistoricalDescriptorStateV1.Unavailable, null);
         if (candidates.Any(item => item.State == HistoricalDescriptorStateV1.RejectedSensitive))
             return (HistoricalDescriptorStateV1.RejectedSensitive, null);
@@ -571,8 +619,10 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static (HistoricalDescriptorStateV1 State, string? Value) ProjectDescriptor(string candidate)
     {
         var firstLine = candidate.Split('\n', 2)[0].TrimEnd('\r').Trim();
-        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || SensitiveDescriptorPattern().IsMatch(firstLine)
+        if (firstLine.Length == 0 || firstLine.Any(char.IsControl) || MeasurementSanitizer.IsUnsafeStringValue(firstLine)
+            || SensitiveDescriptorPattern().IsMatch(firstLine)
             || SocialSecurityNumberPattern().IsMatch(firstLine) || DeviceRelativePathPattern().IsMatch(firstLine)
+            || PhoneNumberPattern().IsMatch(firstLine) || StreetAddressPattern().IsMatch(firstLine) || PersonNamePattern().IsMatch(firstLine)
             || !AllowedDescriptorPattern().IsMatch(firstLine))
             return (HistoricalDescriptorStateV1.RejectedSensitive, null);
         var bounded = string.Concat(firstLine.EnumerateRunes().Take(HistoricalEvidenceContractsV1.MaximumDescriptorLength).Select(rune => rune.ToString()));
@@ -600,8 +650,10 @@ internal static partial class HistoricalEvidenceExtractorV1
             item.LastSeenAt.ToUniversalTime(),
             surfaces,
             provenance,
-            item.ModelObservations.OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef, HistoricalRawReferenceComparer.Instance).Select(value => new HistoricalModelObservationV1(value.Model, ProjectReference(value.EvidenceRef, safe))).ToArray(),
-            item.DurationObservations.OrderBy(value => value.DurationMs).ThenBy(value => value.EvidenceRef, HistoricalRawReferenceComparer.Instance).Select(value => new HistoricalDurationObservationV1(value.DurationMs, ProjectReference(value.EvidenceRef, safe))).ToArray(),
+            item.ModelObservations.Select(value => new HistoricalModelObservationV1(value.Model, ProjectReference(value.EvidenceRef, safe)))
+                .OrderBy(value => value.Model, StringComparer.Ordinal).ThenBy(value => value.EvidenceRef, HistoricalReferenceComparer.Instance).ToArray(),
+            item.DurationObservations.Select(value => new HistoricalDurationObservationV1(value.DurationMs, ProjectReference(value.EvidenceRef, safe)))
+                .OrderBy(value => value.DurationMs).ThenBy(value => value.EvidenceRef, HistoricalReferenceComparer.Instance).ToArray(),
             item.Completeness,
             item.CompletenessReasons.Distinct(StringComparer.Ordinal).OrderBy(ReasonIndex).ToArray(),
             item.SourceKind,
@@ -668,7 +720,8 @@ internal static partial class HistoricalEvidenceExtractorV1
     };
 
     private static bool SafeOptionalToken(string? value) => value is null || value.Length is > 0 and <= 128 && SafeTokenPattern().IsMatch(value);
-    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && RawIdentifierPattern().IsMatch(value);
+    private static bool SafeLocalCarrier(string value) => value.Length is > 0 and <= 128 && RawIdentifierPattern().IsMatch(value)
+        && !MeasurementSanitizer.IsUnsafeStringValue(value) && !SocialSecurityNumberPattern().IsMatch(value) && !PhoneNumberPattern().IsMatch(value);
     private static bool SafeLabel(string? value) => value is null
         || value.Length is > 0 and <= 256
             && !string.IsNullOrWhiteSpace(value)
@@ -679,7 +732,8 @@ internal static partial class HistoricalEvidenceExtractorV1
         string groupId, HistoricalEvidenceGroupDraftV1 draft, string sessionId,
         IReadOnlyList<HistoricalRawEvidenceReferenceV1> references, bool safe) =>
         new(groupId, draft.Kind, sessionId,
-            references.Select(reference => ProjectReference(reference, safe)).ToArray(),
+            references.Select(reference => ProjectReference(reference, safe)).Distinct()
+                .OrderBy(reference => reference, HistoricalReferenceComparer.Instance).ToArray(),
             draft.NumericValue, draft.Unit, draft.Status,
             safe ? null : draft.ExactCallId, draft.CanonicalCallHash,
             safe ? null : draft.ExactOwnershipId, draft.FindingId, draft.FindingReceipt, draft.FindingCandidate);
@@ -774,7 +828,10 @@ internal static partial class HistoricalEvidenceExtractorV1
     private static bool RepositorySafeMetadataValue(string value) =>
         MeasurementSanitizer.SanitizeFreeFormName(value) is not null
         && !SocialSecurityNumberPattern().IsMatch(value)
-        && !DeviceRelativePathPattern().IsMatch(value);
+        && !DeviceRelativePathPattern().IsMatch(value)
+        && !PhoneNumberPattern().IsMatch(value)
+        && !StreetAddressPattern().IsMatch(value)
+        && !PersonNamePattern().IsMatch(value);
     private static string ExtractionDigest(string snapshotId, ReadOnlySpan<byte> selectionBytes)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

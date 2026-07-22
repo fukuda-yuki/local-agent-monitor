@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using CopilotAgentObservability.InstructionFindings;
 using CopilotAgentObservability.Telemetry.Sessions;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
@@ -15,7 +16,7 @@ internal static class HistoricalEvidenceContractsV1
     internal const int MaximumRunsPerSession = 256;
     internal const int MaximumEventsPerSession = MaximumGroupsPerSession * MaximumReferencesPerGroup;
     internal const int MaximumInstructionFindingHandoffs = MaximumSessions * MaximumGroupsPerSession;
-    internal const int MaximumInstructionFindingPayloadBytes = MaximumPayloadBytes;
+    internal const int MaximumInstructionFindingPayloadBytes = InstructionFindingHandoffConsumerV1.MaxPayloadBytes;
     internal const int MaximumInstructionFindingTotalBytes = MaximumPayloadBytes;
     internal const int MaximumDescriptorLength = 160;
     internal const int MaximumPayloadBytes = 64 * 1024 * 1024;

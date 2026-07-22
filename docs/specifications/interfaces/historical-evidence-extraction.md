@@ -69,15 +69,19 @@ extractor re-applies every filter defensively and invokes `ReadEvidenceAsync`
 only for the final included Session IDs; an implementation that reads an
 excluded or metadata-omitted Session violates this contract.
 
-The SQLite source reads at most 256 native IDs, 256 runs, and 4,096 events per
-returned Session, using `limit + 1` probes inside the same read transaction and
+The SQLite source reads at most 256 native IDs, 256 runs, 4,096 events, 4,096
+sanitized monitor spans, and 256 objective evaluations per returned Session,
+using `limit + 1` probes inside the same read transaction and
 rejecting overflow before constructing the extra row or reading any body. It
 also reads at most 51,200 Issue #59 handoffs relevant to exact selected trace
 IDs. Evidence-group capacity is checked before descriptor body reads; no later
 `Take` or silent truncation may hide an overflow.
-The handoff payload length is inspected before SQLite text materialization;
-both each payload and the aggregate selected handoff bytes are capped at
-67,108,864 bytes.
+The handoff payload length is inspected before SQLite text materialization.
+Each payload first passes the public Issue #59 consumer's exact 1,048,576-byte
+and JSON-depth-16 limits; aggregate selected handoff bytes remain capped at
+67,108,864 bytes. The historical schema treats embedded owner receipts and
+candidates as opaque objects; Issue #59's public consumer and shared owner
+types remain their only schema/hash/template authority.
 
 Candidate ordering is ascending by `started_at` when present, otherwise
 `last_seen_at`, then canonical lowercase Session UUID ordinal. All returned
@@ -117,6 +121,13 @@ reference are excluded. `partial`, `rich`, and `full` Sessions may be included;
 their capability state remains honest. `historical_summary` always includes
 `historical_summary_only`, cannot be represented above `partial`, and cannot
 claim raw descriptor, exact repeated-call, or exact ownership capability.
+`live_otel` requires an accepted exact-linked sanitized span projection;
+Session evidence without that projection is `saved_raw`. Completeness reasons
+are emitted only from persisted facts such as missing exact trace context,
+disabled content capture, ingest gaps, unsupported evidence, and hook-only
+capture, subject to the existing reason ceilings. Content state combines the
+captured event state with the current retention authority instead of treating a
+stale persisted `available` flag as current availability.
 
 Capabilities are a fixed Boolean vector: turn/token/cache rollup, error span,
 retry chain, repeated tool call, permission wait, sub-agent fan-out,
@@ -124,6 +135,29 @@ raw-local descriptor, quality reference, source comparison, and instruction
 finding reference. Dataset distribution counts completeness, source kind, and
 each capability independently. Missing stays false/absent; it is never
 synthesized as zero.
+
+Production OTel facts are admitted only for a Session trace grounded by an
+accepted Session event whose `match_kind` is `exact_native` or
+`explicit_link`; adapter names, shared trace text, conversation IDs,
+`trace_continuity`, order, repository, and time proximity are not evidence of
+ownership. One exact trace cannot ground two selected Sessions. Within a
+grounded trace, turns use the accepted `operation=chat || category=llm_call`
+predicate and `(raw_record_id, span_ordinal)` ordering. Explicit projected
+token/cache scalars, error status, and the accepted same-tool retry extractor
+produce their corresponding groups. Exact objective-evaluation rows produce
+quality references. Run model/token/duration facts require an exact event
+grounding; run and span durations are omitted unless their milliseconds are
+finite, non-negative, and integral. Span observations use only sanitized
+projection columns. An event with no source surface never lends its version
+tuple to a native or fallback provenance surface.
+
+No current persisted fact establishes a producer-authored repeated-call ID or
+hash, permission-wait duration, sub-agent ownership ID, or source-value
+comparison. Those capabilities remain false and those groups absent;
+tool-name repetition, parent-span hierarchy, multiple provenance rows, and
+generic `user.message` events are not promoted into those facts. A
+`user_correction` is limited to a later exact-linked user instruction after the
+initial instruction in that Session.
 
 ## Evidence groups and exact references
 
@@ -153,6 +187,15 @@ Production extraction reads those bounded, checksum-verified Issue #59
 handoffs in the coherent SQLite snapshot, resolves their opaque references to
 exact selected Session trace/span evidence, and embeds the receipt/candidate;
 reopening the stored extraction performs no out-of-band finding lookup.
+Exact payload bytes pass
+`InstructionFindingHandoffConsumerV1.Validate` before owner deserialization.
+Real nullable-Session span+turn, turn-only, and span-only references resolve
+through an indexed exact-location map; each reference must resolve uniquely and
+all references for a finding must resolve to one Session. A multi-finding
+candidate is preserved whole and validated with the complete analysis-run
+handoff, never reconstructed as an invalid singleton. Owner-produced
+`previous` and `following` sibling references preserve that exact relative
+position while resolving against the sibling trace's exact location.
 
 Groups sort by Session order, closed kind order, then group ID. References sort
 by Session, trace, nullable span, nullable turn, and Issue #59 relative-position
@@ -187,9 +230,10 @@ fixed allowlisted values, or domain-separated opaque tokens. Relative, device,
 home, UNC, and absolute paths; credentials; PII; and malicious carrier strings
 reject before serialization rather than relying on a permissive blacklist.
 Repository-safe label eligibility reuses the Issue #58 measurement sanitizer,
-with narrow rejection for SSN-shaped values and device-relative paths; unsafe
-labels are omitted rather than hashed. Raw descriptors apply the same narrow
-SSN and device-relative rejection.
+with rejection for SSN/phone/address/person-name shapes and device-relative
+paths; unsafe labels are omitted rather than hashed. Raw descriptors reuse the
+same sanitizer and reject those PII shapes, mixed credential/PII content, and
+non-closed carriers before either representation is serialized.
 
 `sanitized_only=true` never asks the snapshot lease for descriptor-bearing
 content and both forms record `not_requested`. Repository-safe output contains
@@ -204,8 +248,12 @@ bytes over domain
 canonical snapshot ID plus canonical selection bytes. Group IDs use a separate
 domain and the first 16 digest bytes over the canonical group identity.
 The production snapshot ID binds the canonical input selection, exact matching,
-returned, and omitted counts, every returned Session revision, and each loaded
-Issue #59 handoff analysis-run/checksum revision. A change confined to an
+returned, and omitted counts, every returned Session revision, sanitized
+span/objective projection revisions, captured current retention state,
+post-sanitizer descriptor outcome/value, and each loaded Issue #59 handoff
+analysis-run/trace/checksum revision. Every consumed native ID, run, event,
+projected span fact, objective, and authorization outcome is hashed in
+deterministic length-framed form. A change confined to an
 omitted earlier match or handoff therefore cannot collide with the prior
 snapshot/extraction identity.
 
