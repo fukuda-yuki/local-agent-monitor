@@ -12,6 +12,7 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
     private const int SqliteFileControlHasMoved = 20;
     private const int SqliteFileControlWindowsGetHandle = 29;
     private static readonly byte[] MainDatabaseName = "main\0"u8.ToArray();
+    private static readonly object UnixConnectionVerificationGate = new();
 
     private readonly string databasePath;
     private readonly FileStream lease;
@@ -58,10 +59,38 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
 
     internal SqliteConnection OpenVerifiedConnection() => OpenVerifiedConnection(afterConnectionOpened: null);
 
-    internal SqliteConnection OpenVerifiedConnection(Action? afterConnectionOpened)
+    internal SqliteConnection OpenVerifiedConnection(Action? afterConnectionOpened) =>
+        OpenVerifiedConnection(afterConnectionOpened, beforeUnixMovedCheck: null);
+
+    internal SqliteConnection OpenVerifiedConnection(
+        Action? afterConnectionOpened,
+        Action? beforeUnixMovedCheck)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 
+        if (!OperatingSystem.IsWindows())
+        {
+            lock (UnixConnectionVerificationGate)
+            {
+                var descriptorsBeforeOpen = HistoricalImportLocalFile.CaptureRegularFileDescriptors();
+                return OpenVerifiedConnectionCore(
+                    afterConnectionOpened,
+                    beforeUnixMovedCheck,
+                    descriptorsBeforeOpen);
+            }
+        }
+
+        return OpenVerifiedConnectionCore(
+            afterConnectionOpened,
+            beforeUnixMovedCheck: null,
+            descriptorsBeforeOpen: null);
+    }
+
+    private SqliteConnection OpenVerifiedConnectionCore(
+        Action? afterConnectionOpened,
+        Action? beforeUnixMovedCheck,
+        IReadOnlyDictionary<int, HistoricalImportFileIdentity>? descriptorsBeforeOpen)
+    {
         SqliteConnection? connection = null;
         try
         {
@@ -73,8 +102,8 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
             }.ToString());
             connection.Open();
             afterConnectionOpened?.Invoke();
-            RequireExpectedFileIdentity(connection);
             RequireExpectedCanonicalPath(connection);
+            RequireExpectedFileIdentity(connection, descriptorsBeforeOpen, beforeUnixMovedCheck);
             return connection;
         }
         catch (HistoricalImportException)
@@ -166,7 +195,10 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
         }
     }
 
-    private void RequireExpectedFileIdentity(SqliteConnection connection)
+    private void RequireExpectedFileIdentity(
+        SqliteConnection connection,
+        IReadOnlyDictionary<int, HistoricalImportFileIdentity>? descriptorsBeforeOpen,
+        Action? beforeUnixMovedCheck)
     {
         if (connection.State != ConnectionState.Open || connection.Handle is null)
         {
@@ -190,12 +222,15 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
             return;
         }
 
-        using var current = HistoricalImportLocalFile.OpenRegularRead(databasePath, allowWriteShare: true);
-        if (HistoricalImportLocalFile.ReadIdentity(current) != identity)
+        using (var current = HistoricalImportLocalFile.OpenRegularRead(databasePath, allowWriteShare: true))
         {
-            throw new HistoricalImportException(HistoricalImportErrorCodes.StoreUnavailable);
+            if (HistoricalImportLocalFile.ReadIdentity(current) != identity)
+            {
+                throw new HistoricalImportException(HistoricalImportErrorCodes.StoreUnavailable);
+            }
         }
 
+        beforeUnixMovedCheck?.Invoke();
         var moved = 0;
         var movedResult = SqliteFileControlInteger(
             connection.Handle.DangerousGetHandle(),
@@ -203,6 +238,14 @@ internal sealed class HistoricalImportDatabaseLease : IDisposable
             SqliteFileControlHasMoved,
             ref moved);
         if (movedResult != SqliteOk || moved != 0)
+        {
+            throw new HistoricalImportException(HistoricalImportErrorCodes.StoreUnavailable);
+        }
+
+        if (descriptorsBeforeOpen is null
+            // Pooling is disabled and no SQL runs before this check, so the main
+            // database is SQLite's sole newly retained regular file descriptor.
+            || HistoricalImportLocalFile.ReadSingleNewRegularFileIdentity(descriptorsBeforeOpen) != identity)
         {
             throw new HistoricalImportException(HistoricalImportErrorCodes.StoreUnavailable);
         }

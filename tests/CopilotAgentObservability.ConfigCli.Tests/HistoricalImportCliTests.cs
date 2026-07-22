@@ -217,6 +217,43 @@ public sealed class HistoricalImportCliTests
     }
 
     [Fact]
+    public void VerifiedDatabaseConnection_RejectsMultiSwapWithoutMutatingEitherDatabase()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var temp = new TempDirectory();
+        var database = CreateDatabaseFile(temp.Path);
+        var replacementDirectory = Path.Combine(temp.Path, "replacement");
+        Directory.CreateDirectory(replacementDirectory);
+        var replacement = CreateDatabaseFile(replacementDirectory);
+        var leasedAway = database + ".leased";
+        var replacementAway = database + ".replacement";
+        using var lease = HistoricalImportDatabaseLease.Open(database);
+        File.Move(database, leasedAway);
+        File.Move(replacement, database);
+
+        var exception = Assert.Throws<HistoricalImportException>(() =>
+            lease.OpenVerifiedConnection(
+                afterConnectionOpened: () =>
+                {
+                    File.Move(database, replacementAway);
+                    File.Move(leasedAway, database);
+                },
+                beforeUnixMovedCheck: () =>
+                {
+                    File.Move(database, leasedAway);
+                    File.Move(replacementAway, database);
+                }));
+
+        Assert.Equal(HistoricalImportErrorCodes.StoreUnavailable, exception.Code);
+        AssertHistoricalImportSchemaAbsent(database);
+        AssertHistoricalImportSchemaAbsent(leasedAway);
+    }
+
+    [Fact]
     public void History_DatabaseAccessFailure_ReturnsStoreUnavailable()
     {
         using var temp = new TempDirectory();
@@ -454,6 +491,20 @@ public sealed class HistoricalImportCliTests
         var path = Path.Combine(directory, "monitor.db");
         new RawTelemetryStore(path).CreateMonitorSchema();
         return path;
+    }
+
+    private static void AssertHistoricalImportSchemaAbsent(string databasePath)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM schema_version WHERE component='historical_import';";
+        Assert.Equal(0L, Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private static int CreateFifo(string path) => OperatingSystem.IsMacOS()

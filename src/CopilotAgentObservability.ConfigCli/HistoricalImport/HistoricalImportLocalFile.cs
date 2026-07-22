@@ -150,6 +150,38 @@ internal static class HistoricalImportLocalFile
         return WindowsFile.ReadIdentity(handle);
     }
 
+    internal static IReadOnlyDictionary<int, HistoricalImportFileIdentity> CaptureRegularFileDescriptors()
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            return LinuxFile.CaptureRegularFileDescriptors();
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            return MacOsFile.CaptureRegularFileDescriptors();
+        }
+
+        throw new PlatformNotSupportedException();
+    }
+
+    internal static HistoricalImportFileIdentity ReadSingleNewRegularFileIdentity(
+        IReadOnlyDictionary<int, HistoricalImportFileIdentity> before)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        var after = CaptureRegularFileDescriptors();
+        var candidates = after
+            .Where(item => !before.TryGetValue(item.Key, out var prior) || prior != item.Value)
+            .Select(item => item.Value)
+            .ToArray();
+        if (candidates.Length != 1)
+        {
+            throw new InvalidDataException();
+        }
+
+        return candidates[0];
+    }
+
     private static void RequireExpectedOpenedPath(string expectedPath, SafeFileHandle handle)
     {
         string? openedPath = null;
@@ -536,6 +568,37 @@ internal static class HistoricalImportLocalFile
                 0);
         }
 
+        internal static IReadOnlyDictionary<int, HistoricalImportFileIdentity> CaptureRegularFileDescriptors()
+        {
+            var descriptorNames = Directory
+                .EnumerateFileSystemEntries("/proc/self/fd")
+                .Select(System.IO.Path.GetFileName)
+                .ToArray();
+            var descriptors = new Dictionary<int, HistoricalImportFileIdentity>();
+            foreach (var name in descriptorNames)
+            {
+                if (!int.TryParse(name, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var descriptor))
+                {
+                    continue;
+                }
+
+                var buffer = new byte[StatxBufferSize];
+                if (Statx(descriptor, string.Empty, AtEmptyPath, StatxBasicStats, buffer) != 0
+                    || Classify(BitConverter.ToUInt16(buffer, StatxModeOffset)) != HistoricalImportPathKind.RegularFile)
+                {
+                    continue;
+                }
+
+                descriptors[descriptor] = new(
+                    BitConverter.ToUInt32(buffer, 136),
+                    BitConverter.ToUInt32(buffer, 140),
+                    BitConverter.ToUInt64(buffer, 32),
+                    0);
+            }
+
+            return descriptors;
+        }
+
         private static HistoricalImportPathKind Classify(ushort mode) => (mode & 0xf000) switch
         {
             0x8000 => HistoricalImportPathKind.RegularFile,
@@ -655,6 +718,34 @@ internal static class HistoricalImportLocalFile
                 0);
         }
 
+        internal static IReadOnlyDictionary<int, HistoricalImportFileIdentity> CaptureRegularFileDescriptors()
+        {
+            var descriptors = new Dictionary<int, HistoricalImportFileIdentity>();
+            var maximum = GetDescriptorTableSize();
+            if (maximum <= 0)
+            {
+                throw new IOException();
+            }
+
+            var buffer = new byte[StatBufferSize];
+            for (var descriptor = 0; descriptor < maximum; descriptor++)
+            {
+                if (FStat(descriptor, buffer) != 0
+                    || (BitConverter.ToUInt16(buffer, StatModeOffset) & 0xf000) != 0x8000)
+                {
+                    continue;
+                }
+
+                descriptors[descriptor] = new(
+                    BitConverter.ToUInt32(buffer, 0),
+                    0,
+                    BitConverter.ToUInt64(buffer, 8),
+                    0);
+            }
+
+            return descriptors;
+        }
+
         internal static string ReadFinalPath(SafeFileHandle handle)
         {
             var buffer = new byte[MaximumPathBytes];
@@ -700,6 +791,9 @@ internal static class HistoricalImportLocalFile
 
         [DllImport("libSystem.B.dylib", EntryPoint = "fcntl", SetLastError = true)]
         private static extern int FileControl(int fileDescriptor, int command, [Out] byte[] buffer);
+
+        [DllImport("libSystem.B.dylib", EntryPoint = "getdtablesize")]
+        private static extern int GetDescriptorTableSize();
     }
 }
 
