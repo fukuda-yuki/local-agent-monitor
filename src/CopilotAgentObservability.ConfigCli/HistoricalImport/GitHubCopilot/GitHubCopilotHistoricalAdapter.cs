@@ -9,7 +9,6 @@ internal sealed class GitHubCopilotHistoricalAdapter
     private const string ProfileId = "github-copilot-cli-session-state";
     private const string SourceSurface = "github-copilot-cli";
     private const string MetadataOnly = "metadata_only";
-    private const string IncludeContent = "include_content";
     private const string ReferenceRequired = "historical_source_reference_required";
     private const string SourceMalformed = "historical_source_malformed";
     private const string FormatUnsupported = "historical_source_format_unsupported";
@@ -91,7 +90,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
                 request.RequestedCapture,
                 FormatUnsupported);
         }
-        catch (Exception exception) when (!IsFatal(exception))
+        catch (Exception exception) when (!IsFatalOrControlFlow(exception))
         {
             return CreateProbe(
                 detectionState: "detected",
@@ -103,7 +102,7 @@ internal sealed class GitHubCopilotHistoricalAdapter
     }
 
     private static bool IsValidRequestedCapture(string requestedCapture) =>
-        requestedCapture is MetadataOnly or IncludeContent;
+        string.Equals(requestedCapture, MetadataOnly, StringComparison.Ordinal);
 
     private static bool IsValidRequest(GitHubCopilotHistoricalProbeRequest request)
     {
@@ -135,8 +134,22 @@ internal sealed class GitHubCopilotHistoricalAdapter
         }
     }
 
-    private static bool IsFatal(Exception exception) =>
-        exception is OutOfMemoryException or StackOverflowException or AccessViolationException;
+    private static bool IsFatalOrControlFlow(Exception exception) =>
+        IsLegacyFatal(exception) || exception is
+        OutOfMemoryException or
+        StackOverflowException or
+        AccessViolationException or
+        AppDomainUnloadedException or
+        BadImageFormatException or
+        CannotUnloadAppDomainException or
+        InvalidProgramException or
+        System.Threading.ThreadAbortException or
+        ThreadInterruptedException or
+        OperationCanceledException;
+
+#pragma warning disable CS0618 // Callers can still inject this obsolete fatal type even though the runtime no longer raises it.
+    private static bool IsLegacyFatal(Exception exception) => exception is ExecutionEngineException;
+#pragma warning restore CS0618
 
     private static GitHubCopilotHistoricalProbe CreateProbe(
         string detectionState,

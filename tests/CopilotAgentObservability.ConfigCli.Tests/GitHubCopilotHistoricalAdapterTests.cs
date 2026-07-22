@@ -126,23 +126,20 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Fact]
-    public void Probe_IncludeContent_PreservesRequestedCaptureWithoutReadingContent()
+    public void Probe_IncludeContent_IsRejectedBeforeAnySourceProbe()
     {
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
-        var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
+        var probe = adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
             SelectedRoot,
             "session-123",
             "1.0.71",
             true,
-            "include_content")));
+            "include_content"));
 
-        Assert.Equal(4, fileSystem.InspectedPaths.Count);
-        Assert.Equal("include_content", probe.ImportPreview.RequestedCapture);
-        Assert.Equal("not_read", probe.ImportPreview.ContentRisk);
-        Assert.Equal(["historical_source_format_unsupported"], probe.AdapterResult.Diagnostics);
-        AssertZeroCandidate(probe);
+        Assert.Null(probe);
+        Assert.Empty(fileSystem.InspectedPaths);
     }
 
     [Theory]
@@ -248,6 +245,28 @@ public sealed class GitHubCopilotHistoricalAdapterTests
         Assert.DoesNotContain(SensitiveMessage, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("InvalidOperationException", serialized, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [MemberData(nameof(ControlFlowMetadataFailures))]
+    public void Probe_ControlFlowIsNotReportedAsASourceFailure(Exception failure)
+    {
+        var fileSystem = new RecordingMetadataFileSystem
+        {
+            Failure = failure,
+        };
+        var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
+
+        var thrown = Assert.Throws(failure.GetType(), () => adapter.Probe(ValidRequest("1.0.71")));
+
+        Assert.Same(failure, thrown);
+        Assert.Equal([SelectedRoot], fileSystem.InspectedPaths);
+    }
+
+    public static TheoryData<Exception> ControlFlowMetadataFailures() => new()
+    {
+        new ThreadInterruptedException("thread interruption is control flow"),
+        new OperationCanceledException("caller canceled metadata inspection"),
+    };
 
     [Fact]
     public void Probe_ProducesDeterministicContractBytes()
