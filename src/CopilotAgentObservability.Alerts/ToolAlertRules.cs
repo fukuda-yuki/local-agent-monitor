@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace CopilotAgentObservability.Alerts;
 
 public static class ToolAlertRulePack
@@ -77,7 +79,7 @@ public sealed class UnrecoveredRetryChainAlertRule : IAlertRule
         "unrecovered-retry-chain",
         "Unrecovered retry chain",
         "Reports an exact retry chain whose authoritative terminal attempt failed.",
-        ["tool-call-key", "tool-call-ordering", "tool-call-status", "tool-retry-attempt"],
+        ["terminal-run-status", "tool-call-key", "tool-call-ordering", "tool-call-status", "tool-retry-attempt"],
         ["tool-key", "retry-chain-key"],
         [ToolAlertRuleSupport.Threshold("retry-chain-length", "attempts", 2, 100_000, 2, 3)],
         ["incomplete-signal-facts", "unknown-terminal-status"]);
@@ -129,9 +131,15 @@ public sealed class UnrecoveredRetryChainAlertRule : IAlertRule
                 .ThenBy(item => item.Signal.ObservedAt)
                 .ThenBy(item => item.Signal.SignalId, StringComparer.Ordinal)
                 .ToArray();
-            if (ordered.Length < 2 || ordered.Zip(ordered.Skip(1), (left, right) => left.Attempt < right.Attempt).Any(value => !value))
+            if (ordered[0].Attempt != 1
+                || ordered.Zip(ordered.Skip(1), (left, right) => right.Attempt - left.Attempt == 1).Any(value => !value))
             {
-                incomplete |= ordered.Length >= 2;
+                incomplete = true;
+                continue;
+            }
+
+            if (ordered.Length < 2)
+            {
                 continue;
             }
 
@@ -160,7 +168,9 @@ public sealed class UnrecoveredRetryChainAlertRule : IAlertRule
             }
 
             var linkedRunFailures = ToolAlertRuleSupport.Signals(context.Snapshot, AlertSignalKind.SessionEvent)
-                .Where(signal => signal.Status == AlertSignalStatus.Error && signal.ParentSignalId == terminal.SignalId)
+                .Where(signal => signal.Status == AlertSignalStatus.Error
+                    && signal.ParentSignalId == terminal.SignalId
+                    && ToolAlertRuleSupport.Key(signal, "event-kind", AlertComparableKeyKind.MetadataToken) == "terminal-run-status")
                 .ToArray();
             var severity = ordered.Length >= critical || linkedRunFailures.Length > 0
                 ? AlertSeverity.Critical
@@ -239,7 +249,7 @@ public sealed class HighToolFailureRatioAlertRule : IAlertRule
                 new("status-coverage", "ratio", all.Length == 0 ? 0 : (decimal)known.Length / all.Length),
                 new("total-tool-call-count", "calls", all.Length),
             ],
-            known);
+            all);
         return ToolAlertRuleSupport.Outcome([match]);
     }
 }
@@ -298,44 +308,37 @@ public sealed class ExcessivePermissionWaitAlertRule : IAlertRule
         }
 
         var maximum = waits.Max(item => item.Seconds);
+        var totalFactsComplete = !incomplete && !ToolAlertRuleSupport.HasIncompleteInterval(context.Snapshot);
         var total = 0m;
         var exactTotal = true;
         foreach (var wait in waits)
         {
-            if (wait.Seconds > decimal.MaxValue - total)
+            if (!ToolAlertRuleSupport.TryAddExactNonNegative(total, wait.Seconds, out var nextTotal))
             {
                 exactTotal = false;
                 total = Math.Max(total, maximum);
                 break;
             }
-            total += wait.Seconds;
+            total = nextTotal;
         }
         var individualWarning = maximum >= context.EffectiveThresholds["individual-wait.warning"];
         var individualCritical = maximum >= context.EffectiveThresholds["individual-wait.critical"];
-        var totalWarning = total >= context.EffectiveThresholds["total-wait.warning"];
-        var totalCritical = total >= context.EffectiveThresholds["total-wait.critical"];
+        var totalWarning = totalFactsComplete && total >= context.EffectiveThresholds["total-wait.warning"];
+        var totalCritical = totalFactsComplete && total >= context.EffectiveThresholds["total-wait.critical"];
         if (!individualWarning && !totalWarning)
         {
-            return ToolAlertRuleSupport.Outcome([], incomplete ? "incomplete-signal-facts" : null);
+            return ToolAlertRuleSupport.Outcome([], totalFactsComplete ? null : "incomplete-signal-facts");
         }
 
-        if (!individualWarning && totalWarning && (incomplete || ToolAlertRuleSupport.HasIncompleteInterval(context.Snapshot)))
-        {
-            return ToolAlertRuleSupport.Outcome([], "incomplete-signal-facts");
-        }
-
-        var evidence = totalWarning
-            ? waits.Select(item => item.Signal)
-            : waits.Where(item => item.Seconds == maximum).Select(item => item.Signal);
         var observed = new List<AlertObservedValue> { new("maximum-wait", "seconds", maximum) };
-        observed.Add(exactTotal
+        observed.Add(totalFactsComplete && exactTotal
             ? new("total-wait", "seconds", total)
             : new("total-wait-lower-bound", "seconds", total));
         var match = ToolAlertRuleSupport.Match(
             individualCritical || totalCritical ? AlertSeverity.Critical : AlertSeverity.Warning,
             observed,
-            evidence);
-        return ToolAlertRuleSupport.Outcome([match], incomplete ? "incomplete-signal-facts" : null);
+            waits.Select(item => item.Signal));
+        return ToolAlertRuleSupport.Outcome([match], totalFactsComplete ? null : "incomplete-signal-facts");
     }
 }
 
@@ -345,8 +348,8 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
         "repeated-file-read-or-search",
         "Repeated file read or search",
         "Reports repeated exact file reads or searches within an edit-bounded segment.",
-        ["file-access-key", "file-access-ordering", "file-operation-type"],
-        ["file-key", "operation-type", "range-key"],
+        ["file-access-key", "file-access-ordering", "file-access-ownership", "file-operation-type"],
+        ["file-key", "operation-type", "ownership-key", "range-key"],
         [ToolAlertRuleSupport.Threshold("access-count", "accesses", 1, 100_000, 3, 5)],
         ["incomplete-signal-facts"]);
 
@@ -362,22 +365,24 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
         }
 
         var incomplete = false;
-        var segmentByFile = new Dictionary<string, int>(StringComparer.Ordinal);
-        var candidates = new List<(AlertSignal Signal, string File, string Operation, string Range, int Segment)>();
+        var segmentByFileAndOwner = new Dictionary<(string File, string Owner), int>();
+        var candidates = new List<(AlertSignal Signal, string File, string Operation, string Owner, string Range, int Segment)>();
         foreach (var signal in ToolAlertRuleSupport.Signals(context.Snapshot, AlertSignalKind.FileAccess))
         {
             var file = ToolAlertRuleSupport.Key(signal, "file-key", AlertComparableKeyKind.SensitiveHmac);
             var operation = ToolAlertRuleSupport.Key(signal, "operation-type", AlertComparableKeyKind.MetadataToken);
-            if (file is null || operation is not ("read" or "search" or "edit" or "watch" or "poll"))
+            var owner = ToolAlertRuleSupport.Key(signal, "ownership-key", AlertComparableKeyKind.MetadataToken);
+            if (file is null || owner is null || operation is not ("read" or "search" or "edit" or "watch" or "poll"))
             {
                 incomplete = true;
                 continue;
             }
 
-            segmentByFile.TryGetValue(file, out var segment);
+            var segmentKey = (file, owner);
+            segmentByFileAndOwner.TryGetValue(segmentKey, out var segment);
             if (operation == "edit")
             {
-                segmentByFile[file] = segment + 1;
+                segmentByFileAndOwner[segmentKey] = segment + 1;
                 continue;
             }
             if (operation is "watch" or "poll")
@@ -393,7 +398,7 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
             }
 
             range ??= string.Empty;
-            candidates.Add((signal, file, operation, range, segment));
+            candidates.Add((signal, file, operation, owner, range, segment));
         }
 
         if (incomplete)
@@ -404,9 +409,10 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
         var warning = context.EffectiveThresholds["access-count.warning"];
         var critical = context.EffectiveThresholds["access-count.critical"];
         var matches = candidates
-            .GroupBy(item => (item.File, item.Operation, item.Range, item.Segment))
+            .GroupBy(item => (item.File, item.Operation, item.Owner, item.Range, item.Segment))
             .OrderBy(group => group.Key.File, StringComparer.Ordinal)
             .ThenBy(group => group.Key.Operation, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.Owner, StringComparer.Ordinal)
             .ThenBy(group => group.Key.Range, StringComparer.Ordinal)
             .ThenBy(group => group.Key.Segment)
             .Where(group => group.Count() >= warning)
@@ -421,6 +427,7 @@ public sealed class RepeatedFileReadOrSearchAlertRule : IAlertRule
 
 internal static class ToolAlertRuleSupport
 {
+    private static readonly BigInteger MaximumDecimalMagnitude = new(decimal.MaxValue);
     private static readonly string[] SourceSurfaces = ["claude-code", "codex-app", "codex-cli", "github-copilot-cli", "github-copilot-vscode"];
     private static readonly string[] EngineSuppressions = ["missing_required_capability", "rule_disabled", "source_not_applicable"];
 
@@ -469,6 +476,43 @@ internal static class ToolAlertRuleSupport
     public static bool HasIncompleteInterval(AlertNormalizedSnapshot snapshot) =>
         snapshot.CompletenessReasons.Contains("historical_summary_only", StringComparer.Ordinal)
         || snapshot.CompletenessReasons.Contains("ingest_gap", StringComparer.Ordinal);
+
+    public static bool TryAddExactNonNegative(decimal left, decimal right, out decimal result)
+    {
+        var (leftMagnitude, leftScale) = DecimalParts(left);
+        var (rightMagnitude, rightScale) = DecimalParts(right);
+        var scale = Math.Max(leftScale, rightScale);
+        var magnitude = leftMagnitude * BigInteger.Pow(10, scale - leftScale)
+            + rightMagnitude * BigInteger.Pow(10, scale - rightScale);
+
+        while (scale > 0 && magnitude % 10 == 0)
+        {
+            magnitude /= 10;
+            scale--;
+        }
+
+        if (magnitude > MaximumDecimalMagnitude)
+        {
+            result = default;
+            return false;
+        }
+
+        var mask = new BigInteger(uint.MaxValue);
+        var low = unchecked((int)(uint)(magnitude & mask));
+        var middle = unchecked((int)(uint)((magnitude >> 32) & mask));
+        var high = unchecked((int)(uint)((magnitude >> 64) & mask));
+        result = new decimal(low, middle, high, false, (byte)scale);
+        return true;
+    }
+
+    private static (BigInteger Magnitude, int Scale) DecimalParts(decimal value)
+    {
+        var bits = decimal.GetBits(value);
+        var magnitude = new BigInteger((uint)bits[0])
+            | new BigInteger((uint)bits[1]) << 32
+            | new BigInteger((uint)bits[2]) << 64;
+        return (magnitude, (bits[3] >> 16) & 0x7f);
+    }
 
     public static AlertRuleMatch Match(
         AlertSeverity severity,

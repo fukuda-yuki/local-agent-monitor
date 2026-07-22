@@ -29,7 +29,7 @@ public sealed class ToolAlertRuleTests
         AssertThreshold(repeated, "identical-call-count", "calls", 1, 100_000, 3, 5);
 
         var retry = Descriptor(registry, "unrecovered-retry-chain");
-        Assert.Equal(["tool-call-key", "tool-call-ordering", "tool-call-status", "tool-retry-attempt"], retry.RequiredCapabilities);
+        Assert.Equal(["terminal-run-status", "tool-call-key", "tool-call-ordering", "tool-call-status", "tool-retry-attempt"], retry.RequiredCapabilities);
         Assert.Equal(["tool-key", "retry-chain-key"], retry.GroupingKeys);
         AssertThreshold(retry, "retry-chain-length", "attempts", 2, 100_000, 2, 3);
 
@@ -43,8 +43,8 @@ public sealed class ToolAlertRuleTests
         AssertThreshold(permission, "total-wait", "seconds", 0, 604_800, 60, 300);
 
         var file = Descriptor(registry, "repeated-file-read-or-search");
-        Assert.Equal(["file-access-key", "file-access-ordering", "file-operation-type"], file.RequiredCapabilities);
-        Assert.Equal(["file-key", "operation-type", "range-key"], file.GroupingKeys);
+        Assert.Equal(["file-access-key", "file-access-ordering", "file-access-ownership", "file-operation-type"], file.RequiredCapabilities);
+        Assert.Equal(["file-key", "operation-type", "ownership-key", "range-key"], file.GroupingKeys);
         AssertThreshold(file, "access-count", "accesses", 1, 100_000, 3, 5);
         Assert.All(registry.Rules, rule => Assert.Contains("trace-scope-unavailable", rule.Descriptor.SuppressionCodes));
     }
@@ -195,7 +195,7 @@ public sealed class ToolAlertRuleTests
     public void UnrecoveredRetryChain_ExactLinkedTerminalRunFailure_RaisesCritical()
     {
         var chain = RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error).ToList();
-        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId));
+        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId, terminalRunStatus: true));
 
         var receipt = Assert.Single(Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain)).Receipts);
 
@@ -208,7 +208,7 @@ public sealed class ToolAlertRuleTests
     {
         var rule = new UnrecoveredRetryChainAlertRule();
         var chain = RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error).ToList();
-        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId));
+        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId, terminalRunStatus: true));
         var configuration = new AlertEngineConfiguration(
             AlertContractVersions.Configuration,
             "raised-retry-threshold-v1",
@@ -221,6 +221,33 @@ public sealed class ToolAlertRuleTests
         var result = new AlertEvaluationEngine(new AlertRuleRegistry([rule]), new Resolver(true)).Evaluate(Snapshot(signals: chain), configuration);
 
         Assert.Equal(AlertSeverity.Critical, Assert.Single(result.Receipts).Severity);
+    }
+
+    [Fact]
+    public void UnrecoveredRetryChain_GenericLinkedError_DoesNotEscalateAsTerminalRunFailure()
+    {
+        var chain = RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error).ToList();
+        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId));
+
+        var receipt = Assert.Single(Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain)).Receipts);
+
+        Assert.Equal(AlertSeverity.Warning, receipt.Severity);
+        Assert.Equal(2, receipt.Evidence.Count);
+    }
+
+    [Fact]
+    public void UnrecoveredRetryChain_MissingTerminalRunStatusCapability_SuppressesRule()
+    {
+        var capabilities = AllCapabilities().Where(capability => capability.Name != "terminal-run-status").ToArray();
+        var chain = RetryChain(AlertSignalStatus.Error, AlertSignalStatus.Error).ToList();
+        chain.Add(SessionEvent(3, AlertSignalStatus.Error, chain[^1].SignalId, terminalRunStatus: true));
+
+        var result = Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain, capabilities: capabilities));
+
+        Assert.Empty(result.Receipts);
+        var suppression = Assert.Single(result.Suppressions);
+        Assert.Equal("missing_required_capability", suppression.Code);
+        Assert.Equal(["terminal-run-status"], suppression.MissingCapabilities);
     }
 
     [Fact]
@@ -256,6 +283,32 @@ public sealed class ToolAlertRuleTests
         Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
     }
 
+    [Fact]
+    public void UnrecoveredRetryChain_AttemptsStartingAfterOne_AreIncomplete()
+    {
+        var chain = RetryChainAttempts(
+            (AlertSignalStatus.Error, 2),
+            (AlertSignalStatus.Error, 3));
+
+        var result = Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Fact]
+    public void UnrecoveredRetryChain_AttemptGap_IsIncomplete()
+    {
+        var chain = RetryChainAttempts(
+            (AlertSignalStatus.Error, 1),
+            (AlertSignalStatus.Error, 3));
+
+        var result = Evaluate(new UnrecoveredRetryChainAlertRule(), Snapshot(signals: chain));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
     [Theory]
     [InlineData("github-copilot-vscode")]
     [InlineData("claude-code")]
@@ -271,7 +324,23 @@ public sealed class ToolAlertRuleTests
         Assert.Equal(7m, Observed(receipt, "total-tool-call-count"));
         Assert.Equal(5m / 7m, Observed(receipt, "status-coverage"));
         Assert.Equal(0.4m, Observed(receipt, "failure-ratio"));
-        Assert.Equal(5, receipt.Evidence.Count);
+        Assert.Equal(7, receipt.Evidence.Count);
+    }
+
+    [Fact]
+    public void HighToolFailureRatio_UnresolvedUnknownStatusContributor_RejectsReceipt()
+    {
+        var signals = StatusCalls(2, 3).Concat([Tool(6, status: AlertSignalStatus.Unknown)]);
+        var engine = new AlertEvaluationEngine(
+            new AlertRuleRegistry([new HighToolFailureRatioAlertRule()]),
+            new Resolver(reference => reference.ToolCallId != "tool-6"));
+
+        var result = engine.Evaluate(
+            Snapshot(signals: signals),
+            new AlertEngineConfiguration(AlertContractVersions.Configuration, "tool-rules-test-v1", []));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("unresolved_evidence", Assert.Single(result.RejectedMatches).Code);
     }
 
     [Fact]
@@ -350,10 +419,47 @@ public sealed class ToolAlertRuleTests
         var individual = Snapshot(signals: [Permission(1, 30)], reasons: ["ingest_gap"]);
         var totalOnly = Snapshot(signals: [Permission(1, 20), Permission(2, 20), Permission(3, 20)], reasons: ["ingest_gap"]);
 
-        Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), individual).Receipts);
+        var individualResult = Evaluate(new ExcessivePermissionWaitAlertRule(), individual);
+        var individualReceipt = Assert.Single(individualResult.Receipts);
+        Assert.Equal(AlertSeverity.Warning, individualReceipt.Severity);
+        Assert.Equal(30m, Observed(individualReceipt, "total-wait-lower-bound"));
+        Assert.DoesNotContain(individualReceipt.ObservedValues, value => value.Name == "total-wait");
+        Assert.Equal("incomplete-signal-facts", Assert.Single(individualResult.Suppressions).Code);
+
         var totalResult = Evaluate(new ExcessivePermissionWaitAlertRule(), totalOnly);
         Assert.Empty(totalResult.Receipts);
         Assert.Equal("incomplete-signal-facts", Assert.Single(totalResult.Suppressions).Code);
+    }
+
+    [Fact]
+    public void ExcessivePermissionWait_PartialTotalNeverEscalatesExactMaximumSeverity()
+    {
+        var snapshot = Snapshot(
+            signals: [Permission(1, 100), Permission(2, 100), Permission(3, 100)],
+            reasons: ["historical_summary_only"]);
+
+        var result = Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot);
+        var receipt = Assert.Single(result.Receipts);
+
+        Assert.Equal(AlertSeverity.Warning, receipt.Severity);
+        Assert.Equal(300m, Observed(receipt, "total-wait-lower-bound"));
+        Assert.DoesNotContain(receipt.ObservedValues, value => value.Name == "total-wait");
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
+    }
+
+    [Fact]
+    public void ExcessivePermissionWait_MissingDurationNeverLabelsKnownSubtotalExact()
+    {
+        var missingDuration = Permission(2, 0) with { Metrics = [] };
+        var snapshot = Snapshot(signals: [Permission(1, 120), missingDuration]);
+
+        var result = Evaluate(new ExcessivePermissionWaitAlertRule(), snapshot);
+        var receipt = Assert.Single(result.Receipts);
+
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(120m, Observed(receipt, "total-wait-lower-bound"));
+        Assert.DoesNotContain(receipt.ObservedValues, value => value.Name == "total-wait");
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
     }
 
     [Fact]
@@ -415,6 +521,23 @@ public sealed class ToolAlertRuleTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExcessivePermissionWait_FractionAndDecimalMaximum_NeverSilentlyRoundToExactTotal(bool maximumFirst)
+    {
+        var waits = maximumFirst
+            ? new[] { Permission(1, decimal.MaxValue), Permission(2, 0.1m) }
+            : new[] { Permission(1, 0.1m), Permission(2, decimal.MaxValue) };
+
+        var receipt = Assert.Single(Evaluate(new ExcessivePermissionWaitAlertRule(), Snapshot(signals: waits)).Receipts);
+
+        Assert.Equal(AlertSeverity.Critical, receipt.Severity);
+        Assert.Equal(decimal.MaxValue, Observed(receipt, "total-wait-lower-bound"));
+        Assert.DoesNotContain(receipt.ObservedValues, value => value.Name == "total-wait");
+        Assert.Equal(2, receipt.Evidence.Count);
+    }
+
+    [Theory]
     [InlineData("github-copilot-vscode")]
     [InlineData("claude-code")]
     public void RepeatedFileReadOrSearch_SourceNeutralBoundaryFixtures_EmitExpectedSeverity(string source)
@@ -462,6 +585,80 @@ public sealed class ToolAlertRuleTests
         var receipt = Assert.Single(Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals)).Receipts);
 
         Assert.Equal(3m, Observed(receipt, "access-count"));
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_SameOwnershipBranch_RepeatsWithinOneGroup()
+    {
+        var signals = Enumerable.Range(1, 3).Select(index => File(index, Hmac('f'), owner: "branch-a"));
+
+        var receipt = Assert.Single(Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals)).Receipts);
+
+        Assert.Equal(3m, Observed(receipt, "access-count"));
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_ParallelOwnershipBranches_DoNotCombine()
+    {
+        var signals = new[]
+        {
+            File(1, Hmac('f'), owner: "branch-a"),
+            File(2, Hmac('f'), owner: "branch-b"),
+            File(3, Hmac('f'), owner: "branch-a"),
+            File(4, Hmac('f'), owner: "branch-b"),
+        };
+
+        var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals));
+
+        Assert.Empty(result.Receipts);
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_EditInSameOwnershipBranch_ResetsOwnerSegment()
+    {
+        var signals = new[]
+        {
+            File(1, Hmac('f'), owner: "branch-a"),
+            File(2, Hmac('f'), owner: "branch-a"),
+            File(3, Hmac('f'), "edit", owner: "branch-a"),
+            File(4, Hmac('f'), owner: "branch-a"),
+            File(5, Hmac('f'), owner: "branch-a"),
+        };
+
+        var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals));
+
+        Assert.Empty(result.Receipts);
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_EditInParallelBranch_DoesNotResetOwnerSegment()
+    {
+        var signals = new[]
+        {
+            File(1, Hmac('f'), owner: "branch-a"),
+            File(2, Hmac('f'), owner: "branch-a"),
+            File(3, Hmac('f'), "edit", owner: "branch-b"),
+            File(4, Hmac('f'), owner: "branch-a"),
+        };
+
+        var receipt = Assert.Single(Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals)).Receipts);
+
+        Assert.Equal(3m, Observed(receipt, "access-count"));
+    }
+
+    [Fact]
+    public void RepeatedFileReadOrSearch_MissingOwnershipFact_Suppresses()
+    {
+        var signals = FileAccesses(3).ToArray();
+        signals[1] = signals[1] with
+        {
+            ComparableKeys = signals[1].ComparableKeys.Where(key => key.Name != "ownership-key").ToArray(),
+        };
+
+        var result = Evaluate(new RepeatedFileReadOrSearchAlertRule(), Snapshot(signals: signals));
+
+        Assert.Empty(result.Receipts);
+        Assert.Equal("incomplete-signal-facts", Assert.Single(result.Suppressions).Code);
     }
 
     [Fact]
@@ -688,8 +885,10 @@ public sealed class ToolAlertRuleTests
         new("tool-ownership", AlertCapabilityAvailability.Available),
         new("tool-call-status", AlertCapabilityAvailability.Available),
         new("tool-retry-attempt", AlertCapabilityAvailability.Available),
+        new("terminal-run-status", AlertCapabilityAvailability.Available),
         new("explicit-permission-duration", AlertCapabilityAvailability.Available),
         new("file-access-key", AlertCapabilityAvailability.Available),
+        new("file-access-ownership", AlertCapabilityAvailability.Available),
         new("file-operation-type", AlertCapabilityAvailability.Available),
         new("file-access-ordering", AlertCapabilityAvailability.Available),
     ];
@@ -699,6 +898,9 @@ public sealed class ToolAlertRuleTests
 
     private static IEnumerable<AlertSignal> RetryChain(params AlertSignalStatus[] statuses) =>
         statuses.Select((status, index) => Tool(index + 1, retryKind: "explicit", status: status, retryChain: Hmac('r'), retryAttempt: index + 1));
+
+    private static IEnumerable<AlertSignal> RetryChainAttempts(params (AlertSignalStatus Status, int Attempt)[] attempts) =>
+        attempts.Select((item, index) => Tool(index + 1, retryKind: "explicit", status: item.Status, retryChain: Hmac('r'), retryAttempt: item.Attempt));
 
     private static IEnumerable<AlertSignal> StatusCalls(int errors, int successes) =>
         Enumerable.Range(1, errors).Select(index => Tool(index, status: AlertSignalStatus.Error))
@@ -743,12 +945,13 @@ public sealed class ToolAlertRuleTests
     private static AlertSignal Permission(int sequence, decimal seconds, string? traceId = "trace-1") =>
         Signal(sequence, AlertSignalKind.Permission, AlertSignalStatus.Success, [new("wait-duration", "seconds", seconds)], [], traceId: traceId);
 
-    private static AlertSignal File(int sequence, string file, string operation = "read", string? range = null)
+    private static AlertSignal File(int sequence, string file, string operation = "read", string? range = null, string owner = "branch-main")
     {
         var keys = new List<AlertComparableKey>
         {
             new("file-key", AlertComparableKeyKind.SensitiveHmac, file),
             new("operation-type", AlertComparableKeyKind.MetadataToken, operation),
+            new("ownership-key", AlertComparableKeyKind.MetadataToken, owner),
         };
         if (range is not null)
         {
@@ -758,8 +961,14 @@ public sealed class ToolAlertRuleTests
         return Signal(sequence, AlertSignalKind.FileAccess, AlertSignalStatus.Success, [], keys);
     }
 
-    private static AlertSignal SessionEvent(int sequence, AlertSignalStatus status, string parentSignalId) =>
-        Signal(sequence, AlertSignalKind.SessionEvent, status, [], [], parentSignalId);
+    private static AlertSignal SessionEvent(int sequence, AlertSignalStatus status, string parentSignalId, bool terminalRunStatus = false) =>
+        Signal(
+            sequence,
+            AlertSignalKind.SessionEvent,
+            status,
+            [],
+            terminalRunStatus ? [new("event-kind", AlertComparableKeyKind.MetadataToken, "terminal-run-status")] : [],
+            parentSignalId);
 
     private static AlertSignal Signal(
         int sequence,
@@ -798,8 +1007,20 @@ public sealed class ToolAlertRuleTests
 
     private static readonly DateTimeOffset At = new(2026, 7, 22, 0, 0, 0, TimeSpan.Zero);
 
-    private sealed class Resolver(bool exists) : IAlertEvidenceResolver
+    private sealed class Resolver : IAlertEvidenceResolver
     {
-        public bool Exists(AlertEvidenceReference reference) => exists;
+        private readonly Func<AlertEvidenceReference, bool> _exists;
+
+        public Resolver(bool exists)
+            : this(_ => exists)
+        {
+        }
+
+        public Resolver(Func<AlertEvidenceReference, bool> exists)
+        {
+            _exists = exists;
+        }
+
+        public bool Exists(AlertEvidenceReference reference) => _exists(reference);
     }
 }
