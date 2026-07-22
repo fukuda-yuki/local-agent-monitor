@@ -188,8 +188,8 @@ internal static class HistoricalEfficiencyAnalyzerV1
                 {
                     tracker.Observe(candidate.Count);
                     if (candidate.Count < tracker.Rule.MinimumSample) return;
-                    tracker.CompleteEvaluation = true;
                     if (candidate[0].Input <= 0) { tracker.MissingMetric = true; return; }
+                    tracker.CompleteEvaluation = true;
                     var ratio = candidate[^1].Input / candidate[0].Input;
                     if (ratio < 1.75m) return;
                     matches.Add(candidate.ToArray());
@@ -204,7 +204,7 @@ internal static class HistoricalEfficiencyAnalyzerV1
                     [Scalar("first_input_tokens", match[0].Input, "input_token"),
                         Scalar("last_input_tokens", match[^1].Input, "input_token"),
                         Scalar("context_growth_ratio", ratio, "ratio")],
-                    null, null, missingInSession));
+                    null, null));
                 tracker.Matched = true;
             }
         }
@@ -245,8 +245,9 @@ internal static class HistoricalEfficiencyAnalyzerV1
                 var included = eligible.Skip(1).ToArray();
                 var inputTotal = included.Aggregate(0m, (sum, value) => checked(sum + value.Input));
                 var cacheTotal = included.Aggregate(0m, (sum, value) => checked(sum + value.Cache));
+                if (inputTotal == 0) { tracker.MissingMetric = true; continue; }
                 tracker.CompleteEvaluation = true;
-                if (inputTotal < 10_000m || inputTotal <= 0) continue;
+                if (inputTotal < 10_000m) continue;
                 var ratio = cacheTotal / inputTotal;
                 if (ratio >= 0.20m) continue;
                 drivers.Add(BuildDriver(analysis, tracker.Rule, session.Session.SessionId, [session],
@@ -254,7 +255,7 @@ internal static class HistoricalEfficiencyAnalyzerV1
                     [Scalar("included_input_tokens", inputTotal, "input_token"),
                         Scalar("included_cache_read_tokens", cacheTotal, "cache_read_token"),
                         Scalar("cache_read_ratio", ratio, "ratio")],
-                    null, null, missing));
+                    null, null));
                 tracker.Matched = true;
             }
         }

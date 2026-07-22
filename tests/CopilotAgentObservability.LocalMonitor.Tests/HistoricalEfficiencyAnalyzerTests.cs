@@ -99,6 +99,96 @@ public sealed class HistoricalEfficiencyAnalysisTests
     }
 
     [Fact]
+    public void Analyze_ZeroContextDenominator_IsInsufficientMissingMetric()
+    {
+        var session = new SyntheticSession(1)
+            .AddTurn(1, inputTokens: 0)
+            .AddTurn(2, inputTokens: 1)
+            .AddTurn(3, inputTokens: 2)
+            .AddQuality("pass");
+
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
+
+        Assert.DoesNotContain(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.ContextGrowth);
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.ContextGrowth);
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Insufficient, coverage.State);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.MissingRequiredMetric], coverage.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_ZeroCacheDenominator_IsInsufficientMissingMetric()
+    {
+        var session = new SyntheticSession(1)
+            .AddTurn(1, inputTokens: 100, cacheReadTokens: 0)
+            .AddTurn(2, inputTokens: 0, cacheReadTokens: 0)
+            .AddTurn(3, inputTokens: 0, cacheReadTokens: 0)
+            .AddQuality("pass");
+
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
+
+        Assert.DoesNotContain(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.CacheInefficiency);
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.CacheInefficiency);
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.Insufficient, coverage.State);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.MissingRequiredMetric], coverage.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_PositiveCacheInputBelowThreshold_IsCompleteNoMatch()
+    {
+        var session = new SyntheticSession(1)
+            .AddTurn(1, inputTokens: 6_000, cacheReadTokens: 0)
+            .AddTurn(2, inputTokens: 4_000, cacheReadTokens: 0)
+            .AddTurn(3, inputTokens: 5_000, cacheReadTokens: 0)
+            .AddQuality("pass");
+
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
+
+        Assert.DoesNotContain(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.CacheInefficiency);
+        var coverage = Coverage(result, HistoricalEfficiencyDriverCategoryV1.CacheInefficiency);
+        Assert.Equal(HistoricalEfficiencyCoverageStateV1.NoMatch, coverage.State);
+        Assert.Equal([HistoricalEfficiencyCoverageReasonV1.NoThresholdMatch], coverage.Reasons);
+    }
+
+    [Fact]
+    public void Analyze_ContextMatchWithAnotherMissingInput_RemainsSupported()
+    {
+        var session = new SyntheticSession(1)
+            .AddTurn(1)
+            .AddTurn(2, inputTokens: 100)
+            .AddTurn(3, inputTokens: 150)
+            .AddTurn(4, inputTokens: 200)
+            .AddQuality("pass");
+
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
+
+        var driver = Assert.Single(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.ContextGrowth);
+        Assert.Equal(HistoricalEfficiencyDriverVerdictV1.Supported, driver.Verdict);
+        Assert.Equal(3, driver.EvidenceRefs.Count);
+    }
+
+    [Fact]
+    public void Analyze_CacheMatchWithAnotherMissingScalar_RemainsSupported()
+    {
+        var session = new SyntheticSession(1)
+            .AddTurn(1, inputTokens: 5_000)
+            .AddTurn(2, inputTokens: 5_000, cacheReadTokens: 0)
+            .AddTurn(3, inputTokens: 6_000, cacheReadTokens: 0)
+            .AddTurn(4, inputTokens: 6_000, cacheReadTokens: 0)
+            .AddQuality("pass");
+
+        var result = HistoricalEfficiencyAnalyzerV1.Analyze(HistoricalEfficiencyTestData.Extraction(session));
+
+        var driver = Assert.Single(result.Receipt.Drivers,
+            value => value.Category == HistoricalEfficiencyDriverCategoryV1.CacheInefficiency);
+        Assert.Equal(HistoricalEfficiencyDriverVerdictV1.Supported, driver.Verdict);
+        Assert.Equal(2, driver.EvidenceRefs.Count);
+    }
+
+    [Fact]
     public void Analyze_Frozen72UnavailableOperationalCategories_StayExplicitlyUnavailable()
     {
         var session = new SyntheticSession(1)
