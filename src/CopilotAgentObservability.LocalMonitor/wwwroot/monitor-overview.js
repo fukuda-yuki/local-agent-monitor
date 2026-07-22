@@ -268,15 +268,15 @@
     body.replaceChildren(emptyState("アラートを読み込んでいます。"));
     try {
       const options = { cache: "no-store", signal };
-      const [openResponse, criticalResponse, warningResponse] = await Promise.all([
-        fetch(`/api/alert-center/v1/alerts?state=open&period=${encodeURIComponent(period)}&limit=100`, options),
-        fetch(`/api/alert-center/v1/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}&limit=1`, options),
-        fetch(`/api/alert-center/v1/alerts?severity=warning&state=open&period=${encodeURIComponent(period)}&limit=1`, options),
-      ]);
-      if (!openResponse.ok || !criticalResponse.ok || !warningResponse.ok) throw new Error("alert-center");
-      const [openSnapshot, criticalSnapshot, warningSnapshot] = await Promise.all([
-        openResponse.json(), criticalResponse.json(), warningResponse.json(),
-      ]);
+      const openResponse = await fetch(`/api/alert-center/v1/alerts?state=open&period=${encodeURIComponent(period)}&limit=100`, options);
+      if (!openResponse.ok) throw new Error("alert-center");
+      const openSnapshot = await openResponse.json();
+      const criticalResponse = await fetch(`/api/alert-center/v1/alerts?severity=critical&state=open&period=${encodeURIComponent(period)}&limit=1`, options);
+      if (!criticalResponse.ok) throw new Error("alert-center");
+      const criticalSnapshot = await criticalResponse.json();
+      const warningResponse = await fetch(`/api/alert-center/v1/alerts?severity=warning&state=open&period=${encodeURIComponent(period)}&limit=1`, options);
+      if (!warningResponse.ok) throw new Error("alert-center");
+      const warningSnapshot = await warningResponse.json();
       if (generation !== refreshGeneration) return;
 
       const alert = criticalSnapshot.alerts?.[0];
@@ -352,7 +352,6 @@
       button.classList.toggle("active", button.dataset.period === period);
     }
 
-    const alertRefresh = renderAlertOverview(period, generation, controller.signal);
     try {
       const resp = await fetch(`/api/monitor/overview?period=${period}`, { cache: "no-store", signal: controller.signal });
       if (!resp.ok) return;
@@ -367,7 +366,9 @@
         /* Server-rendered overview remains visible on refresh failure. */
       }
     } finally {
-      await alertRefresh;
+      if (generation === refreshGeneration) {
+        await renderAlertOverview(period, generation, controller.signal);
+      }
       if (generation === refreshGeneration) refreshController = null;
     }
   }

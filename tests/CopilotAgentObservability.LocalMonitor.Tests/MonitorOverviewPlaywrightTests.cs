@@ -12,6 +12,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorOverviewPlaywrightTests
 {
+    private static readonly TimeSpan EventBarrierTimeout = TimeSpan.FromSeconds(10);
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -28,8 +30,46 @@ public class MonitorOverviewPlaywrightTests
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
-        var requestedUrls = new List<string>();
-        page.Request += (_, request) => requestedUrls.Add(request.Url);
+        var requestedUrls = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var responseDiagnostics = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var failureDiagnostics = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var alertRequestReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        page.Request += (_, request) =>
+        {
+            requestedUrls.Enqueue(request.Url);
+            if (IsSevenDayAlertRequest(request.Url)) alertRequestReached.TrySetResult(true);
+        };
+        page.Response += (_, response) =>
+        {
+            if (IsOverviewRequest(response.Url)) responseDiagnostics.Enqueue($"{response.Status} {response.Url}");
+        };
+        page.RequestFailed += (_, request) =>
+        {
+            if (IsOverviewRequest(request.Url)) failureDiagnostics.Enqueue($"{request.Failure} {request.Url}");
+        };
+        var initialOverviewRequestReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseInitialOverviewRequest = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sevenDayTraceListRequestReached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSevenDayTraceListRequest = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync($"{host.Url}/api/monitor/overview?period=today", async route =>
+        {
+            initialOverviewRequestReached.TrySetResult(true);
+            await releaseInitialOverviewRequest.Task;
+            try
+            {
+                await route.AbortAsync();
+            }
+            catch (PlaywrightException)
+            {
+                // The 7d click normally cancels this held request first.
+            }
+        });
+        await page.RouteAsync($"{host.Url}/api/monitor/trace-list?period=7d&limit=5", async route =>
+        {
+            sevenDayTraceListRequestReached.TrySetResult(true);
+            await releaseSevenDayTraceListRequest.Task;
+            await route.ContinueAsync();
+        });
 
         await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
@@ -52,26 +92,97 @@ public class MonitorOverviewPlaywrightTests
         var errorHref = await page.Locator("#kpi-error-card").GetAttributeAsync("href");
         Assert.Contains("status=error", errorHref);
 
-        // Period toggle refetches the sanitized overview endpoint for 7d.
-        var promptLabelRequest = sanitizedOnly
-            ? null
-            : page.WaitForRequestAsync(request => request.Url.Contains("/traces/trace-ov/prompt-label", StringComparison.Ordinal));
-        await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
-        if (promptLabelRequest is not null)
+        // Hold the automatic today refresh so the 7d action deterministically
+        // supersedes it before either refresh can request a raw prompt label.
+        await WaitForEventAsync(
+            initialOverviewRequestReached.Task,
+            "Timed out waiting for the automatic today overview request.");
+        try
         {
-            await promptLabelRequest;
+            // Period toggle refetches the sanitized overview endpoint for 7d.
+            await page.EvaluateAsync("""
+                () => {
+                    const list = document.getElementById("top-traces");
+                    const oldRows = new Set(list.querySelectorAll(".top-trace-row"));
+                    if (oldRows.size === 0) {
+                        throw new Error("Expected a server-rendered TOP5 row before refresh.");
+                    }
+
+                    let oldRowRemoved = false;
+                    window.__topTraceRefreshState = { mutationCount: 0, oldRowRemoved: false, newRowAdded: false };
+                    window.__topTraceRefreshCompleted = new Promise((resolve) => {
+                        const observer = new MutationObserver((mutations) => {
+                            window.__topTraceRefreshState.mutationCount += mutations.length;
+                            oldRowRemoved ||= mutations.some((mutation) =>
+                                Array.from(mutation.removedNodes).some((node) => oldRows.has(node)));
+                            window.__topTraceRefreshState.oldRowRemoved = oldRowRemoved;
+                            const newRow = Array.from(list.querySelectorAll(".top-trace-row"))
+                                .find((row) => !oldRows.has(row));
+                            window.__topTraceRefreshState.newRowAdded = Boolean(newRow);
+                            if (oldRowRemoved && newRow) {
+                                observer.disconnect();
+                                resolve(list.innerText);
+                            }
+                        });
+                        observer.observe(list, { childList: true });
+                    });
+
+                    document.querySelector("#period-toggle .period-btn[data-period='7d']").click();
+                }
+                """);
         }
+        finally
+        {
+            releaseInitialOverviewRequest.TrySetResult(true);
+        }
+
+        try
+        {
+            await WaitForEventAsync(
+                sevenDayTraceListRequestReached.Task,
+                "Timed out waiting for the 7d TOP5 request.");
+            Assert.False(
+                alertRequestReached.Task.IsCompleted,
+                "Alert Center requests must not compete with the overview and TOP5 reads.");
+        }
+        finally
+        {
+            releaseSevenDayTraceListRequest.TrySetResult(true);
+        }
+
+        string topText;
+        try
+        {
+            topText = await WaitForEventAsync(
+                page.EvaluateAsync<string>("() => window.__topTraceRefreshCompleted"),
+                "Timed out waiting for the 7d TOP5 refresh to replace the previous row.");
+        }
+        catch (TimeoutException exception)
+        {
+            var browserState = await page.EvaluateAsync<string>("""
+                () => JSON.stringify({
+                    refresh: window.__topTraceRefreshState,
+                    topText: document.getElementById("top-traces")?.innerText,
+                    period: document.querySelector("#period-toggle .period-btn.active")?.dataset.period,
+                    kpiLabel: document.getElementById("kpi-tokens-label")?.innerText
+                })
+                """);
+            throw new TimeoutException(
+                $"{exception.Message} Browser={browserState}; responses=[{string.Join(", ", responseDiagnostics)}]; failures=[{string.Join(", ", failureDiagnostics)}]; requests=[{string.Join(", ", requestedUrls.Where(IsOverviewRequest))}]",
+                exception);
+        }
+        await WaitForEventAsync(
+            alertRequestReached.Task,
+            "Timed out waiting for the Alert Center refresh after the 7d TOP5 refresh.");
         await Expect(page.Locator("#period-toggle .period-btn[data-period='7d']")).ToHaveClassAsync(new System.Text.RegularExpressions.Regex("active"));
         await Expect(page.Locator("#kpi-tokens-label")).ToHaveTextAsync("7日のトークン（実消費）");
         // The seeded trace is recent, so the 7d window includes its tokens.
         // 実消費 = (1000 input − 700 cache read) + 200 output = 500.
         await Expect(page.Locator("#kpi-tokens-value")).ToHaveTextAsync("500");
         await Expect(page.Locator("#kpi-tokens-breakdown")).ToContainTextAsync("総量 1.2K");
-        await Expect(page.Locator("#top-traces .top-trace-row")).ToHaveCountAsync(1);
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/overview?period=7d", StringComparison.Ordinal));
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/trace-list?period=7d", StringComparison.Ordinal));
 
-        var topText = await page.Locator("#top-traces").InnerTextAsync();
         if (sanitizedOnly)
         {
             // Sanitized context: no prompt content and no raw-bearing fetches.
@@ -87,6 +198,28 @@ public class MonitorOverviewPlaywrightTests
             Assert.Contains(requestedUrls, url => url.Contains("/traces/trace-ov/prompt-label", StringComparison.Ordinal));
         }
     }
+
+    private static async Task<T> WaitForEventAsync<T>(Task<T> eventTask, string timeoutDiagnostic)
+    {
+        try
+        {
+            return await eventTask.WaitAsync(EventBarrierTimeout);
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException(timeoutDiagnostic, exception);
+        }
+    }
+
+    private static bool IsOverviewRequest(string url) =>
+        url.Contains("/api/monitor/overview", StringComparison.Ordinal)
+        || url.Contains("/api/monitor/trace-list", StringComparison.Ordinal)
+        || url.Contains("/prompt-label", StringComparison.Ordinal)
+        || url.Contains("/api/alert-center", StringComparison.Ordinal);
+
+    private static bool IsSevenDayAlertRequest(string url) =>
+        url.Contains("/api/alert-center", StringComparison.Ordinal)
+        && url.Contains("period=7d", StringComparison.Ordinal);
 
     /// <summary>One chat trace received a minute ago (inside every period window): 1000 input / 200 output with cache usage and a prompt marker.</summary>
     private static void SeedRecentTrace(MonitorTempDirectory temp)

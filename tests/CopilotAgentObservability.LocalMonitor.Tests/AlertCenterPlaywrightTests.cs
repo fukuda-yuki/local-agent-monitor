@@ -567,8 +567,6 @@ public sealed class AlertCenterPlaywrightTests
         var staleStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var staleFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseStale = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var staleStartedCount = 0;
-        var staleFinishedCount = 0;
         await page.RouteAsync("**/api/alert-center/v1/alerts?*", async route =>
         {
             var query = new Uri(route.Request.Url).Query;
@@ -579,7 +577,7 @@ public sealed class AlertCenterPlaywrightTests
             var response = Snapshot(items, [], [], totalCount: items.Length);
             if (query.Contains("period=today", StringComparison.Ordinal))
             {
-                if (Interlocked.Increment(ref staleStartedCount) == 3) staleStarted.TrySetResult();
+                staleStarted.TrySetResult();
                 await releaseStale.Task;
                 try
                 {
@@ -591,7 +589,7 @@ public sealed class AlertCenterPlaywrightTests
                 }
                 finally
                 {
-                    if (Interlocked.Increment(ref staleFinishedCount) == 3) staleFinished.TrySetResult();
+                    staleFinished.TrySetResult();
                 }
                 return;
             }
