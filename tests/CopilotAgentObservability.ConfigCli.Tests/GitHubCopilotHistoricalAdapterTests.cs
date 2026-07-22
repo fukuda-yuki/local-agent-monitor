@@ -6,11 +6,21 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class GitHubCopilotHistoricalAdapterTests
 {
-    private const string SelectedRoot = @"C:\selected-copilot-root";
+    private static readonly string SelectedRoot = Path.GetFullPath(Path.Combine(
+        Path.GetTempPath(),
+        "copilot-history-adapter-tests",
+        "selected-copilot-root"));
     private static readonly string ContractRoot = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
         "docs", "specifications", "contracts", "historical-import", "v1");
+
+    [Fact]
+    public void ValidSelectedRootFixture_IsPlatformNativeAndCanonical()
+    {
+        Assert.True(Path.IsPathFullyQualified(SelectedRoot));
+        Assert.Equal(Path.GetFullPath(SelectedRoot), SelectedRoot);
+    }
 
     [Fact]
     public void Probe_WithoutConsent_DoesNotTouchTheFileSystem()
@@ -30,10 +40,7 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Theory]
-    [InlineData(null, "session-123")]
-    [InlineData("", "session-123")]
-    [InlineData(SelectedRoot, null)]
-    [InlineData(SelectedRoot, "")]
+    [MemberData(nameof(MissingSelections))]
     public void Probe_WithoutAnExactSelection_DoesNotTouchTheFileSystem(
         string? selectedRoot,
         string? sessionId)
@@ -103,21 +110,20 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     }
 
     [Theory]
-    [InlineData("relative-root", "session-123")]
-    [InlineData(@"C:\selected-copilot-root\..\adjacent", "session-123")]
-    [InlineData(SelectedRoot, ".")]
-    [InlineData(SelectedRoot, "..")]
-    [InlineData(SelectedRoot, "nested/session")]
-    [InlineData(SelectedRoot, "nested\\session")]
-    [InlineData(SelectedRoot, "session:123")]
-    [InlineData(SelectedRoot, "invalid version")]
-    public void Probe_MalformedRequestReference_FailsClosedWithoutIo(string root, string value)
+    [MemberData(nameof(MalformedRequests))]
+    public void Probe_MalformedRequestReference_FailsClosedWithoutIo(
+        string root,
+        string sessionId,
+        string version)
     {
         var fileSystem = RecordingMetadataFileSystem.WithValidContainer();
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
-        var request = value == "invalid version"
-            ? new GitHubCopilotHistoricalProbeRequest(root, "session-123", value, true, "metadata_only")
-            : new GitHubCopilotHistoricalProbeRequest(root, value, "1.0.71", true, "metadata_only");
+        var request = new GitHubCopilotHistoricalProbeRequest(
+            root,
+            sessionId,
+            version,
+            true,
+            "metadata_only");
 
         var probe = RequireProbe(adapter.Probe(request));
 
@@ -206,15 +212,15 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     [Fact]
     public void Probe_PermissionFailure_UsesFixedSanitizedDiagnostic()
     {
-        const string SensitivePath = @"C:\Users\person\secret-root";
+        var sensitivePath = Path.Combine(SelectedRoot, "private-root");
         var fileSystem = new RecordingMetadataFileSystem
         {
-            Failure = new UnauthorizedAccessException($"denied: {SensitivePath}"),
+            Failure = new UnauthorizedAccessException($"denied: {sensitivePath}"),
         };
         var adapter = new GitHubCopilotHistoricalAdapter(fileSystem);
 
         var probe = RequireProbe(adapter.Probe(new GitHubCopilotHistoricalProbeRequest(
-            SensitivePath,
+            sensitivePath,
             "private-session",
             "1.0.73",
             true,
@@ -222,7 +228,8 @@ public sealed class GitHubCopilotHistoricalAdapterTests
 
         AssertMalformed(probe);
         var serialized = Encoding.UTF8.GetString(probe.AdapterResultJson);
-        Assert.DoesNotContain(SensitivePath, serialized, StringComparison.Ordinal);
+        Assert.Equal([sensitivePath], fileSystem.InspectedPaths);
+        Assert.DoesNotContain(sensitivePath, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("private-session", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("denied", serialized, StringComparison.OrdinalIgnoreCase);
     }
@@ -266,6 +273,26 @@ public sealed class GitHubCopilotHistoricalAdapterTests
     {
         new ThreadInterruptedException("thread interruption is control flow"),
         new OperationCanceledException("caller canceled metadata inspection"),
+    };
+
+    public static TheoryData<string?, string?> MissingSelections() => new()
+    {
+        { null, "session-123" },
+        { string.Empty, "session-123" },
+        { SelectedRoot, null },
+        { SelectedRoot, string.Empty },
+    };
+
+    public static TheoryData<string, string, string> MalformedRequests() => new()
+    {
+        { "relative-root", "session-123", "1.0.71" },
+        { Path.Combine(SelectedRoot, "..", "adjacent"), "session-123", "1.0.71" },
+        { SelectedRoot, ".", "1.0.71" },
+        { SelectedRoot, "..", "1.0.71" },
+        { SelectedRoot, "nested/session", "1.0.71" },
+        { SelectedRoot, "nested\\session", "1.0.71" },
+        { SelectedRoot, "session:123", "1.0.71" },
+        { SelectedRoot, "session-123", "invalid version" },
     };
 
     [Fact]
