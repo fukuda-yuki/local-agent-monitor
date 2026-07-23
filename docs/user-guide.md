@@ -94,6 +94,26 @@ WSL2 から実行する場合は、WSL 内の process から Local Monitor の l
 - 生成済み dashboard artifact を共有場所に置く前に、access control、retention、削除方法、利用者周知を確認する。
 - remote managed Langfuse / Collector endpoint に送信する前に、access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める。
 
+## 画像で見る Local Ingestion Monitor
+
+<p align="center">
+  <img width="900" alt="Local Ingestion Monitor 概要" src="./assets/screenshots/local-monitor-overview.png">
+</p>
+
+Local Ingestion Monitor は、VS Code や GitHub Copilot CLI から収集したテレメトリを可視化するローカル専用 UI です。トークンコスト、エラー率、モデル別キャッシュ効率をひと目で把握できます。
+
+<p align="center">
+  <img width="900" alt="Local Ingestion Monitor トレース一覧" src="./assets/screenshots/local-monitor-trace-list.png">
+</p>
+
+保存された全トレースをプロンプト・モデル・実行状態（正常 / エラー / 回復済み）で絞り込み、右プレビューパネルでトークン構成や高コストスパンを即座に確認できます。
+
+<p align="center">
+  <img width="900" alt="Local Ingestion Monitor トレース詳細（フロー）" src="./assets/screenshots/local-monitor-trace-detail-flow.png">
+</p>
+
+トレース内の各ステップ（LLM 呼び出し、ツール実行、並行処理）を時系列フローまたは Waterfall 表示で追跡し、ボトルネックやエラー原因を特定できます。
+
 ## 画像で見る Static Dashboard
 
 <p align="center">

@@ -12,9 +12,9 @@ Source of truth checked: `docs/requirements.md`, `docs/spec.md`, `docs/specifica
 | **[DOC-1A](#DOC-1A)** | Demo Confusion | `README.md:128-134`, `docs/getting-started.md:6-26` | **High** | Fixed | ドキュメント冒頭で合成データ生成が最優先ステップとして掲載され、環境構築完了と誤認される |
 | **[DOC-1B](#DOC-1B)** | Demo Confusion | `README.md:182-187`, `docs/user-guide/local-monitor.md` | **High** | Fixed | Config CLI / setup.ps1 の `success: true` が実テレメトリ受信完了と誤解され、First Trace 確認が埋もれている |
 | **[DOC-1C](#DOC-1C)** | Demo Confusion | UI screenshots, `docs/user-guide/local-monitor.md` | Medium | Fixed | 画像や説明文において「デモデータ表示中」と「ライブ受信準備完了」の区別・識別注釈が不足している |
-| **[DOC-2A](#DOC-2A)** | Image Discrepancy | `docs/user-guide.md:99-109` | Medium | Open | `user-guide.md` ポータルに Local Monitor の画像が1枚もなく、旧 Static Dashboard の画像のみで README とちぐはぐ |
-| **[DOC-2B](#DOC-2B)** | Image Discrepancy | `docs/user-guide/local-monitor.md:510-655` | Medium | Open | 画像が長大ドキュメントの最末尾に一括配置され、本文（各機能説明箇所）と完全に切断されている |
-| **[DOC-2C](#DOC-2C)** | Image Discrepancy | `README.md` vs `docs/user-guide/local-monitor.md` | Medium | Open | README と user-guide 間で掲載画面（waterfall, error-mode, inspector）やキャプション・説明順序が非対称 |
+| **[DOC-2A](#DOC-2A)** | Image Discrepancy | `docs/user-guide.md:99-109` | Medium | Fixed | `user-guide.md` ポータルに Local Monitor の画像が1枚もなく、旧 Static Dashboard の画像のみで README とちぐはぐ |
+| **[DOC-2B](#DOC-2B)** | Image Discrepancy | `docs/user-guide/local-monitor.md:510-655` | Medium | Fixed | 画像が長大ドキュメントの最末尾に一括配置され、本文（各機能説明箇所）と完全に切断されている |
+| **[DOC-2C](#DOC-2C)** | Image Discrepancy | `README.md` vs `docs/user-guide/local-monitor.md` | Medium | Fixed | README と user-guide 間で掲載画面（waterfall, error-mode, inspector）やキャプション・説明順序が非対称 |
 | **[DOC-3A](#DOC-3A)** | Troubleshooting | `README.md:171-176`, `docs/getting-started.md` | Medium | Open | Windows / PowerShell の `ExecutionPolicy`（企業ポリシーブロック）時の解決手順（`-ExecutionPolicy Bypass`）の欠落 |
 | **[DOC-3B](#DOC-3B)** | Troubleshooting | `README.md`, `docs/user-guide.md` | Medium | Open | ポート4320競合（Address in use）、VS Code環境変数非引き継ぎ、プロキシ等の企業環境トラブル対策の欠落 |
 | **[DOC-3C](#DOC-3C)** | Troubleshooting | `README.md:229-241`, `docs/user-guide.md` | Medium | Open | ドキュメント一覧やナビゲーションに「トラブルシューティング」項目およびリンクが一切存在しない |
