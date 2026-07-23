@@ -1,0 +1,77 @@
+{
+  "$schema": "https://local-agent-monitor.invalid/contracts/pricing/v1/pricing-registry.schema.json",
+  "schema_version": "pricing.registry.v1",
+  "registry_version": "synthetic-2026.1",
+  "source_kind": "bundled",
+  "source_id": "synthetic",
+  "source_label": "Synthetic deterministic test registry",
+  "last_reviewed_date": "2026-01-01",
+  "stale_after_date": "2026-12-31",
+  "source_references": [
+    {
+      "reference": "https://example.com/pricing/synthetic-2026",
+      "reviewed_date": "2026-01-01",
+      "note": "Synthetic values only; not a provider price source."
+    }
+  ],
+  "entries": [
+    {
+      "entry_id": "synthetic-token",
+      "revision": 1,
+      "supersedes_entry_key": null,
+      "provider": "github_copilot",
+      "canonical_model_id": "synthetic-model",
+      "aliases": ["synthetic-exact"],
+      "billing_mode": "github_ai_credits",
+      "pricing_route": "credit_consuming_interaction",
+      "rates": {
+        "input_per_million_tokens": 0.10,
+        "output_per_million_tokens": 0.30,
+        "cache_read_per_million_tokens": null,
+        "cache_write_5m_per_million_tokens": null,
+        "cache_write_1h_per_million_tokens": null,
+        "reasoning_per_million_tokens": null,
+        "per_request": null,
+        "per_credit": null,
+        "request_credit_multiplier": null
+      },
+      "currency": "USD",
+      "currency_minor_units": 2,
+      "effective_from_utc": "2026-01-01T00:00:00.0000000Z",
+      "effective_to_utc": "2027-01-01T00:00:00.0000000Z",
+      "source_reference": "https://example.com/pricing/synthetic-2026",
+      "last_reviewed_date": "2026-01-01",
+      "included_zero_incremental_cost": false,
+      "limitations": ["Synthetic fixture; never use as a provider price."]
+    },
+    {
+      "entry_id": "synthetic-request-credit",
+      "revision": 1,
+      "supersedes_entry_key": null,
+      "provider": "github_copilot",
+      "canonical_model_id": "synthetic-request-model",
+      "aliases": [],
+      "billing_mode": "github_legacy_requests",
+      "pricing_route": "legacy_request",
+      "rates": {
+        "input_per_million_tokens": null,
+        "output_per_million_tokens": null,
+        "cache_read_per_million_tokens": null,
+        "cache_write_5m_per_million_tokens": null,
+        "cache_write_1h_per_million_tokens": null,
+        "reasoning_per_million_tokens": null,
+        "per_request": null,
+        "per_credit": 0.01,
+        "request_credit_multiplier": 5
+      },
+      "currency": "USD",
+      "currency_minor_units": 2,
+      "effective_from_utc": "2026-01-01T00:00:00.0000000Z",
+      "effective_to_utc": "2027-01-01T00:00:00.0000000Z",
+      "source_reference": "https://example.com/pricing/synthetic-2026",
+      "last_reviewed_date": "2026-01-01",
+      "included_zero_incremental_cost": false,
+      "limitations": ["Synthetic request-to-credit fixture."]
+    }
+  ]
+}

@@ -1511,6 +1511,68 @@ creation and preview; downloads are only process-produced, revalidated
 archives. The complete contract is canonical in
 [`interfaces/runtime-backup-restore.md`](interfaces/runtime-backup-restore.md).
 
+## Pricing Registry And Estimate Boundary
+
+The Issue #94 registry and estimate records are repository-safe only when they
+contain the closed pricing contract: provider/model/mode identifiers, effective
+dates, reviewed public source references, numeric rates and usage quantities,
+opaque source event/trace/span IDs, completeness, fixed reasons, hashes, and
+calculation metadata. They must never contain raw prompts/responses, tool
+arguments/results, credentials, account/organization/contract identifiers,
+invoice lines, user identity/PII, private source locators, or local paths.
+
+Runtime price fetch, scraping, billing API access, credential use, and
+enterprise/custom-contract discovery are prohibited. A local override is a
+caller-supplied, separately labeled versioned registry document and must not be
+committed when it contains private contract data. The engine never logs input
+records or overrides and never converts a missing quantity or unknown contract
+to zero. Source references identify reviewed public pricing material; they are
+not fetched during estimation.
+
+Canonical estimate output is metadata-only and may be stored by a future
+consumer, but Issue #94 creates no persistence, HTTP, CLI, or browser surface.
+Before canonical output, the domain admits only closed provider/mode/route/
+completeness/reason values, bounded opaque provenance tokens, and bounded model
+or label text. Control characters, rooted or traversal-like paths,
+credential-bearing URL-like values, negative quantities, fractional
+token/request quantities, and malformed predecessor IDs fail before
+calculation. Every admitted string must be well-formed UTF-16; valid surrogate
+pairs remain valid text and unpaired surrogates fail closed. Caller-owned
+request collections are copied exactly once before validation so mutation
+cannot change the validated calculation or identity. Credit quantities remain
+decimal because valid provider credit usage can be fractional.
+Public source references are limited to 4,096 UTF-16 code units and must begin
+with exact lowercase `https://`. They reject explicit user information
+(including empty user information), query, fragment, raw whitespace/control/
+line/paragraph separators, raw backslash, IP-literal/private-style host,
+terminal-dot/single-label host, localhost/`.localhost`, exact `home.arpa`, or
+`.local`, `.internal`, `.lan`, `.home`, and `.home.arpa` suffixes. Decoded URL
+paths reject traversal, email-like values, GitHub/OpenAI/Google/Slack token
+markers, Bearer/Basic/Authorization markers, private-key headers, and
+key/secret/password/credential assignments. Malformed percent escapes are
+rejected; one well-formed percent-decoding pass is the v1 inspection boundary,
+and the decoded value also rejects control/line/paragraph separators and
+backslash.
+Repository-safe labels and provenance reject the same credential shapes;
+labels also reject either path separator and email-like values. Validation
+errors are fixed and do not echo rejected values.
+The strict estimate consumer accepts only bounded canonical bytes, revalidates
+the closed contract, recomputes identity, and requires byte-identical
+recalculation against the supplied exact catalog before defensively copying
+nested collections. The catalog itself is canonical bounded
+`pricing.catalog-snapshot.v1` bytes (at most 4 MiB, depth 32, and 64 documents)
+in bundled-first/caller order; catalog construction enforces the same document
+and serialized-byte ceilings. Canonical estimate production and consumption
+both enforce the 1 MiB ceiling, while the consumer also enforces depth 32.
+Consumers reject unknown/duplicate fields, noncanonical bytes, and invalid
+registry/estimate semantics. The estimate-bound
+`catalog_sha256` and public identity hash provide integrity only; neither
+authenticates
+client-supplied estimate bytes.
+Consequently it adds no Host/origin/CSRF/CORS behavior and no new retention
+kind. Any #95 UI or later persistence owner must separately specify access,
+retention, mutation, and private-override handling before exposing estimates.
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:
