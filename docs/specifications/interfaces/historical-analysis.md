@@ -353,12 +353,14 @@ enable the #73 provider runner. It also rejects a raw-capable
 `selection.sanitized_only=false` preview before #72 owner access rather than
 silently changing the caller's closed selection.
 
-The browser retains only a current bounded safe preview/receipt projection in
-memory. It uses no browser storage and no full history, raw descriptor, raw
-body, provider input, or reusable raw response. Finding, mitigation, error,
-and reference text are escaped inert text, never HTML. Logs, URLs, evidence,
-screenshots, and tests contain only safe IDs, fixed states, counts, and bounded
-safe text.
+After transient rendering, the only long-lived preview binding is exactly
+`extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`. The browser
+retains no selection, included/excluded Session data, or other preview response
+fields in that binding. It uses no browser storage and no full history, raw
+descriptor, raw body, provider input, or reusable raw response. Finding,
+mitigation, error, and reference text are escaped inert text, never HTML. Logs,
+URLs, evidence, screenshots, and tests contain only safe IDs, fixed states,
+counts, and bounded safe text.
 
 The page provides semantic headings, labelled scope controls and tables, named
 Instruction/Efficiency start controls, and descriptive evidence links. Tab and

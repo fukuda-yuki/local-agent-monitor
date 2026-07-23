@@ -11,6 +11,7 @@ public sealed class HistoricalAnalysisSpecificationTests
     {
         var specification = File.ReadAllText(Path.Combine(
             RepositoryRoot, "docs", "specifications", "interfaces", "historical-analysis.md"));
+        var normalizedSpecification = specification.ReplaceLineEndings(" ");
 
         Assert.All(
         [
@@ -35,13 +36,14 @@ public sealed class HistoricalAnalysisSpecificationTests
             "no heuristic lookup",
             "`selection.sanitized_only=false`",
             "before #72 owner access",
+            "After transient rendering, the only long-lived preview binding is exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`",
             "future-surface-registry.json",
             "Issue #91",
             "issue-91-validation-handoff.json",
             "91-H-075",
             "91-S-075",
             "91-L-075",
-        ], required => Assert.Contains(required, specification, StringComparison.Ordinal));
+        ], required => Assert.Contains(required, normalizedSpecification, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -70,6 +72,14 @@ public sealed class HistoricalAnalysisSpecificationTests
             "before the #72 owner",
             security,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "長寿命 browser state は `extraction_id`、`raw_local_sha256`、`repository_safe_sha256` の3フィールドだけ",
+            requirements,
+            StringComparison.Ordinal);
+        const string BrowserBindingInvariant =
+            "long-lived browser state contains exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`";
+        Assert.Contains(BrowserBindingInvariant, specification.ReplaceLineEndings(" "), StringComparison.Ordinal);
+        Assert.Contains(BrowserBindingInvariant, security.ReplaceLineEndings(" "), StringComparison.Ordinal);
     }
 
     [Fact]

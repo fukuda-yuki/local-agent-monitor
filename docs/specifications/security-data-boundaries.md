@@ -1292,7 +1292,11 @@ or expired state. A `--sanitized-only` host accepts only an exact
 `selection.sanitized_only=true` historical-analysis preview; `false` is
 rejected as `400 invalid_historical_analysis_request` before the #72 owner
 opens a snapshot or reads descriptors and is never silently rewritten.
-Browser state, storage, URLs, logs, artifacts, tests, and
+After transient preview rendering, long-lived browser state contains exactly
+`extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`; selection,
+included/excluded Session data, and every other preview response field are
+discarded rather than retained in that binding. Browser storage, URLs, logs,
+artifacts, tests, and
 repository-safe evidence contain no full raw history, raw descriptors, prompt,
 response, tool body, provider input, local path, credentials, or PII. All
 dynamic text is escaped inert text. This boundary adds no raw analysis,

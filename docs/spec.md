@@ -479,7 +479,10 @@ postures; normal provider-free composition returns the fixed public
 never silently rewritten. The surface retains loopback/Host,
 same-origin, CSRF-on-POST, JSON-only bounded strict requests, no CORS,
 `Cache-Control: no-store`, escaped inert text, and no browser storage/full
-history. It neither adds a provider nor absorbs import, apply, effect, pricing,
+history. After transient preview rendering, long-lived browser state contains
+exactly `extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`; it
+retains no selection, included/excluded Session data, or other preview response
+fields. It neither adds a provider nor absorbs import, apply, effect, pricing,
 Alert Center, portability, raw analysis, or content-enabled capture.
 
 ## Alert-rule engine foundation
