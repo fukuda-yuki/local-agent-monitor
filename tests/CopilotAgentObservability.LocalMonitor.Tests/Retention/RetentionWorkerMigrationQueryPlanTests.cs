@@ -12,6 +12,20 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
     private const string LeaseExpiryIndex = "IX_retention_leases_kind_expiry";
 
     [Fact]
+    public void FixtureReadConnection_IsReadOnlyNonPooledAndAllowsHashingWhileOpen()
+    {
+        var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "retention", RetentionFixtureName);
+        var manifest = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "retention", "manifest.json");
+
+        using var connection = Open(fixture);
+        var options = new SqliteConnectionStringBuilder(connection.ConnectionString);
+
+        Assert.Equal(SqliteOpenMode.ReadOnly, options.Mode);
+        Assert.False(options.Pooling);
+        Assert.Equal(ManifestFixtureHash(manifest), Hash(fixture));
+    }
+
+    [Fact]
     public void PreWorkerRetentionV1Fixture_MigratesIdempotentlyWithoutChangingSourceEvidence()
     {
         var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "retention", RetentionFixtureName);
@@ -157,7 +171,17 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
 
     private static bool TableExists(string path, string table) => Scalar<long>(path, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name);", ("$name", table)) == 1;
     private static T Scalar<T>(string path, string sql, params (string Name, object Value)[] parameters) { using var connection = Open(path); using var command = connection.CreateCommand(); command.CommandText = sql; foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value); return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T)); }
-    private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Pooling=False"); connection.Open(); return connection; }
+    private static SqliteConnection Open(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        return connection;
+    }
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
     private static void Append(IncrementalHash digest, string value) { var bytes = Encoding.UTF8.GetBytes(value); digest.AppendData(BitConverter.GetBytes(bytes.Length)); digest.AppendData(bytes); }
     private static void DeleteDatabaseFiles(string path) { foreach (var candidate in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(candidate)) File.Delete(candidate); }
