@@ -230,6 +230,10 @@ Repository では wrapper の場所だけが変わります。
 .\scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
 ```
 
+> [!IMPORTANT]
+> `setup.ps1 apply` の出力に含まれる `{"success": true}` は、設定ファイルの静的検証および書き込みが完了したことを示します。
+> 設定完了の動的な証明は、VS Code で Copilot Chat を実行した際に Local Monitor 画面（`http://127.0.0.1:4320/`）へ最初のトレース（First Trace）が反映されることです。
+
 `all` は VS Code Stable / Insiders の Default Profile、GitHub Copilot CLI、
 caller-managed App / SDK guidance を計画します。App / SDK は sample contract のみで、
 caller-owned file を変更しません。apply 後は既に起動済みの VS Code、terminal、

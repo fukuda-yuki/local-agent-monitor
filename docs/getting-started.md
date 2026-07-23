@@ -3,10 +3,38 @@
 スターティングガイド。
 詳しい利用者向け説明は [docs/user-guide.md](user-guide.md) を参照する。
 
-## 1. Synthetic Dashboard を生成する
+## 1. Local Ingestion Monitor を起動してリアルタイム観測を開始する（推奨）
 
-外部サービスや実データなしで、静的 dashboard の生成経路を確認できる。
-これは `raw-only` profile の最小確認にも使える。
+Docker Desktop や外部サービスなしで VS Code Copilot Chat / GitHub Copilot CLI の
+テレメトリをリアルタイムに収集・可視化できます。
+
+**ステップ A — モニターを起動する：**
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\monitor.db --url http://127.0.0.1:4320
+```
+
+ブラウザで `http://127.0.0.1:4320/` を開きます。
+
+**ステップ B — 観測用の環境変数を適用して VS Code を起動する：**
+
+```powershell
+dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver --target monitor
+# 表示された環境変数設定コマンドを実行したターミナルから起動します：
+code .
+```
+
+**ステップ C — 初回トレース（First Trace）の受領を確認する：**
+
+VS Code 上で Copilot Chat に質問を送信し、ブラウザの `http://127.0.0.1:4320/`（概要）および `/traces`（トレース一覧）に最初のトレースが表示されることを確認します。  
+※ 設定スクリプト等の出力で `success: true` が表示されても、それは静的な設定完了を意味します。実際に画面へトレースが反映されて初めてセットアップ完了となります。
+
+詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照してください。
+
+## 2. クイック体験：デモ用合成データで静的ダッシュボードを試す
+
+実環境の Copilot や外部サービスを使わず、静的ダッシュボードの表示やデータ変換パイプラインの動作のみを試したい場合のクイック体験手順です（※実際のテレメトリ収集環境の構築ではありません）。
 
 ```powershell
 New-Item -ItemType Directory -Force tmp\dashboard-demo | Out-Null
@@ -22,33 +50,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 - `tmp\dashboard-demo\site\index.html`
 - `tmp\dashboard-demo\site\dashboard-data.json`
 
-`tmp\` は local runtime output であり、commit しない。
-
-## 2. Local Ingestion Monitor を使う（Langfuse 不要）
-
-Docker Desktop や外部サービスなしで VS Code Copilot Chat / GitHub Copilot CLI の
-テレメトリをリアルタイムに確認できます。
-
-**ターミナル A — モニター起動：**
-
-```powershell
-New-Item -ItemType Directory -Force data | Out-Null
-dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\monitor.db --url http://127.0.0.1:4320
-```
-
-ブラウザで `http://127.0.0.1:4320/` を開く。
-
-**ターミナル B — VS Code 用環境変数を生成して適用し、VS Code を起動：**
-
-```powershell
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- profile-vscode-env --profile raw-local-receiver --target monitor
-# 出力結果を貼り付けて実行してから：
-code .
-```
-
-VS Code で Copilot Chat に質問すると、ブラウザの `http://127.0.0.1:4320/`（概要）と `/traces`（トレース一覧）に受信結果が表示されます。
-
-詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照する。
+`tmp\` はローカルの試行用出力であるため、コミットには含めません。
 
 ## 3. Live Trace Review を試す（Langfuse）
 
