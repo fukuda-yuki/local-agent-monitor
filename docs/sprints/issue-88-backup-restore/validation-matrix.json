@@ -1,9 +1,9 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
-  "final_validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+  "final_validation_sha": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
   "inventory_date": "2026-07-23",
-  "environment_boundary": "Preparation baseline SHA only. The Issue #88 implementation is an uncommitted worktree candidate and has not yet reached the required frozen-SHA build, Playwright, focused, full-suite, replay, migration, security, or cross-machine gates.",
+  "environment_boundary": "Exact functional SHA on Windows x64 with synthetic bounded records, disposable SQLite databases, loopback-only test hosts, and repository-local Playwright Chromium, plus exact-SHA Unix native-path observations in an isolated WSL2 Ubuntu 24.04 clone. No content-enabled capture, private raw archive retention, or genuine second-machine execution is claimed.",
   "active_rows": [
     {
       "row_id": "91-B-088",
@@ -24,23 +24,30 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
         "bundle_schema": "local-runtime-backup.v1",
         "manifest": "local-runtime-backup-manifest.v1",
         "archive": "local-runtime-backup-zip-store.v1",
         "checksum": "sha256.v1"
       },
       "expected_invariant": "A consistent online SQLite snapshot is durably published as the strict raw local profile; exact warnings, manifest facts, checksums, preview, migration, and offline restore remain deterministic without path or raw-content disclosure in results.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-88-backup-restore/README.md#candidate-pinned-validation",
+          "compatibility_basis": "Exact-candidate CLI, archive, manifest, online snapshot, inspect, preview, migration, restore, UI, readiness, Doctor, and full-solution tests used disposable local state and synthetic bounded records."
+        }
+      ],
+      "actual_result": "At the exact functional candidate, Config CLI RuntimeBackup passed 12/12, Local Monitor RuntimeBackup passed 308/308, packaged readiness and documentation rows passed 45/45, build and Playwright bootstrap passed, and the canonical full solution passed 8409/8409 with zero failures or skips.",
+      "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #88 runtime backup and restore",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
       "validation_date": "2026-07-23",
-      "environment_boundary": "Frozen-candidate execution is pending; the preparation SHA does not claim the current uncommitted implementation."
+      "environment_boundary": "Windows x64 disposable databases and same-machine cross-directory fixtures establish the automated contract only; no raw archive or sensitive locator is repository evidence, and genuine second-machine interoperability is classified separately."
     },
     {
       "row_id": "91-S-088",
@@ -61,22 +68,29 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
         "restore_journal": "runtime-restore-journal.v2",
         "transient_owner": "runtime-backup-transient-owner.v1",
         "runtime_backup_component": 1
       },
       "expected_invariant": "Untrusted archives, executable schema, namespace collisions, malformed receipts, external raw state, reparse/device paths, and retention conflicts fail before unsafe mutation; crash recovery deletes only exact owned artifacts and rollback restores the exact prior database.",
-      "evidence": [],
-      "actual_result": "",
-      "classification": "not_attempted",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-88-backup-restore/README.md#candidate-pinned-validation",
+          "compatibility_basis": "Candidate-pinned archive attack, executable-schema, namespace, retention/resurrection, crash-recovery, atomic rollback, HTTP security, transient cleanup, migration, direct archive-ceiling, Unix native special-file, and no-leak cases used disposable repository-safe fixtures."
+        }
+      ],
+      "actual_result": "The exact candidate passed deterministic corruption and archive-attack rejection, the direct 513 MiB + 1 byte ceiling, strict compatibility and component migration, exact retention/tombstone preservation, explicit resurrection warning, pre/post-swap recovery, rollback, owned-marker cleanup, API/UI security, three Unix native device/FIFO/socket/path observations on WSL2 Ubuntu, and repository evidence scanning gates.",
+      "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #88 runtime backup and restore",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
       "validation_date": "2026-07-23",
-      "environment_boundary": "Frozen-candidate security, migration, browser, and full-suite execution is pending; no raw backup bytes are repository evidence."
+      "environment_boundary": "Windows x64 synthetic attack fixtures, disposable local artifacts, loopback hosts, and repository-safe text evidence, plus WSL2 Ubuntu 24.04 native Linux device/FIFO/socket and path classification. Non-product Unix SQLite clients are outside the supported restore boundary and must be closed; no connection-enumeration capability is claimed."
     },
     {
       "row_id": "91-L-088",
@@ -97,6 +111,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
+        "candidate": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
         "bundle_schema": "local-runtime-backup.v1",
         "restore_result": "local-runtime-restore-result.v1"
       },
@@ -115,7 +130,7 @@
       "retry_condition": "On a genuine second machine, transfer the private archive outside the repository, verify its SHA-256, run the documented stop/restore/start sequence, and record accepted readiness plus Doctor evidence against the frozen candidate.",
       "unverified_capability": "Cross-machine restore interoperability, post-restore restart readiness, and Doctor on the final Issue #88 candidate.",
       "owner": "Issue #88 runtime backup and restore",
-      "validation_sha": "c02c10ab18553acef1619ce12ec630f4f6f5aa5f",
+      "validation_sha": "556811ef0bf96ef1267c4a9d00d9311154fc78e3",
       "validation_date": "2026-07-23",
       "environment_boundary": "No raw archive was copied into the repository and no second-machine claim was made; only the exact blocked_external boundary is recorded."
     }
@@ -126,7 +141,7 @@
     "docs/sprints/issue-88-backup-restore/README.md"
   ],
   "release_decision": {
-    "decision": "release_blocked",
+    "decision": "release_ready_with_external_blockers",
     "external_blockers": [
       {
         "row_id": "91-L-088",

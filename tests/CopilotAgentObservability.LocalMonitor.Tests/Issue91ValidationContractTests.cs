@@ -110,7 +110,7 @@ public sealed class Issue91ValidationContractTests
     }
 
     [Fact]
-    public void RuntimeBackupIssue91HandoffAndPreparationMatrixStayCoherent()
+    public void RuntimeBackupIssue91HandoffAndFinalMatrixStayCoherent()
     {
         var handoffPath = Path.Combine(RepositoryRoot, "docs", "specifications", "contracts", "runtime-backup", "v1", "issue-91-validation-handoff.json");
         var matrixPath = Path.Combine(RepositoryRoot, "docs", "sprints", "issue-88-backup-restore", "validation-matrix.json");
@@ -130,24 +130,35 @@ public sealed class Issue91ValidationContractTests
         var filters = handoff.RootElement.GetProperty("automated_test_filters").EnumerateArray().Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
         Assert.Contains("FullyQualifiedName~RuntimeBackupManifestValidationTests", filters);
         Assert.Contains("FullyQualifiedName~RuntimeBackupPlaywrightTests", filters);
+        Assert.Contains("FullyQualifiedName~RuntimeBackupWave3ComponentRoundTripTests", filters);
         Assert.Contains("FullyQualifiedName~RuntimeRestoreDocumentationUsesPackagedConditionalRestartSequence", filters);
         Assert.Contains("FullyQualifiedName~PublishedStartWaitReady", filters);
+        Assert.Contains("FullyQualifiedName~LocalMonitorScriptTests", filters);
         Assert.DoesNotContain(registry.RootElement.GetProperty("entries").EnumerateArray(), entry => entry.GetProperty("owner_issue").GetInt32() == 88);
 
         const string preparationSha = "c02c10ab18553acef1619ce12ec630f4f6f5aa5f";
+        const string functionalSha = "556811ef0bf96ef1267c4a9d00d9311154fc78e3";
         Assert.Equal(preparationSha, matrix.RootElement.GetProperty("matrix_prep_sha").GetString());
-        Assert.Equal(preparationSha, matrix.RootElement.GetProperty("final_validation_sha").GetString());
+        Assert.Equal(functionalSha, matrix.RootElement.GetProperty("final_validation_sha").GetString());
         var rows = matrix.RootElement.GetProperty("active_rows").EnumerateArray().ToArray();
         Assert.Equal(["91-B-088", "91-S-088", "91-L-088"], rows.Select(row => row.GetProperty("row_id").GetString()));
-        Assert.Equal(["not_attempted", "not_attempted", "blocked_external"], rows.Select(row => row.GetProperty("classification").GetString()));
-        Assert.All(rows, row => Assert.Equal(preparationSha, row.GetProperty("validation_sha").GetString()));
+        Assert.Equal(["passed", "passed", "blocked_external"], rows.Select(row => row.GetProperty("classification").GetString()));
+        Assert.All(rows, row =>
+        {
+            Assert.Equal(functionalSha, row.GetProperty("validation_sha").GetString());
+            Assert.Equal(functionalSha, row.GetProperty("versions").GetProperty("candidate").GetString());
+            Assert.NotEmpty(row.GetProperty("evidence").EnumerateArray());
+        });
         Assert.NotEmpty(rows[2].GetProperty("evidence").EnumerateArray());
+        Assert.Equal("release_ready_with_external_blockers",
+            matrix.RootElement.GetProperty("release_decision").GetProperty("decision").GetString());
         var blocker = matrix.RootElement.GetProperty("release_decision").GetProperty("external_blockers").EnumerateArray().Single();
         foreach (var property in new[] { "severity", "blocker", "retry_condition", "unverified_capability" })
             Assert.Equal(rows[2].GetProperty(property).GetString(), blocker.GetProperty(property).GetString());
         Assert.Contains(
             "docs/sprints/issue-88-backup-restore/README.md",
             matrix.RootElement.GetProperty("evidence_ledger_refs").EnumerateArray().Select(item => item.GetString()));
+        Assert.Contains(functionalSha, File.ReadAllText(ledgerPath), StringComparison.Ordinal);
     }
 
     [Fact]
