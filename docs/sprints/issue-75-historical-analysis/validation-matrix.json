@@ -1,8 +1,8 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "da016c581e89dc3902e6e0332b618252d5028481",
-  "final_validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
-  "inventory_date": "2026-07-23",
+  "final_validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+  "inventory_date": "2026-07-24",
   "environment_boundary": "Windows x64 with production component stores over disposable SQLite databases, loopback-only test hosts, sanitized synthetic multi-Session metadata, and repository-local Playwright Chromium; no genuine provider or content-enabled capture is claimed.",
   "active_rows": [
     {
@@ -24,7 +24,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
         "historical_analysis": "historical-analysis.v1",
         "historical_evidence": "historical-evidence.v1",
         "instruction_handoff": "instruction-finding-handoff.v1",
@@ -45,8 +45,8 @@
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #75 historical analysis UI",
-      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
-      "validation_date": "2026-07-23",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
       "environment_boundary": "Exact candidate on Windows x64 using disposable production-component databases, loopback HTTP hosts, safe deterministic data, and headless repository Chromium."
     },
     {
@@ -68,16 +68,16 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
         "secret_corpus": "validation-secret-corpus.v1",
         "browser": "repository Playwright Chromium"
       },
-      "expected_invariant": "Responses, browser state, logs, and committed evidence remain repository-safe; raw content is never retained in client state, missing and expired evidence fail closed, and navigation uses only exact #53 owner mappings.",
+      "expected_invariant": "After transient rendering, the only long-lived preview binding contains exactly extraction_id, raw_local_sha256, and repository_safe_sha256; no selection, included/excluded Session data, or other preview response field is retained. Responses, logs, and committed evidence remain repository-safe, missing and expired evidence fail closed, and navigation uses only exact #53 owner mappings.",
       "evidence": [
         {
           "kind": "automated",
           "reference": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md#91-s-075--security-accessibility-and-no-leak-gate",
-          "compatibility_basis": "Candidate-pinned HTTP, component, and Chromium cases cover Host/origin/body guards, no-store responses, strict DTOs, inert text, keyboard/live-region behavior, exact resolution, and scanner detection."
+          "compatibility_basis": "Candidate-pinned HTTP, component, and Chromium cases cover Host/origin/body guards, no-store responses, strict DTOs, exact three-field long-lived binding instrumentation, rejection of every other preview field, inert text, keyboard/live-region behavior, exact resolution, and scanner detection."
         }
       ],
       "actual_result": "The corrected exact candidate rejects raw-capable preview selection before #72 owner access on a sanitized-only host and retains only the frozen three-field browser binding. It passed the focused contract/browser/security gates and final full suite; the Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases, and the installed handoff artifact produced 118 variants with zero matches.",
@@ -87,8 +87,8 @@
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #75 historical analysis UI",
-      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
-      "validation_date": "2026-07-23",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
       "environment_boundary": "Repository-safe synthetic values, temporary databases, loopback hosts, committed contracts, and headless Chromium; no user content, credentials, or sensitive local paths were used."
     },
     {
@@ -110,7 +110,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
         "provider_source_tuple": "not-available",
         "content_authorization": "not-authorized"
       },
@@ -129,8 +129,8 @@
       "retry_condition": "Obtain separate content-access authorization and promote an exact reviewed provider/source/version multi-Session tuple, then freeze a new candidate and run provider execution, canonical receipt readback, exact drill-down, and repository-safe leak scanning.",
       "unverified_capability": "Genuine provider-backed instruction findings and efficiency evidence across an exact reviewed multi-Session dataset.",
       "owner": "Issue #75 historical analysis UI with the source-compatibility and provider owners",
-      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
-      "validation_date": "2026-07-23",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
       "environment_boundary": "External authorization and reviewed-source boundary only; no provider prompt, response, tool payload, credential, raw record, or content-enabled capture was produced."
     }
   ],

@@ -13,12 +13,15 @@ behavior. Current behavior remains defined by `docs/requirements.md`,
 
 - Wave 4 kickoff: `2df115682f0e280d020c04b4936968d4602f623c`
 - Pre-freeze matrix activation: `da016c581e89dc3902e6e0332b618252d5028481`
-- Functional candidate: `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3`
-- Superseded functional candidate: `23c5212e0bf0bf05885930974e53d051d731e117`
-- Superseded integrated candidate: `0c67e185dd0d72c33b6ff3bf661b24e414fc3739`
+- Source functional candidate: `e7037714f16bc4c9c14b34ed8f69fc6e18cd6972`
+- Exact integrated validation candidate: `2054bae8daa433315ba30221e456e031a488b02b`
+- Superseded source candidates: `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3`,
+  `23c5212e0bf0bf05885930974e53d051d731e117`
+- Superseded integrated candidates: `7e9be266a9898226caf863366de9625294ba8d87`,
+  `0c67e185dd0d72c33b6ff3bf661b24e414fc3739`
 - #72 repair source: `e9bc3a7bb6feb5bdefa084dcace420f19670fd1f`
 - #72 repair integration: `23c5212e0bf0bf05885930974e53d051d731e117`
-- Validation date: 2026-07-23
+- Validation date: 2026-07-24
 - Matrix: `docs/sprints/issue-75-historical-analysis/validation-matrix.json`
 - Detailed evidence:
   `docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md`
@@ -39,10 +42,13 @@ Final safety review invalidated the earlier `91-S-075` pass recorded at
 `0c67e185dd0d72c33b6ff3bf661b24e414fc3739`. The earlier implementation
 trusted a caller-controlled raw-capable preview selection on a sanitized-only
 host and retained the complete preview response in browser closure state. The
-corrected functional candidate rejects that selection before #72 owner access
+corrected implementation rejects that selection before #72 owner access
 without rewriting it and retains only extraction ID plus the two exact
-checksums. The matrix and detailed evidence record the new regression tests,
-independent reviews, and fresh candidate-pinned validation.
+checksums. A later final review found that this exact three-field invariant was
+not yet pinned in canonical specifications. Source candidate `e7037714...` and
+its patch-equivalent integrated validation candidate `2054bae8...` close that
+contract gap. The matrix and detailed evidence record both corrections, their
+regression tests, independent reviews, and fresh candidate-pinned validation.
 
 Historical import, proposal apply, verified effect verdicts, provider pricing,
 Alert Center, and portability behavior remain owned by their existing Issues;

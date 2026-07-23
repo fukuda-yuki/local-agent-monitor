@@ -10,18 +10,22 @@ path, or content-enabled capture output.
 | --- | --- |
 | Wave 4 kickoff | `2df115682f0e280d020c04b4936968d4602f623c` |
 | Pre-freeze activation | `da016c581e89dc3902e6e0332b618252d5028481` |
-| Functional candidate | `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3` |
-| Superseded functional candidate | `23c5212e0bf0bf05885930974e53d051d731e117` |
-| Superseded integrated candidate | `0c67e185dd0d72c33b6ff3bf661b24e414fc3739` |
+| Source functional candidate | `e7037714f16bc4c9c14b34ed8f69fc6e18cd6972` |
+| Exact integrated validation candidate | `2054bae8daa433315ba30221e456e031a488b02b` |
+| Superseded source candidates | `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3`, `23c5212e0bf0bf05885930974e53d051d731e117` |
+| Superseded integrated candidates | `7e9be266a9898226caf863366de9625294ba8d87`, `0c67e185dd0d72c33b6ff3bf661b24e414fc3739` |
 | #72 repair source / integration | `e9bc3a7bb6feb5bdefa084dcace420f19670fd1f` / `23c5212e0bf0bf05885930974e53d051d731e117` |
-| Date / OS | 2026-07-23 / Windows x64 |
+| Date / OS | 2026-07-24 / Windows x64 |
 | Browser | Repository-local Playwright Chromium and headless Chromium |
 | Data | Disposable SQLite databases, loopback-only hosts, and sanitized synthetic multi-Session metadata |
 | Capture policy | No genuine provider execution and no content-enabled live capture |
 
 All accepted Wave 1–3 functional revisions named by the Wave 4 contract were
-verified as ancestors of the functional candidate. The candidate worktree was
-clean before and after execution.
+verified as ancestors of the integrated validation candidate. Source commit
+`e7037714...` and integrated commit `2054bae8...` have the same stable patch ID,
+and their #75 production, specification, contract, evidence, and test paths
+have no tree differences. The integration candidate worktree was clean before
+and after execution.
 
 ## `91-H-075` — automated and browser gate
 
@@ -32,7 +36,8 @@ supported/weak/incomplete and zero/failure/timeout/canceled/stale states,
 provider unavailable/partial/failed states, exact evidence resolution, and
 safe browser state.
 
-Results at the exact functional candidate:
+Required and focused results at exact integrated validation candidate
+`2054bae8daa433315ba30221e456e031a488b02b`:
 
 - handoff-declared 13-filter gate: Local Monitor 279/279 and
   InstructionFindings 20/20, zero failed or skipped;
@@ -156,6 +161,25 @@ route plus Playwright passed 47/47, specification plus coordinator passed
 bootstrap, full suite, and all focused #75 gates were then rerun at the new
 candidate with the results above.
 
+A subsequent independent Issue/spec/matrix review rejected that evidence as a
+final closeout because canonical requirements, specification, interface, and
+security text still described only a generic bounded safe browser projection.
+That wording did not exclude retention of the complete repository-safe preview
+response. The same review found that the corrected candidate commits were
+created on 2026-07-24 JST while evidence metadata still said 2026-07-23.
+
+The new specification regression failed 2/5 against the generic canonical
+wording. Source candidate
+`e7037714f16bc4c9c14b34ed8f69fc6e18cd6972` pins the post-render long-lived
+binding to exactly `extraction_id`, `raw_local_sha256`, and
+`repository_safe_sha256` across all four canonical documents; the regression
+then passed 5/5. Its integrated patch-equivalent candidate
+`2054bae8daa433315ba30221e456e031a488b02b` reran skill mirror, build,
+Playwright bootstrap, the full 8486/8486 suite, handoff 279+20, Playwright 7,
+contract/specification 15, and production evidence 33 with zero failures or
+skips. Evidence dates were corrected to the actual 2026-07-24 JST execution
+date before re-attestation.
+
 The first corrected-evidence scan invocation supplied three comma-delimited
 paths as one PowerShell string and returned
 `scan_result=ERROR reason=required_target_missing`. No artifact was missing;
@@ -165,8 +189,9 @@ zero matches. The failed invocation is not represented as a scanner pass.
 
 ## Candidate validation commands
 
-Commands were run from the exact functional candidate unless the failure
-history above says otherwise.
+Commands were run from exact integrated validation candidate `2054bae8...`
+unless the failure history above says otherwise. The source candidate ran the
+new specification regression directly as 5/5.
 
 ```powershell
 pwsh scripts\agent\sync-claude-skills.ps1 -Check
