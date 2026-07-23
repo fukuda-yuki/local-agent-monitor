@@ -2,6 +2,7 @@
 
 Status: integrated automated, browser, migration, archive, and repository-safe
 security validation complete; explicit external live rows remain blocked.
+Issues #75 and #48 are `closed/completed`; Issue #60 remains open for P2.
 
 This directory is historical validation evidence. Current product behavior is
 defined by `docs/requirements.md`, `docs/spec.md`, and the relevant files under

@@ -37,11 +37,12 @@ on different branch roles and neither is substituted for the other.
 
 ## Terminal graph and ancestry
 
-At this evidence head, #72, #73, and #74 are `closed/completed`; #75 and #48
-are temporarily open only to record and close the safety/specification
-correction. Their technical close gates pass, and the authorized close actions
-are the next operation. Historical import #76–#79, Alerting #80–#84, and
-Portability #85–#88 are `closed/completed`. Issue #60 remains open.
+Issues #72, #73, #74, #75, and #48 are `closed/completed`. The final #75
+correction/closeout is recorded in GitHub comment `5061104434`; the #48 parent
+gate is recorded in comment `5061112131`. Historical import #76–#79, Alerting
+#80–#84, and Portability #85–#88 are also `closed/completed`. Issue #60
+handoff comment `5061114898` records the final graph, and Issue #60 remains
+open.
 
 Issue #60 remains open because the next P2 entry points are still active:
 #92/#93 for the remaining Codex source/app work and #94/#95 for monetary cost
@@ -208,5 +209,6 @@ not substitute for the successful full suite.
 ## Publication state
 
 Candidate and evidence are local-only. The primary checkout was not modified.
+GitHub Issue comments and the authorized #75/#48 close actions were performed.
 No push, pull request, tag, content-enabled capture, or remote-history action
 was performed.
