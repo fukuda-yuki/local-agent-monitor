@@ -1,15 +1,15 @@
-# Raw Data Loop
+# データの取り込みと集計
 
-Raw data loop は、saved raw OTLP JSON を SQLite raw store に取り込み、normalized measurement dataset を生成する流れです。
-Langfuse UI が起動していなくても、file-based input だけで再現できます。
-`raw-local-receiver` profile では、この repository の local receiver が受け取った telemetry も同じ raw data loop に接続します。
+保存された OTLP テレメトリデータを取り込み、集計用データセットを生成する手順です。
+Langfuse が動いていなくても、ファイルから直接実行できます。
+`raw-local-receiver` プロファイルでは、このリポジトリの local receiver が受け取ったテレメトリも同じ流れで処理できます。
 
 ## 入力
 
-入力は saved raw OTLP JSON です。
-実 prompt、response、tool arguments / results、identity-bearing attributes が含まれ得るため、repository に commit しないでください。
+入力は保存済みの OTLP JSON ファイルです。
+実際のプロンプト、レスポンス、ツールの引数/結果、個人識別属性が含まれる場合があるため、リポジトリにコミットしないでください。
 
-Synthetic fixture:
+合成テストデータ:
 
 ```text
 tests\CopilotAgentObservability.ConfigCli.Tests\TestData\raw-otlp.synthetic.json

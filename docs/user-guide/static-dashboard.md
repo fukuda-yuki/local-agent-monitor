@@ -1,7 +1,7 @@
 # Static Dashboard
 
-Static dashboard は Agent workflow の aggregate view です。
-個別 trace の詳細調査は Langfuse trace viewer、raw store、または明示 opt-in の sensitive bundle へ drill down します。
+Static Dashboard は、収集したトレースデータの概要を一覧で確認するための静的な HTML 画面です。
+個別トレースの詳細は Langfuse や Local Monitor のトレース詳細画面で確認します。
 
 ## 生成フロー
 
@@ -13,7 +13,7 @@ normalized measurements
   -> index.html + dashboard-data.json
 ```
 
-Synthetic fixture での生成例:
+サンプルデータでの生成例：
 
 ```powershell
 New-Item -ItemType Directory -Force tmp\dashboard-demo | Out-Null

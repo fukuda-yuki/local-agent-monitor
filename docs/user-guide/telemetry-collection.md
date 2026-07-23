@@ -1,6 +1,6 @@
 # Telemetry Collection
 
-この文書は Copilot clients から OpenTelemetry data を収集する利用者向け手順です。
+Copilot クライアントから OpenTelemetry テレメトリを収集する手順です。
 
 ## 全体像
 
@@ -14,11 +14,11 @@ Codex App / app-server
 Langfuse self-host / Collector / raw local receiver / saved raw OTLP JSON
 ```
 
-Collection profile は `CAO_COLLECTION_PROFILE` で選びます。
-最小 profile は `raw-only`、標準 full profile は `docker-desktop-langfuse` です。
+テレメトリの送信先は環境変数 `CAO_COLLECTION_PROFILE` で指定します。
+最小構成は `raw-only`、フル構成は `docker-desktop-langfuse` です。
 
-Langfuse は標準 full profile の個別 trace viewer として使います。
-Raw data loop と static dashboard は Langfuse UI に必須依存しません。
+Langfuse はトレースの詳細確認に使います。
+データ集計や Static Dashboard は Langfuse なしでも利用できます。
 
 ## Langfuse endpoint
 
@@ -61,8 +61,8 @@ code .
 
 ## Raw Local Receiver
 
-`raw-local-receiver` profile は Langfuse や Collector を使わず、この repository の local receiver に telemetry を送ります。
-Raw payload は prompt、response、tool arguments / results、identity attributes、credential-like strings を含み得るため、raw store と一時出力を repository に commit しないでください。
+`raw-local-receiver` は、Langfuse や Collector を使わず、このリポジトリの local receiver に直接テレメトリを送るプロファイルです。
+テレメトリにはプロンプト、レスポンス、ツールの引数/結果、個人識別情報、認証情報が含まれる場合があります。raw store や一時出力をリポジトリにコミットしないでください。
 
 Receiver を foreground process として起動します。
 
@@ -96,10 +96,10 @@ code .
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --json tmp\raw-local-receiver\measurements.json
 ```
 
-Live VS Code direct telemetry は Sprint7 の未確認項目です。
+
 検証時は VS Code version、GitHub Copilot Chat extension version、receiver command、raw store path、trace id または raw record id、confirmed / unconfirmed signals を記録してください。
 
-## Local Ingestion Monitor（Sprint8）
+## Local Ingestion Monitor
 
 LocalMonitor は loopback-only の単一 ASP.NET Core プロセスです。VS Code GitHub
 Copilot Chat の OTLP HTTP/protobuf を `POST /v1/traces` で直接受信し、SQLite raw

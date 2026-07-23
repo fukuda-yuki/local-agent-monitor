@@ -1,7 +1,7 @@
-# Getting Started (スターティングガイド)
+# はじめかた
 
 Copilot Agent Observability のクイックスタートガイドです。  
-より詳しい説明は [利用者向け詳細ガイド (user-guide.md)](user-guide.md) を参照してください。
+より詳しい説明は [ユーザーガイド (user-guide.md)](user-guide.md) を参照してください。
 
 ## 1. Local Ingestion Monitor を起動してリアルタイム観測を開始する（推奨）
 
@@ -32,9 +32,10 @@ VS Code 上で Copilot Chat に質問を送信し、ブラウザの `http://127.
 
 詳細は [Local Ingestion Monitor ユーザーガイド](user-guide/local-monitor.md) を参照してください。
 
-## 2. クイック体験：デモ用合成データで静的ダッシュボードを試す
+## 2. デモデータでダッシュボードを試す（環境構築なし）
 
-実環境の Copilot や外部サービスを使わず、静的ダッシュボードの表示やデータ変換パイプラインの動作のみを試したい場合のクイック体験手順です（※実際のテレメトリ収集環境の構築ではありません）。
+Copilot の実行や外部サービスは不要です。サンプルデータでダッシュボード画面の生成だけを試せます。  
+※ この手順はテレメトリ収集の環境構築ではありません。
 
 ```powershell
 New-Item -ItemType Directory -Force tmp\dashboard-demo | Out-Null
@@ -52,7 +53,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 
 `tmp\` はローカルの試行用出力であるため、コミットには含めません。
 
-## 3. Live Trace Review を試す（Langfuse 連携）
+## 3. Langfuse でトレースを確認する
 
 リアルタイムトレースを Langfuse で確認する場合は `docker-desktop-langfuse` プロファイルを使用し、ローカルで起動した Langfuse へ OTLP HTTP で送信します。
 
@@ -66,23 +67,23 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-a
 
 ※ Langfuse の API キーや認証ヘッダー、シークレット情報はリポジトリへコミットしないでください。
 
-## 4. Telemetry Collection Profile を選択する
+## 4. テレメトリの送信先を選ぶ
 
-コレクションプロファイル（`CAO_COLLECTION_PROFILE`）はテレメトリのルーティングモードを指定します。
+環境変数 `CAO_COLLECTION_PROFILE` で、テレメトリの送り先を指定します。
 
 ```powershell
 $env:CAO_COLLECTION_PROFILE="raw-local-receiver"
 ```
 
-最小構成は `raw-only`、標準のフル機能構成は `docker-desktop-langfuse` です。  
+最小限の構成は `raw-only`、すべての機能を使う構成は `docker-desktop-langfuse` です。  
 詳細は [コレクションプロファイル仕様書](specifications/interfaces/collection-profiles.md) を参照してください。
 
 > [!CAUTION]
 > `remote-managed-langfuse` および `remote-managed-collector` はリモートサーバーへのデータ送信となります。社内ポリシーや同意設定を確認のうえ利用してください。
 
-## 5. Raw Data Loop を試す
+## 5. 保存データを集計する
 
-保存された raw OTLP JSON がある場合は、SQLite raw store に取り込んで集計用データセットを生成できます。
+保存済みのテレメトリデータ（raw OTLP JSON）がある場合は、集計用データセットに変換できます。
 
 ```powershell
 New-Item -ItemType Directory -Force data,tmp\raw-loop | Out-Null
@@ -92,9 +93,9 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw da
 
 `data\raw-store.db` および一時出力ファイルはローカル実行用データのため、コミット対象外です。
 
-## 6. 診断・改善提案ループを試す
+## 6. 自動診断と改善提案を試す
 
-合成データから失敗傾向の診断、改善提案、評価結果、判断テンプレートを自動生成します。
+サンプルデータから、失敗傾向の診断レポートや改善提案を自動生成します。
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- validate-diagnoses tests\CopilotAgentObservability.ConfigCli.Tests\TestData\m5-diagnoses.synthetic.json --json tmp\raw-loop\validated-diagnoses.json
@@ -105,9 +106,9 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decisio
 
 ※ この分析ループはリポジトリのコードやファイルを自動修正・コミットしません。
 
-## 7. 次に読むもの
+## 7. 次のステップ
 
-- [利用者向け詳細ガイド](user-guide.md)
+- [ユーザーガイド](user-guide.md)
 - [トラブルシューティングガイド](user-guide/troubleshooting.md)
 - [要件定義](requirements.md)
 - [技術仕様索引](spec.md)

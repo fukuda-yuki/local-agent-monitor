@@ -1,11 +1,11 @@
-# Diagnosis / Improvement Loop
+# 自動診断と改善提案
 
-この loop は trace 由来の失敗傾向と改善候補を deterministic record として整理します。
-Repository の file を自動修正せず、patch / diff / commit / push / pull request も作成しません。
+トレースデータから失敗の傾向を分析し、改善候補を一覧として出力します。
+この機能がリポジトリのファイルを変更することはありません。
 
-## Legacy Human Review Flow
+## レビューフロー（従来方式）
 
-既存 diagnosis record から proposal、evaluation、human decision template を生成します。
+既存の診断レコードから、改善提案・評価結果・判断テンプレートを生成します。
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- validate-diagnoses tests\CopilotAgentObservability.ConfigCli.Tests\TestData\m5-diagnoses.synthetic.json --json tmp\raw-loop\validated-diagnoses.json
@@ -22,9 +22,9 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- record-human-dec
 
 `<decisions.json>` には synthetic または sanitized された decision record だけを指定してください。
 
-## Candidate Pipeline
+## 候補パイプライン
 
-Normalized measurement から diagnosis candidate を生成します。
+集計済みデータから診断候補を生成します。
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-diagnosis-candidates tmp\raw-loop\measurements.json --json tmp\raw-loop\diagnosis-candidates.json
@@ -32,7 +32,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-improve
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-auto-decisions tmp\raw-loop\improvement-candidates.json --json tmp\raw-loop\auto-decisions.json
 ```
 
-Sensitive content を含む evidence extraction は明示 opt-in の場合だけ使います。
+機密情報を含む証拠の抽出は、明示的にオプトインした場合のみ使えます。
 出力先は repository 外、または ignored local path にしてください。
 
 ```powershell
