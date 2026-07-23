@@ -28,7 +28,7 @@ This file records review findings only. No fix is applied here.
 | **[DOC-6A](#DOC-6A)** | Diff hygiene | `docs/user-guide/static-dashboard.md`, `docs/user-guide/telemetry-collection.md` | High | Fixed | 全行が CRLF に変換され、実質数行の変更が数百行の差分として現れている |
 | **[DOC-6B](#DOC-6B)** | Meaning change | `docs/user-guide/telemetry-collection.md` (旧 96-98 行目付近) | High | Fixed | 「Live VS Code direct telemetry は Sprint7 の未確認項目」という、今も有効な注記が文言修正の範囲を超えて丸ごと削除されている |
 | **[DOC-6C](#DOC-6C)** | Scope creep | `docs/user-guide/static-dashboard.md` (冒頭段落) | Medium | Fixed | 「個別 trace 詳細調査」の遷移先が raw store / sensitive bundle → Local Monitor に無断で変更されており、読みやすさ改善の範囲を超えた内容変更になっている |
-| **[DOC-6D](#DOC-6D)** | Coverage claim vs reality | `docs/user-guide/local-monitor.md` | Medium | Open | コミットメッセージは「all user-facing documentation」を主張するが、1121 行中 3 行のみ改善。DOC-4C/DOC-5B と同じ問題（`Issue #69`, `redacted plan`, `change_set_id`, 未翻訳英語多数）が残存 |
+| **[DOC-6D](#DOC-6D)** | Coverage claim vs reality | `docs/user-guide/local-monitor.md` | Medium | Fixed | コミットメッセージは「all user-facing documentation」を主張するが、1121 行中 3 行のみ改善。DOC-4C/DOC-5B と同じ問題（`Issue #69`, `redacted plan`, `change_set_id`, 未翻訳英語多数）が残存 |
 | **[DOC-6E](#DOC-6E)** | Tracker hygiene (peripheral) | `docs/BUG_ISSUE/README.md` | Low | Open (pre-existing) | インデックス表が DOC-1〜DOC-5C を "Open" のまま表示しており、`doc-ux-readability-issues.md` 側の "Fixed" 表記と矛盾している |
 
 Items verified as **no problem found** (see "Checked, no issue" section below):

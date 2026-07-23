@@ -69,7 +69,7 @@ repository metadata cleanup.
 | [DOC-6A](doc-ux-readability-review-15fe4cbf.md#DOC-6A) | CRLF injected into 2 of 10 files, hiding the real diff | High | Fixed | Normalize line endings back to LF; add `.gitattributes` to prevent recurrence |
 | [DOC-6B](doc-ux-readability-review-15fe4cbf.md#DOC-6B) | Still-valid "Sprint7 unconfirmed" caveat deleted, not reworded | High | Fixed | Restore the unconfirmed-status caveat in `telemetry-collection.md` without the `Sprint7` label |
 | [DOC-6C](doc-ux-readability-review-15fe4cbf.md#DOC-6C) | `static-dashboard.md` intro drill-down targets changed beyond wording | Medium | Fixed | Confirm intended content change or restore `raw store` / `sensitive bundle` mentions |
-| [DOC-6D](doc-ux-readability-review-15fe4cbf.md#DOC-6D) | `local-monitor.md` left ~unconverted despite "all user-facing documentation" claim | Medium | Open | Apply the same 5 readability patterns to `local-monitor.md`, or scope the claim down |
+| [DOC-6D](doc-ux-readability-review-15fe4cbf.md#DOC-6D) | `local-monitor.md` left ~unconverted despite "all user-facing documentation" claim | Medium | Fixed | Apply the same 5 readability patterns to `local-monitor.md`, or scope the claim down |
 | [DOC-6E](doc-ux-readability-review-15fe4cbf.md#DOC-6E) | BUG_ISSUE index still shows DOC-1..5C as Open while cards are marked Fixed | Low | Open (pre-existing) | Sync this README's index table with each card's actual Status |
 
 ## Active Feature Files
