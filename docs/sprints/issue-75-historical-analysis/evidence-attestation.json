@@ -1,23 +1,23 @@
 {
   "schema_version": "evidence-attestation.v1",
   "issue": 75,
-  "functional_candidate_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
-  "evidence_materialization_sha": "fb25065973e42d5f85a64c8ff108c82b132002aa",
-  "evidence_materialization_parent_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+  "functional_candidate_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
+  "evidence_materialization_sha": "03bf1fbf7fd6466a98c9058d34c87926b8660627",
+  "evidence_materialization_parent_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
   "relationship": "The evidence materialization is a docs-only child of the exact functional candidate; it does not change production, specification, fixture, or test behavior.",
   "checksum_algorithm": "SHA-256",
   "artifacts_at_evidence_materialization": [
     {
       "path": "docs/sprints/issue-75-historical-analysis/README.md",
-      "sha256": "abe6d2015aa68f43fe56dcf44528d2f98b4c4d08e0e9a7c1250da13c39952e27"
+      "sha256": "796e0382bf8269315936d21817491b7f1edde278afe2258758b61641c43cdfc9"
     },
     {
       "path": "docs/sprints/issue-75-historical-analysis/validation-matrix.json",
-      "sha256": "00110e1269c151731ec22386b76194790f5a98fa6a6ab6d1b2d03505a2fd94c7"
+      "sha256": "1838311525822b077fa65e509ab8b0dc9a829563520328c5f2257732b70a84de"
     },
     {
       "path": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md",
-      "sha256": "962d1524e04290ed3aec9c598364a54798bed4f10d3fddbc932f3252ee219e6b"
+      "sha256": "9ec5c92aa5e5b79358922f539146fc2a6100c0afe7f5a09a29d5f7df084952f7"
     },
     {
       "path": "docs/specifications/contracts/historical-analysis/v1/issue-91-validation-handoff.json",
