@@ -277,23 +277,68 @@ planned/blocked candidate governed by D072. This documentation correction
 invalidates the earlier repository-wide run and requires the coordinator's
 post-freeze rerun recorded below.
 
-Final Issue #92 artifact gates and superseded repository-wide results:
+Final Issue #92 artifact gates, preserved failures, and repository-wide
+results:
 
 | Command | Result |
 | --- | --- |
-| Issue #92 focused contract tests | final candidate: 8/8 passed, 0 failed/skipped |
-| Source capability contract tests | final candidate: 19/19 passed, 0 failed/skipped |
-| combined focused gate | final candidate: 27/27 passed, 0 failed/skipped |
+| Issue #92 focused contract tests | functional candidate `792f134b91c97efbe4d37aa966581369d6424e78`: 8/8 passed, 0 failed/skipped |
+| Source capability contract tests | functional candidate `792f134b91c97efbe4d37aa966581369d6424e78`: 19/19 passed, 0 failed/skipped |
+| combined focused gate | functional candidate `792f134b91c97efbe4d37aa966581369d6424e78`: 27/27 passed, 0 failed/skipped |
 | process diagnostic execution contract | included in Issue #92 8/8; exact output shape parsed, sensitive emission/read flags false |
-| artifact checksum verification | final candidate: 6/6 repository-safe artifacts matched SHA-256 manifest; manifest does not hash itself |
-| Issue #91 scanner self-test | final candidate: 118 transformation cases and 5 negative cases passed |
-| repository-safe artifact scans | final candidate: contract 4 files / 472 variants and sprint+script+manifest 5 files / 590 variants; 0 matches |
-| Claude skill mirror check | pre-review pass: 5 shared skills; final candidate rerun delegated to coordinator |
-| solution build | pre-review pass: 0 warnings / 0 errors; superseded by final corrections; final candidate rerun delegated to coordinator |
-| Playwright Chromium bootstrap | pre-review exit 0; superseded by final corrections; final candidate rerun delegated to coordinator |
-| full solution tests | pre-review 8,492/8,492 passed, 0 failed/skipped (`20 + 451 + 266 + 4,604 + 3,151`); superseded by final corrections; final candidate rerun delegated to coordinator |
-| repository-safe self-review | final candidate: `git diff --check`, JSON parse, stale-claim scan, zero-residue check, and artifact scanner passed |
+| artifact checksum verification | evidence head: 6/6 repository-safe artifacts matched SHA-256 manifest; manifest does not hash itself |
+| Issue #91 scanner self-test | functional candidate: 118 transformation cases and 5 negative cases passed |
+| repository-safe artifact scans | functional candidate and evidence update: contract 4 files / 472 variants and sprint+script+manifest 5 files / 590 variants; 0 matches |
+| Claude skill mirror check | functional candidate: 5 shared skills matched |
+| solution build | functional candidate: 0 warnings / 0 errors |
+| Playwright Chromium bootstrap | functional candidate: exit 0 |
+| full solution tests | functional candidate: 8,497/8,497 passed, 0 failed/skipped (`20 + 451 + 266 + 4,606 + 3,154`) |
+| repository-safe self-review | evidence head: `git diff --check`, JSON parse, stale-claim scan, zero-residue check, checksum verification, and artifact scanner passed |
 
 The pre-review build, Playwright bootstrap, and 8,492-test full run are retained
 as historical evidence but are not claimed as final-candidate validation. The
-coordinator owns the final exact repository-wide validation after this handoff.
+coordinator completed the final exact repository-wide validation on
+`792f134b91c97efbe4d37aa966581369d6424e78`.
+
+### Candidate and failure ledger
+
+The Issue #92 implementation revision is
+`1de49180c80dfda46334e5dbbae9e4e37d41a235`. Its first post-freeze exact full
+suite completed 8,493 of 8,494 tests and failed the #88-owned
+`RuntimeBackupPlaywrightTests` navigation check after `WaitForURLAsync` timed
+out. The same #88 test blob failed independently in the #94 worktree. The
+owning Issue was reopened; the diagnosis found a Playwright 1.61
+URL/load-state subscription race rather than a runtime-backup product defect.
+The accepted #88 test-only revision
+`672b83d86d83d10cf07a1609fe9bd370ce9aa742` replaced that lifecycle wait with
+the exact web-first URL assertion while retaining the exact heading readiness
+check.
+
+The next #92 candidate
+`e222efc6b0ab0440b161b8a1a2244acc0bc08150` proved the #88 timeout corrected
+but again completed 8,493 of 8,494 tests because
+`RetentionStatusRouteTests.StatusRoute_FailsClosedWhenExposedCatalogFieldsAreNotDiagnosticSafe`
+failed with `ObjectDisposedException` from a direct test SQLite command. The
+#89 owner was reopened. The accepted test-only revision
+`50db4d9f343361f31e42ed684b2ab2828d5fe7b9` pins those direct connections as
+non-pooled and also fixes the independently reproduced committed-fixture
+read/write handle race with read-only fixture connections. Its evidence keeps
+the original `ObjectDisposedException`, the later 441/442 shared-fixture lock
+failure, and the 1/20 overlap reproduction; targeted validation reached
+Retention 444/444 and the exact three-class overlap reached 20/20 runs with
+12/12 in every run.
+
+The immutable Issue #92 functional candidate is
+`792f134b91c97efbe4d37aa966581369d6424e78`. Both accepted corrections are
+ancestors. On that exact clean SHA, the Claude skill mirror check passed for
+five shared skills, build passed with zero warnings and errors, Playwright
+Chromium bootstrap exited zero, and the full solution passed 8,497/8,497 with
+no skipped test. The combined Issue #92/source-capability gate then passed
+27/27.
+
+The first combined sprint/script scanner invocation incorrectly supplied the
+two PowerShell paths as one comma-containing string and failed closed with
+`required_target_missing`. Inspection showed an invocation-shape error, not a
+missing artifact or scanner defect. The corrected array invocation passed for
+five files and 590 variants with zero matches. This failure is not replaced or
+erased by the corrected invocation.
