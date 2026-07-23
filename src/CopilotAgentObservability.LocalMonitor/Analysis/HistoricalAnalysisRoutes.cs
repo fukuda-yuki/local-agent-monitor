@@ -65,7 +65,9 @@ internal static class HistoricalAnalysisRoutes
         app.MapPost($"{ApiPrefix}/evidence/resolve", context => ResolveEvidenceAsync(context, coordinator));
     }
 
-    internal static bool IsPath(PathString path) => path.StartsWithSegments(ApiPrefix);
+    internal static bool IsPath(PathString path) =>
+        path.StartsWithSegments(ApiPrefix)
+        || path.Equals(new PathString("/historical-analysis"));
 
     internal static async Task WriteErrorAsync(HttpContext context, int statusCode, string error)
     {
