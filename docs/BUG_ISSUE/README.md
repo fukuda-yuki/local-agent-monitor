@@ -46,21 +46,21 @@ repository metadata cleanup.
 
 | Card | Feature unit / Aspect | Severity | Status | Plan boundary |
 | --- | --- | --- | --- | --- |
-| [DOC-1A](doc-ux-readability-issues.md#DOC-1A) | Synthetic demo order in docs vs live setup | High | Open | Separate demo trial & live telemetry setup order |
-| [DOC-1B](doc-ux-readability-issues.md#DOC-1B) | Config CLI `success: true` vs real trace arrival | High | Open | Clarify static config vs first-trace arrival verification |
-| [DOC-1C](doc-ux-readability-issues.md#DOC-1C) | UI screenshot demo mode labeling | Medium | Open | Add explicit demo dataset watermark & status badge docs |
-| [DOC-2A](doc-ux-readability-issues.md#DOC-2A) | `user-guide.md` missing Local Monitor images | Medium | Open | Embed Local Monitor overview images in main user-guide portal |
-| [DOC-2B](doc-ux-readability-issues.md#DOC-2B) | `local-monitor.md` end-of-file image dump | Medium | Open | Move images from bottom dump directly below feature sections |
-| [DOC-2C](doc-ux-readability-issues.md#DOC-2C) | README vs user-guide screenshot sync | Medium | Open | Harmonize image selections, captions, & UI versions |
-| [DOC-3A](doc-ux-readability-issues.md#DOC-3A) | PowerShell ExecutionPolicy script block | Medium | Open | Add `-ExecutionPolicy Bypass` commands & corporate environment notes |
-| [DOC-3B](doc-ux-readability-issues.md#DOC-3B) | Port 4320 conflict & VS Code env inheritance | Medium | Open | Add port conflict troubleshooting & terminal scope guidelines |
-| [DOC-3C](doc-ux-readability-issues.md#DOC-3C) | Missing Troubleshooting navigation links | Medium | Open | Add direct links to Troubleshooting guide in README & user-guide |
-| [DOC-4A](doc-ux-readability-issues.md#DOC-4A) | `user-guide.md` TOC & step-by-step structure | Medium | Open | Restructure user-guide portal with TOC (`cc-switch` model) |
-| [DOC-4B](doc-ux-readability-issues.md#DOC-4B) | Task-oriented vs module-oriented layout | Medium | Open | Reorganize files by user goals rather than internal modules |
-| [DOC-4C](doc-ux-readability-issues.md#DOC-4C) | Internal dev jargon leakage in user manual | Medium | Open | Remove internal issue #s & implementation jargon from user guide |
-| [DOC-5A](doc-ux-readability-issues.md#DOC-5A) | AI-like redundant Japanese phrasing | Medium | Open | Refactor "〜することができる/となります" per `humanizer-ja` |
-| [DOC-5B](doc-ux-readability-issues.md#DOC-5B) | Untranslated literal English phrases | Medium | Open | Translate raw English jargon (`reversible setup` etc.) |
-| [DOC-5C](doc-ux-readability-issues.md#DOC-5C) | Style inconsistency (常体/敬体) & passive voice | Medium | Open | Standardize tone to natural polite Japanese (です/ます) |
+| [DOC-1A](doc-ux-readability-issues.md#DOC-1A) | Synthetic demo order in docs vs live setup | High | Fixed | Separate demo trial & live telemetry setup order |
+| [DOC-1B](doc-ux-readability-issues.md#DOC-1B) | Config CLI `success: true` vs real trace arrival | High | Fixed | Clarify static config vs first-trace arrival verification |
+| [DOC-1C](doc-ux-readability-issues.md#DOC-1C) | UI screenshot demo mode labeling | Medium | Fixed | Add explicit demo dataset watermark & status badge docs |
+| [DOC-2A](doc-ux-readability-issues.md#DOC-2A) | `user-guide.md` missing Local Monitor images | Medium | Fixed | Embed Local Monitor overview images in main user-guide portal |
+| [DOC-2B](doc-ux-readability-issues.md#DOC-2B) | `local-monitor.md` end-of-file image dump | Medium | Fixed | Move images from bottom dump directly below feature sections |
+| [DOC-2C](doc-ux-readability-issues.md#DOC-2C) | README vs user-guide screenshot sync | Medium | Fixed | Harmonize image selections, captions, & UI versions |
+| [DOC-3A](doc-ux-readability-issues.md#DOC-3A) | PowerShell ExecutionPolicy script block | Medium | Fixed | Add `-ExecutionPolicy Bypass` commands & corporate environment notes |
+| [DOC-3B](doc-ux-readability-issues.md#DOC-3B) | Port 4320 conflict & VS Code env inheritance | Medium | Fixed | Add port conflict troubleshooting & terminal scope guidelines |
+| [DOC-3C](doc-ux-readability-issues.md#DOC-3C) | Missing Troubleshooting navigation links | Medium | Fixed | Add direct links to Troubleshooting guide in README & user-guide |
+| [DOC-4A](doc-ux-readability-issues.md#DOC-4A) | `user-guide.md` TOC & step-by-step structure | Medium | Fixed | Restructure user-guide portal with TOC (`cc-switch` model) |
+| [DOC-4B](doc-ux-readability-issues.md#DOC-4B) | Task-oriented vs module-oriented layout | Medium | Fixed | Reorganize files by user goals rather than internal modules |
+| [DOC-4C](doc-ux-readability-issues.md#DOC-4C) | Internal dev jargon leakage in user manual | Medium | Fixed | Remove internal issue #s & implementation jargon from user guide |
+| [DOC-5A](doc-ux-readability-issues.md#DOC-5A) | AI-like redundant Japanese phrasing | Medium | Fixed | Refactor "〜することができる/となります" per `humanizer-ja` |
+| [DOC-5B](doc-ux-readability-issues.md#DOC-5B) | Untranslated literal English phrases | Medium | Fixed | Translate raw English jargon (`reversible setup` etc.) |
+| [DOC-5C](doc-ux-readability-issues.md#DOC-5C) | Style inconsistency (常体/敬体) & passive voice | Medium | Fixed | Standardize tone to natural polite Japanese (です/ます) |
 
 ### Commit `15fe4cbf` review cards (active)
 
@@ -70,7 +70,7 @@ repository metadata cleanup.
 | [DOC-6B](doc-ux-readability-review-15fe4cbf.md#DOC-6B) | Still-valid "Sprint7 unconfirmed" caveat deleted, not reworded | High | Fixed | Restore the unconfirmed-status caveat in `telemetry-collection.md` without the `Sprint7` label |
 | [DOC-6C](doc-ux-readability-review-15fe4cbf.md#DOC-6C) | `static-dashboard.md` intro drill-down targets changed beyond wording | Medium | Fixed | Confirm intended content change or restore `raw store` / `sensitive bundle` mentions |
 | [DOC-6D](doc-ux-readability-review-15fe4cbf.md#DOC-6D) | `local-monitor.md` left ~unconverted despite "all user-facing documentation" claim | Medium | Fixed | Apply the same 5 readability patterns to `local-monitor.md`, or scope the claim down |
-| [DOC-6E](doc-ux-readability-review-15fe4cbf.md#DOC-6E) | BUG_ISSUE index still shows DOC-1..5C as Open while cards are marked Fixed | Low | Open (pre-existing) | Sync this README's index table with each card's actual Status |
+| [DOC-6E](doc-ux-readability-review-15fe4cbf.md#DOC-6E) | BUG_ISSUE index still shows DOC-1..5C as Open while cards are marked Fixed | Low | Fixed | Sync this README's index table with each card's actual Status |
 
 ## Active Feature Files
 
