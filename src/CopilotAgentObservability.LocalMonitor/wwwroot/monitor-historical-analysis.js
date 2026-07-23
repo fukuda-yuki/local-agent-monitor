@@ -16,7 +16,7 @@
   const efficiencyResult = byId("historical-analysis-efficiency-result");
   const live = byId("historical-analysis-live");
   const validation = byId("historical-analysis-validation");
-  let preview = null;
+  let previewBinding = null;
   let previewGeneration = 0;
 
   const element = (tag, text, className) => {
@@ -31,6 +31,11 @@
   const exact = value => value === null || value === undefined ? "unavailable" : String(value);
   const lines = id => byId(id).value.split(/\r?\n/u).filter(value => value.length > 0);
   const utc = value => value ? `${value}:00Z` : null;
+  const retainPreviewBinding = value => Object.freeze({
+    extraction_id: value.extraction_id,
+    raw_local_sha256: value.raw_local_sha256,
+    repository_safe_sha256: value.repository_safe_sha256
+  });
 
   const announce = message => {
     live.textContent = message;
@@ -217,7 +222,7 @@
   selectionForm.addEventListener("submit", async event => {
     event.preventDefault();
     clearValidation();
-    preview = null;
+    previewBinding = null;
     previewGeneration += 1;
     const generation = previewGeneration;
     clearProjection();
@@ -231,8 +236,9 @@
         selection: selection()
       });
       if (generation !== previewGeneration) return;
-      preview = value;
+      const binding = retainPreviewBinding(value);
       renderPreview(value);
+      previewBinding = binding;
     } catch (error) {
       if (generation !== previewGeneration) return;
       showValidation(exact(error.code));
@@ -242,8 +248,8 @@
   });
 
   selectionForm.addEventListener("input", () => {
-    const shouldAnnounce = preview !== null || !previewPanel.hidden || previewButton.disabled;
-    preview = null;
+    const shouldAnnounce = previewBinding !== null || !previewPanel.hidden || previewButton.disabled;
+    previewBinding = null;
     previewGeneration += 1;
     clearProjection();
     instructionButton.disabled = true;
@@ -304,7 +310,7 @@
     button.type = "button";
     button.dataset.evidenceReference = token;
     button.addEventListener("click", async () => {
-      if (preview !== binding) return;
+      if (previewBinding !== binding) return;
       button.disabled = true;
       try {
         const response = await post("/evidence/resolve", {
@@ -313,7 +319,7 @@
           repository_safe_sha256: binding.repository_safe_sha256,
           references: [token]
         });
-        if (preview !== binding) return;
+        if (previewBinding !== binding) return;
         const resolution = response.resolutions?.[0];
         const state = exact(resolution?.resolution_state);
         const content = exact(resolution?.content_state);
@@ -330,7 +336,7 @@
         }
         announce(`Evidence ${token}: ${state} · ${content}`);
       } catch (error) {
-        if (preview !== binding) return;
+        if (previewBinding !== binding) return;
         replace(wrapper, element("span", `${token} · ${exact(error.code)}`));
         announce(`Evidence ${token}: ${exact(error.code)}`);
       }
@@ -389,8 +395,8 @@
   };
 
   instructionButton.addEventListener("click", async () => {
-    if (!preview) return;
-    const binding = preview;
+    if (!previewBinding) return;
+    const binding = previewBinding;
     const generation = previewGeneration;
     instructionButton.disabled = true;
     byId("historical-analysis-instruction-state").textContent = "starting";
@@ -439,7 +445,7 @@
       instructionButton.disabled = false;
       instructionButton.focus();
     } finally {
-      instructionButton.disabled = preview === null;
+      instructionButton.disabled = previewBinding === null;
     }
   });
 
@@ -512,8 +518,8 @@
   };
 
   efficiencyButton.addEventListener("click", async () => {
-    if (!preview) return;
-    const binding = preview;
+    if (!previewBinding) return;
+    const binding = previewBinding;
     const generation = previewGeneration;
     efficiencyButton.disabled = true;
     byId("historical-analysis-efficiency-state").textContent = "starting";
@@ -557,7 +563,7 @@
       efficiencyButton.disabled = false;
       efficiencyButton.focus();
     } finally {
-      efficiencyButton.disabled = preview === null;
+      efficiencyButton.disabled = previewBinding === null;
     }
   });
 })();

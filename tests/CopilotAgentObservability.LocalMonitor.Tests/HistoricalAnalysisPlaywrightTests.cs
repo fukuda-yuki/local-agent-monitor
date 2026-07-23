@@ -30,6 +30,22 @@ public sealed class HistoricalAnalysisPlaywrightTests
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
+        await page.AddInitScriptAsync(
+            """
+            (() => {
+              const originalFreeze = Object.freeze;
+              Object.freeze = value => {
+                if (value
+                    && typeof value === "object"
+                    && Object.prototype.hasOwnProperty.call(value, "extraction_id")
+                    && Object.prototype.hasOwnProperty.call(value, "raw_local_sha256")
+                    && Object.prototype.hasOwnProperty.call(value, "repository_safe_sha256")) {
+                  window.__historicalAnalysisRetainedPreviewBinding = JSON.stringify(value);
+                }
+                return originalFreeze(value);
+              };
+            })();
+            """);
         var requests = new ConcurrentQueue<IRequest>();
         page.Request += (_, request) => requests.Enqueue(request);
         await RoutePreview(page);
@@ -86,6 +102,22 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.Locator("#historical-analysis-warnings")).ToContainTextAsync("truncated_before");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeEnabledAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Efficiency 分析を開始" })).ToBeEnabledAsync();
+
+        var retainedBinding = await page.EvaluateAsync<string?>(
+            "() => window.__historicalAnalysisRetainedPreviewBinding ?? null");
+        Assert.NotNull(retainedBinding);
+        Assert.DoesNotContain(RawMarker, retainedBinding, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretMarker, retainedBinding, StringComparison.Ordinal);
+        Assert.DoesNotContain(PathMarker, retainedBinding, StringComparison.Ordinal);
+        using (var binding = JsonDocument.Parse(retainedBinding))
+        {
+            Assert.Equal(
+                ["extraction_id", "raw_local_sha256", "repository_safe_sha256"],
+                binding.RootElement.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(ExtractionId, binding.RootElement.GetProperty("extraction_id").GetString());
+            Assert.Equal(RawSha, binding.RootElement.GetProperty("raw_local_sha256").GetString());
+            Assert.Equal(SafeSha, binding.RootElement.GetProperty("repository_safe_sha256").GetString());
+        }
 
         var previewRequest = requests.Single(request => request.Url.EndsWith("/api/historical-analysis/v1/preview", StringComparison.Ordinal));
         using (var body = JsonDocument.Parse(previewRequest.PostData!))

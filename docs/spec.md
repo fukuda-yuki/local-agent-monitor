@@ -472,7 +472,11 @@ verdict recomputation. Safe-token evidence resolution maps only to the existing
 #53 escaped trace/diagnostics target and distinguishes missing, unresolved, and
 expired. Every response is repository-safe in raw-default and sanitized-only
 postures; normal provider-free composition returns the fixed public
-`provider_unavailable` condition. The surface retains loopback/Host,
+`provider_unavailable` condition. When the current host is
+`--sanitized-only`, preview accepts only an exact
+`selection.sanitized_only=true` request; `false` is rejected as
+`400 invalid_historical_analysis_request` before opening the #72 owner and is
+never silently rewritten. The surface retains loopback/Host,
 same-origin, CSRF-on-POST, JSON-only bounded strict requests, no CORS,
 `Cache-Control: no-store`, escaped inert text, and no browser storage/full
 history. It neither adds a provider nor absorbs import, apply, effect, pricing,

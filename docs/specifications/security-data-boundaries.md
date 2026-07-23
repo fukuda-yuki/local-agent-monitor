@@ -1288,7 +1288,11 @@ It never performs heuristic history lookup and never returns a raw body.
 Raw-default is a validation profile, not authorization to return raw content.
 Both raw-default and `--sanitized-only` responses are repository-safe;
 sanitized-only retains safe preview/status/navigation and preserves unavailable
-or expired state. Browser state, storage, URLs, logs, artifacts, tests, and
+or expired state. A `--sanitized-only` host accepts only an exact
+`selection.sanitized_only=true` historical-analysis preview; `false` is
+rejected as `400 invalid_historical_analysis_request` before the #72 owner
+opens a snapshot or reads descriptors and is never silently rewritten.
+Browser state, storage, URLs, logs, artifacts, tests, and
 repository-safe evidence contain no full raw history, raw descriptors, prompt,
 response, tool body, provider input, local path, credentials, or PII. All
 dynamic text is escaped inert text. This boundary adds no raw analysis,

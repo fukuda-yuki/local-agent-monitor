@@ -15,6 +15,7 @@ internal sealed class HistoricalAnalysisCoordinatorV1 : IAsyncDisposable
     private readonly HistoricalAnalysisEvidenceResolverV1 evidenceResolver = new();
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan efficiencyTimeout;
+    private readonly bool sanitizedOnly;
     private readonly CancellationTokenSource stopping;
     private readonly ConcurrentDictionary<long, Task> instructionTasks = new();
     private readonly ConcurrentDictionary<string, Task> efficiencyTasks = new(StringComparer.Ordinal);
@@ -23,7 +24,7 @@ internal sealed class HistoricalAnalysisCoordinatorV1 : IAsyncDisposable
     private readonly object efficiencyGate = new();
 
     internal HistoricalAnalysisCoordinatorV1(HistoricalEvidenceApplicationServiceV1 evidence)
-        : this(evidence, null, null, CancellationToken.None, null, null, null)
+        : this(evidence, null, null, CancellationToken.None, null, null, null, false)
     {
     }
 
@@ -34,13 +35,15 @@ internal sealed class HistoricalAnalysisCoordinatorV1 : IAsyncDisposable
         CancellationToken applicationStopping,
         IHistoricalEfficiencyExecutorV1? efficiencyExecutor = null,
         TimeProvider? timeProvider = null,
-        TimeSpan? efficiencyTimeout = null)
+        TimeSpan? efficiencyTimeout = null,
+        bool sanitizedOnly = false)
     {
         this.evidence = evidence ?? throw new ArgumentNullException(nameof(evidence));
         this.instructionComposition = instructionComposition;
         this.efficiencyExecutor = efficiencyExecutor ?? DefaultHistoricalEfficiencyExecutorV1.Instance;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.efficiencyTimeout = efficiencyTimeout ?? DefaultEfficiencyTimeout;
+        this.sanitizedOnly = sanitizedOnly;
         if (this.efficiencyTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(efficiencyTimeout));
         stopping = CancellationTokenSource.CreateLinkedTokenSource(applicationStopping);
@@ -65,7 +68,8 @@ internal sealed class HistoricalAnalysisCoordinatorV1 : IAsyncDisposable
             || request.SchemaVersion != HistoricalAnalysisContractsV1.PreviewRequestSchemaVersion
             || request.Selection is null
             || request.Selection.ExplicitSessionIds is null
-            || request.Selection.SourceSurfaces is null)
+            || request.Selection.SourceSurfaces is null
+            || sanitizedOnly && !request.Selection.SanitizedOnly)
             throw new HistoricalAnalysisException(HistoricalAnalysisErrorCodesV1.InvalidRequest);
 
         HistoricalEvidenceExtractionV1 extraction;

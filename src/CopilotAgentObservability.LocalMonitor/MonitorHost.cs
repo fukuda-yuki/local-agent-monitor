@@ -193,7 +193,8 @@ internal static class MonitorHost
             serviceProvider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
             testOptions?.HistoricalEfficiencyExecutor,
             timeProvider,
-            testOptions?.HistoricalEfficiencyTimeout));
+            testOptions?.HistoricalEfficiencyTimeout,
+            sanitizedOnly: options.SanitizedOnly));
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
         var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);
         builder.Services.AddSingleton(proposalApplyService);

@@ -33,6 +33,8 @@ public sealed class HistoricalAnalysisSpecificationTests
             "no browser storage",
             "no combined analyze-all action",
             "no heuristic lookup",
+            "`selection.sanitized_only=false`",
+            "before #72 owner access",
             "future-surface-registry.json",
             "Issue #91",
             "issue-91-validation-handoff.json",
@@ -56,6 +58,18 @@ public sealed class HistoricalAnalysisSpecificationTests
         Assert.Contains("/historical-analysis", specification, StringComparison.Ordinal);
         Assert.Contains("/api/historical-analysis/v1", security, StringComparison.Ordinal);
         Assert.Contains("`invalid_host`", security, StringComparison.Ordinal);
+        Assert.Contains(
+            "`400 invalid_historical_analysis_request`",
+            requirements,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "`selection.sanitized_only=true` request",
+            specification,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "before the #72 owner",
+            security,
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -143,6 +143,26 @@ public sealed class HistoricalAnalysisRouteTests
     }
 
     [Fact]
+    public async Task Preview_SanitizedOnlyHostRejectsRawSelectionBeforeDescriptorCapableOwnerAccess()
+    {
+        using var temp = new MonitorTempDirectory();
+        var source = new InstructionSnapshotSource();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            sanitizedOnly: true,
+            testOptions: QuietOptions(source));
+
+        using var response = await host.Client.SendAsync(PreviewRequest(ValidBody()));
+
+        await AssertError(
+            response,
+            HttpStatusCode.BadRequest,
+            HistoricalAnalysisErrorCodesV1.InvalidRequest);
+        Assert.Equal(0, source.OpenCount);
+        Assert.Equal(0, source.DescriptorReadCount);
+    }
+
+    [Fact]
     public async Task InstructionStart_ProviderFreeHostResolvesBindingBeforeUnavailableWithoutCreatingRun()
     {
         using var temp = new MonitorTempDirectory();
@@ -183,7 +203,7 @@ public sealed class HistoricalAnalysisRouteTests
             temp,
             sanitizedOnly: true,
             testOptions: QuietOptions(new InstructionSnapshotSource(), provider));
-        var preview = await PreviewBinding(host);
+        var preview = await PreviewBinding(host, sanitizedOnly: true);
 
         using var response = await host.Client.SendAsync(InstructionStartRequest(preview));
 
@@ -656,7 +676,7 @@ public sealed class HistoricalAnalysisRouteTests
             temp,
             sanitizedOnly: sanitizedOnly,
             testOptions: QuietOptions(source));
-        var preview = await PreviewBinding(host);
+        var preview = await PreviewBinding(host, sanitizedOnly);
         var sourceReadsAfterPreview = source.ReadCount;
         var references = new[]
         {
@@ -899,10 +919,19 @@ public sealed class HistoricalAnalysisRouteTests
             Assert.Equal(expectedTarget, resolution.GetProperty("target").GetString());
     }
 
-    private static string ValidBody() =>
-        """
-        {"schema_version":"historical-analysis-preview.request.v1","selection":{"repository":"repo-a","workspace":null,"from":null,"to":null,"explicit_session_ids":[],"source_surfaces":[],"task_label":null,"experiment_label":null,"maximum_session_count":50,"sanitized_only":false}}
-        """;
+    private static string ValidBody(bool sanitizedOnly = false)
+    {
+        const string body =
+            """
+            {"schema_version":"historical-analysis-preview.request.v1","selection":{"repository":"repo-a","workspace":null,"from":null,"to":null,"explicit_session_ids":[],"source_surfaces":[],"task_label":null,"experiment_label":null,"maximum_session_count":50,"sanitized_only":false}}
+            """;
+        return sanitizedOnly
+            ? body.Replace(
+                "\"sanitized_only\":false",
+                "\"sanitized_only\":true",
+                StringComparison.Ordinal)
+            : body;
+    }
 
     private static MonitorHostTestOptions QuietOptions(
         IHistoricalEvidenceSnapshotSourceV1? historicalEvidenceSource = null,
@@ -946,9 +975,10 @@ public sealed class HistoricalAnalysisRouteTests
     }
 
     private static async Task<(string ExtractionId, string RawLocalSha256, string RepositorySafeSha256)> PreviewBinding(
-        RunningMonitorHost host)
+        RunningMonitorHost host,
+        bool sanitizedOnly = false)
     {
-        using var response = await host.Client.SendAsync(PreviewRequest(ValidBody()));
+        using var response = await host.Client.SendAsync(PreviewRequest(ValidBody(sanitizedOnly)));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
         return (
@@ -1260,13 +1290,21 @@ public sealed class HistoricalAnalysisRouteTests
         : IHistoricalEvidenceSnapshotSourceV1
     {
         private static readonly Guid SessionId = Guid.Parse("018f0000-0000-7000-8000-000000000001");
+        internal int OpenCount { get; private set; }
+        internal int DescriptorReadCount { get; private set; }
 
         public ValueTask<IHistoricalEvidenceSnapshotLeaseV1> OpenSnapshotAsync(
             HistoricalEvidenceSelectionV1 selection,
-            CancellationToken cancellationToken) =>
-            ValueTask.FromResult<IHistoricalEvidenceSnapshotLeaseV1>(new Lease(includeRetryDriver));
+            CancellationToken cancellationToken)
+        {
+            OpenCount++;
+            return ValueTask.FromResult<IHistoricalEvidenceSnapshotLeaseV1>(
+                new Lease(this, includeRetryDriver));
+        }
 
-        private sealed class Lease(bool includeRetryDriver) : IHistoricalEvidenceSnapshotLeaseV1
+        private sealed class Lease(
+            InstructionSnapshotSource owner,
+            bool includeRetryDriver) : IHistoricalEvidenceSnapshotLeaseV1
         {
             public string SnapshotId => "snapshot-instruction-v1";
             public IReadOnlyList<HistoricalSessionMetadataV1> Sessions =>
@@ -1304,6 +1342,7 @@ public sealed class HistoricalAnalysisRouteTests
                 bool includeDescriptors,
                 CancellationToken cancellationToken)
             {
+                if (includeDescriptors) owner.DescriptorReadCount++;
                 List<HistoricalEvidenceGroupDraftV1> groups =
                 [
                     new(
