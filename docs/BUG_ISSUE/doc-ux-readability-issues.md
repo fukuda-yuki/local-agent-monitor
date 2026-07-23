@@ -15,9 +15,9 @@ Source of truth checked: `docs/requirements.md`, `docs/spec.md`, `docs/specifica
 | **[DOC-2A](#DOC-2A)** | Image Discrepancy | `docs/user-guide.md:99-109` | Medium | Fixed | `user-guide.md` ポータルに Local Monitor の画像が1枚もなく、旧 Static Dashboard の画像のみで README とちぐはぐ |
 | **[DOC-2B](#DOC-2B)** | Image Discrepancy | `docs/user-guide/local-monitor.md:510-655` | Medium | Fixed | 画像が長大ドキュメントの最末尾に一括配置され、本文（各機能説明箇所）と完全に切断されている |
 | **[DOC-2C](#DOC-2C)** | Image Discrepancy | `README.md` vs `docs/user-guide/local-monitor.md` | Medium | Fixed | README と user-guide 間で掲載画面（waterfall, error-mode, inspector）やキャプション・説明順序が非対称 |
-| **[DOC-3A](#DOC-3A)** | Troubleshooting | `README.md:171-176`, `docs/getting-started.md` | Medium | Open | Windows / PowerShell の `ExecutionPolicy`（企業ポリシーブロック）時の解決手順（`-ExecutionPolicy Bypass`）の欠落 |
-| **[DOC-3B](#DOC-3B)** | Troubleshooting | `README.md`, `docs/user-guide.md` | Medium | Open | ポート4320競合（Address in use）、VS Code環境変数非引き継ぎ、プロキシ等の企業環境トラブル対策の欠落 |
-| **[DOC-3C](#DOC-3C)** | Troubleshooting | `README.md:229-241`, `docs/user-guide.md` | Medium | Open | ドキュメント一覧やナビゲーションに「トラブルシューティング」項目およびリンクが一切存在しない |
+| **[DOC-3A](#DOC-3A)** | Troubleshooting | `README.md:171-176`, `docs/getting-started.md` | Medium | Fixed | Windows / PowerShell の `ExecutionPolicy`（企業ポリシーブロック）時の解決手順（`-ExecutionPolicy Bypass`）の欠落 |
+| **[DOC-3B](#DOC-3B)** | Troubleshooting | `README.md`, `docs/user-guide.md` | Medium | Fixed | ポート4320競合（Address in use）、VS Code環境変数非引き継ぎ、プロキシ等の企業環境トラブル対策の欠落 |
+| **[DOC-3C](#DOC-3C)** | Troubleshooting | `README.md:229-241`, `docs/user-guide.md` | Medium | Fixed | ドキュメント一覧やナビゲーションに「トラブルシューティング」項目およびリンクが一切存在しない |
 | **[DOC-4A](#DOC-4A)** | Structure | `docs/user-guide.md:1-121` | Medium | Open | `cc-switch` 理想モデルのような全体目次（TOC）やステップバイステップの案内構造が存在しない |
 | **[DOC-4B](#DOC-4B)** | Structure | `docs/user-guide/*.md` (6 files) | Medium | Open | ユーザーの目的軸ではなく内部実装モジュール軸（Raw Data Loop, Candidate Loop 等）で分断されている |
 | **[DOC-4C](#DOC-4C)** | Structure | `README.md:186`, `docs/user-guide.md:40-75` | Medium | Open | マニュアル内に内部実装・開発者用語（`change_set_id`, `Issue #69 の責務`, OTLP carrier等）が混入している |

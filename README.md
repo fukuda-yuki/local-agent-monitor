@@ -170,11 +170,14 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 Config CLI の復元可能なセットアップ（reversible setup）は、変更内容を事前にマスキング済み計画（redacted plan）として保存し、返された `change_set_id` を指定した場合にのみ適用されます。
 
 ```powershell
-pwsh scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
-pwsh scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
-pwsh scripts\local-monitor\setup.ps1 status --adapter github-copilot
-pwsh scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
+pwsh -ExecutionPolicy Bypass scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
+pwsh -ExecutionPolicy Bypass scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
+pwsh -ExecutionPolicy Bypass scripts\local-monitor\setup.ps1 status --adapter github-copilot
+pwsh -ExecutionPolicy Bypass scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
 ```
+
+> [!TIP]
+> Windows 環境で PowerShell スクリプトの実行がブロックされる場合は、上記のように `-ExecutionPolicy Bypass` を付与して実行してください。詳細は [トラブルシューティングガイド](docs/user-guide/troubleshooting.md) を参照してください。
 
 Windows x64 Release ZIP では、同じ引数を `.\scripts\setup.ps1` に渡します。ZIP 内の self-contained Config CLI を直接使うため、.NET SDK / Runtime は不要です。各コマンドは stdout に 1 個の `setup.v1` JSON を返します。
 
@@ -228,6 +231,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 | ドキュメント | 内容 |
 | --- | --- |
 | [利用者向け詳細ガイド](docs/user-guide.md) | セットアップから各機能の使い方まで |
+| [トラブルシューティング](docs/user-guide/troubleshooting.md) | PowerShell 実行権限・ポート競合・環境変数等のトラブル対応 |
 | [要件定義](docs/requirements.md) | 製品要件の定義 |
 | [技術仕様索引](docs/spec.md) | 実装仕様へのインデックス |
 | [実装仕様](docs/specifications/README.md) | 各コンポーネントの詳細仕様 |

@@ -108,6 +108,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decisio
 ## 7. 次に読むもの
 
 - [利用者向け詳細ガイド](user-guide.md)
+- [トラブルシューティングガイド](user-guide/troubleshooting.md)
 - [要件定義](requirements.md)
 - [技術仕様索引](spec.md)
 - [実装仕様](specifications/README.md)
