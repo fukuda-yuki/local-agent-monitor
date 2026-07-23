@@ -99,9 +99,10 @@ so this work leaves that file unchanged. That registry contains only
 its schema.
 
 The Issue #91 matrix contract also forbids evidence against a dirty branch or
-moving name. Because this lane is explicitly no-commit, it does not fabricate a
-`final_validation_sha`. If the integration owner decides a standalone domain
-row is required before #95, the proposed row is:
+moving name. #94 therefore records its exact clean integrated candidate
+`7e688fecdeecd81013f3c9097719d45e412245f4` in the sprint evidence without
+inventing a future-registry activation or an unowned matrix row. If a later
+matrix owner decides a standalone domain row is required, the proposed row is:
 
 - row ID: `91-P-094`;
 - surface: `pricing-estimation-domain`;
