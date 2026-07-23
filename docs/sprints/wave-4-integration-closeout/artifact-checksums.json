@@ -1,0 +1,39 @@
+{
+  "schema_version": "wave-4-artifact-checksums.v1",
+  "candidate_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+  "evidence_execution_sha": "bbba6cf79b4e6da1ee1363edd73007ece476c036",
+  "algorithm": "SHA-256",
+  "verification_date": "2026-07-24",
+  "artifacts": [
+    { "path": "docs/sprints/issue-75-historical-analysis/README.md", "sha256": "4720522877028069b5e1941e59974c1f00af596ac7e3db76a005c1f52de0cbc0" },
+    { "path": "docs/sprints/issue-75-historical-analysis/validation-matrix.json", "sha256": "608897421b3a92bcb8f987af15ef385ac1569911b5c90bc11073484fcac7e514" },
+    { "path": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md", "sha256": "e168bf620d8e6a8b99847997e16e9b7db8d7e0d5ec90a89ade3a4595d8ed6e84" },
+    { "path": "docs/sprints/issue-75-historical-analysis/evidence-attestation.json", "sha256": "24fd2eb1c633ec2780b506ff7b6e3b095f07004689733f31b4484cc7441538c5" },
+    { "path": "docs/specifications/contracts/historical-analysis/v1/issue-91-validation-handoff.json", "sha256": "73517a06fb6f890b9141493166c10c72c1ba0fe30a2e8e515fdbe156c5ec33ad" },
+    { "path": "docs/sprints/issue-79-historical-import/validation-matrix.json", "sha256": "46e920fdc1aee341b008c0733e2e2b82879ca145768007d700f18dcebd361f3b" },
+    { "path": "docs/sprints/issue-79-historical-import/final-evidence.md", "sha256": "a28861683105c6364692e9acad432785210bf80144be3f3413f867dbc97b489e" },
+    { "path": "docs/specifications/contracts/historical-import-workflow/v1/issue-91-validation-handoff.json", "sha256": "60539936cfb7b53e98f312d657ac8378d1a41afbd9ac99ef81f1a8b6b2641dbd" },
+    { "path": "docs/sprints/issue-84-alert-center/README.md", "sha256": "2d0473138aa34b63fddcd9950fe82c8d66ebc261aeb79a760bba2c15a160f407" },
+    { "path": "docs/sprints/issue-84-alert-center/validation-matrix.json", "sha256": "fc6a931dfd4cac09880b6f27cba0b11d70de8ff288d282949b5ff2b68db25109" },
+    { "path": "docs/sprints/issue-84-alert-center/milestones/M1-alert-center/live-validation.md", "sha256": "ce84efcc6e16365cd425439d763f233ad05ab3481199d0d737ace889d1919721" },
+    { "path": "docs/sprints/issue-85-sanitized-export/validation-matrix.json", "sha256": "918eec1da84c815a5dccbde00b427cf2759f265071cb315e18e5e125e864c031" },
+    { "path": "docs/sprints/issue-85-sanitized-export/milestones/M1-sanitized-evidence-export/review.md", "sha256": "7c9fb5a60be93e45170e9861b00869d6f13ee6438f7bf1c0544b7788e1c90a8f" },
+    { "path": "docs/specifications/contracts/sanitized-evidence/v1/issue-91-validation-handoff.json", "sha256": "920caac9fca3efaae154c72e3244aa9057656219f270add529cc0ee5f301042e" },
+    { "path": "docs/sprints/issue-86-sanitized-import/validation-matrix.json", "sha256": "4b0895ea745d47d5f07949b76e73154809ca66d2f879e3324eb5c503e8167a24" },
+    { "path": "docs/sprints/issue-86-sanitized-import/final-evidence.md", "sha256": "84c0be0c56fdb3dd1daccbca454e7c68e141d1681bb7be857bb4f51d9eb6c8cb" },
+    { "path": "docs/sprints/issue-87-raw-replay/README.md", "sha256": "b93db02c1b85adf6d0fb165fdba806b4b9d48e262ead60dcefced284e409134d" },
+    { "path": "docs/sprints/issue-87-raw-replay/validation-matrix.json", "sha256": "c519b784677273bd29f66815fd2bc6d73051b6cb6d5a14b7972ab9eee245160b" },
+    { "path": "docs/specifications/contracts/raw-local-replay/v1/issue-91-validation-handoff.json", "sha256": "10aa20cc3d6d5876cd10e818f545f4e6fd82157cd8bf4809af99738f583482e7" },
+    { "path": "docs/sprints/issue-88-backup-restore/README.md", "sha256": "f06060b556ef270d812e39701f24a88fadb5e502bb8e511b8d695cead1c42312" },
+    { "path": "docs/sprints/issue-88-backup-restore/validation-matrix.json", "sha256": "8b19231a37a75301c28e2f153fcd823e472f6cc05f882d2d22298b31433052cd" },
+    { "path": "docs/specifications/contracts/runtime-backup/v1/issue-91-validation-handoff.json", "sha256": "ed6d9ce13aa2eb2daf033dd85eca4d3ed7e97516a3240b6727f3dbdfb0317278" },
+    { "path": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json", "sha256": "59934b3df0882177e1c6e879f8c82c3dd9469a014ca2e09ee47e36cc0bc6362a" }
+  ],
+  "canonical_checks": {
+    "issue_75_attested_files": 4,
+    "issue_79_session_v10_sha256": "cdcb1a87eeac8550281ab12825c2a297941c74b5574f25ba99793004d838a60d",
+    "issue_85_request_sha256": "d42a8a9bad48b9b2b970c8e3e70f6ce9bc97e8d7801bf9667ddd02033b8bcc35",
+    "issue_85_zip_sha256": "cfa37600ed5973c295d8920679d9dd99de9c669b4cdb77140957b35548f23769",
+    "issue_86_migration_fingerprint": "6f6ddfa063bc69f874b7540d1a0b1c9ebc8e5180f49b3a6f23220998606f9a42"
+  }
+}
