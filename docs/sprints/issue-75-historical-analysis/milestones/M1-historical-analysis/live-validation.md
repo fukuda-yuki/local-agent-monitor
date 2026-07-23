@@ -10,7 +10,9 @@ path, or content-enabled capture output.
 | --- | --- |
 | Wave 4 kickoff | `2df115682f0e280d020c04b4936968d4602f623c` |
 | Pre-freeze activation | `da016c581e89dc3902e6e0332b618252d5028481` |
-| Functional candidate | `23c5212e0bf0bf05885930974e53d051d731e117` |
+| Functional candidate | `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3` |
+| Superseded functional candidate | `23c5212e0bf0bf05885930974e53d051d731e117` |
+| Superseded integrated candidate | `0c67e185dd0d72c33b6ff3bf661b24e414fc3739` |
 | #72 repair source / integration | `e9bc3a7bb6feb5bdefa084dcace420f19670fd1f` / `23c5212e0bf0bf05885930974e53d051d731e117` |
 | Date / OS | 2026-07-23 / Windows x64 |
 | Browser | Repository-local Playwright Chromium and headless Chromium |
@@ -32,16 +34,16 @@ safe browser state.
 
 Results at the exact functional candidate:
 
-- handoff-declared 13-filter gate: Local Monitor 278/278 and
+- handoff-declared 13-filter gate: Local Monitor 279/279 and
   InstructionFindings 20/20, zero failed or skipped;
 - Historical Analysis Playwright matrix: 7/7;
 - Issue #75/#91/specification contract gate: 15/15;
 - production historical evidence class: 33/33;
 - solution build: zero warnings and zero errors;
 - Playwright Chromium bootstrap: passed;
-- final full solution: 8485/8485, zero failed or skipped —
+- final full solution: 8486/8486, zero failed or skipped —
   InstructionFindings 20, Alerts 451, Doctor 266, Config CLI 4598, and Local
-  Monitor 3150.
+  Monitor 3151.
 
 The Playwright matrix launches real loopback HTTP hosts and exercises the
 compiled page and JavaScript against safe multi-Session projections. It is a
@@ -50,10 +52,16 @@ interoperability.
 
 ## `91-S-075` — security, accessibility, and no-leak gate
 
-The candidate retains loopback Host validation, same-origin and bounded-body
-guards, no-store responses, strict DTOs, raw/sanitized separation, exact owner
-pairing, missing/unresolved/expired distinctions, inert text insertion,
-keyboard order, focus restoration, and polite live-region announcements.
+The corrected candidate retains loopback Host validation, same-origin and
+bounded-body guards, no-store responses, strict DTOs, raw/sanitized separation,
+exact owner pairing, missing/unresolved/expired distinctions, inert text
+insertion, keyboard order, focus restoration, and polite live-region
+announcements. A sanitized-only host now rejects
+`selection.sanitized_only=false` as
+`400 invalid_historical_analysis_request` before the #72 owner opens a snapshot
+or reads a descriptor; the server does not rewrite the closed selection. The
+browser stores only a frozen `extraction_id`, `raw_local_sha256`, and
+`repository_safe_sha256` binding after transient preview rendering.
 
 The Issue #91 scanner self-test passed 118 transformation cases and 5 negative
 cases. The installed Issue #75 handoff produced 118 generated variants with
@@ -126,6 +134,34 @@ with `NETSDK1004` because five projects had not yet produced restore assets.
 The exact required build with restore then passed with zero warnings and zero
 errors. The failed precondition attempt is not represented as validation
 success.
+
+After the first #75/#48 closeout, an independent final safety review rejected
+the `91-S-075` claim at integrated candidate
+`0c67e185dd0d72c33b6ff3bf661b24e414fc3739`. It found that the coordinator
+forwarded caller-controlled `selection.sanitized_only=false` on a
+sanitized-only host and that the browser assigned the complete preview
+response to persistent closure state. #75 and dependent parent #48 were
+reopened, and that candidate and its prior closeout claim were explicitly
+superseded.
+
+Before production changes, the two new regressions both failed against the old
+implementation: the route returned `200` instead of the fixed `400`, and the
+runtime browser binding observation was absent because no bounded projection
+was retained. Candidate `e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3`
+binds the immutable host posture into the coordinator, rejects before owner
+access, and retains only the exact three-field browser binding. The two
+regressions then passed 2/2; the settled Historical Analysis gate passed 77/77,
+route plus Playwright passed 47/47, specification plus coordinator passed
+25/25, and two independent reviews reported C0/I0/M0. The required build,
+bootstrap, full suite, and all focused #75 gates were then rerun at the new
+candidate with the results above.
+
+The first corrected-evidence scan invocation supplied three comma-delimited
+paths as one PowerShell string and returned
+`scan_result=ERROR reason=required_target_missing`. No artifact was missing;
+the command shape was wrong. The same canonical scanner was rerun with an
+explicit three-element path array and passed with 3 files, 354 variants, and
+zero matches. The failed invocation is not represented as a scanner pass.
 
 ## Candidate validation commands
 

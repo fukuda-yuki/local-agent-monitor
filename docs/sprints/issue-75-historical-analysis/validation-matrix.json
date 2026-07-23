@@ -1,7 +1,7 @@
 {
   "schema_version": "validation-matrix.v1",
   "matrix_prep_sha": "da016c581e89dc3902e6e0332b618252d5028481",
-  "final_validation_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+  "final_validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
   "inventory_date": "2026-07-23",
   "environment_boundary": "Windows x64 with production component stores over disposable SQLite databases, loopback-only test hosts, sanitized synthetic multi-Session metadata, and repository-local Playwright Chromium; no genuine provider or content-enabled capture is claimed.",
   "active_rows": [
@@ -24,7 +24,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "23c5212e0bf0bf05885930974e53d051d731e117",
+        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
         "historical_analysis": "historical-analysis.v1",
         "historical_evidence": "historical-evidence.v1",
         "instruction_handoff": "instruction-finding-handoff.v1",
@@ -38,14 +38,14 @@
           "compatibility_basis": "Candidate-pinned production-store, route, orchestration, persistence, contract, and Chromium tests exercise raw-default and sanitized-only postures with safe synthetic multi-Session metadata."
         }
       ],
-      "actual_result": "The exact candidate passed the 13-filter handoff gate (278 Local Monitor and 20 InstructionFindings tests), the 7-case Historical Analysis Playwright matrix, the 33-case production evidence class, build with zero warnings/errors, and the final full solution with 8485/8485 tests and zero skips.",
+      "actual_result": "The corrected exact candidate passed the 13-filter handoff gate (279 Local Monitor and 20 InstructionFindings tests), the 7-case Historical Analysis Playwright matrix, the 33-case production evidence class, build with zero warnings/errors, and the final full solution with 8486/8486 tests and zero skips.",
       "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #75 historical analysis UI",
-      "validation_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
       "validation_date": "2026-07-23",
       "environment_boundary": "Exact candidate on Windows x64 using disposable production-component databases, loopback HTTP hosts, safe deterministic data, and headless repository Chromium."
     },
@@ -68,7 +68,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "23c5212e0bf0bf05885930974e53d051d731e117",
+        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
         "secret_corpus": "validation-secret-corpus.v1",
         "browser": "repository Playwright Chromium"
       },
@@ -80,14 +80,14 @@
           "compatibility_basis": "Candidate-pinned HTTP, component, and Chromium cases cover Host/origin/body guards, no-store responses, strict DTOs, inert text, keyboard/live-region behavior, exact resolution, and scanner detection."
         }
       ],
-      "actual_result": "The exact candidate passed the focused contract/browser/security gates and final full suite; the Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases, and the installed handoff artifact produced 118 variants with zero matches.",
+      "actual_result": "The corrected exact candidate rejects raw-capable preview selection before #72 owner access on a sanitized-only host and retains only the frozen three-field browser binding. It passed the focused contract/browser/security gates and final full suite; the Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases, and the installed handoff artifact produced 118 variants with zero matches.",
       "classification": "passed",
       "severity": "none",
       "blocker": null,
       "retry_condition": null,
       "unverified_capability": null,
       "owner": "Issue #75 historical analysis UI",
-      "validation_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
       "validation_date": "2026-07-23",
       "environment_boundary": "Repository-safe synthetic values, temporary databases, loopback hosts, committed contracts, and headless Chromium; no user content, credentials, or sensitive local paths were used."
     },
@@ -110,7 +110,7 @@
       "applicability": "applicable",
       "applicability_reason": null,
       "versions": {
-        "candidate": "23c5212e0bf0bf05885930974e53d051d731e117",
+        "candidate": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
         "provider_source_tuple": "not-available",
         "content_authorization": "not-authorized"
       },
@@ -129,7 +129,7 @@
       "retry_condition": "Obtain separate content-access authorization and promote an exact reviewed provider/source/version multi-Session tuple, then freeze a new candidate and run provider execution, canonical receipt readback, exact drill-down, and repository-safe leak scanning.",
       "unverified_capability": "Genuine provider-backed instruction findings and efficiency evidence across an exact reviewed multi-Session dataset.",
       "owner": "Issue #75 historical analysis UI with the source-compatibility and provider owners",
-      "validation_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+      "validation_sha": "e2c2e2d5f80d26f8921e9b7c6b1ee8396e79a2c3",
       "validation_date": "2026-07-23",
       "environment_boundary": "External authorization and reviewed-source boundary only; no provider prompt, response, tool payload, credential, raw record, or content-enabled capture was produced."
     }
