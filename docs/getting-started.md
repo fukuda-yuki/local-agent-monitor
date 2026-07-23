@@ -1,11 +1,11 @@
-# Getting Started
+# Getting Started (スターティングガイド)
 
-スターティングガイド。
-詳しい利用者向け説明は [docs/user-guide.md](user-guide.md) を参照する。
+Copilot Agent Observability のクイックスタートガイドです。  
+より詳しい説明は [利用者向け詳細ガイド (user-guide.md)](user-guide.md) を参照してください。
 
 ## 1. Local Ingestion Monitor を起動してリアルタイム観測を開始する（推奨）
 
-Docker Desktop や外部サービスなしで VS Code Copilot Chat / GitHub Copilot CLI の
+Docker Desktop や外部サービスを使わずに、VS Code Copilot Chat や GitHub Copilot CLI の
 テレメトリをリアルタイムに収集・可視化できます。
 
 **ステップ A — モニターを起動する：**
@@ -52,9 +52,9 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 
 `tmp\` はローカルの試行用出力であるため、コミットには含めません。
 
-## 3. Live Trace Review を試す（Langfuse）
+## 3. Live Trace Review を試す（Langfuse 連携）
 
-Live trace を確認する場合は `docker-desktop-langfuse` profile を使い、Langfuse self-host をローカルで起動して client を OTLP HTTP で Langfuse に送る。
+リアルタイムトレースを Langfuse で確認する場合は `docker-desktop-langfuse` プロファイルを使用し、ローカルで起動した Langfuse へ OTLP HTTP で送信します。
 
 代表コマンド:
 
@@ -64,25 +64,25 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-copilot
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-app-config
 ```
 
-Langfuse key、Base64 authorization header、secret は repository に保存しない。
-検証には synthetic data または公開してよい検証用 data だけを使う。
+※ Langfuse の API キーや認証ヘッダー、シークレット情報はリポジトリへコミットしないでください。
 
-## 4. Collection Profile を選ぶ
+## 4. Telemetry Collection Profile を選択する
 
-Collection profile は telemetry routing mode を表す。
+コレクションプロファイル（`CAO_COLLECTION_PROFILE`）はテレメトリのルーティングモードを指定します。
 
 ```powershell
-$env:CAO_COLLECTION_PROFILE="raw-only"
+$env:CAO_COLLECTION_PROFILE="raw-local-receiver"
 ```
 
-最小 profile は `raw-only`、標準 full profile は `docker-desktop-langfuse`。
-詳細は [collection profile specification](specifications/interfaces/collection-profiles.md) を参照する。
+最小構成は `raw-only`、標準のフル機能構成は `docker-desktop-langfuse` です。  
+詳細は [コレクションプロファイル仕様書](specifications/interfaces/collection-profiles.md) を参照してください。
 
-WARNING: `remote-managed-langfuse` と `remote-managed-collector` は、送信前に access control、retention、削除方法、masking / redaction、利用者周知または同意、identity handling、credential handling を決める必要がある。この repository は remote / shared endpoint の利用者同意 workflow を実装しない。
+> [!CAUTION]
+> `remote-managed-langfuse` および `remote-managed-collector` はリモートサーバーへのデータ送信となります。社内ポリシーや同意設定を確認のうえ利用してください。
 
 ## 5. Raw Data Loop を試す
 
-saved raw OTLP JSON がある場合は SQLite raw store に取り込み、normalized measurement dataset を生成する。
+保存された raw OTLP JSON がある場合は、SQLite raw store に取り込んで集計用データセットを生成できます。
 
 ```powershell
 New-Item -ItemType Directory -Force data,tmp\raw-loop | Out-Null
@@ -90,11 +90,11 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- ingest-raw tests
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --csv tmp\raw-loop\measurements.csv --json tmp\raw-loop\measurements.json
 ```
 
-`data\raw-store.db`、raw payload、一時 CSV / JSON は local runtime data として扱い、commit しない。
+`data\raw-store.db` および一時出力ファイルはローカル実行用データのため、コミット対象外です。
 
-## 6. Diagnosis / Improvement Support を試す
+## 6. 診断・改善提案ループを試す
 
-Synthetic diagnosis input から improvement proposal、evaluation、human decision template を生成する。
+合成データから失敗傾向の診断、改善提案、評価結果、判断テンプレートを自動生成します。
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- validate-diagnoses tests\CopilotAgentObservability.ConfigCli.Tests\TestData\m5-diagnoses.synthetic.json --json tmp\raw-loop\validated-diagnoses.json
@@ -103,7 +103,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- evaluate-improve
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-decision-template tmp\raw-loop\evaluations.json --json tmp\raw-loop\decision-template.json
 ```
 
-この loop は repository を自動修正しない。patch / diff / commit / push / pull request は生成しない。
+※ この分析ループはリポジトリのコードやファイルを自動修正・コミットしません。
 
 ## 7. 次に読むもの
 
