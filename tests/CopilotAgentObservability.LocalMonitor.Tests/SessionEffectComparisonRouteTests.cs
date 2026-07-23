@@ -245,7 +245,7 @@ public sealed class SessionEffectComparisonRouteTests
         await using var fixture = await CreateComparisonFixtureAsync(temp);
         var pre = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "pre", index, "expected", 1000)).ToArray();
         var post = Enumerable.Range(0, 3).Select(index => InsertComparableSession(temp.DatabasePath, "post", index, "expected", 1000)).ToArray();
-        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}"))
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
         {
             connection.Open(); using var command = connection.CreateCommand();
             command.CommandText = "UPDATE improvement_proposals SET revision=2 WHERE proposal_id=$id;";
@@ -508,7 +508,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static long Scalar(string databasePath, string sql)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         return (long)command.ExecuteScalar()!;
     }
@@ -568,7 +568,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static void InsertPendingApplication(string databasePath, Guid applyId, string operationKind)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO proposal_apply_pending(apply_id,draft_id,proposal_id,root_id,actor_kind,file_count,operation_kind,recorded_at) SELECT a.apply_id,a.draft_id,d.proposal_id,d.root_id,'local_user',(SELECT COUNT(*) FROM proposal_apply_files f WHERE f.draft_id=d.draft_id),$kind,'2026-07-12T00:00:00+00:00' FROM proposal_applies a JOIN proposal_apply_drafts d ON d.draft_id=a.draft_id WHERE a.apply_id=$id;";
         command.Parameters.AddWithValue("$id", applyId.ToString("D")); command.Parameters.AddWithValue("$kind", operationKind); command.ExecuteNonQuery();
@@ -576,7 +576,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static void ExecuteSql(string databasePath, string sql, Guid id, params (string Name, string Value)[] values)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value);
@@ -585,7 +585,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static string? Text(string databasePath, string sql, Guid id)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         return command.ExecuteScalar() as string;
@@ -616,7 +616,7 @@ public sealed class SessionEffectComparisonRouteTests
         applied.EnsureSuccessStatusCode();
         using var applyJson = JsonDocument.Parse(await applied.Content.ReadAsStringAsync());
         var applyId = applyJson.RootElement.GetProperty("apply_id").GetGuid();
-        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath}"))
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
         {
             connection.Open(); using var command = connection.CreateCommand();
             command.CommandText = "UPDATE proposal_applies SET created_at='2026-01-02T00:00:00+00:00' WHERE apply_id=$id;";
@@ -630,7 +630,7 @@ public sealed class SessionEffectComparisonRouteTests
         var id = Guid.CreateVersion7();
         var started = side == "pre" ? DateTimeOffset.Parse("2026-01-01T00:00:00Z").AddMinutes(index) : DateTimeOffset.Parse("2026-01-03T00:00:00Z").AddMinutes(index);
         var ended = started.AddMilliseconds(durationMilliseconds);
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
@@ -654,7 +654,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static void InsertObjective(string databasePath, Guid sessionId, string result, string severity)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand();
         var runId = Guid.CreateVersion7();
         command.CommandText = "INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,started_at,ended_at,input_tokens,output_tokens,total_tokens,status) VALUES($run,$session,NULL,NULL,'trace',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'completed'); INSERT INTO objective_evaluations(objective_evaluation_id,session_id,run_id,trace_id,result,severity,evaluator_id,evaluator_version,criterion_id,case_key,recorded_at) VALUES($id,$session,$run,'trace',$result,$severity,'eval','v1','quality','case','2026-01-03T00:00:00+00:00');";
@@ -698,7 +698,7 @@ public sealed class SessionEffectComparisonRouteTests
 
     private static void InsertRecommendedProposal(string databasePath, Guid proposalId)
     {
-        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath}");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($id,'recommended','skill','fixture','fixture','fixture','fixture','fixture','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00');";
         command.Parameters.AddWithValue("$id", proposalId.ToString("D"));

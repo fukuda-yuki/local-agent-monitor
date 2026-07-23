@@ -241,7 +241,7 @@ public sealed class RetentionMutationRouteTests
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: TestOptions());
         var workflowKey = WorkflowKey(43);
         var token = await IssueMutationTokenAsync(host, sessionId, workflowKey);
-        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
         {
             connection.Open();
             using var command = connection.CreateCommand();
@@ -303,7 +303,7 @@ public sealed class RetentionMutationRouteTests
         using var response = await SendJsonAsync(host, HttpMethod.Post, "/api/retention/v1/previews", PreviewJson(sessionId), WorkflowKey(50));
         await AssertErrorAsync(response, HttpStatusCode.RequestEntityTooLarge, RetentionMutationErrorCodes.TargetLimitExceeded);
 
-        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM retention_mutation_previews;";
@@ -331,7 +331,7 @@ public sealed class RetentionMutationRouteTests
 
     private static string ReadItemId(MonitorTempDirectory temp)
     {
-        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT item_id FROM retention_items WHERE store_kind='session_event_content';";
@@ -340,7 +340,7 @@ public sealed class RetentionMutationRouteTests
 
     private static void SetState(MonitorTempDirectory temp, string itemId, string state, bool denied)
     {
-        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE retention_items SET state=$state,read_denied_at=$denied,queued_at=$denied WHERE item_id=$item_id;";

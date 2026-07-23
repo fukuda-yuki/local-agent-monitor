@@ -748,6 +748,32 @@ public sealed class RuntimeBackupArchiveTests
     }
 
     [Fact]
+    public void Startup_bounds_owned_transient_markers_without_counting_unrelated_siblings()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("value");
+        for (var index = 0; index <= RuntimeBackupLimits.MaximumInventoryItems; index++)
+            File.WriteAllText(Path.Combine(temp.DirectoryPath, $"operator-{index:D4}.tmp"), "unrelated");
+
+        var unrelated = new SqliteRuntimeBackupService(temp.TimeProvider).Initialize(temp.DatabasePath);
+
+        Assert.True(unrelated.Success, unrelated.ErrorCode);
+
+        for (var index = 0; index <= RuntimeBackupLimits.MaximumInventoryItems; index++)
+        {
+            var raw = Path.Combine(temp.DirectoryPath, $".runtime-backup-{index:x32}.partial");
+            File.WriteAllText(raw, "raw-private-bytes");
+            File.WriteAllText(raw + ".owner.v1", "runtime-backup-transient-owner.v1\n");
+        }
+
+        var overLimit = new SqliteRuntimeBackupService(temp.TimeProvider).Initialize(temp.DatabasePath);
+
+        Assert.False(overLimit.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.SnapshotStoreUnavailable, overLimit.ErrorCode);
+        Assert.True(File.Exists(Path.Combine(temp.DirectoryPath, ".runtime-backup-00000000000000000000000000000000.partial")));
+    }
+
+    [Fact]
     public void Next_publication_recovers_owned_partial_and_inspection_stage_without_deleting_unowned_files()
     {
         using var temp = new RuntimeBackupTemp();

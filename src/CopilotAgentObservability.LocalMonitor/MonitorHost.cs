@@ -114,14 +114,8 @@ internal static class MonitorHost
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(health);
         builder.Services.AddSingleton<RuntimeBackupMonitorLease>(_ => monitorLease);
-        var databaseExisted = File.Exists(options.DatabasePath);
         var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
         builder.Services.AddSingleton(retentionContext);
-        if (!databaseExisted)
-        {
-            var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
-            if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
-        }
         var doctorApplication = testOptions?.DoctorApplication
             ?? CreateDoctorApplication(options.DatabasePath, timeProvider, testOptions?.DoctorApplicationFactory);
         builder.Services.AddSingleton(doctorApplication);
@@ -272,6 +266,8 @@ internal static class MonitorHost
                 alertEngineStore));
         var sanitizedImportStore = new SqliteSanitizedImportStore(options.DatabasePath, timeProvider);
         sanitizedImportStore.CreateSchema();
+        var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
+        if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
 
         var app = builder.Build();
         _ = app.Services.GetRequiredService<RuntimeBackupMonitorLease>();

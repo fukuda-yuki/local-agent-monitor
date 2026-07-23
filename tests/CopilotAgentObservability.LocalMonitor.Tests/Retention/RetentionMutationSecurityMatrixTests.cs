@@ -192,7 +192,7 @@ public sealed class RetentionMutationSecurityMatrixTests
             Now.AddDays(90));
         store.Write(new(new(session, [], [], [observedEvent]), [content]));
 
-        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         using var read = connection.CreateCommand();
         read.CommandText = "SELECT item_id FROM retention_items WHERE store_kind='session_event_content';";

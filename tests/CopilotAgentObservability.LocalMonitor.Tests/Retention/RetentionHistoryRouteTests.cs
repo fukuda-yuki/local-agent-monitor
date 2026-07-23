@@ -156,7 +156,7 @@ public sealed class RetentionHistoryRouteTests
         var content = events.Select((item, index) => new SessionEventContent(
             item.EventId, "application/json", $"{{\"synthetic\":{index}}}", time.AddSeconds(index), time.AddDays(90).AddSeconds(index))).ToArray();
         store.Write(new(new(session, [], [], events), content));
-        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT item_id FROM retention_items WHERE store_kind='session_event_content' ORDER BY item_id;";
@@ -238,7 +238,7 @@ public sealed class RetentionHistoryRouteTests
 
     private static void Execute(string path, string sql, params (string Name, object Value)[] parameters)
     {
-        using var connection = new SqliteConnection($"Data Source={path}");
+        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;

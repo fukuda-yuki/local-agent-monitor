@@ -585,7 +585,7 @@ public sealed class SessionProposalApplyRouteTests
 
     private static void Execute(string databasePath, string sql, Guid draftId)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -601,7 +601,7 @@ public sealed class SessionProposalApplyRouteTests
         legacy.Remove("ProposalRevision");
         legacy["ApprovalDigest"] = legacyDigest;
         File.WriteAllText(privatePath, legacy.ToJsonString());
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE proposal_apply_drafts SET approval_digest=$digest WHERE draft_id=$id; UPDATE proposal_apply_revisions SET approval_digest=$digest WHERE draft_id=$id;";
@@ -670,7 +670,7 @@ public sealed class SessionProposalApplyRouteTests
 
     private static void InsertPersistedProposal(string databasePath, Guid proposalId)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at) VALUES($id,'candidate','skill','fixture','fixture','fixture','fixture','fixture','2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00');";
@@ -680,7 +680,7 @@ public sealed class SessionProposalApplyRouteTests
 
     private static long Scalar(string databasePath, string sql)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = sql;

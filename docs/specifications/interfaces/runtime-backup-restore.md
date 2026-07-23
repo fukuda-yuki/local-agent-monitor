@@ -244,9 +244,11 @@ no path or raw data and is flushed before raw bytes are created. Normal cleanup
 removes exact SQLite sidecars/raw bytes first and the marker last. Startup
 recovers database-local markers; the next operation touching a caller-selected
 archive/output directory recovers markers there. Recovery is bounded, no-follow,
-and deletes nothing for a missing, malformed, nonregular, reparse-bearing, or
-exclusively active marker. A lookalike raw file without the exact marker is
-unowned and preserved. HTTP upload bytes remain on one delete-on-close handle.
+and applies its inventory ceiling only to matching owner-marker namespace
+entries, not to unrelated siblings in the same directory. It deletes nothing
+for a missing, malformed, nonregular, reparse-bearing, or exclusively active
+marker. A lookalike raw file without the exact marker is unowned and preserved.
+HTTP upload bytes remain on one delete-on-close handle.
 
 Backup is a read operation on captured business data. Its sanitized receipt may
 be appended to the live `runtime_backup_receipts` table after successful
@@ -267,6 +269,15 @@ Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather
 than a supported migration source.
+
+Local Monitor startup is two-phase under one non-waiting restore lease. Before
+any owning store opens, phase one recovers exact owned transient/restore state
+and rejects malformed, unknown, future, or dependency-invalid component-version
+vectors without requiring every component to exist. Existing owning stores then
+run their canonical migrations. Phase two adds and validates only
+`runtime_backup` v1 before the HTTP host is built. This sequencing does not
+replace or relax the full read-only shape, executable-object, integrity, and
+external-state preflight required before a backup or restore migration.
 
 The only component table is `runtime_backup_receipts`. It stores a UUIDv7
 operation ID, operation kind (`backup` or `restore`), lowercase artifact

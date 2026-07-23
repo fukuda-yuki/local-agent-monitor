@@ -256,26 +256,30 @@ public sealed class SessionWorkspaceRouteTests
     public async Task RawContent_IsSameOriginAndAbsentInSanitizedOnlyMode()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp);
-        using var ingest = IngestRequest(Envelope());
-        Assert.Equal(HttpStatusCode.NoContent, (await host.Client.SendAsync(ingest)).StatusCode);
-        using var list = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
-        var sessionId = list!.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString();
-        using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
-        var eventId = detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString();
+        string? sessionId;
+        string? eventId;
+        await using (var host = await MonitorTestHost.StartAsync(temp))
+        {
+            using var ingest = IngestRequest(Envelope());
+            Assert.Equal(HttpStatusCode.NoContent, (await host.Client.SendAsync(ingest)).StatusCode);
+            using var list = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
+            sessionId = list!.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString();
+            using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
+            eventId = detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString();
 
-        using var crossSite = new HttpRequestMessage(HttpMethod.Get, $"/sessions/{sessionId}/events/{eventId}/content");
-        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
-        using var crossSiteResponse = await host.Client.SendAsync(crossSite);
-        Assert.Equal(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
-        Assert.Equal("no-store", crossSiteResponse.Headers.CacheControl?.ToString());
+            using var crossSite = new HttpRequestMessage(HttpMethod.Get, $"/sessions/{sessionId}/events/{eventId}/content");
+            crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+            using var crossSiteResponse = await host.Client.SendAsync(crossSite);
+            Assert.Equal(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+            Assert.Equal("no-store", crossSiteResponse.Headers.CacheControl?.ToString());
+
+            using var obsoletePath = await host.Client.GetAsync($"/api/session-workspace/sessions/{sessionId}/events/{eventId}/content");
+            Assert.Equal(HttpStatusCode.NotFound, obsoletePath.StatusCode);
+        }
 
         await using var sanitized = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
         using var absent = await sanitized.Client.GetAsync($"/sessions/{sessionId}/events/{eventId}/content");
         Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
-
-        using var obsoletePath = await host.Client.GetAsync($"/api/session-workspace/sessions/{sessionId}/events/{eventId}/content");
-        Assert.Equal(HttpStatusCode.NotFound, obsoletePath.StatusCode);
     }
 
     [Fact]

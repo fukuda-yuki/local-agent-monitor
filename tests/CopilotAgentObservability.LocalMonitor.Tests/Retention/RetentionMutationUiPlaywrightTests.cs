@@ -645,7 +645,7 @@ public sealed class RetentionMutationUiPlaywrightTests
 
         private static string ReadItemId(MonitorTempDirectory temp)
         {
-            using var connection = new SqliteConnection($"Data Source={temp.DatabasePath}");
+            using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT item_id FROM retention_items WHERE store_kind='session_event_content';";

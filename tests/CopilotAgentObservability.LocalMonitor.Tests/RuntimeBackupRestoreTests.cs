@@ -27,6 +27,56 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_startup_preparation_holds_the_lease_without_running_owner_migrations()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Target))
+        {
+            temp.Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version(component,version) VALUES('session',13);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var initialization = service.InitializeForMonitor(temp.Target);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        Assert.NotNull(initialization.Lease);
+        using var lease = initialization.Lease!;
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
+        using (var database = temp.Open(temp.Target))
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM schema_version WHERE component='runtime_backup';"));
+        var competing = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+        Assert.False(competing.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.MonitorMustBeStopped, competing.Result.ErrorCode);
+        Assert.Null(competing.Lease);
+
+        var completed = service.CompleteMonitorInitialization(lease);
+
+        Assert.True(completed.Success, completed.ErrorCode);
+        using (var database = temp.Open(temp.Target))
+            Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='runtime_backup';"));
+    }
+
+    [Theory]
+    [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('retention',2);")]
+    [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('forged_component',1);")]
+    [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version TEXT NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('retention','1');")]
+    public void Monitor_startup_rejects_invalid_retention_only_vectors_without_mutating_the_database(string schema)
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Target))
+            temp.Execute(database, schema);
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
+    }
+
+    [Fact]
     public void Restore_reconciles_current_terminal_tombstone_and_never_restores_raw_bytes()
     {
         using var temp = new RestoreTemp();

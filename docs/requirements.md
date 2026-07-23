@@ -352,7 +352,11 @@ catalog の cleanup 対象に追加せず、常に `retention_backup_not_purged`
 raw-bearing snapshot / partial / inspection stage は raw 作成前に path-free な
 exact owner marker を durable 化し、startup または同じ caller-selected directory を
 次に使う操作が bounded / no-follow で exact marker-bound bytes だけを回収する。
-marker のない lookalike、malformed / active / nonregular owner は削除せず fail closed とする。
+回収上限は owner-marker namespace の該当 entry に適用し、無関係な sibling の総数を
+raw state として扱わない。marker のない lookalike、malformed / active / nonregular
+owner は削除せず fail closed とする。Local Monitor startup は restore lease と回収を
+owner migration より前に確立し、owner migration 完了後に `runtime_backup` v1 を確定する。
+この startup sequencing は backup / restore の厳格な read-only preflight を緩めない。
 
 Restore は停止済み Local Monitor に対する offline CLI だけが実行できる。
 untrusted archive を bounded に検査し、staging で checksum / schema /

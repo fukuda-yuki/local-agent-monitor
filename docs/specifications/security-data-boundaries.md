@@ -1401,8 +1401,12 @@ Raw-bearing online snapshots, archive partials, and inspection databases use an
 exact flushed same-directory owner marker before raw creation. Startup or the
 next operation in a caller-selected directory performs bounded no-follow
 recovery of only that marker-derived basename and its SQLite sidecars, deleting
-the marker last. Unmarked lookalikes, malformed markers, and active/nonregular
-owners are retained and fail closed. Completed archive bytes are durably flushed
+the marker last. The bound counts matching owner-marker namespace entries, not
+unrelated siblings. Unmarked lookalikes, malformed markers, and active/nonregular
+owners are retained and fail closed. Local Monitor holds the restore lease from
+this recovery through canonical owner migrations and the final
+`runtime_backup` v1 check; backup/restore candidate validation remains the full
+strict pre-mutation gate. Completed archive bytes are durably flushed
 before and after no-overwrite rename; a crash residue is never treated as an
 operator backup or repository evidence.
 

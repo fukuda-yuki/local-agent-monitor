@@ -139,11 +139,12 @@ public sealed class SqliteEffectComparisonStoreTests
         CopySessionFixture($"session-v{historicalVersion}.sqlite", temp.DatabasePath);
         var proposal = FixtureId(4, historicalVersion);
 
-        using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
-
-        var store = app.Services.GetRequiredService<ISessionStore>();
-        Assert.Single(store.ListApplicationReceipts(proposal));
-        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
+        using (var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }))
+        {
+            var store = app.Services.GetRequiredService<ISessionStore>();
+            Assert.Single(store.ListApplicationReceipts(proposal));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
+        }
         using var restarted = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
         Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(proposal));
     }
@@ -158,11 +159,12 @@ public sealed class SqliteEffectComparisonStoreTests
         CopySessionFixture($"session-v10-from-v{historicalVersion}.sqlite", temp.DatabasePath);
         var proposal = FixtureId(4, historicalVersion);
 
-        using var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
-
-        var store = app.Services.GetRequiredService<ISessionStore>();
-        Assert.Single(store.ListApplicationReceipts(proposal));
-        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
+        using (var app = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false }))
+        {
+            var store = app.Services.GetRequiredService<ISessionStore>();
+            Assert.Single(store.ListApplicationReceipts(proposal));
+            Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT proposal_revision FROM improvement_proposal_sessions WHERE proposal_id=$proposal;", ("$proposal", proposal.ToString("D"))));
+        }
         using var restarted = MonitorHost.Build(new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", false, MonitorOptions.DefaultMaxRequestBodyBytes), new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, UseUserSecrets = false });
         Assert.Single(restarted.Services.GetRequiredService<ISessionStore>().ListApplicationReceipts(proposal));
     }
@@ -595,7 +597,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
     private static void SeedProposalAndApply(string databasePath, Guid proposalId, Guid applyId, DateTimeOffset appliedAt)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open();
         Execute(connection, "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($id,'recommended','skill','fixture','fixture','fixture','fixture','fixture',$at,$at,$at);", ("$id", proposalId.ToString("D")), ("$at", appliedAt.ToString("O")));
         var draft = Guid.CreateVersion7();
@@ -729,7 +731,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
     private static long Scalar(string databasePath, string sql, params (string Name, object? Value)[] values)
     {
-        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql; foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value);
         return (long)command.ExecuteScalar()!;
     }

@@ -102,7 +102,7 @@ public sealed class SqliteRuntimeBackupService
         var lease = new RuntimeBackupMonitorLease(database, stream);
         try
         {
-            var result = InitializeWithLease(database);
+            var result = PrepareMonitorInitializationWithLease(database);
             if (!result.Success)
             {
                 lease.Dispose();
@@ -121,12 +121,12 @@ public sealed class SqliteRuntimeBackupService
     {
         ArgumentNullException.ThrowIfNull(lease);
         if (!lease.IsActive) return new(false, RuntimeBackupErrorCodes.MonitorMustBeStopped);
-        try { return InitializeWithLease(lease.DatabasePath); }
+        try { return CompleteMonitorInitializationWithLease(lease.DatabasePath); }
         catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException || IsIo(exception))
         { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
     }
 
-    private RuntimeBackupPreflightResult InitializeWithLease(string database)
+    private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(string database)
     {
         if (!RecoverTransientFiles(Path.GetDirectoryName(database)!, Path.GetFileName(database))
             || !RecoverTransientFiles(Path.Combine(Path.GetDirectoryName(database)!, "runtime-backups"), Path.GetFileName(database)))
@@ -144,6 +144,45 @@ public sealed class SqliteRuntimeBackupService
             recoveryGuard?.Dispose();
             return new(true, null, new Dictionary<string, int>(), []);
         }
+        if (!TryRemoveEmptyReadSidecars(database))
+        {
+            recoveryGuard?.Dispose();
+            return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+        }
+        recoveryGuard?.Dispose();
+        using var validationGuard = TryAcquireRecoveryGuard(database);
+        if (validationGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+        var result = ValidateMonitorComponentVersions(database);
+        return TryRemoveEmptyReadSidecars(database)
+            ? result
+            : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+    }
+
+    private RuntimeBackupPreflightResult CompleteMonitorInitializationWithLease(string database)
+    {
+        var preparation = PrepareMonitorInitializationWithLease(database);
+        if (!preparation.Success || !PathEntryExists(database)) return preparation;
+        EnsureRuntimeBackupSchema(database);
+        using var guard = TryAcquireRecoveryGuard(database);
+        if (guard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+        var result = ValidateMonitorComponentVersions(database);
+        if (result.Success)
+        {
+            using var connection = Open(database, SqliteOpenMode.ReadOnly, immutableReadOnly: false);
+            if (!RuntimeBackupSchemaV1.IsValid(connection, null))
+                result = new(false, RuntimeBackupErrorCodes.RestoreIncompatible, result.ComponentVersions);
+        }
+        return TryRemoveEmptyReadSidecars(database)
+            ? result
+            : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+    }
+
+    private RuntimeBackupPreflightResult InitializeWithLease(string database)
+    {
+        var preparation = PrepareMonitorInitializationWithLease(database);
+        if (!preparation.Success || !PathEntryExists(database)) return preparation;
+        var recoveryGuard = TryAcquireRecoveryGuard(database);
+        if (recoveryGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var preflight = PreflightForMigration(database, immutableReadOnly: false);
         if (!TryRemoveEmptyReadSidecars(database))
         {
@@ -159,6 +198,31 @@ public sealed class SqliteRuntimeBackupService
         return TryRemoveEmptyReadSidecars(database)
             ? final
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
+    }
+
+    private static RuntimeBackupPreflightResult ValidateMonitorComponentVersions(string database)
+    {
+        try
+        {
+            using var connection = Open(database, SqliteOpenMode.ReadOnly, immutableReadOnly: false);
+            ValidateIntegrity(connection);
+            if (!TableExists(connection, "schema_version")
+                && !TableExists(connection, "retention_component_versions"))
+                return new(true, null, new Dictionary<string, int>(), []);
+            var versions = ReadComponentVersions(connection, requireSharedSchemaVersion: false);
+            foreach (var item in versions)
+            {
+                if (item.Value <= 0 || !SupportedComponents.TryGetValue(item.Key, out var supported) || item.Value > supported)
+                    return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            }
+            if (versions.ContainsKey("sanitized_import") && !versions.ContainsKey("historical_import"))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            return new(true, null, versions, []);
+        }
+        catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
+        {
+            return new(false, RuntimeBackupErrorCodes.RestoreIncompatible);
+        }
     }
 
     public RuntimeBackupCreateResult CreateAndPublish(string databasePath, string outputPath)
@@ -1418,12 +1482,19 @@ public sealed class SqliteRuntimeBackupService
     private static Dictionary<string, int> ReadComponentVersions(string path, bool readOnly)
     { using var connection = Open(path, readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, immutableReadOnly: readOnly); return ReadComponentVersions(connection); }
 
-    private static Dictionary<string, int> ReadComponentVersions(SqliteConnection connection)
+    private static Dictionary<string, int> ReadComponentVersions(
+        SqliteConnection connection,
+        bool requireSharedSchemaVersion = true)
     {
         var result = new Dictionary<string, int>(StringComparer.Ordinal);
-        if (!TableExists(connection, "schema_version")) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
-        using (var command = connection.CreateCommand())
+        if (!TableExists(connection, "schema_version"))
         {
+            if (requireSharedSchemaVersion)
+                throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
+        }
+        else
+        {
+            using var command = connection.CreateCommand();
             command.CommandText = "SELECT component,version,typeof(component),typeof(version),length(CAST(component AS BLOB)) FROM schema_version ORDER BY component;";
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -2494,21 +2565,26 @@ public sealed class SqliteRuntimeBackupService
             if (directoryKind == RuntimeBackupNativePathKind.Missing) return true;
             if (directoryKind != RuntimeBackupNativePathKind.Directory) return false;
             var markers = new HashSet<string>(PathComparer);
-            var entries = Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly)
-                .Take(RuntimeBackupLimits.MaximumInventoryItems + 1)
-                .ToArray();
-            if (entries.Length > RuntimeBackupLimits.MaximumInventoryItems) return false;
-            foreach (var marker in entries)
+            foreach (var pattern in new[]
+                     {
+                         ".runtime-backup-*.partial.owner.v1",
+                         ".runtime-backup-inspect-*.sqlite.owner.v1",
+                         ".*.online-snapshot.owner.v1",
+                     })
             {
-                var name = Path.GetFileName(marker);
-                var partial = name.StartsWith(".runtime-backup-", FileNameComparison)
-                    && name.EndsWith(".partial.owner.v1", FileNameComparison);
-                var inspection = name.StartsWith(".runtime-backup-inspect-", FileNameComparison)
-                    && name.EndsWith(".sqlite.owner.v1", FileNameComparison);
-                var snapshot = databaseFileName is not null
-                    && name.StartsWith($".{databaseFileName}.", FileNameComparison)
-                    && name.EndsWith(".online-snapshot.owner.v1", FileNameComparison);
-                if (partial || inspection || snapshot) markers.Add(marker);
+                foreach (var marker in Directory.EnumerateFileSystemEntries(directory, pattern, SearchOption.TopDirectoryOnly))
+                {
+                    var name = Path.GetFileName(marker);
+                    var partial = name.StartsWith(".runtime-backup-", FileNameComparison)
+                        && name.EndsWith(".partial.owner.v1", FileNameComparison);
+                    var inspection = name.StartsWith(".runtime-backup-inspect-", FileNameComparison)
+                        && name.EndsWith(".sqlite.owner.v1", FileNameComparison);
+                    var snapshot = databaseFileName is not null
+                        && name.StartsWith($".{databaseFileName}.", FileNameComparison)
+                        && name.EndsWith(".online-snapshot.owner.v1", FileNameComparison);
+                    if (!partial && !inspection && !snapshot) continue;
+                    if (markers.Add(marker) && markers.Count > RuntimeBackupLimits.MaximumInventoryItems) return false;
+                }
             }
 
             foreach (var marker in markers.Order(PathComparer))

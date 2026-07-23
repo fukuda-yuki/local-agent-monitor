@@ -195,10 +195,12 @@ public class MonitorUiTests
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
 
-        await using var defaultHost = await StartHostAsync(temp);
-        var defaultOverview = await defaultHost.Client.GetStringAsync("/");
-        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
-        Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
+        await using (var defaultHost = await StartHostAsync(temp))
+        {
+            var defaultOverview = await defaultHost.Client.GetStringAsync("/");
+            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
+            Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
+        }
 
         await using var sanitizedHost = await StartHostAsync(temp, sanitizedOnly: true);
         var sanitizedOverview = await sanitizedHost.Client.GetStringAsync("/");
