@@ -1,0 +1,144 @@
+{
+  "$schema": "https://local-agent-monitor.invalid/contracts/pricing/v1/pricing-registry.schema.json",
+  "schema_version": "pricing.registry.v1",
+  "registry_version": "bundled-2026-07-24.1",
+  "source_kind": "bundled",
+  "source_id": "official-reviewed",
+  "source_label": "Repository-reviewed public list prices",
+  "last_reviewed_date": "2026-07-24",
+  "stale_after_date": "2026-08-24",
+  "source_references": [
+    {
+      "reference": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "reviewed_date": "2026-07-24",
+      "note": "GitHub Copilot token rates and AI-credit calculation source."
+    },
+    {
+      "reference": "https://docs.github.com/en/billing/concepts/product-billing/github-copilot-billing",
+      "reviewed_date": "2026-07-24",
+      "note": "GitHub Copilot billing-mode and allowance context."
+    },
+    {
+      "reference": "https://github.com/features/copilot/plans",
+      "reviewed_date": "2026-07-24",
+      "note": "GitHub Copilot plan and AI-credit context; 1 AI credit is 0.01 USD."
+    },
+    {
+      "reference": "https://www-cdn.anthropic.com/files/4zrzovbb/website/3684c2faafb97418665782cea0001f439f74b1d2.pdf",
+      "reviewed_date": "2026-07-24",
+      "note": "Anthropic official list-price document dated 2026-05-27."
+    },
+    {
+      "reference": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "reviewed_date": "2026-07-24",
+      "note": "Anthropic canonical API model identifiers and versioning."
+    },
+    {
+      "reference": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking",
+      "reviewed_date": "2026-07-24",
+      "note": "Anthropic output-token billing semantics for extended thinking."
+    }
+  ],
+  "entries": [
+    {
+      "entry_id": "github-copilot-gpt-5-mini-ai-credits",
+      "revision": 1,
+      "supersedes_entry_key": null,
+      "provider": "github_copilot",
+      "canonical_model_id": "GPT-5 mini",
+      "aliases": [],
+      "billing_mode": "github_ai_credits",
+      "pricing_route": "credit_consuming_interaction",
+      "rates": {
+        "input_per_million_tokens": 0.25,
+        "output_per_million_tokens": 2.00,
+        "cache_read_per_million_tokens": 0.025,
+        "cache_write_5m_per_million_tokens": null,
+        "cache_write_1h_per_million_tokens": null,
+        "reasoning_per_million_tokens": null,
+        "per_request": null,
+        "per_credit": null,
+        "request_credit_multiplier": null
+      },
+      "currency": "USD",
+      "currency_minor_units": 2,
+      "effective_from_utc": "2026-07-24T00:00:00.0000000Z",
+      "effective_to_utc": null,
+      "source_reference": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "last_reviewed_date": "2026-07-24",
+      "included_zero_incremental_cost": false,
+      "limitations": [
+        "The GitHub page did not state a prior effective date when reviewed, so this bundled entry starts at the review date.",
+        "Billing mode and credit-consuming interaction route must be explicitly established; the model name does not establish AI-credit billing.",
+        "Code completion and next-edit routes do not select this entry.",
+        "The USD token components already correspond to AI credits at 0.01 USD per credit; adding a separate credit component would double count."
+      ]
+    },
+    {
+      "entry_id": "github-copilot-gpt-5-mini-plan-included",
+      "revision": 1,
+      "supersedes_entry_key": null,
+      "provider": "github_copilot",
+      "canonical_model_id": "GPT-5 mini",
+      "aliases": [],
+      "billing_mode": "plan_included",
+      "pricing_route": "credit_consuming_interaction",
+      "rates": {
+        "input_per_million_tokens": null,
+        "output_per_million_tokens": null,
+        "cache_read_per_million_tokens": null,
+        "cache_write_5m_per_million_tokens": null,
+        "cache_write_1h_per_million_tokens": null,
+        "reasoning_per_million_tokens": null,
+        "per_request": null,
+        "per_credit": null,
+        "request_credit_multiplier": null
+      },
+      "currency": "USD",
+      "currency_minor_units": 2,
+      "effective_from_utc": "2026-07-24T00:00:00.0000000Z",
+      "effective_to_utc": null,
+      "source_reference": "https://github.com/features/copilot/plans",
+      "last_reviewed_date": "2026-07-24",
+      "included_zero_incremental_cost": true,
+      "limitations": [
+        "The caller must explicitly establish that this usage is within an included allowance.",
+        "This is zero incremental cost, not a claim that the plan or seat has zero price."
+      ]
+    },
+    {
+      "entry_id": "claude-code-sonnet-4-6-anthropic-api",
+      "revision": 1,
+      "supersedes_entry_key": null,
+      "provider": "claude_code",
+      "canonical_model_id": "claude-sonnet-4-6",
+      "aliases": [],
+      "billing_mode": "anthropic_api_tokens",
+      "pricing_route": "standard_global",
+      "rates": {
+        "input_per_million_tokens": 3.00,
+        "output_per_million_tokens": 15.00,
+        "cache_read_per_million_tokens": 0.30,
+        "cache_write_5m_per_million_tokens": 3.75,
+        "cache_write_1h_per_million_tokens": 6.00,
+        "reasoning_per_million_tokens": null,
+        "per_request": null,
+        "per_credit": null,
+        "request_credit_multiplier": null
+      },
+      "currency": "USD",
+      "currency_minor_units": 2,
+      "effective_from_utc": "2026-05-27T00:00:00.0000000Z",
+      "effective_to_utc": null,
+      "source_reference": "https://www-cdn.anthropic.com/files/4zrzovbb/website/3684c2faafb97418665782cea0001f439f74b1d2.pdf",
+      "last_reviewed_date": "2026-07-24",
+      "included_zero_incremental_cost": false,
+      "limitations": [
+        "Applies only when Claude Code billing is explicitly configured as direct Anthropic API token billing on the standard-global route.",
+        "The dated 2026-05-27 document is used as a conservative local effective boundary; no earlier applicability is claimed.",
+        "US-only inference, Batch, subscription, and cloud-provider routes are distinct and are not inferred from this entry.",
+        "Output tokens are the inclusive billed output quantity; thinking and reasoning tokens are a subset and must not be added again."
+      ]
+    }
+  ]
+}

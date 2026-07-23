@@ -30,6 +30,13 @@ CSV output uses one file per logical table.
 Treat this as a schema identifier, not product positioning or active sprint planning.
 Do not rename it without a schema migration, fixture update, and dashboard compatibility check.
 
+Its `estimated_cost` / `cost_source` calculator is a legacy static-dashboard
+compatibility surface. It is not the canonical Issue #94 pricing registry or
+estimator, and its current missing-token and unversioned price-table semantics
+must not be used as pricing authority. Issue #94 does not rewrite this wire
+contract. A future #95 consumer must make an explicit compatibility/migration
+decision before projecting `pricing.estimate.v1` results into this dataset.
+
 ## Logical Tables
 
 | Logical table | Purpose |

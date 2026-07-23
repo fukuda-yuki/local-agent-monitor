@@ -8,6 +8,7 @@
     <Project Path="src/CopilotAgentObservability.LocalMonitor/CopilotAgentObservability.LocalMonitor.csproj" />
     <Project Path="src/CopilotAgentObservability.Telemetry/CopilotAgentObservability.Telemetry.csproj" />
     <Project Path="src/CopilotAgentObservability.Persistence.Sqlite/CopilotAgentObservability.Persistence.Sqlite.csproj" />
+    <Project Path="src/CopilotAgentObservability.Pricing/CopilotAgentObservability.Pricing.csproj" />
     <Project Path="src/CopilotAgentObservability.RawReplay/CopilotAgentObservability.RawReplay.csproj" />
     <Project Path="src/CopilotAgentObservability.SanitizedExport/CopilotAgentObservability.SanitizedExport.csproj" />
     <Project Path="src/CopilotAgentObservability.SanitizedImport/CopilotAgentObservability.SanitizedImport.csproj" />
@@ -18,5 +19,6 @@
     <Project Path="tests/CopilotAgentObservability.Doctor.Tests/CopilotAgentObservability.Doctor.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.InstructionFindings.Tests/CopilotAgentObservability.InstructionFindings.Tests.csproj" />
     <Project Path="tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" />
+    <Project Path="tests/CopilotAgentObservability.Pricing.Tests/CopilotAgentObservability.Pricing.Tests.csproj" />
   </Folder>
 </Solution>

@@ -173,6 +173,37 @@ Update (D039 / D042 / D050): Sprint18 の Local Monitor overview / trace-list �
   Session event timeline は利用でき、欠落・エラー・推定・判定不能を推測で
   補完しない。Evidence は `--sanitized-only` でも利用でき、raw content を
   取得・復元・action/log/output へ送出しない。
+- Versioned pricing estimation。Issue #94 は GitHub Copilot と Claude Code の
+  明示 billing mode に対する effective-dated pricing registry と deterministic
+  estimator を source-neutral domain として提供する。入力は provider、exact model
+  ID、session time、billing mode、exact pricing route、provenance 付き token / request / credit quantity、
+  source completeness を分離して保持し、欠落・unknown・unsupported route を zero
+  とみなさない。出力は `estimated` / `partial` / `not-estimable`、currency、丸め前の
+  component 金額、coverage、固定 reason、registry/model/mode version、source
+  provenance を保持する。registry update と local override は versioned な
+  append/supersede とし、過去 estimate を書き換えず、recalculation は predecessor
+  ID を持つ新しい canonical record とする。registry v1 は `USD` / minor unit 2
+  のみを受理する。bundled document と caller 順の local override documents を
+  保存した canonical `pricing.catalog-snapshot.v1` bytes の SHA-256 を各 estimate
+  identity に含める。strict snapshot consumer はその exact ordered bytes を復元し、
+  strict estimate consumer は canonical bytes、再計算した estimate ID、
+  caller が渡す exact catalog snapshot での byte-identical recalculation を検証して
+  defensive copy を返す。public hash だけを authenticity とみなさず、#95 は
+  current catalog へ置換・並べ替えをせず exact snapshot bytes を保持する。
+  catalog の生成と消費は最大 64 documents / canonical 4 MiB / depth 32、estimate
+  の生成と消費は canonical 1 MiB / depth 32 を共通上限とする。reviewed public
+  source reference は最大 4,096 UTF-16 code units、well-formed UTF-16 の exact
+  lowercase `https://` URI とし、userinfo、raw whitespace/control/backslash、
+  malformed percent escape、および1回だけ decode した control/backslash/
+  traversal/credential shape を拒否する。すべての admitted string は well-formed
+  UTF-16 とし、caller-owned collection は validation 前に一度だけ immutable
+  snapshot 化する。rate、
+  multiplier、fractional credit は normalized scale 6 以下とし、全 component 積と
+  aggregate を exact representability で動的検証して、表現不能値を丸めず拒否する。換算、invoice reconciliation、
+  enterprise/custom price 推測、quality/effect claim、UI、budget alert、通知、
+  provider からの runtime price fetch は行わない。Codex App は v1 では
+  `subscription_or_contract_unknown`、subscription/custom contract はそれぞれ
+  allocation/price unknown として `not-estimable` にする。
 - Grafana JSON dashboard fallback。
 
 参考のみ:

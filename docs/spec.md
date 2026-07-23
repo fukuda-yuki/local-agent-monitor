@@ -485,6 +485,57 @@ retains no selection, included/excluded Session data, or other preview response
 fields. It neither adds a provider nor absorbs import, apply, effect, pricing,
 Alert Center, portability, raw analysis, or content-enabled capture.
 
+## Versioned pricing estimation
+
+Issue #94 freezes the source-neutral registry and estimator contract at
+[pricing estimation](specifications/interfaces/pricing-estimation.md) and
+`specifications/contracts/pricing/v1/`. A caller supplies the session-effective
+timestamp, exact provider/model/billing-mode/pricing-route tuple, source completeness, and
+each available usage quantity with field provenance. The estimator selects an
+exact canonical ID or exact declared alias only; it does not trim, fold case,
+fuzzy-match, infer a plan, or substitute a provider route.
+
+Registry entries are effective-dated, explicitly currency-bearing,
+pricing-route-specific, reviewed source
+records. Bundled revisions and separately labeled local overrides are
+append/supersede records; an overlap without an explicit supersession link is
+invalid. Every calculation preserves the selected registry, entry, model,
+billing-mode, currency, source reference, and rounding policy. Missing
+categories remain missing and yield `partial` or `not-estimable`, never an
+implicit zero. Only an explicitly selected included/zero-incremental-cost rule
+may produce a zero estimate. Recalculation creates a new deterministic record
+with an optional predecessor ID and never rewrites the older record.
+Registry v1 accepts only USD with two minor units. Its strict estimate consumer
+requires the exact calculation catalog snapshot identified by
+`catalog_sha256`, rejects noncanonical,
+identity-mismatched, or catalog-recalculation-mismatched bytes, and returns an
+immutable projection for later persistence owners. The public hash is not an
+authenticity boundary. Canonical `pricing.catalog-snapshot.v1` preserves
+bundled-first and caller-supplied override/document/entry order without sorting;
+its strict bounded consumer is the reload authority. Later persistence owners
+must retain those exact bytes rather than substitute the current catalog.
+Catalog construction and consumption share the 64-document, 4 MiB canonical
+snapshot, and depth-32 limits; estimate production and consumption share the
+1 MiB canonical estimate and depth-32 limits. Public source references are at
+most 4,096 UTF-16 code units and must be well-formed exact lowercase
+`https://` URIs with no user information, raw whitespace/control/backslash,
+malformed percent escape, or decoded control/backslash/traversal/credential
+shape after the single inspection decode. All admitted strings must be
+well-formed UTF-16. Caller-owned request collections are copied once before
+validation and the calculation uses only that immutable snapshot.
+Rates, multipliers, and fractional credits use normalized scale at most six;
+each component and the single aggregate must remain exactly representable or
+calculation fails closed without rounding.
+
+GitHub Copilot token/credit, legacy request, included plan, and unknown/custom
+contract modes remain distinct. Claude Anthropic API, explicitly configured
+cloud API, subscription, and custom contract modes remain distinct. Codex App
+is `not-estimable: subscription_or_contract_unknown` in v1 even when model
+provenance exists. The domain performs no currency conversion, invoice
+reconciliation, runtime pricing fetch, purchase or plan mutation,
+quality/effect assertion, UI, alert, notification, database migration, or
+Issue #80 receipt/lifecycle change.
+
 ## Alert-rule engine foundation
 
 Issue #80 defines the source-neutral deterministic alert contract at
@@ -764,6 +815,7 @@ sanitized. The canonical contract is
 | Candidate record interfaces | [specifications/interfaces/candidate-records.md](specifications/interfaces/candidate-records.md) |
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
+| Pricing estimation interface | [specifications/interfaces/pricing-estimation.md](specifications/interfaces/pricing-estimation.md) |
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
 | Historical source import interface | [specifications/interfaces/historical-source-import.md](specifications/interfaces/historical-source-import.md) |
 | Historical evidence extraction interface | [specifications/interfaces/historical-evidence-extraction.md](specifications/interfaces/historical-evidence-extraction.md) |

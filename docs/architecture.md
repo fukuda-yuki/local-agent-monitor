@@ -372,6 +372,33 @@ fully typed #80-owned Alert Center projection. #84 remains an
 upper-layer projection/UI consumer and receives neither arbitrary SQL nor a
 source-specific snapshot adapter from this repair.
 
+Issue #94 adds an independent repository-safe pricing domain:
+
+```text
+explicit provider/model/billing mode + provenance-bearing usage
+                              |
+                              v
+CopilotAgentObservability.Pricing
+  registry validation + exact route/effective-date selection
+  deterministic component estimation + canonical estimate record/consumer
+```
+
+`Pricing` references neither Telemetry, Persistence.Sqlite, Config CLI, Local
+Monitor, Alerts, nor provider SDKs. It performs no runtime network access.
+Upper-layer consumers may supply exact, capability-authorized values later,
+but #94 adds no database component, migration, HTTP/CLI/UI surface, or alert
+dependency. Bundled pricing data is an embedded reviewed repository artifact;
+local overrides remain separately labeled inputs and cannot silently replace
+bundled entries.
+Registry v1 admits USD with two minor units only. The consumer validates
+canonical bytes and identity, then recalculates against its required exact
+catalog snapshot. `Pricing` canonically serializes the bundled document followed
+by caller-ordered local overrides as `pricing.catalog-snapshot.v1`, binds its
+SHA-256 into every estimate, and exposes the strict snapshot reload boundary.
+It owns no storage and does not treat a public hash as authenticity. #95 must
+persist those exact bytes; reconstruction and latest-catalog substitution are
+not equivalent.
+
 Issue #87 adds a raw-only sibling without changing the sanitized export domain:
 
 ```text
@@ -633,6 +660,17 @@ measurements + optional raw/candidate outputs
   -> generate-dashboard-dataset
   -> generate-static-dashboard
   -> index.html + dashboard-data.json
+```
+
+Issue #94 is a separate calculation flow:
+
+```text
+exact session time + explicit provider/model/mode/pricing route
+  + provenance-bearing token/request/credit quantities
+  + bundled registry [and optional labeled overrides]
+  -> validate registry and exact effective-date match
+  -> estimate independent unrounded components
+  -> immutable pricing.estimate.v1 record
 ```
 
 用途:

@@ -2536,3 +2536,58 @@ unmarked/malformed/active owners untouched. The restore crash journal remains
 the sole owner of restore staging outside the database being swapped. The canonical
 interface is
 [runtime backup and restore](specifications/interfaces/runtime-backup-restore.md).
+
+## D073: Pricing is an exact effective-dated domain, not a dashboard lookup
+
+Status: Accepted (2026-07-24)
+
+Issue #94 introduces a standalone `CopilotAgentObservability.Pricing` domain.
+The registry is versioned, effective-dated, explicitly currency-bearing, and backed by
+reviewed source references. Lookup requires an exact provider, billing mode,
+canonical model ID or declared exact alias, exact pricing route, and
+session-effective timestamp.
+Case folding, trimming, fuzzy matching, inferred plan/contract, runtime
+scraping, and currency conversion are rejected because they can turn unknown
+billing evidence into a false monetary statement.
+Registry v1 deliberately accepts only USD with two minor units; supporting a
+different currency profile requires a later contract version. Canonical
+estimate reload uses the pricing-owned strict consumer, including identity and
+exact-catalog byte recalculation, rather than a persistence-owned parser.
+The exact catalog is exported as canonical `pricing.catalog-snapshot.v1`
+bytes in bundled-first, caller-ordered override/document/entry order; no sorting
+occurs. Its SHA-256 is bound into every estimate identity, and the strict
+snapshot consumer is the only reload authority. A later persistence owner must
+retain those exact bytes and cannot reconstruct them or substitute the current
+catalog.
+Because the hash is publicly recomputable, it is not an authenticity boundary.
+
+Catalog production and consumption share the ceiling of 64 ordered documents
+and 4 MiB of canonical snapshot bytes; canonical estimate production and
+consumption share the 1 MiB ceiling. Both strict consumers enforce depth 32.
+Public source references are at most 4,096 UTF-16 code units and use well-formed
+exact lowercase `https://` syntax with fixed lexical, percent-decoding, host,
+and credential-shape rejection. All admitted strings are well-formed UTF-16,
+and request collections are snapshotted once before validation so caller
+mutation cannot change the calculation after admission.
+
+Bundled revisions and separately labeled local overrides are append-only
+records. A new non-overlapping exact tuple may be appended without a
+predecessor; overlapping applicable entries require an explicit supersession
+key and fail registry construction without a unique supersession path.
+Recalculation creates a new deterministic `pricing.estimate.v1` record and may
+name the prior record; it never updates that prior record in place. Amounts are
+computed as independent decimal components with no intermediate rounding.
+Missing categories stay missing and produce `partial` or `not-estimable`;
+explicit zero usage remains distinct from missing usage. Zero incremental cost
+is allowed only by an exact included-plan registry rule.
+Rates, multipliers, and fractional credit quantities have normalized scale at
+most six, but static magnitude bounds do not imply every product is
+representable. Each component and the aggregate are checked exactly and fail
+closed rather than round when System.Decimal cannot represent the result.
+
+This domain has no SQLite component in #94. It neither changes the frozen Issue
+#80 receipt/lifecycle schemas nor authorizes #95 UI, budget alerts,
+notifications, invoice reconciliation, enterprise price inference, purchases,
+quality claims, or effect verdicts. The existing `sprint4-m2-v1` static
+dashboard unit-price calculator remains a legacy compatibility surface and is
+not promoted to canonical pricing authority.

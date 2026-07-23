@@ -1,0 +1,419 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-agent-monitor.invalid/contracts/pricing/v1/pricing-registry.schema.json",
+  "title": "Pricing registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "registry_version",
+    "source_kind",
+    "source_id",
+    "source_label",
+    "last_reviewed_date",
+    "stale_after_date",
+    "source_references",
+    "entries"
+  ],
+  "properties": {
+    "$schema": { "type": "string", "format": "uri" },
+    "schema_version": { "const": "pricing.registry.v1" },
+    "registry_version": { "$ref": "#/$defs/token" },
+    "source_kind": { "enum": ["bundled", "local_override"] },
+    "source_id": { "$ref": "#/$defs/token" },
+    "source_label": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "last_reviewed_date": { "type": "string", "format": "date" },
+    "stale_after_date": { "type": "string", "format": "date" },
+    "source_references": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/source_reference" }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "utc_timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "nullable_rate": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0.000001,
+          "maximum": 1000000,
+          "multipleOf": 0.000001
+        },
+        { "type": "null" }
+      ]
+    },
+    "source_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "reviewed_date", "note"],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096,
+          "pattern": "^https://(?![^?#]*[\\s\\\\\\x00-\\x1F\\x7F])(?!(?:[^@/?#]+\\.)?[hH][oO][mM][eE]\\.[aA][rR][pP][aA](?::[0-9]+)?(?:/|$))[^@/?#]+(?:/[^?#]*)?$"
+        },
+        "reviewed_date": { "type": "string", "format": "date" },
+        "note": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "rates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_per_million_tokens",
+        "output_per_million_tokens",
+        "cache_read_per_million_tokens",
+        "cache_write_5m_per_million_tokens",
+        "cache_write_1h_per_million_tokens",
+        "reasoning_per_million_tokens",
+        "per_request",
+        "per_credit",
+        "request_credit_multiplier"
+      ],
+      "properties": {
+        "input_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "output_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "cache_read_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "cache_write_5m_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "cache_write_1h_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "reasoning_per_million_tokens": { "$ref": "#/$defs/nullable_rate" },
+        "per_request": { "$ref": "#/$defs/nullable_rate" },
+        "per_credit": { "$ref": "#/$defs/nullable_rate" },
+        "request_credit_multiplier": { "$ref": "#/$defs/nullable_rate" }
+      }
+    },
+    "token_rate_shape": {
+      "properties": {
+        "rates": {
+          "properties": {
+            "per_request": { "type": "null" },
+            "per_credit": { "type": "null" },
+            "request_credit_multiplier": { "type": "null" }
+          },
+          "anyOf": [
+            { "properties": { "input_per_million_tokens": { "type": "number" } } },
+            { "properties": { "output_per_million_tokens": { "type": "number" } } },
+            { "properties": { "cache_read_per_million_tokens": { "type": "number" } } },
+            { "properties": { "cache_write_5m_per_million_tokens": { "type": "number" } } },
+            { "properties": { "cache_write_1h_per_million_tokens": { "type": "number" } } },
+            { "properties": { "reasoning_per_million_tokens": { "type": "number" } } }
+          ]
+        },
+        "included_zero_incremental_cost": { "const": false }
+      }
+    },
+    "legacy_rate_shape": {
+      "properties": {
+        "rates": {
+          "properties": {
+            "input_per_million_tokens": { "type": "null" },
+            "output_per_million_tokens": { "type": "null" },
+            "cache_read_per_million_tokens": { "type": "null" },
+            "cache_write_5m_per_million_tokens": { "type": "null" },
+            "cache_write_1h_per_million_tokens": { "type": "null" },
+            "reasoning_per_million_tokens": { "type": "null" }
+          },
+          "oneOf": [
+            {
+              "properties": {
+                "per_request": { "type": "number" },
+                "per_credit": { "type": "null" },
+                "request_credit_multiplier": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "per_request": { "type": "null" },
+                "per_credit": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "included_zero_incremental_cost": { "const": false }
+      }
+    },
+    "included_rate_shape": {
+      "properties": {
+        "rates": {
+          "properties": {
+            "input_per_million_tokens": { "type": "null" },
+            "output_per_million_tokens": { "type": "null" },
+            "cache_read_per_million_tokens": { "type": "null" },
+            "cache_write_5m_per_million_tokens": { "type": "null" },
+            "cache_write_1h_per_million_tokens": { "type": "null" },
+            "reasoning_per_million_tokens": { "type": "null" },
+            "per_request": { "type": "null" },
+            "per_credit": { "type": "null" },
+            "request_credit_multiplier": { "type": "null" }
+          }
+        },
+        "included_zero_incremental_cost": { "const": true }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_id",
+        "revision",
+        "supersedes_entry_key",
+        "provider",
+        "canonical_model_id",
+        "aliases",
+        "billing_mode",
+        "pricing_route",
+        "rates",
+        "currency",
+        "currency_minor_units",
+        "effective_from_utc",
+        "effective_to_utc",
+        "source_reference",
+        "last_reviewed_date",
+        "included_zero_incremental_cost",
+        "limitations"
+      ],
+      "properties": {
+        "entry_id": { "$ref": "#/$defs/token" },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "supersedes_entry_key": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 268,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,127}@[1-9][0-9]{0,9}$"
+        },
+        "provider": {
+          "enum": ["github_copilot", "claude_code", "codex_app"]
+        },
+        "canonical_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "billing_mode": {
+          "enum": [
+            "github_ai_credits",
+            "github_legacy_requests",
+            "plan_included",
+            "anthropic_api_tokens",
+            "cloud_provider_api_tokens",
+            "subscription",
+            "custom_enterprise",
+            "unknown"
+          ]
+        },
+        "pricing_route": {
+          "enum": [
+            "credit_consuming_interaction",
+            "legacy_request",
+            "code_completion",
+            "next_edit_suggestion",
+            "standard_global",
+            "us_only_inference",
+            "batch",
+            "cloud_provider_configured",
+            "subscription_or_contract",
+            "unknown"
+          ]
+        },
+        "rates": { "$ref": "#/$defs/rates" },
+        "currency": { "const": "USD" },
+        "currency_minor_units": { "const": 2 },
+        "effective_from_utc": { "$ref": "#/$defs/utc_timestamp" },
+        "effective_to_utc": {
+          "oneOf": [
+            { "$ref": "#/$defs/utc_timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "source_reference": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096,
+          "pattern": "^https://(?![^?#]*[\\s\\\\\\x00-\\x1F\\x7F])(?!(?:[^@/?#]+\\.)?[hH][oO][mM][eE]\\.[aA][rR][pP][aA](?::[0-9]+)?(?:/|$))[^@/?#]+(?:/[^?#]*)?$"
+        },
+        "last_reviewed_date": { "type": "string", "format": "date" },
+        "included_zero_incremental_cost": { "type": "boolean" },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      },
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "provider": { "const": "github_copilot" },
+                "billing_mode": {
+                  "enum": [
+                    "github_ai_credits",
+                    "github_legacy_requests",
+                    "plan_included"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "provider": { "const": "claude_code" },
+                "billing_mode": {
+                  "enum": [
+                    "anthropic_api_tokens",
+                    "cloud_provider_api_tokens"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "billing_mode": {
+                "enum": [
+                  "github_ai_credits",
+                  "anthropic_api_tokens",
+                  "cloud_provider_api_tokens"
+                ]
+              }
+            },
+            "required": ["billing_mode"]
+          },
+          "then": { "$ref": "#/$defs/token_rate_shape" }
+        },
+        {
+          "if": {
+            "properties": {
+              "billing_mode": { "const": "github_legacy_requests" }
+            },
+            "required": ["billing_mode"]
+          },
+          "then": { "$ref": "#/$defs/legacy_rate_shape" }
+        },
+        {
+          "if": {
+            "properties": {
+              "billing_mode": { "const": "plan_included" }
+            },
+            "required": ["billing_mode"]
+          },
+          "then": { "$ref": "#/$defs/included_rate_shape" }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": { "const": "github_copilot" },
+              "billing_mode": { "const": "github_ai_credits" }
+            },
+            "required": ["provider", "billing_mode"]
+          },
+          "then": {
+            "properties": {
+              "pricing_route": { "const": "credit_consuming_interaction" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": { "const": "github_copilot" },
+              "billing_mode": { "const": "github_legacy_requests" }
+            },
+            "required": ["provider", "billing_mode"]
+          },
+          "then": {
+            "properties": {
+              "pricing_route": { "const": "legacy_request" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": { "const": "github_copilot" },
+              "billing_mode": { "const": "plan_included" }
+            },
+            "required": ["provider", "billing_mode"]
+          },
+          "then": {
+            "properties": {
+              "pricing_route": {
+                "enum": [
+                  "credit_consuming_interaction",
+                  "code_completion",
+                  "next_edit_suggestion"
+                ]
+              },
+              "included_zero_incremental_cost": { "const": true }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": { "const": "claude_code" },
+              "billing_mode": { "const": "anthropic_api_tokens" }
+            },
+            "required": ["provider", "billing_mode"]
+          },
+          "then": {
+            "properties": {
+              "pricing_route": {
+                "enum": ["standard_global", "us_only_inference", "batch"]
+              },
+              "rates": {
+                "properties": {
+                  "reasoning_per_million_tokens": { "type": "null" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provider": { "const": "claude_code" },
+              "billing_mode": { "const": "cloud_provider_api_tokens" }
+            },
+            "required": ["provider", "billing_mode"]
+          },
+          "then": {
+            "properties": {
+              "pricing_route": { "const": "cloud_provider_configured" },
+              "rates": {
+                "properties": {
+                  "reasoning_per_million_tokens": { "type": "null" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
