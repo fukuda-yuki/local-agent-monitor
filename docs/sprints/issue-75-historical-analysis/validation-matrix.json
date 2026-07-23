@@ -1,0 +1,155 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "da016c581e89dc3902e6e0332b618252d5028481",
+  "final_validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+  "inventory_date": "2026-07-24",
+  "environment_boundary": "Windows x64 with production component stores over disposable SQLite databases, loopback-only test hosts, sanitized synthetic multi-Session metadata, and repository-local Playwright Chromium; no genuine provider or content-enabled capture is claimed.",
+  "active_rows": [
+    {
+      "row_id": "91-H-075",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-analysis-automated",
+      "operation": "bounded scope selection and preview, included and excluded Session presentation, independent instruction and efficiency execution, terminal-state distinctions, exact evidence drill-down, and browser interaction",
+      "profiles": {
+        "collection": ["sqlite-production-store", "loopback-api", "playwright-ui"],
+        "content_access": ["raw-default", "sanitized-only", "content-available", "content-unavailable"],
+        "compatibility": ["supported", "weak", "incomplete", "zero", "failure", "timeout", "stale", "mixed-source"],
+        "hook": [],
+        "otel": ["available", "missing", "mixed-source"],
+        "binding": ["exact-session-trace-span", "missing-negative", "unresolved-negative"],
+        "restart": ["persisted-reload"],
+        "retention": ["available", "expired-evidence", "missing"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
+        "historical_analysis": "historical-analysis.v1",
+        "historical_evidence": "historical-evidence.v1",
+        "instruction_handoff": "instruction-finding-handoff.v1",
+        "efficiency_receipt": "historical-efficiency-receipt.v1"
+      },
+      "expected_invariant": "The UI and API consume the accepted #72 dataset, #73 finding receipts, and #74 driver receipts without schema forks; every selection, exclusion, terminal state, and drill-down remains bounded, owner-validated, and distinct.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md#91-h-075--automated-and-browser-gate",
+          "compatibility_basis": "Candidate-pinned production-store, route, orchestration, persistence, contract, and Chromium tests exercise raw-default and sanitized-only postures with safe synthetic multi-Session metadata."
+        }
+      ],
+      "actual_result": "The corrected exact candidate passed the 13-filter handoff gate (279 Local Monitor and 20 InstructionFindings tests), the 7-case Historical Analysis Playwright matrix, the 33-case production evidence class, build with zero warnings/errors, and the final full solution with 8486/8486 tests and zero skips.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #75 historical analysis UI",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
+      "environment_boundary": "Exact candidate on Windows x64 using disposable production-component databases, loopback HTTP hosts, safe deterministic data, and headless repository Chromium."
+    },
+    {
+      "row_id": "91-S-075",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-analysis-security",
+      "operation": "repository-safe HTTP and UI, raw and sanitized separation, exact evidence ownership, inaccessible and expired evidence, inert rendering, accessibility, and no-leak validation",
+      "profiles": {
+        "collection": ["loopback-api", "playwright-ui", "repository-artifacts"],
+        "content_access": ["raw-default", "sanitized-only", "content-unavailable"],
+        "compatibility": ["malformed", "stale", "provider-failed", "provider-partial"],
+        "hook": [],
+        "otel": ["missing", "mixed-source"],
+        "binding": ["exact-owner-pair", "ambiguous-negative", "missing-negative"],
+        "restart": [],
+        "retention": ["expired-evidence", "missing"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
+        "secret_corpus": "validation-secret-corpus.v1",
+        "browser": "repository Playwright Chromium"
+      },
+      "expected_invariant": "After transient rendering, the only long-lived preview binding contains exactly extraction_id, raw_local_sha256, and repository_safe_sha256; no selection, included/excluded Session data, or other preview response field is retained. Responses, logs, and committed evidence remain repository-safe, missing and expired evidence fail closed, and navigation uses only exact #53 owner mappings.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md#91-s-075--security-accessibility-and-no-leak-gate",
+          "compatibility_basis": "Candidate-pinned HTTP, component, and Chromium cases cover Host/origin/body guards, no-store responses, strict DTOs, exact three-field long-lived binding instrumentation, rejection of every other preview field, inert text, keyboard/live-region behavior, exact resolution, and scanner detection."
+        }
+      ],
+      "actual_result": "The corrected exact candidate rejects raw-capable preview selection before #72 owner access on a sanitized-only host and retains only the frozen three-field browser binding. It passed the focused contract/browser/security gates and final full suite; the Issue #91 scanner self-test passed 118 transformation cases and 5 negative cases, and the installed handoff artifact produced 118 variants with zero matches.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #75 historical analysis UI",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
+      "environment_boundary": "Repository-safe synthetic values, temporary databases, loopback hosts, committed contracts, and headless Chromium; no user content, credentials, or sensitive local paths were used."
+    },
+    {
+      "row_id": "91-L-075",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "historical-analysis-live-provider",
+      "operation": "genuine reviewed multi-Session provider execution with exact source identity, content authorization, finding receipt readback, efficiency receipt readback, and exact evidence drill-down",
+      "profiles": {
+        "collection": ["genuine-provider-multi-session"],
+        "content_access": ["separately-authorized-content"],
+        "compatibility": ["reviewed-source-tuple-required"],
+        "hook": ["unverified"],
+        "otel": ["unverified"],
+        "binding": ["exact-session-trace-span"],
+        "restart": [],
+        "retention": ["authorized-current-lease-required"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "2054bae8daa433315ba30221e456e031a488b02b",
+        "provider_source_tuple": "not-available",
+        "content_authorization": "not-authorized"
+      },
+      "expected_invariant": "A genuine provider-backed result is claimed only after separate content-access authorization and promotion of an exact reviewed multi-Session source tuple; fixture-backed or metadata-only execution is not substituted for that evidence.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md#91-l-075--genuine-provider-gate",
+          "compatibility_basis": "The live gate stopped at its explicit authorization and source-tuple preconditions; no provider process or content-enabled capture was started."
+        }
+      ],
+      "actual_result": "No genuine provider-backed multi-Session run was attempted. Repository-safe production-component and browser executions passed, but they do not satisfy the separately authorized provider/content gate.",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "Content-enabled live capture was not authorized, and no exact reviewed multi-Session provider source tuple was available.",
+      "retry_condition": "Obtain separate content-access authorization and promote an exact reviewed provider/source/version multi-Session tuple, then freeze a new candidate and run provider execution, canonical receipt readback, exact drill-down, and repository-safe leak scanning.",
+      "unverified_capability": "Genuine provider-backed instruction findings and efficiency evidence across an exact reviewed multi-Session dataset.",
+      "owner": "Issue #75 historical analysis UI with the source-compatibility and provider owners",
+      "validation_sha": "2054bae8daa433315ba30221e456e031a488b02b",
+      "validation_date": "2026-07-24",
+      "environment_boundary": "External authorization and reviewed-source boundary only; no provider prompt, response, tool payload, credential, raw record, or content-enabled capture was produced."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/specifications/contracts/historical-analysis/v1/issue-91-validation-handoff.json",
+    "docs/sprints/issue-75-historical-analysis/README.md",
+    "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md"
+  ],
+  "release_decision": {
+    "decision": "release_ready_with_external_blockers",
+    "external_blockers": [
+      {
+        "row_id": "91-L-075",
+        "severity": "high",
+        "blocker": "Content-enabled live capture was not authorized, and no exact reviewed multi-Session provider source tuple was available.",
+        "retry_condition": "Obtain separate content-access authorization and promote an exact reviewed provider/source/version multi-Session tuple, then freeze a new candidate and run provider execution, canonical receipt readback, exact drill-down, and repository-safe leak scanning.",
+        "unverified_capability": "Genuine provider-backed instruction findings and efficiency evidence across an exact reviewed multi-Session dataset."
+      }
+    ]
+  }
+}

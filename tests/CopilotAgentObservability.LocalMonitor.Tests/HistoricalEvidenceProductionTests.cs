@@ -634,11 +634,11 @@ public sealed class HistoricalEvidenceProductionTests
     public async Task SnapshotSource_ReadsDescriptorOnlyAfterRawCapabilityAndGrantedRetentionLease()
     {
         using var temp = new MonitorTempDirectory();
+        var now = new DateTimeOffset(2026, 7, 22, 11, 0, 0, TimeSpan.Zero);
         using var app = MonitorHost.Build(
             new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", true, 31_457_280),
-            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, UseUserSecrets = false });
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, TimeProvider = new MutableTimeProvider(now), UseUserSecrets = false });
         var store = app.Services.GetRequiredService<ISessionStore>();
-        var now = new DateTimeOffset(2026, 7, 22, 11, 0, 0, TimeSpan.Zero);
         var sessionId = Guid.CreateVersion7();
         var eventId = Guid.CreateVersion7();
         const string traceId = "1123456789abcdef0123456789abcdef";
@@ -677,9 +677,9 @@ public sealed class HistoricalEvidenceProductionTests
     public async Task SnapshotSource_AnySensitiveDescriptorCandidateVetoesSessionAndPersistsState(bool includeSafe, bool safeFirst)
     {
         using var temp = new MonitorTempDirectory();
-        using var app = BuildHost(temp.DatabasePath);
-        var store = app.Services.GetRequiredService<ISessionStore>();
         var now = new DateTimeOffset(2026, 7, 22, 11, 15, 0, TimeSpan.Zero);
+        using var app = BuildHost(temp.DatabasePath, new MutableTimeProvider(now));
+        var store = app.Services.GetRequiredService<ISessionStore>();
         var sessionId = Guid.CreateVersion7();
         const string traceId = "7123456789abcdef0123456789abcdee";
         var initial = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null,
@@ -731,11 +731,11 @@ public sealed class HistoricalEvidenceProductionTests
     public async Task SnapshotSource_DeniedOrBusyCurrentLeaseDoesNotMaterializeDescriptor(int dispositionValue)
     {
         using var temp = new MonitorTempDirectory();
+        var now = new DateTimeOffset(2026, 7, 22, 11, 30, 0, TimeSpan.Zero);
         using var app = MonitorHost.Build(
             new MonitorOptions(temp.DatabasePath, "http://127.0.0.1:0", true, 31_457_280),
-            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, UseUserSecrets = false });
+            new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, TimeProvider = new MutableTimeProvider(now), UseUserSecrets = false });
         var store = app.Services.GetRequiredService<ISessionStore>();
-        var now = new DateTimeOffset(2026, 7, 22, 11, 30, 0, TimeSpan.Zero);
         var sessionId = Guid.CreateVersion7();
         var eventId = Guid.CreateVersion7();
         const string traceId = "9123456789abcdef0123456789abcdef";
@@ -822,9 +822,9 @@ public sealed class HistoricalEvidenceProductionTests
     public async Task SnapshotSource_BindsGrantedDescriptorOutcomeIntoSnapshotIdentity()
     {
         using var temp = new MonitorTempDirectory();
-        using var app = BuildHost(temp.DatabasePath);
-        var store = app.Services.GetRequiredService<ISessionStore>();
         var now = new DateTimeOffset(2026, 7, 22, 13, 30, 0, TimeSpan.Zero);
+        using var app = BuildHost(temp.DatabasePath, new MutableTimeProvider(now));
+        var store = app.Services.GetRequiredService<ISessionStore>();
         var sessionId = Guid.CreateVersion7();
         var correctionId = Guid.CreateVersion7();
         const string traceId = "4123456789abcdef0123456789abcdef";
@@ -910,9 +910,9 @@ public sealed class HistoricalEvidenceProductionTests
         return sessionId;
     }
 
-    private static WebApplication BuildHost(string databasePath) => MonitorHost.Build(
+    private static WebApplication BuildHost(string databasePath, TimeProvider? timeProvider = null) => MonitorHost.Build(
         new MonitorOptions(databasePath, "http://127.0.0.1:0", true, 31_457_280),
-        new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, UseUserSecrets = false });
+        new MonitorHostTestOptions { StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false, StartSessionOtelEnrichment = false, TimeProvider = timeProvider, UseUserSecrets = false });
 
     private static MonitorSpanRow Span(int ordinal, string spanId, string? operation = null, string? category = null,
         string? toolName = null, string? toolType = null, string? parentSpanId = null, string? agentName = null,

@@ -1266,6 +1266,42 @@ credentials, price/currency, and monetary values are forbidden. The receipt
 checksum proves byte integrity, not quality improvement, effect, origin, or
 provenance. Issue #75 consumes this safe receipt without formula recomputation.
 
+## Historical Analysis Boundary
+
+Issue #75's `GET /historical-analysis` and
+`/api/historical-analysis/v1/*` surface is loopback-only, validates Host,
+emits no CORS headers, and sets `Cache-Control: no-store` on every response.
+An invalid Host is rejected before routing with the fixed `400`
+`invalid_host` error; no route-specific detail is returned.
+POST preview/start/resolve requests are same-origin and require
+`x-monitor-csrf: local-monitor`; all bodies are JSON-only, no more than
+1,048,576 bytes, and reject unknown fields. Fixed errors do not echo input,
+raw evidence, provider details, or exceptions.
+
+Preview invokes only the #72 owner. Instruction status returns only the #73
+repository-safe read DTO plus owner-validated canonical #59 bytes; efficiency
+status returns only the exact #74 repository-safe receipt. Evidence resolution
+receives opaque safe tokens and returns only distinct availability/content
+state plus an existing escaped same-origin #53 trace or diagnostics target.
+It never performs heuristic history lookup and never returns a raw body.
+
+Raw-default is a validation profile, not authorization to return raw content.
+Both raw-default and `--sanitized-only` responses are repository-safe;
+sanitized-only retains safe preview/status/navigation and preserves unavailable
+or expired state. A `--sanitized-only` host accepts only an exact
+`selection.sanitized_only=true` historical-analysis preview; `false` is
+rejected as `400 invalid_historical_analysis_request` before the #72 owner
+opens a snapshot or reads descriptors and is never silently rewritten.
+After transient preview rendering, long-lived browser state contains exactly
+`extraction_id`, `raw_local_sha256`, and `repository_safe_sha256`; selection,
+included/excluded Session data, and every other preview response field are
+discarded rather than retained in that binding. Browser storage, URLs, logs,
+artifacts, tests, and
+repository-safe evidence contain no full raw history, raw descriptors, prompt,
+response, tool body, provider input, local path, credentials, or PII. All
+dynamic text is escaped inert text. This boundary adds no raw analysis,
+content-enabled capture, import, provider pricing, apply, or effect authority.
+
 ## Sanitized Evidence Export Boundary
 
 Issue #85 exports only explicit sanitized projections and exact canonical
