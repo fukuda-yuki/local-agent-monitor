@@ -27,6 +27,7 @@
 | Human-review records | [interfaces/human-review-records.md](interfaces/human-review-records.md) |
 | Dashboard dataset | [interfaces/dashboard-dataset.md](interfaces/dashboard-dataset.md) |
 | Pricing estimation | [interfaces/pricing-estimation.md](interfaces/pricing-estimation.md) |
+| Cost analytics and budget alerts | [interfaces/cost-analytics.md](interfaces/cost-analytics.md) |
 | Instruction diagnosis analysis | [interfaces/instruction-diagnosis-analysis.md](interfaces/instruction-diagnosis-analysis.md) |
 | Canvas Session workspace | [interfaces/canvas-session-workspace.md](interfaces/canvas-session-workspace.md) |
 | Canvas Session workspace UI | [interfaces/canvas-session-workspace-ui.md](interfaces/canvas-session-workspace-ui.md) |

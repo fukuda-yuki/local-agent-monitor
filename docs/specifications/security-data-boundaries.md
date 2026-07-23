@@ -1573,6 +1573,92 @@ Consequently it adds no Host/origin/CSRF/CORS behavior and no new retention
 kind. Any #95 UI or later persistence owner must separately specify access,
 retention, mutation, and private-override handling before exposing estimates.
 
+## Cost Analytics Persistence And UI Boundary
+
+Issue #95 stores only exact, strict-consumer-validated Issue #94 catalog and
+estimate canonical bytes in the private Local Monitor SQLite database. Public
+hashes are integrity keys, not admission authority. Only a trusted in-process
+catalog provider and source adapter may create store candidates. No HTTP route,
+browser form, import archive, environment variable, or runtime request may
+provide canonical catalog/estimate bytes, a local override document, provider
+credential, invoice, account/organization/contract identifier, or private
+price. The only optional override acquisition is repeated startup
+`--pricing-registry-override <absolute-file>` (maximum eight), handled by the
+trusted provider before host construction. It rejects relative/foreign/UNC/
+network/device/alternate-stream paths, every symlink/reparse ancestor,
+nonregular/duplicate/oversize/malformed documents, and path-swap identity
+changes; it reads no-follow once from an identity-bound handle and returns only
+fixed path-free failure. Neither locator nor source bytes enter HTTP/UI/logs/
+SQLite scalars/evidence. The exact canonical catalog snapshot remains private
+database content; there is no persisted locator or watcher.
+
+The Windows wrappers expose optional
+`-PricingRegistryOverride <string[]>` on one-shot `start.ps1` and explicit
+`install-startup-task.ps1`. They preserve caller order and forward each value as
+one host `--pricing-registry-override`. One-shot start does not persist the
+locator. Explicit Task Scheduler registration necessarily stores the private
+absolute paths in current-user OS task action arguments, visible to same-user
+and administrator OS tooling; the registration workflow discloses that fact
+before use. The wrapper/application do not copy or echo those paths into logs,
+state files, database, HTTP/UI, repository-safe evidence, or any wrapper
+success/error/dry-run/status/stdout/stderr surface. One-shot start creates the
+process without a shell and uses one argument-list element per repeated host
+flag/value. Task registration uses one fixed UTF-16LE encoded PowerShell
+command, with every array member represented as a single-quoted literal whose
+embedded single quotes are doubled; it never concatenates a locator into
+executable syntax. Paths containing spaces or PowerShell metacharacters remain
+one literal array member. The encoded Task Scheduler action is the sole
+persisted locator and is OS-inspectable/decodable under the disclosed residual.
+Enable/disable does
+not rewrite them. Runtime backup/restore never contains the locators, so a
+restored configuration bound to overrides requires the user to supply the same
+reviewed file set/order or commit a configuration against the current catalog.
+
+The sole archive exception is strict owner-validated Issue #88
+`local-runtime-backup` whole-database restore. It may restore only exact
+catalog/estimate/configuration/request bytes and provenance that were already
+persisted inside the backed-up pricing component and pass the shared pricing
+schema plus strict consumer validation. Restore is not candidate admission and
+cannot introduce a standalone catalog, override document, estimate, or
+canonical-byte member.
+
+The `pricing` component's durable business history is append-only. Exact catalog
+bytes, estimate bytes, configuration/commit history,
+recalculation runs/results/events, and explicit active
+head ledgers are retained as metadata for the referenced Session. Session
+deletion is blocked while pricing history owns an exact Session reference;
+the sole owner-delete exception is a maximum-32 transient configuration-preview
+receipt, removed only after its fixed 15-minute expiry or successful commit;
+repository/workspace/path/time proximity never creates ownership or a cascade.
+Pricing creates no raw Retention item and is not an Issue #90 mutation target.
+Raw/content expiry or deletion does not rewrite a price estimate or alert
+receipt; later evidence availability is reported separately. The whole private
+database remains the Issue #88 backup unit. Issue #85 sanitized export v1
+excludes all pricing bytes and all alert-v2 bytes.
+
+The cost API and `/costs` page expose bounded sealed projections only. They
+never return canonical private bytes, local-override content or locator,
+quantity provenance identifiers, private source locations, account data,
+credentials, raw prompt/response/system/tool content, source/file bodies, PII,
+local paths, arbitrary provider text, exception text, or database values not
+listed by the cost interface. Reviewed public source references are inert text,
+never clickable/fetched URLs. Logs, errors, alert summaries, lifecycle comments,
+matrix evidence, and screenshots follow the same exclusion.
+
+All cost responses are `Cache-Control: no-store`; CORS remains off. Every
+request passes loopback Host validation and same-origin checks. Writes require
+strict JSON, fixed size/cardinality bounds, and the existing CSRF header.
+Errors use fixed codes without rejected identifiers or values. Sanitized-only
+mode keeps metadata-only cost views and actions available but grants no raw
+read and does not enable a provider adapter.
+
+The current Issue #61 manifests do not authorize a complete positive production
+estimate. The default adapter therefore returns an explicit unavailable state.
+Synthetic positive fixtures validate deterministic behavior but cannot be
+classified as genuine provider-live evidence. A registry match, model label,
+Session-run token total, repository, current time, or current catalog never
+upgrades that state. Content-enabled capture remains separately unauthorized.
+
 ## Shared Use Preconditions
 
 Before shared dashboard or real-data publishing:

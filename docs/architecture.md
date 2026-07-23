@@ -367,8 +367,9 @@ starts raw execution by default.
 
 The Wave 3 alert compatibility repair keeps the same dependency direction.
 `Alerts` additionally owns the source-neutral evaluate-and-append application
-contract and the bounded query contract. `Persistence.Sqlite` implements the
-query contract over the existing `alert_engine` v1 tables and invokes the
+contract and the bounded query contract. The preserved v1 baseline in
+`Persistence.Sqlite` implements the query contract over v1 rows in the
+`alert_engine` owner tables and invokes the
 shared `Alerts` strict receipt authority before returning exact bytes with the
 fully typed #80-owned Alert Center projection. #84 remains an
 upper-layer projection/UI consumer and receives neither arbitrary SQL nor a
@@ -400,6 +401,40 @@ SHA-256 into every estimate, and exposes the strict snapshot reload boundary.
 It owns no storage and does not treat a public hash as authenticity. #95 must
 persist those exact bytes; reconstruction and latest-catalog substitution are
 not equivalent.
+
+Issue #95 adds an upper-layer cost application without changing that domain
+direction:
+
+```text
+Telemetry / Session exact identities and reviewed #61 provenance
+                           |
+                           v
+LocalMonitor cost application -> Pricing
+           |                    (pure #94 engine/strict consumers)
+           v
+Persistence.Sqlite pricing component v1
+  exact catalog/estimate bytes + configuration/recalculation/head ledgers
+           |
+           v
+bounded analytics + #80 alert snapshot/config v2
+           |
+           v
+same #80 evaluator/store -> same #83 lifecycle -> #84 version-aware read/UI
+```
+
+`Persistence.Sqlite` references `Pricing` only to validate exact bytes through
+the #94 consumers; it does not copy the pricing parser or estimator. The cost
+catalog provider composes the embedded bundled document with at most eight
+identity-bound trusted local override files supplied at process startup; it
+persists only canonical snapshot bytes and never a locator. The cost
+application obtains positive estimate input only from an injected trusted
+source adapter. Local Monitor supplies the default unavailable adapter until a
+reviewed #61 mapping authorizes all required facts. #80 adds v2 contracts to the
+existing evaluator/store, #83 keeps lifecycle v1 while accepting an engine-v2
+parent, #84 owns version-aware presentation, #85 keeps export v1 receipt-only,
+and #88 owns the appended storage/restore compatibility. No second evaluator,
+store, lifecycle, invoice, provider-fetch, or legacy-dashboard projection is
+introduced.
 
 Issue #87 adds a raw-only sibling without changing the sanitized export domain:
 
@@ -466,9 +501,9 @@ caller-provided normalized alert snapshot
   -> initialize + append through IAlertEngineStore
   -> bounded typed success outcome only after append success
 
-trusted alert_engine v1 query
+trusted alert_engine query (v1-only methods or version-aware v1/v2 dispatch)
   -> alert-id/evaluation-id/suppression-ordinal cursor pages (1..100)
-  -> strict #80 owner validation + fully typed receipt/suppression projections
+  -> version-specific strict #80 owner validation + sealed projections
   -> #84 server-side projection without direct SQL
 
 explicit Session + trace evaluation request
@@ -675,6 +710,26 @@ exact session time + explicit provider/model/mode/pricing route
   -> immutable pricing.estimate.v1 record
 ```
 
+Issue #95 consumes that record through an exact persisted-history flow:
+
+```text
+explicit local Session UUID + trusted source adapter + exact configuration head
+  -> exact #94 request/catalog snapshot/estimate canonical bytes
+  -> strict snapshot and estimate consumer reload
+  -> append-only pricing estimate + recalculation result + contiguous head
+  -> active-head-only Session/UTC-day/rolling-period projections
+  -> currency-separated complete total + provisional partial-component subtotal
+     + exact coverage
+  -> #80 alert snapshot/config/evaluation/receipt v2
+  -> unchanged #83 lifecycle v1 + #84 version-aware Alert Center
+```
+
+Membership, predecessor selection, and evidence resolution use exact Session,
+estimate, catalog, configuration, and head identities. They never use latest
+timestamp, current catalog, repository/workspace/path, or model proximity.
+Current source manifests leave genuine positive provider estimates unavailable;
+synthetic fixtures prove execution only.
+
 用途:
 
 - Run Overview。
@@ -745,6 +800,16 @@ Issue #88 adds a separate `runtime_backup` SQLite component v1 after the #79
 and #86 component migrations. It owns sanitized path-free operation receipts
 only and does not change Monitor 7, Session 13, Retention 1, or the five raw
 store kinds.
+
+Issue #95 appends `pricing` component v1 after `runtime_backup` without changing
+the accepted #79 -> #86 -> #88 subsequence. It owns exact private catalog and
+estimate bytes plus append-only configuration/recalculation/head metadata.
+Alert-engine v1 upgrades in place to v2 while preserving v1 canonical bytes;
+alert-lifecycle remains v1. The fixed tail is
+`historical_instruction_analysis -> historical_import -> sanitized_import ->
+runtime_backup -> pricing`. Whole-database backup/restore validates both
+component versions and pricing-owned objects; no additional archive member,
+Retention kind, or raw-store kind exists.
 
 ```text
 live WAL database

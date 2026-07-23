@@ -60,6 +60,35 @@ Repository:
 .\scripts\local-monitor\stop.ps1 -Force
 ```
 
+One-shot pricing registry overrides can be passed in caller order and are not
+persisted by `start.ps1`:
+
+```powershell
+.\scripts\local-monitor\start.ps1 `
+  -PricingRegistryOverride @('<absolute-registry-a>','<absolute-registry-b>')
+```
+
+To retain the same reviewed override set for logon startup, pass it explicitly
+when registering the task:
+
+```powershell
+.\scripts\local-monitor\install-startup-task.ps1 `
+  -PricingRegistryOverride @('<absolute-registry-a>','<absolute-registry-b>')
+```
+
+This opt-in stores the private absolute paths in the current-user Task Scheduler
+action arguments, where same-user and administrator OS tooling can inspect
+them. The wrapper and application do not copy those paths into logs, state,
+HTTP/UI output, or repository-safe evidence. Enable/disable preserves the
+registered arguments. Dry-run, status, and errors report only whether overrides
+are present and their count; they do not print a path. The database and runtime
+backup do not contain override locators or original source-file bytes, but the
+private whole-database backup does contain the canonicalized catalog snapshot
+derived from an override, including private rates/provenance. Treat it as a
+raw-bearing private artifact. After restore, supply the same reviewed files in
+the same order or
+preview and commit a configuration against the newly loaded catalog.
+
 `status.ps1` reports installed state, process state, startup registration,
 startup enabled state, task name, URL, DB path, log path, install root, app
 version, `/health/live`, `/health/ready`, readiness status, degraded reasons,
@@ -143,6 +172,16 @@ posture.
 - The monitor still enforces loopback bind, Host header validation, same-origin
   controls, and `Cache-Control: no-store` on raw-bearing surfaces.
 - Wrapper logs contain operational facts only.
+- Pricing override file paths are persisted only in Task Scheduler action
+  arguments after explicit registration; one-shot start does not persist them.
+- Every wrapper success/error/dry-run/status/stdout/stderr/log/state surface
+  reports at most override presence/count and never reflects a locator.
+- One-shot process creation uses a shell-free process argument list with one
+  distinct `--pricing-registry-override` flag/value pair per path. Task
+  registration uses one fixed UTF-16LE PowerShell encoded command whose
+  single-quoted array members double every embedded single quote; no path is
+  concatenated into executable syntax. The encoded task action is the sole
+  persisted locator and remains OS-inspectable/decodable as disclosed above.
 - Release ZIPs and workflow artifacts contain published app files and scripts,
   not runtime DB, logs, state, raw telemetry, credentials, or PII.
 - Runtime DB, logs, pid/state files, and generated task state are local machine

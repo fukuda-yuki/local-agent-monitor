@@ -608,6 +608,66 @@ reconciliation, runtime pricing fetch, purchase or plan mutation,
 quality/effect assertion, UI, alert, notification, database migration, or
 Issue #80 receipt/lifecycle change.
 
+## Estimated-cost analytics and budget-alert integration
+
+Issue #95 defines the Local Monitor consumer at
+[cost analytics and budget alerts](specifications/interfaces/cost-analytics.md).
+The consumer obtains exact catalog/request facts only through trusted in-process
+providers, persists the exact Issue #94 catalog and estimate canonical bytes in
+a `pricing` component v1 whose durable business history is append-only, and
+reloads both through the Issue #94
+strict consumers before any projection. Public HTTP never accepts canonical
+catalog/estimate bytes, local override documents, paths, credentials, invoices,
+or private contract values.
+The sole delete exception is the component-owned bounded transient
+configuration-preview receipt: it expires after 15 minutes or is consumed by a
+successful commit, while durable catalog/configuration/commit/recalculation/
+estimate/head history remains immutable.
+
+The optional repeated Local Monitor startup option
+`--pricing-registry-override <absolute-file>` accepts at most eight trusted
+local regular registry documents in caller order after the bundled document.
+It rejects duplicate/source-conflicting, relative/foreign/network/device/UNC,
+reparse/symlink-ancestor, path-swap, oversize, malformed, or catalog-invalid
+input with one fixed path-free startup error. Files are identity-bound and read
+once; no watcher, fetch, HTTP upload/edit, path reflection, or fallback exists.
+
+An explicit configuration and recalculation bind exact Session UUIDs,
+configuration/catalog identities, captured active heads, calculation time, and
+idempotency. A successful recalculation appends immutable estimate, run, target,
+result, event, and head facts; a stale head or failure preserves all previous
+history. Active selection follows an explicit contiguous head ledger, never
+maximum timestamp or current-catalog substitution. Missing, unavailable,
+partial, not-estimable, failed, and stale Sessions remain distinct. Analytics
+total only fully estimated active Sessions, keep partial known components as a
+provisional reasoned subtotal without a lower-bound/actual-cost claim,
+split currencies, and compute coverage as estimated eligible Sessions divided
+by all eligible Sessions. An explicit estimated zero remains covered.
+
+The fixed budget rules are session, UTC-day, and configured rolling-period
+estimated-cost thresholds. They remain disabled until currency, warning/
+critical thresholds, window, and minimum coverage are explicitly configured.
+They reuse the single Issue #80 evaluator/store through additive v2 contracts,
+the unchanged #83 lifecycle-v1 events, and the version-aware #84 Alert Center.
+Multi-Session membership and evidence are exact; no synthetic aggregate Session
+or second alert stack exists. Alert v1 bytes/goldens/APIs remain compatible,
+#85 export v1 continues to carry only receipt v1, and the #88 migration tail
+becomes `historical_instruction_analysis -> historical_import ->
+sanitized_import -> runtime_backup -> pricing`.
+
+The accepted Issue #61 manifests do not yet authorize genuine positive pricing
+requests. The default source adapter therefore remains unavailable; synthetic
+repository-safe adapters validate positive behavior without becoming live
+support evidence. Codex App therefore remains
+`unavailable/codex_adapter_unavailable` on the current production path; the
+frozen #94 `not-estimable/subscription_or_contract_unknown` result is only the
+hypothetical domain outcome for a separately authorized exact fact set.
+`/api/costs/v1/*` and
+`/costs` expose metadata-only, no-store, same-origin/CSRF-protected views and
+actions. The page is contextual and does not add a third primary sidebar item.
+Estimated cost is not an invoice, chargeback, quality improvement, effect
+verdict, or model recommendation.
+
 ## Alert-rule engine foundation
 
 Issue #80 defines the source-neutral deterministic alert contract at
@@ -617,8 +677,11 @@ unavailable evidence produces a bounded suppression, never an inferred zero.
 Accepted matches become immutable canonical `alert.receipt.v1` values with
 exact evidence and config/input/evaluation hashes; comparable sensitive labels
 use private keyed HMAC tokens. SQLite ownership is limited to the
-`alert_engine` component v1 tables, allowing the separate #83 lifecycle
-component to coexist without rewriting receipt bytes. Issues #81 and #82 add
+`alert_engine` component tables. Issue #80 owns the engine-v2 migration and v2
+cost carriers integrated for Issue #95 inside that same owner while preserving
+all v1 bytes and methods,
+allowing the separate #83 lifecycle-v1 component to coexist without rewriting
+receipt bytes. Issues #81 and #82 add
 the frozen [tool/retry/permission rule pack](specifications/interfaces/tool-alert-rules.md)
 and [token/context/cache rule pack](specifications/interfaces/token-context-cache-alert-rules.md)
 through the existing registry; #84 owns Alert Center reads/UI/aggregation, and
@@ -635,9 +698,11 @@ enumerates exact receipt bytes with an owner-validated fully typed Alert Center
 projection, plus typed evaluation and suppression metadata, using fixed
 ordering, cursors, and a 1..100 limit. Evaluation metadata is emitted only after
 strict canonical reconstruction, exact byte comparison, and agreement with its
-SQLite scalar identities and child counts. It reads
-only the existing schema-v1 engine tables, adds no migration or source adapter,
-and gives #84 no arbitrary-SQL or provenance authority.
+SQLite scalar identities and child counts. It reads only owner-validated engine
+tables, uses version-specific consumers, adds no source adapter, and gives #84
+no arbitrary-SQL or provenance authority. Existing v1 query methods return v1
+rows only. The additive v2 query surface returns sealed v1/v2 projections and
+never passes v2 bytes to a v1 consumer.
 
 ## Alert lifecycle
 
@@ -661,6 +726,11 @@ rows, and #61 source-compatibility observations. `GET
 /api/alert-center/v1/alerts` provides a bounded filterable snapshot and
 `/alerts` renders its list/detail, exact evidence state, bounded sanitized
 lifecycle transition history/actions, coverage facts, and recurring groups.
+Issue #84 owns the compatibility revision integrated for Issue #95:
+`GET /api/alert-center/v2/alerts` and version-aware `/alerts` presentation for
+receipt v1/v2, including exact multi-Session and pricing estimate evidence.
+The v1 route/DTO remains unchanged and recurrence does not regroup an already
+aggregate cost receipt.
 Repository/workspace query values pass the existing sanitized free-form guard
 plus #84 path/credential/token checks before they can be reflected into the
 exact query DTO. Persisted scope values pass the same guard, and one unsafe
@@ -888,6 +958,7 @@ sanitized. The canonical contract is
 | Human-review record interfaces | [specifications/interfaces/human-review-records.md](specifications/interfaces/human-review-records.md) |
 | Dashboard dataset interface | [specifications/interfaces/dashboard-dataset.md](specifications/interfaces/dashboard-dataset.md) |
 | Pricing estimation interface | [specifications/interfaces/pricing-estimation.md](specifications/interfaces/pricing-estimation.md) |
+| Cost analytics and budget alert interface | [specifications/interfaces/cost-analytics.md](specifications/interfaces/cost-analytics.md) |
 | Instruction diagnosis analysis interface | [specifications/interfaces/instruction-diagnosis-analysis.md](specifications/interfaces/instruction-diagnosis-analysis.md) |
 | Historical source import interface | [specifications/interfaces/historical-source-import.md](specifications/interfaces/historical-source-import.md) |
 | Historical evidence extraction interface | [specifications/interfaces/historical-evidence-extraction.md](specifications/interfaces/historical-evidence-extraction.md) |
@@ -984,13 +1055,41 @@ Publicly documented interfaces are:
   `x-monitor-csrf: local-monitor`, and return `Cache-Control: no-store`.
   These routes remain available under `--sanitized-only` and do not expose or
   mutate receipt evidence.
-- Alert Center endpoints: `GET /api/alert-center/v1/alerts` and `POST
-  /api/alert-center/v1/evaluations`. The read returns only bounded sanitized
-  receipt/lifecycle/evidence/coverage/recurrence projections. The write accepts
-  only the closed `alert.center.evaluation-request.v1`, requires same-origin
-  plus `x-monitor-csrf: local-monitor`, and returns only evaluation ID, ordered
-  receipt IDs, suppressions, and rejected matches. Both use `Cache-Control:
-  no-store`; `/alerts` remains metadata-only under `--sanitized-only`.
+- Alert Center endpoints: `GET /api/alert-center/v1/alerts`,
+  `GET /api/alert-center/v2/alerts`, and
+  `POST /api/alert-center/v1/evaluations`. The v1 read remains the frozen
+  bounded sanitized receipt/lifecycle/evidence/coverage/recurrence projection.
+  The additive v2 read returns the version-aware `alert.center.v2` projection
+  for receipt v1/v2, exact multi-Session cost scope, pricing-estimate evidence,
+  budget suppression, and the unchanged lifecycle. The write accepts only the
+  closed `alert.center.evaluation-request.v1`, requires same-origin plus
+  `x-monitor-csrf: local-monitor`, and returns only evaluation ID, ordered
+  receipt IDs, suppressions, and rejected matches. All three use
+  `Cache-Control: no-store`; `/alerts` remains metadata-only under
+  `--sanitized-only`, and Issue #95 adds no separate public Alert Center
+  cost-evaluation route. Budget evaluation occurs only through explicit budget
+  scopes on `POST /api/costs/v1/recalculations`.
+- Local Monitor estimated-cost endpoints:
+  `GET /api/costs/v1/configuration`,
+  `GET /api/costs/v1/configurations/{configuration_id}`,
+  `GET /api/costs/v1/catalog?after=<cursor>&limit=<1..100>`,
+  `POST /api/costs/v1/configuration/preview`,
+  `POST /api/costs/v1/configurations`,
+  `POST /api/costs/v1/recalculations`,
+  `GET /api/costs/v1/recalculations/{run_id}`,
+  `GET /api/costs/v1/sessions/{session_id}/recalculations?after=<attempt_revision>&limit=<1..100>`,
+  `GET /api/costs/v1/sessions/{session_id}/estimates?after=<estimate_id>&limit=<1..100>`,
+  `GET /api/costs/v1/sessions/{session_id}/estimates/{estimate_id}`, and
+  `GET /api/costs/v1/analytics?from=<UTC>&to=<UTC>&after=<cursor>&limit=<1..100>`.
+  `GET /costs` is the separate result-oriented browser page, always reachable
+  from fixed Overview and Diagnostics context entries and optionally narrowed
+  by exact Session/estimate links. Every API/page request requires a valid
+  loopback Host and same-origin context. The API accepts bounded strict
+  JSON/query input, GET is mutation-free, POST additionally requires JSON plus
+  `x-monitor-csrf: local-monitor`, and every response is
+  `Cache-Control: no-store`. Missing, partial, not-estimable, failed,
+  unavailable, stale, and incomplete facts remain distinct from an explicit
+  estimated zero.
 - Sanitized export CLI commands:
   `sanitized-export preview --database <monitor.db> --request <request.json>`,
   `sanitized-export export --database <monitor.db> --request <request.json>
@@ -1040,10 +1139,10 @@ Publicly documented interfaces are:
   default pre-restore backup, atomic swap/rollback, and post-install
   readiness/Doctor checks.
 - Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および ダッシュボード（`/`）と トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route / raw section を除去（raw-detail route は `404`、dashboard / traces の prompt ラベルは省略し短縮 TraceId にフォールバック）、PII は除外。prompt ラベルは `/api/monitor/*` と SSE には含めない。full-payload JSON raw API は提供しない。Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
-- Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
+- Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）、および最大8回の optional `--pricing-registry-override <absolute-file>`。pricing override は trusted local regular registry document を caller order で bundled document の後へ追加し、private path/bytes を API、UI、log、または repository-safe evidence へ出さない。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 
   Update (D039 / D042 / D050): Local Monitor の client-side overview / trace-list と Canvas helper は、same-origin / token-gated local screen 上で `GET /traces/{traceId}/prompt-label` を `fetch` し、prompt label を `textContent` 相当の inert text として表示してよい。これは full raw payload の client-side fetch 許可ではなく、`/api/monitor/*` と SSE は prompt-free のまま。
-- Local Ingestion Monitor Windows startup scripts: `scripts/local-monitor/start.ps1`、`stop.ps1`、`status.ps1`、`set-startup-task.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`、`install-user-env.ps1`、`uninstall-user-env.ps1`。Task Scheduler task の既定名は `CopilotAgentObservability LocalMonitor`、trigger は current user logon、既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下。Task 登録 script は client routing 設定を書き換えない。user env script は別の明示操作として current user の永続環境変数に raw-local-receiver / monitor 向け OTLP routing を設定・解除する。startup 登録、enable / disable、今すぐ起動、user env install / uninstall は利用者が明示実行した場合のみ行う。
+- Local Ingestion Monitor Windows startup scripts: `scripts/local-monitor/start.ps1`、`stop.ps1`、`status.ps1`、`set-startup-task.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`、`install-user-env.ps1`、`uninstall-user-env.ps1`。`start.ps1 -PricingRegistryOverride <string[]>` は0..8個の absolute file を caller order の repeated host `--pricing-registry-override` として渡し、one-shot start では path を永続化しない。`install-startup-task.ps1 -PricingRegistryOverride <string[]>` は利用者が明示した場合だけ同じ順序の private absolute path を current-user Task Scheduler action arguments に保存する。この OS-owned task argument は同一ユーザーまたは管理者の OS tooling から見えるため、利用者へ登録前に明示する一方、script/app は path を log、state、API、UI、repository-safe evidence へ複製しない。dry-run/status/error は override の有無と件数だけを示し、path を表示しない。`set-startup-task.ps1` の enable/disable は arguments を変更しない。Task Scheduler task の既定名は `CopilotAgentObservability LocalMonitor`、trigger は current user logon、既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下。Task 登録 script は client routing 設定を書き換えない。user env script は別の明示操作として current user の永続環境変数に raw-local-receiver / monitor 向け OTLP routing を設定・解除する。pricing override locator は DB/runtime backup に含めず、restore 後も同じ reviewed file set/order を起動時に再指定するか、新しい catalog で configuration を preview/commit する。startup 登録、enable / disable、今すぐ起動、user env install / uninstall は利用者が明示実行した場合のみ行う。
 - Local Ingestion Monitor Release ZIP interface: `.github/workflows/local-monitor-release.yml` と `scripts/local-monitor/package-release.ps1` は Windows x64 self-contained folder publish を `local-monitor-win-x64.zip` として生成する。ZIP layout は `app/`、`scripts/`、`README.md`、`manifest.json`、notices を含む。ZIP scripts は `install.ps1`、`start.ps1`、`stop.ps1`、`status.ps1`、`set-startup-task.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`、`install-user-env.ps1`、`uninstall-user-env.ps1` を含む。install root 既定は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\app\`、runtime root 既定は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\`。uninstall は DB / logs を既定保持し、`-RemoveData` 明示時のみ runtime data を削除する。
 - Local Ingestion Monitor Copilot raw analysis routes（raw-default only）: `POST /traces/{traceId}/analysis`（CSRF header required; creates a queued local analysis run and dispatches the .NET GitHub Copilot SDK analysis service without embedding raw in the request。Sprint18 で optional `question` / `history`（過去 Q&A turns）を受け付け、runner が prompt に履歴ブロックを追記する history-resend 追い質問に対応。server 側に会話 session 状態は持たない。D045）、`GET /traces/{traceId}/analysis/runs/{runId}`（local raw-derived result; same-origin + `Cache-Control: no-store`）、`GET /traces/{traceId}/analysis/runs/{runId}/safe-summary`（repository-safe allowlist summary）。These routes are not under `/api/monitor/*`; `/api/monitor/*` and SSE remain sanitized-only. `--sanitized-only` removes the analysis routes.
 - Local Monitor Copilot raw analysis configuration: `CopilotAnalysis:Enabled`（未設定時は enabled; `false` で local analysis runner を明示無効化）、`CopilotAnalysis:Model`（既定 `gpt-5`）、`CopilotAnalysis:TimeoutSeconds`（raw analysis runner が 1 回の SDK send/wait に許容する実行タイムアウト秒。正の整数。未設定・不正値は既定 `60`。Canvas options の timeout hint とは独立）、`CopilotAnalysis:BaseDirectory`（writable な SDK runtime state parent。未設定時は writable temp-local LocalMonitor parent。Local Monitor は run ごとに catalog-owned opaque child を作成し、その child だけを SDK に渡す。parent や sibling は cleanup target ではない。詳細は [Raw Store And Normalization Specification](specifications/layers/raw-store-normalization.md#analysis-sdk-directory-capture-and-cleanup-d3)）、and optional BYOK provider keys `CopilotAnalysis:Provider:Type`、`BaseUrl`、`WireApi`（`completions` or `responses`）、`ApiKey`。These may be supplied through user-secrets or equivalent local configuration. `ApiKey` must not be logged, persisted in analysis events, or emitted to repository-safe outputs.

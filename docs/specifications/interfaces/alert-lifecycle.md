@@ -10,7 +10,8 @@ contract for immutable Issue #80 alert receipts.
 Concrete alert rules, source parsing, Alert Center UI/aggregation,
 notifications, and heuristic predecessor discovery are outside this interface.
 The Issue #80 receipt bytes and the `alert_engine` component-owned tables remain
-immutable.
+immutable. The Issue #95 compatibility rule near the end accepts a valid
+engine-v2 parent without changing this lifecycle-v1 contract.
 
 ## Fixed v1 contracts
 
@@ -85,16 +86,18 @@ is detected before insert. Any unexpected SQLite constraint or integrity error
 is `alert_lifecycle_store_unavailable`, not a revision conflict.
 
 Initialization is additive and transactional. Fresh databases and databases
-with the accepted `alert_engine` v1 component are supported through route-local
-composition. Every lifecycle route first invokes the Issue #80 engine store's
-existing initialize/validate operation, then initializes/validates the
+with an accepted `alert_engine` v1 or v2 component are supported through
+route-local composition. Every lifecycle route first invokes the shared Issue
+#80 owner initialization/validation authority, then initializes/validates the
 lifecycle component, and only then performs a read or mutation. The lifecycle
-store also refuses to initialize or operate unless the accepted engine v1
-schema validates; it consumes the Issue #80 validator and does not reproduce or
-relax its table definitions. Therefore a fresh host creates the engine parent
-before the lifecycle child and returns `404 alert_not_found` for an unknown
-receipt, while a counterfeit `alert_receipts` table without a valid engine
-component returns the fixed lifecycle unavailable error and creates no
+store also refuses to initialize or operate unless that owner schema validates;
+it consumes the Issue #80 schema authority and does not reproduce or relax its
+table definitions. Receipt existence is then one exact parameterized primary-key
+lookup in the validated `alert_receipts` table; lifecycle does not invoke a
+receipt parser or infer its version. Therefore a fresh host creates the engine
+parent before the lifecycle child and returns `404 alert_not_found` for an
+unknown receipt, while a counterfeit `alert_receipts` table without a valid
+engine component returns the fixed lifecycle unavailable error and creates no
 lifecycle objects. Existing `schema_version` rows and all non-lifecycle
 tables/rows are preserved. Missing, newer, or definition-mismatched lifecycle
 components fail closed with `alert_lifecycle_store_unavailable`; they are not
@@ -276,3 +279,25 @@ Issue #84 consumes `alert.lifecycle.v1`, revision-descending bounded history,
 and `sanitized-alert-lifecycle.v1`. Concrete rule packs and retention producers
 remain responsible for calling the trusted seams with exact IDs; Issue #83
 ships no end-to-end producer that guesses these relationships.
+
+## Alert-engine v2 parent compatibility
+
+Issue #95 does not create `alert.lifecycle.v2`. The fixed lifecycle schema,
+event bytes, transition table, revision/idempotency rules, routes, DTOs, and
+error codes above remain v1.
+
+The parent compatibility check accepts a structurally valid Issue #80
+`alert_engine` component at version 1 or 2. At version 2, immutable
+`alert.receipt.v1` and `alert.receipt.v2` rows may coexist in the same
+`alert_receipts` parent table. Receipt existence uses the shared owner schema
+validation followed by the unchanged exact primary-key lookup; lifecycle code
+does not parse, dispatch, or copy either receipt version. The unchanged foreign
+key therefore supports user actions on an exact v2 alert ID.
+
+An unknown/future/broken engine maps to lifecycle unavailable. An absent exact
+canonical parent alert ID maps to `alert_not_found`. Migration to engine v2 must
+preserve every lifecycle row and parent
+relationship and pass `foreign_key_check`. Tests must prove unchanged lifecycle
+canonical events/API bytes for v1, the same mutation/history behavior for one
+v2 receipt, no receipt rewrite, rollback on invalid parent migration, and no
+second lifecycle table/store/API.

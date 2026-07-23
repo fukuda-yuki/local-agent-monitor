@@ -174,6 +174,14 @@ is derived from total tokens or another category. Token and request quantities
 are integral. Credit quantities are decimal because provider credit accounting
 can be fractional.
 
+Those five request-level provenance objects and the per-quantity provenance
+objects are the complete v1 request provenance surface. Configuration IDs,
+configuration-entry ordinals, catalog hashes, and registry selections are not
+additional request fields. A caller may bind its authority only through the
+existing five safe-token fields. Catalog SHA and registry selection remain
+estimate-envelope facts validated by `PricingEstimateConsumer` against the
+exact supplied catalog snapshot.
+
 All token/credit quantities are at most `1000000000000000000`; request count is
 at most `1000000000000`. A positive fractional credit is at least `0.000001`.
 Credit quantity normalized fractional scale is at most six. Rate/quantity
@@ -392,8 +400,11 @@ authorize capture or infer a billing route.
 The legacy `dashboard-dataset` `sprint4-m2-v1` unit-price calculator predates
 this contract and can treat a missing token side as zero. It remains unchanged
 for wire compatibility and is explicitly non-authoritative for Issue #94.
-Issue #95 must decide how to persist/project this new record without silently
-mapping it into that legacy field.
+Issue #95 persists the exact canonical bytes in its separate `pricing`
+component and exposes the `/costs` surface. It does not project
+`pricing.estimate.v1` into `sprint4-m2-v1`, rewrite `estimated_cost` or
+`cost_source`, or use those fields as estimate input. A future projection
+requires a new dashboard schema and an explicit compatibility migration.
 
 Issue #94 adds no SQLite schema component or migration, HTTP/CLI/UI route,
 budget rule, alert, notification, provider credential, invoice reconciliation,

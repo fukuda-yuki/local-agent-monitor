@@ -281,3 +281,57 @@ surface's future entry, or supersede the registry through a versioned canonical
 transition; it must not write `active` into the v1 registry or inherit a pass
 from the former placeholder. The machine-readable handoff is
 `contracts/sanitized-evidence/v1/issue-91-validation-handoff.json`.
+
+## Alert-engine v2 coexistence
+
+Issue #95 does not widen this bundle. The v1 carrier set, manifest/control
+schemas, paths, record-count vocabulary, scanner, archive order, golden bytes,
+and Issue #86 input remain frozen. `alert.receipt.v2`,
+`sanitized-alert-receipt.v2`, `pricing.estimate.v1`,
+`pricing.catalog-snapshot.v1`, and every `pricing_*` row are not v1 export
+carriers. Direct/public attempts to add them continue to fail closed as an
+unsupported producer/profile/record.
+
+The trusted SQLite snapshot provider recognizes an exact `alert_engine`
+component at version 1 or 2. For version 2 it calls the #80 owner authority to
+validate the complete table/index/trigger/FK shape and scalar version
+constraints without enumerating unrelated payload rows. This is the sole
+private exception to the descriptor-query allowlist above; it performs bounded
+schema metadata queries only. Sanitized export deliberately does not claim
+whole-engine row integrity.
+
+The unchanged 256-sentinel descriptor acquisition then selects only rows whose
+scalar receipt schema is exactly `alert.receipt.v1`, exact-fetches only those
+selected v1 payloads, validates each through the unchanged
+`AlertReceiptConsumerV1`, and for each of the at-most-255 selected receipts
+uses one bounded #80 owner query to require its exact parent evaluation scalar
+schema is v1 and its evaluation/config/input identities equal the receipt. The
+parent query reads no evaluation payload and is the only selected-graph
+provenance exception to the original table allowlist. A v1 receipt with a v2,
+missing, or identity-mismatched parent is `snapshot_store_unavailable`.
+The provider reads no v2 canonical evaluation/receipt/suppression payload,
+does not enumerate unrelated v2 rows, and does not invoke a v2 payload
+consumer. Unrelated v2 row validity remains the #80 owning store's
+startup/read responsibility, not an export-v1 carrier condition.
+V2 rows are never passed to a v1 consumer, materialized in the export
+inventory, selected, scanned by the export scanner, hashed into the v1
+snapshot, counted against the v1 record ceiling, or copied into an artifact.
+An invalid selected v1 row or broken/counterfeit/future engine schema makes the
+snapshot `snapshot_store_unavailable`; neither is downgraded to `missing` or
+partial success. An unrelated v2 payload is never read and therefore cannot be
+classified by this v1 export.
+
+A structurally valid v2-only engine snapshot is a successful v1 snapshot with no exportable
+alert receipt and reports the existing `missing` carrier state. A valid mixed
+store exports v1 rows only after structural owner validation and strict
+selected-v1 validation above succeed.
+The bounded processing-version inventory may state
+`alert_engine_schema=2`; that value is compatibility metadata, not evidence
+that a v2 receipt or pricing capability was exported. A counterfeit/broken/
+future engine remains snapshot unavailable. Unrelated exact pricing-component
+objects are ignored by #85 and their canonical bytes are never read.
+
+Tests pin the existing v1 golden SHA unchanged, v1-only/v2-only/mixed stores,
+corrupt v1 beside valid v2, future/broken schema refusal, direct v2/cost-carrier
+rejection, route/CLI behavior, and zero leakage of v2/pricing/private-override
+bytes or error details.

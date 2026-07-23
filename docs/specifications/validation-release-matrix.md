@@ -126,6 +126,77 @@ decompression, or secure-erasure proof.
 
 Any violation above is a hard blocker and prevents a release-ready decision.
 
+## Issue #95 Direct Rows
+
+Issue #95 is an active implementation, not a future-registry placeholder. Its
+owning matrix contains exactly these direct rows:
+
+- `91-A-095`: automated pricing persistence/head/recalculation and durable
+  retry-history route, analytics range/daily totals, alert v2,
+  lifecycle/Alert Center, cost API/UI including every closed status/code such
+  as `cost_session_not_eligible`, accessibility, fresh/upgrade migration,
+  sanitized-export compatibility, and backup/restore. It directly pins the safe
+  catalog route's default/limit bounds, malformed cursor, changed-catalog
+  cursor, canonical nonmember cursor, and page continuation; the immutable
+  configuration read and commit `Location`; preview TTL/capacity/cleanup,
+  consumed-preview lost-response replay, and expired-preview restore cleanup;
+  full-snapshot v1 recurring aggregation across v2 pages and incomplete
+  acquisition withholding recurrence; exact registered/unknown v2 rule/formula
+  metadata; direct cursor reload, response-size-shortened pages, visible range,
+  backward/forward Alert Center navigation, and canonical
+  member-but-nonboundary cursor rejection; and browser abort/generation behavior
+  with at most one 100-entry catalog page plus 64 source projections retained;
+- `91-S-095`: exact-byte reload, no current-catalog/head substitution, exact
+  Session/estimate identity, hostile schema/API inputs, no raw/secret/PII/path/
+  private-override leakage, startup override no-follow/reparse/identity-swap/
+  credential rejection, changed provider-catalog rebinding, sanitized-only
+  behavior, archive safety, and final scanner. Wrapper coverage exercises
+  one-shot start, dry-run, install success/failure, `-StartNow`, status,
+  enable/disable, restart, paths containing spaces/single quotes/PowerShell
+  metacharacters, shell-free one-argument-per-path process creation, safe
+  encoded Task Scheduler action construction/inspection, and asserts that no
+  success/error/stdout/stderr/log/state surface retains a locator while the
+  explicitly disclosed OS task action does; and
+- `91-L-095`: genuine multi-Session provider/model/billing/quantity mapping,
+  for both GitHub Copilot and Claude Code, positive estimate persistence,
+  configured budget evaluation, and Alert Center readback.
+
+The `91-A-095` Playwright matrix must show separated currency/registry range
+totals and UTC daily trend, provisional partial labels, durable failed/retry
+history, and the incomplete path withholding all totals while announcing its
+exact cap/lower bound.
+
+The #95 final candidate may be frozen only after accepted #80, #83, #84, #85,
+and #88 compatibility revisions are recorded, closed/accepted under their own
+contracts, and proven ancestors. The same candidate re-executes or honestly
+reclassifies the existing #88 rows affected by the new pricing vector,
+including second-machine `91-L-088`; those remain #88-owned and are not
+duplicated as a fourth #95 row. A same-machine synthetic restore cannot pass
+`91-L-088`.
+
+Implementation must materialize the active rows at
+`docs/sprints/issue-95-cost-analytics/validation-matrix.json`; they are not added
+to `future-surface-registry.json`. It must also materialize the machine-readable
+handoff at
+`docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json`;
+it binds matrix-prep SHA, frozen candidate SHA, every actual evidence execution
+SHA, row classifications, and artifact paths/checksums. `91-A-095` and
+`91-S-095` must pass on the frozen candidate. Only after every repository-owned
+adapter, compatibility, migration, and automated/security proof passes, when a
+reviewed #61 GitHub Copilot or Claude Code mapping or separately authorized
+content/source execution is still unavailable, `91-L-095` is
+`blocked_external/high` with the exact retry condition and genuine positive
+capability for each affected provider named as unverified. Synthetic execution
+cannot promote that row.
+
+The repository-safe scanner covers cost DTOs, Alert Center/lifecycle/sanitized
+export projections, fixed errors/logs, receipts/ledgers, matrix evidence, and
+repository artifacts. The raw-bearing `local-runtime-backup` archive is a
+private local operator artifact and is never copied into or scanned as
+repository-safe evidence. Its structural/checksum/strict-consumer validation
+is recorded only as bounded counts, hashes, classifications, and exit status;
+private pricing or raw database bytes are not evidence output.
+
 ## Release Decision
 
 The matrix returns exactly one decision and, when applicable, a structured

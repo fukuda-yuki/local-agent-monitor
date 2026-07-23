@@ -1,8 +1,8 @@
 # Alert Center read and UI contract
 
-Status: Issue #84 implementation contract
+Status: Issue #84 v1 implementation contract plus Issue #95 compatibility
 Owner: Issue #84
-Schema: `alert.center.v1`
+Schemas: `alert.center.v1`, additive `alert.center.v2`
 
 ## Purpose and authority
 
@@ -10,11 +10,12 @@ The Alert Center is a sanitized local read surface over accepted alert-domain
 contracts. It does not evaluate rules or own alert state.
 
 - Alert identity, severity, evidence, observed values, effective thresholds,
-  source metadata, and completeness come only from a canonical
-  `alert.receipt.v1` receipt accepted by `AlertReceiptConsumerV1`.
+  source metadata, and completeness come only from canonical owner-store bytes
+  accepted by the matching `AlertCenterReceiptConsumerV1` or
+  `AlertCenterReceiptConsumerV2`.
 - Rule titles, descriptions, evaluation windows, thresholds, and required
-  capabilities come only from the frozen #81 and #82 registered rule
-  descriptors with the exact receipt rule ID and version.
+  capabilities come only from the frozen #81/#82 or #95 registered rule
+  descriptors with the exact receipt rule ID and separate version.
 - Current state, revision, history, and allowed mutations come only from the
   #83 `alert.lifecycle.v1` store and HTTP API.
 - Repository/workspace labels and evidence availability are exact joins to the
@@ -475,3 +476,454 @@ row IDs:
   source adapter or content-capture authorization is unavailable.
 
 No #85 export row or carrier is activated by this transition.
+
+## Additive cost-receipt read compatibility
+
+Issue #84 preserves every `/api/alert-center/v1/*`, `alert.center.v1` DTO,
+filter, recurring rule, and v1 UI behavior. Issue #95 adds no client or public
+Alert Center evaluation route; the trusted cost application invokes the Issue
+#80 v2 evaluator only after an explicit recalculation.
+
+`GET /api/alert-center/v2/alerts` is an additive no-store, same-origin,
+loopback-only read using `alert.center.v2`. It acquires sealed owner-validated
+v1/v2 receipt projections from the single version-aware #80 query store and
+joins lifecycle through the unchanged #83 API/store. It does not parse
+canonical bytes, query engine tables directly, re-evaluate rules, or infer
+scope.
+
+The exact v2 response is:
+
+```text
+schema_version = alert.center.v2
+snapshot_id
+acquisition_state = complete | incomplete
+acquisition_cap_reason = null | owner_more | receipt_limit | retained_bytes_limit
+acquired_receipt_count
+match_count_state = exact | acquired_only
+matched_item_count
+query
+items
+visible_start_ordinal
+visible_end_ordinal
+has_previous
+previous_cursor
+next_cursor
+recurring_state = complete | incomplete_snapshot
+recurring_groups
+coverage_state = complete | incomplete | unavailable
+coverage
+omitted_coverage_fact_count
+```
+
+`acquired_receipt_count` is the validated owner count before filtering.
+`matched_item_count` is exact inside that acquired set. It is a global exact
+count only when `match_count_state=exact`; incomplete acquisition uses
+`acquired_only` and MUST NOT be presented as a global total, top, latest, or
+zero claim.
+
+Visible ordinals are one-based positions inside the complete filtered acquired
+set and are both zero for an empty page. `has_previous` is true exactly when
+the request begins after a validated member. `previous_cursor` is null on the
+first and second pages; on the second page `has_previous=true` means the
+previous request omits `cursor`. On later pages it is the exact cursor after
+which the preceding page begins. The server deterministically replays page
+boundaries from the start using the same limit and 16-MiB complete-response
+bound, so this remains exact when a response-size bound shortened any page.
+`next_cursor` is null exactly when no filtered acquired member remains after
+`visible_end_ordinal`. A direct cursor reload therefore reconstructs the same
+visible range and backward/forward navigation without client-only history.
+
+`acquisition_cap_reason` is null if and only if acquisition is complete. When
+more owner rows exist and multiple receipt-acquisition bounds coincide at the
+same accepted-record boundary, the fixed winning rank is
+`retained_bytes_limit`, then `receipt_limit`, then `owner_more`.
+`retained_bytes_limit` means accepting the next validated receipt/projection
+would exceed 64 MiB, `receipt_limit` means 2,000 validated receipts were
+accepted, and `owner_more` means the twentieth owner page was consumed while
+its cursor still reports more. Processing order, owner page size, and which
+condition a caller happens to test first cannot change the token.
+
+`recurring_groups` reuses the exact existing v1 recurring-group projection and
+property order: `aggregation_state`, `rule_id`, `rule_version`, `repository`,
+`workspace`, `source_surface`, `source_version`, `observation_date`, `from`,
+`to`, `occurrence_count`, `distinct_session_count`, `first_observed_at`,
+`last_observed_at`, `completeness_distribution`, `alert_ids`, `session_ids`,
+`evidence_references`. It is computed from every matching validated
+`receipt_v1` item in the full acquired and filtered snapshot before pagination,
+never from the current page. `cost_receipt_v2` items do not participate. When
+acquisition is complete, `recurring_state=complete` and each group uses the
+unchanged v1 `supported | low_n | unsupported_scope` rule. When acquisition is
+incomplete, `recurring_state=incomplete_snapshot`, `recurring_groups=[]`, and
+the response makes no recurring or zero-recurring claim. The response never
+emits an apparently supported group from a bounded prefix.
+
+`items` is a closed discriminated union with properties in exact order
+`receipt_kind`, `receipt_v1`, `cost_receipt_v2`. `receipt_kind` is exactly
+`receipt_v1 | cost_receipt_v2`. For `receipt_v1`, `receipt_v1` is the exact
+existing sealed v1 Alert Center item and `cost_receipt_v2` is null. For
+`cost_receipt_v2`, `receipt_v1` is null and `cost_receipt_v2` is the exact
+payload below. Both-null, both-present, a discriminator/payload mismatch, or an
+unknown kind fails the whole page with `alert_center_store_unavailable`; no
+member is skipped. This wrapper does not change one byte or field of the v1
+route/DTO.
+
+The `cost_receipt_v2` payload has properties in this exact order:
+
+```text
+alert_id
+evaluation_id
+rule_id
+rule_version
+severity
+initial_state
+lifecycle
+first_observed_at
+last_observed_at
+summary
+rule
+formula
+source_surface
+source_version
+completeness
+completeness_reasons
+source_cost_configuration_id
+source_configuration_head_revision
+source_configuration_catalog_sha256
+configuration_version
+configuration_hash
+input_hash
+scope
+eligibility_digest
+evidence
+currency
+aggregate_state
+observed_amount
+warning_threshold
+critical_threshold
+eligible_count
+estimated_count
+partial_count
+not_estimable_count
+missing_count
+failed_count
+unavailable_count
+stale_count
+coverage_numerator
+coverage_denominator
+coverage_basis_points
+members
+```
+
+`rule` has exact property order `rule_id`, `rule_version`, `contract_state`,
+`title`, `description`, `evaluation_window`, `scope_kind`. The first two equal
+the receipt. Exact registry identity produces `contract_state=registered` and
+the remaining metadata copied from `AlertRuleDescriptorV2`; `formula` is the
+descriptor's exact non-null registered formula. If the exact ID/version is not
+registered, `contract_state=unknown_version`, all four nullable presentation
+members after it and top-level `formula` are null, while receipt facts remain
+visible. There is no nearest-version fallback or client-authored label.
+
+The alert/evaluation/rule/configuration/source identities, severity, fixed
+initial state, lifecycle projection, times, summary, completeness, exact scope,
+eligibility digest, monetary values, thresholds, counts, coverage, and input
+hash are copied from the sealed #80 receipt and #83 lifecycle projection. The
+configuration version is exact `cost.configuration.v1`. A receipt is a
+successful monetary match, so `currency` is exact `USD`, `aggregate_state` is
+`available`, observed amount and both thresholds are non-null canonical decimal
+values, all counts and coverage values are non-null, and first/last observation
+times are non-null. Arrays are present even when empty. `scope` is the exact
+`AlertCostScopeV2` wire shape/order; its bounds are both null for Session and
+both non-null for UTC-day/rolling-period. `lifecycle` is the same sealed
+property order/nullability used by the existing v1 item; v2 adds no lifecycle
+field or state. Every other top-level property above is non-null.
+
+Each `evidence` item has exact property order `kind`, `evidence_id`,
+`session_id`, `observed_at_utc`, `state`, `href`. The first four fields and
+canonical array order equal the accepted receipt. `state` is
+`available | missing | expired`. For `kind=session`, `href` is always the
+non-null fixed same-origin Session href. For `kind=pricing_estimate`, it is the
+fixed same-origin estimate href only when state is `available` and is null
+otherwise.
+
+Each `members` item preserves receipt member order and has exact property order:
+
+```text
+session_id
+session_effective_at_utc
+state
+attempt_revision
+attempt_result_kind
+attempt_result_code
+head_revision
+estimate_id
+catalog_sha256
+registry_version
+billing_mode
+session_evidence_state
+repository
+workspace
+scope_state
+session_href
+estimate_evidence_state
+estimate_href
+```
+
+The receipt supplies fields through `billing_mode`; their nullable-state
+relationships are the strict #80 member contract. The presentation resolver
+supplies the remaining fields. `session_evidence_state` is always
+`available | missing | expired`; repository/workspace are nullable accepted
+labels, `scope_state` is `available | unavailable`, and `session_href` is the
+non-null fixed same-origin Session href. `estimate_evidence_state` is null if
+and only if `estimate_id` is null; otherwise it is
+`available | missing | expired`. `estimate_href` is non-null only when the
+estimate evidence state is `available`. Every nullable field is emitted as JSON
+null, never omitted or replaced with empty text/zero.
+
+The item contains no canonical pricing/receipt bytes, local override document,
+source body, arbitrary provider text, credential, private contract/account/
+invoice value, PII, path, or lifecycle comment. Source references are not part
+of the alert receipt.
+
+`coverage` is also a closed discriminated union with properties in exact order
+`coverage_kind`, `suppression_v1`, `cost_suppression_v2`. `coverage_kind` is
+exactly `suppression_v1 | cost_suppression_v2`, and exactly the matching payload
+is non-null; the other payload is emitted as JSON null. Both-null,
+both-present, discriminator/payload mismatch, or unknown kind fails the whole
+page with `alert_center_store_unavailable`.
+
+The additive `suppression_v1` payload has exact property order
+`evaluation_id`, `suppression_ordinal`, `rule_id`, `rule_version`, `code`,
+`missing_capabilities`, `context_state`, `source_surface`, `source_version`,
+`session_id`, `trace_id`, `observation_date`. It is the existing sealed v1
+coverage fact plus its owner suppression ordinal; existing v1 nullability and
+context rules remain unchanged.
+
+The `cost_suppression_v2` payload has properties in this exact order:
+
+```text
+evaluation_id
+suppression_ordinal
+rule_id
+rule_version
+code
+source_cost_configuration_id
+source_configuration_head_revision
+source_configuration_catalog_sha256
+configuration_version
+configuration_hash
+scope_kind
+scope_id
+scope_start_utc
+scope_end_utc
+eligibility_digest
+currency
+aggregate_state
+eligible_count
+estimated_count
+partial_count
+not_estimable_count
+missing_count
+failed_count
+unavailable_count
+stale_count
+coverage_basis_points
+first_observed_at
+last_observed_at
+```
+
+Its values come only from the paired sealed v2 evaluation/suppression
+projections. Configuration version is exact `cost.configuration.v1`; currency
+is null or exact `USD`; bounds are both null for Session and both non-null for
+UTC-day/rolling-period. Counts, coverage, and times are nullable exactly as
+specified by the #80 snapshot/suppression contract, and every nullable property
+is present as JSON null. Except for those conditional fields, every payload
+property is non-null. The fact contains no member identity or canonical bytes.
+
+Coverage acquisition uses at most 20 owner pages, 2,000 evaluations, 100
+returned facts, and 8 MiB per owner page. Any cap sets `coverage_state` to
+`incomplete`, retains only the validated acquired facts, and sets
+`omitted_coverage_fact_count` to null because unseen facts are not counted. A
+fully exhausted owner cursor sets `coverage_state=complete` and
+`omitted_coverage_fact_count=0`. Owner busy/unavailable sets
+`coverage_state=unavailable`, returns `coverage=[]`, and sets the omitted count
+to null; it never returns partial facts. Thus a budget evaluation suppressed
+for incomplete/empty/no-covered/coverage conditions remains visible even
+though it has no receipt item.
+
+#95 implements bounded `ICostAlertPresentationResolverV1` for #84. For each
+exact member it returns the same Session ID/effective time, Session evidence
+state `available | missing | expired`, nullable accepted repository/workspace
+labels, and the fixed same-origin
+`/costs?session_id=<canonical-encoded-session-id>` href. For each estimate
+reference it returns `available | missing | expired` and the fixed same-origin
+`/costs?session_id=<canonical-encoded-session-id>&estimate_id=<exact-encoded-estimate-id>`
+href
+only after strict catalog/estimate reload and exact Session/time ownership. It
+does not require current-head membership because a historical receipt may cite
+a predecessor. #84 receives only this sealed projection and does not query
+pricing/Session tables directly. Missing, unsafe, conflicting labels become
+null with explicit unavailable scope state and are never echoed, normalized,
+or used as a path.
+
+Its internal sealed call is
+`Resolve(IReadOnlyList<AlertCostMemberV2> members,
+IReadOnlyList<AlertEvidenceReferenceV2> evidence)`. Input must be in canonical
+v2 order, contain at most 2,000 members and 4,000 evidence references, and be
+consistent with the exact member/evidence cross-field rules; otherwise the
+result is `unavailable`. `CostAlertPresentationResolutionV1` has exact property
+order `state`, `members`, where state is
+`success | busy | unavailable`. A successful member projection has exact
+property order `session_id`, `session_effective_at_utc`,
+`session_evidence_state`, `repository`, `workspace`, `scope_state`,
+`session_href`, `estimate_id`, `estimate_evidence_state`, `estimate_href`.
+Nullable fields are emitted explicitly; evidence states are
+`available | missing | expired`, and scope state is
+`available | unavailable`. Non-success returns an empty member array. The
+sealed result is bounded to 8 MiB UTF-8 and cannot include a database/path/error
+string. One over-bound result is `unavailable`, never a truncated projection.
+On success, `members.Count` equals the input member count and output member
+index `i` names the exact input member at index `i`; omission, duplication,
+reordering, or an extra member makes the resolver result `unavailable`. The
+Alert Center also requires one presentation state for every input evidence
+reference before constructing the evidence array: the output member's Session
+state maps to its one Session reference, and its nullable estimate state maps
+to its one pricing-estimate reference. Resolver `busy` aborts the whole read as
+`503 alert_center_store_busy`; resolver `unavailable`, including any
+cardinality/order/evidence mismatch, aborts it as
+`503 alert_center_store_unavailable`. Neither state produces a partial item,
+snapshot, or cursor.
+
+The existing v1 recurring aggregation processes receipt-v1 items only. A
+receipt-v2 cost window already represents an exact aggregate and is never fed
+through the "two distinct receipt Sessions" recurring rule. The v2 route
+applies that unchanged v1 aggregation to the full acquired/filtered receipt-v1
+set before pagination, as defined above.
+
+Version-aware filters are closed to:
+
+- v1 semantic filters `alert_id`, `session_id`, `trace_id`, `severity`, `state`,
+  `rule_id`, `source_surface`, `repository`, `workspace`, `completeness`,
+  `period`, `from`, and `to`;
+- `receipt_kind=all | receipt_v1 | cost_receipt_v2`, default `all`;
+- `scope_kind=all | session | utc_day | rolling_period`, default `all`;
+- `currency=all | USD`, default `all`;
+- `coverage_state=all | full | partial`, default `all`;
+- `cursor=<opaque-v2-cursor>`, absent on page one; and
+- `limit=1..100`, default 50.
+
+Before decoding, the v2 route forms the cursor-excluded encoded filter query by
+removing the sole `cursor` component from the raw query string (without the
+leading `?`) and joining the remaining raw percent-encoded components in their
+received order with `&`. Its UTF-8 length is at most 7,000 bytes. The cursor
+component is canonical literal ASCII `cursor=<opaque-v2-cursor>`; percent
+escapes in its value are invalid. Appending `&cursor=` and the maximum
+1,024-character cursor to a 7,000-byte filter query therefore produces at most
+8,032 query bytes, below the unchanged 8,192-byte total bound. This reserved
+cursor budget applies on page one as well as continuation requests; a server
+must not accept a filter query whose generated next cursor cannot be
+resubmitted.
+
+`offset` remains v1-only and is invalid on v2. Explicit `all` and omission
+canonicalize identically. Every member occurs at most once. Session filter
+retains the existing v1 opaque-ID guard and exact comparison; it is not reparsed
+as UUIDv7. It matches v1's exact receipt Session or any exact v2 member accepted
+local Session ID, never a representative Session. This preserves historical
+canonical Guid versions and opaque v1 IDs.
+
+Canonical resolved query property order is `alert_id`, `session_id`, `trace_id`,
+`severity`, `state`, `rule_id`, `source_surface`, `repository`, `workspace`,
+`completeness`, `from`, `to`, `receipt_kind`, `scope_kind`, `currency`,
+`coverage_state`, `limit`; resolved dates replace `period`, all nullable values
+are explicit, and cursor is excluded. `filter_digest` is lowercase SHA-256 of a
+length-framed `alert-center-filter/v2` domain and those exact bytes.
+
+| Filter | receipt v1 | cost receipt v2 |
+| --- | --- | --- |
+| alert/severity/lifecycle state/rule/source/completeness | exact item fact | exact item fact |
+| Session | exact opaque receipt Session | any exact member |
+| trace | exact optional receipt trace | never matches |
+| repository/workspace | exact accepted v1 scope | exact resolved member scope; when Session or both labels are supplied, every member-level predicate must match the same Session |
+| scope/currency/cost coverage | non-`all` never matches | exact cost fact |
+| date | receipt `last_observed_at` | Session effective time, or aggregate-window overlap |
+
+Missing, unsafe, conflicting, or unresolved member scope never matches.
+Repository from one member and workspace from another cannot form a match.
+`full` means 10,000 basis points; `partial` means 1..9,999 on a receipt that
+passed its configured minimum. Suppressions are coverage facts, not receipt
+items. Inclusive `yyyy-MM-dd` input resolves to
+`[from 00:00:00Z,to+1 day 00:00:00Z)`. A cost Session scope matches iff its sole
+effective time is inside; day/period matches iff
+`scope_start < query_end && scope_end > query_start`.
+
+After filtering, both kinds use the accepted UI order: severity rank
+`critical < warning < info`, canonical `last_observed_at` descending, then
+alert ID ordinal ascending. The cursor is
+`alert-center-cursor-v2.` plus unpadded base64url canonical UTF-8 JSON with
+property order `schema_version`, `snapshot_id`, `filter_digest`, `limit`,
+`severity_rank`, `last_observed_at`, `alert_id`; it is 1..1,024 ASCII
+characters, uses `schema_version=alert.center.cursor.v2`, and the UI treats it
+as opaque. The next page begins strictly after
+that tuple. Cursor validation precedence is fixed: malformed content or a
+filter/limit mismatch is `400 alert_center_invalid_query`; then the server
+recomputes the snapshot and a snapshot-ID mismatch is
+`409 alert_center_snapshot_changed`; only when that ID matches must
+`severity_rank`, `last_observed_at`, and `alert_id` equal exactly one member of
+the recomputed filtered snapshot and the cursor must equal a page-end boundary
+emitted by deterministic replay from page one under the same limit and complete
+response-byte bound. A canonical member tuple that is not such a boundary, or a
+canonical nonmember tuple, is `400 alert_center_invalid_query` and cannot skip
+rows or create an undefined backward page. Filter/lifecycle mutation resets the
+UI to page one.
+
+`snapshot_id` is `alert-center-snapshot-` plus lowercase SHA-256 of a
+length-framed `alert-center-snapshot/v2` domain containing the resolved query
+excluding cursor, acquisition state/cap boundary, and—in owner alert-ID
+order—each acquired alert ID, receipt kind, canonical-receipt SHA, complete
+sanitized item-projection SHA, lifecycle state/revision/history/relationships,
+resolved member scope, and evidence availability. It also binds coverage state
+and ordered coverage-projection digests. Every returned DTO fact is therefore
+page-stable.
+
+Acquisition uses at most 20 owner pages, 2,000 validated receipts, and 64 MiB
+combined retained canonical-receipt plus sanitized-projection bytes. One
+transient owner page remains bounded to 100 records/8,388,608 canonical bytes
+and is discarded after processing. A reached cap while more owner rows exist
+yields incomplete with the cap reason selected by the fixed rank above; unseen
+rows are never counted. A complete UTF-8 response is at most 16 MiB. The page
+may stop before an item that would exceed that response bound, return fewer than
+limit, and provide the last emitted cursor. One item that cannot fit alone is
+`503 alert_center_response_too_large`; no empty-page cursor loop is emitted.
+
+Empty, duplicate, unknown, malformed, non-USD, conflicting, or over-8,192-byte
+query input returns `400 alert_center_invalid_query`.
+
+The v2 error body is exactly
+`{"schema_version":"alert.center.error.v2","error":"<fixed_code>"}`.
+Status mapping preserves v1 and adds: invalid Host/query/cursor is 400,
+cross-origin is 403, changed snapshot is
+`409 alert_center_snapshot_changed`, and receipt-owner/lifecycle/presentation-
+resolver busy, unavailable, or one oversize item is 503
+(`alert_center_response_too_large` for the latter).
+Coverage-owner busy/unavailable instead uses the successful
+`coverage_state=unavailable` shape defined above.
+Responses and errors are no-store and never include an identifier/value that
+failed validation.
+
+The `/alerts` page MUST use the v2 route to render both kinds. Cost receipts show
+exact contextual links to each Session and `/costs`; lifecycle actions still
+call `/api/alerts/v1/{alert_id}/lifecycle/actions`. Keyboard, focus, stale
+generation, inert text, acquisition-bound, and error semantics remain the
+accepted Alert Center rules. Recurring presentation reads only the response's
+full-snapshot `recurring_state` and `recurring_groups`; it never aggregates the
+visible page. Tests pin the unchanged v1 route bytes, mixed v1/v2
+pagination/filtering, full-snapshot recurring results across multiple pages,
+incomplete acquisition withholding recurring groups, exact multi-Session
+navigation, exact registered/unknown rule metadata and formula, direct cursor
+reload plus backward/forward navigation (including response-bound-shortened
+pages), member-but-nonboundary cursor rejection, lifecycle mutation, v2 tamper
+fail-closed behavior, and absence of a second evaluator/store/UI.
+They also pin an exact 7,000-byte cursor-excluded percent-encoded filter query
+with a maximum 1,024-character generated cursor: the continuation URI stays
+within 8,192 bytes and its resubmission returns the strict next page without an
+empty-page loop. A 7,001-byte cursor-excluded query is rejected with
+`400 alert_center_invalid_query`.

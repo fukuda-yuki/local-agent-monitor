@@ -2660,3 +2660,69 @@ notifications, invoice reconciliation, enterprise price inference, purchases,
 quality claims, or effect verdicts. The existing `sprint4-m2-v1` static
 dashboard unit-price calculator remains a legacy compatibility surface and is
 not promoted to canonical pricing authority.
+
+## D074: Cost analytics persists exact history and extends the existing alert stack
+
+Status: Accepted (2026-07-24)
+
+D074 supersedes only D067's schema-v1-only, no-migration, and v1-only-query
+ceiling for the additive #95/#80 v2 path. Every D067 v1 byte, identity, golden,
+method, query, route, and lifecycle semantic remains accepted and unchanged.
+
+Issue #95 owns one local metadata-only consumer of the frozen Issue #94 domain.
+It persists the exact catalog snapshot and estimate canonical bytes in a new
+`pricing` SQLite component v1 whose durable business history is append-only,
+and reloads them only through the
+#94 strict consumers. A public hash proves integrity, not authenticity, so
+catalogs and positive requests enter only through trusted in-process providers.
+The sole owner-delete exception is a bounded transient configuration-preview
+receipt, removed only at its fixed 15-minute expiry or successful consumption;
+catalog/configuration/commit/recalculation/estimate/head history is never
+deleted or rewritten.
+The optional repeated startup-only `--pricing-registry-override` admits at most
+eight identity-bound local regular documents after the bundled registry. The
+provider reads once with no-follow/reparse/TOCTOU/path-leak guards; no HTTP
+upload, watcher, network fetch, persisted locator, or permissive fallback
+exists.
+The current #61 manifests do not authorize all required provider/model/mode/
+route/quantity facts; the default production adapter therefore remains
+unavailable. Synthetic positive adapters are test evidence, not live support.
+
+Configuration, recalculation, and active selection are immutable ledgers.
+Recalculation binds exact Session, configuration, catalog, and captured head
+identities, appends a new estimate with its exact predecessor, and never
+overwrites history. The active estimate is the highest contiguous explicit head
+revision, not a current catalog or maximum timestamp. Aggregation uses active
+heads only, keeps currencies separate, counts only fully estimated amounts in
+the total, exposes partial known components only as a provisional subtotal
+with reasons and no lower-bound claim, and retains every
+eligible partial/not-estimable/missing/failed/unavailable/stale Session in the
+coverage denominator. Explicit estimated zero remains covered.
+
+Daily and period budget receipts cannot fit the one-Session v1 alert carrier.
+Issue #80 therefore owns additive alert snapshot/configuration/evaluation/
+receipt/canonical-json v2 contracts and an `alert_engine` schema-v2 migration
+inside the existing evaluator/store. V1 types, bytes, hashes, goldens, store
+methods, queries, and routes remain unchanged. Issue #83 accepts the engine-v2
+parent while keeping lifecycle v1. Issue #84 owns a version-aware v2 read/API/UI
+projection; aggregate cost receipts are not fed into the existing recurrence
+grouping. Issue #85 keeps sanitized export v1 frozen and selects receipt-v1 rows
+only. No second evaluator, store, lifecycle, or receipt parser is created.
+
+Issue #88 appends `pricing` after `runtime_backup`, preserving the accepted
+#79 -> #86 -> #88 migration subsequence. The complete tail is
+`historical_instruction_analysis -> historical_import -> sanitized_import ->
+runtime_backup -> pricing`. Whole-database backup/restore validates and carries
+pricing privately; no archive member, Retention kind, or raw store is added.
+
+The Local Monitor exposes bounded no-store cost projections and explicit
+same-origin/CSRF-protected configuration/recalculation actions at `/costs` and
+`/api/costs/v1/*`. It does not accept canonical bytes or local overrides over
+HTTP. The D042 two-item primary sidebar remains unchanged; cost navigation is
+contextual. The legacy `sprint4-m2-v1` dashboard cost fields remain frozen and
+non-authoritative rather than receiving an implicit projection.
+
+Estimated cost is not invoice reconciliation, billing/chargeback, currency
+conversion, purchase/quota mutation, notification, quality improvement,
+verified effect, or automatic model recommendation. Content-enabled capture
+remains separately unauthorized.

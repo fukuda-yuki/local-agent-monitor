@@ -34,8 +34,11 @@ Its `estimated_cost` / `cost_source` calculator is a legacy static-dashboard
 compatibility surface. It is not the canonical Issue #94 pricing registry or
 estimator, and its current missing-token and unversioned price-table semantics
 must not be used as pricing authority. Issue #94 does not rewrite this wire
-contract. A future #95 consumer must make an explicit compatibility/migration
-decision before projecting `pricing.estimate.v1` results into this dataset.
+contract. Issue #95 does not project `pricing.estimate.v1` into this dataset,
+does not rewrite either legacy cost field, and never uses them as source facts.
+Its separate `/costs` surface is authoritative for deterministic local
+estimated-cost metadata. Any later projection requires a new dashboard schema
+and an explicit compatibility migration.
 
 ## Logical Tables
 

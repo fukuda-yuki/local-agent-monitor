@@ -62,6 +62,7 @@ GitHub Copilot first-trace common adapter の各 request は新たに得た一�
 - Historical instruction analysis。Issue #73 は persisted #72 extraction 一件だけを明示 provider で解析し、provider には canonical bytes から独立再構築した view だけを渡し、post-validation は provider から隔離した owner snapshot だけを authority とする。final #59 finding の exact refs は provider anchor trace を一意に所有する同一 Session に限定し、anchor ref 1 件以上と #59 relation を満たす同 Session の bounded non-anchor context ref だけを許可する。他 Session は recurrence の独立評価にだけ寄与する。同じ #59 category が各 Session 内で独立に category-specific minimum を満たす distinct Session が 2 件以上ある場合だけ `recurring` / eligible とし、1 件は `single_session`、0 件は `insufficient_support` とする。exact/resolved citation は 0/1 件でも frozen #59 の `weak` / `incomplete` finding と exact support projection を保持し、unrelated / under-minimum group は promotion に使わない。model/provider は共有 sensitive-carrier gate、`timeout_ms` は `1..3,600,000` に固定し、absent/checksum-mismatch の `stale_extraction` と owner-invalid な `extraction_invalid`、caller の `canceled` と owner timeout の `timed_out` を区別する。queued/running/全 terminal state を `historical-instruction-analysis.read.v1` として #75 に渡し、success receipt がなくても extraction truncation、sanitized/content、repository-safe completeness/source distribution を保持する。projection は completeness/source-kind total の一致と capability count 上限を再検証し、unavailable (`sanitized_only=false` / `content_available=false`) は empty distribution、provider-stage state は positive Session total に固定する。通常 host は store/composition/read boundary を登録するが provider/credential/raw execution は既定で構成せず、current host が `--sanitized-only` の間は過去の raw extraction が残っていても runner 構成を拒否する。HTTP/UI/proposal/effect/apply は追加しない。
 - Historical efficiency analysis。Issue #72 の exact canonical `historical-evidence.repository-safe.v1` bytes だけを入力にし、token volume、context growth、cache inefficiency、retry overhead、duration outlier、opaque model mix を versioned deterministic rule で評価する。frozen #72 v1 が producer-authored repeated-call identity、exact tool-failure status、permission-wait duration、exact subagent ownership を永続化しないため、対応する4カテゴリは理由付き `unavailable` とし、reserved group/capability shape から能力を捏造しない。missing / unknown / zero denominator は complete evaluation に変換しない。quality evidence は強度判定を downgrade できるが、効率観測から quality improvement / effect / monetary cost を主張しない。結果は extraction ID/hash を各 driver にも exact-bind し、exact evidence refs、category coverage、quality availability、fixed mitigation を持つ canonical repository-safe receipt として Issue #75 が formula を再計算せず消費する。HTTP、UI、DB/migration、import、AI narrative、proposal/effect/apply は含めない。
 - Historical Analysis。Issue #75 は `GET /historical-analysis` で #72 preview の included/excluded と exact reason を実行前に提示し、#73 instruction と #74 efficiency を独立して開始・表示し、#53 の exact Session/trace/span/turn navigation へ安全な token からのみ遷移できること。#73 の全状態、provider-free normal host の `provider_unavailable`、#74 の zero/coverage/verdict、supported/weak/incomplete、stale/invalid/timeout/partial/canceled、sanitized-only と expiry を混同せず表示する。API は `/api/historical-analysis/v1/*`、repository-safe response、loopback/Host/same-origin/CSRF/no-store/strict JSON 境界に従い、raw-default を raw content 返却権限にしない。current host が `--sanitized-only` の場合、preview は `selection.sanitized_only=true` の exact request だけを受け付け、`false` は #72 owner を開く前に `400 invalid_historical_analysis_request` で拒否し、server が `true` へ書き換えない。preview 応答の transient render 後に、長寿命 browser state は `extraction_id`、`raw_local_sha256`、`repository_safe_sha256` の3フィールドだけを保持し、selection、included/excluded Session、その他の preview response field を保持しない。履歴 import、proposal apply、effect verdict、provider pricing、Alert Center、portability、raw analysis、content-enabled live capture は含めない。
+- Alert v2 compatibility。以下の #80–#85 v1 要件は preserved baseline であり current schema の上限ではない。Issue #80 が所有し Issue #95 に統合する compatibility change は、v1 bytes / hashes / goldens / public API / query behavior を変更せず、同じ3 engine table・同じ evaluator/store に `alert.*.v2` と `alert_engine` schema v2 を additive に追加する。rule ID と version は別 field とし、#83 lifecycle schema/API は v1 のまま engine v1/v2 parent を受け付ける。#84 は v1-only route に加えて version-aware v2 route/UI を所有し、#85 export v1 は v1 receipt row だけを選択して v2/pricing bytes を materialize しない。D074 が D067 の v1-only ceiling だけを更新し、v1 semantics は保持する。
 - Alert-rule engine foundation。versioned source-neutral snapshot / capability と compiled rule registry を deterministic に評価し、missing / unknown / unavailable evidence を zero と推測せず bounded suppression にする。accepted match は exact evidence、config/input/evaluation hashes を持つ immutable canonical receipt として component-owned `alert_engine` schema v1 に保存し、sensitive comparable label は private keyed HMAC token にする（D067）。#81 / #82 は rule packs、#83 は lifecycle、#84 は Alert Center reads/UI/aggregation、#85 は sanitized export をそれぞれ所有する separate consumers であり、receipt bytes や engine-owned tables を再定義しない。canonical receipt を別 component が消費する場合は、#80 所有の strict v1 consumer validator を使用し、unknown / duplicate field、非 canonical byte、version/profile/invariant 違反と receipt 内 field から再計算できる `alert_id` の不一致を固定 no-leak error で拒否すること。consumer boundary は 8 MiB と receipt v1 の固定 JSON depth に制限し、返却 projection は alert/session/optional trace/source surface/last-observed identity のみとする。この上限と consumer-only semantic gate は既存 producer/serializer/store admission や bytes を変更せず、超過または semantic-invalid receipt を downstream が truncate してはならない。receipt 単体から再計算できない evaluation/config/input identity は canonical lowercase hash shape のみを検証し、origin/signature/authorization/provenance を主張しない。
 - Alert engine production compatibility。source-neutral な production application boundary は caller が既に正規化した一つの snapshot を frozen registry/configuration/evidence resolver で評価し、既存 store へ completed evaluation を append して成功した場合だけ evaluation/config identity、ordered receipt ID、typed suppression、typed rejected match を持つ bounded immutable outcome を返す。initialization、busy、unavailable、conflict、contract rejection を固定状態で区別し、append failure を成功へ変換しない。Alert Center の trusted server-side read は additive query interface から alert ID / evaluation ID / suppression ordinal の固定順、cursor、1..100 limit で取得し、receipt bytes は既存 strict consumer と同じ #80 authority を通過した fully typed sealed Alert Center projection としてのみ渡す。evaluation projection も canonical evaluation 全体の strict 再構築と byte identity を通過し、scalar identity と child row count が一致する場合だけ返す。既存 five-field consumer API は変更せず、#84 は receipt parser を複製しない。query は schema v1 の既存3 tableを読み、migration、任意 SQL、raw/content table read、source provenance 推測を追加しない。
 - Alert lifecycle。immutable `alert.receipt.v1` とは別の component-owned append-only event chain から current state / revision を導出し、mutation は optimistic concurrency と idempotency を必須にする。reevaluation、supersession、source deletion は明示された versioned seam だけを使用し、heuristic predecessor / Session-time relationを推測せず、canonical receipt bytes を変更または削除しない。sanitized lifecycle read/mutation routes は `--sanitized-only` でも利用可能で、same-origin、CSRF、bounded audit value、`Cache-Control: no-store` を維持する。#83 は rule logic、Alert Center UI、notification を実装しない（D067）。
@@ -208,6 +209,35 @@ Update (D039 / D042 / D050): Sprint18 の Local Monitor overview / trace-list �
   provider からの runtime price fetch は行わない。Codex App は v1 では
   `subscription_or_contract_unknown`、subscription/custom contract はそれぞれ
   allocation/price unknown として `not-estimable` にする。
+- Estimated-cost analytics and budget alerts。Issue #95 は Issue #94 の exact
+  canonical catalog/estimate bytes を `pricing` SQLite component v1 に
+  append-only で保持し、strict consumer で再読込した active estimate head
+  だけを Session / analytics / budget evaluation に使用する。recalculation は
+  exact predecessor を持つ新 estimate/run/event/head を追加し、過去 record を
+  上書きしない。current catalog、timestamp、repository、workspace、path、
+  model label からの代用・推測を行わない。coverage numerator は active
+  `estimated` Session、denominator は全 eligible Session とし、`partial` /
+  `not-estimable` / missing / failed / unavailable / stale は denominator に残す。
+  explicit included zero は covered とする。金額は currency ごとに分離し、
+  partial known-component subtotal は provisional + exact reason として
+  complete total と混ぜず、lower-bound/actual cost と主張しない。3 budget rule は currency / threshold / window /
+  minimum coverage を明示した configuration があるまで disabled とする。
+  session / daily / period evaluation は同じ #80 evaluator/store の additive
+  `alert.*.v2`、同じ #83 lifecycle、#84 Alert Center を使用し、synthetic
+  aggregate Session や second alert stack を作らない。#85 sanitized export
+  v1 は alert-v1 carrier のみを出力し、#88 migration tail は
+  `historical_instruction_analysis -> historical_import -> sanitized_import ->
+  runtime_backup -> pricing` とする。現行 #61 mapping が positive pricing
+  authority を与えない provider は unavailable / unverified のままとし、
+  synthetic fixture を live evidence とみなさない。任意 local override は
+  repeated `--pricing-registry-override <absolute-file>`（最大8）だけで startup
+  時に trusted local regular file を no-follow/identity-bound で読み、bundled
+  の後へ caller order で追加する。HTTP upload/edit、network/device/UNC/
+  reparse/symlink、path echo、file watcher は認めない。API/UI/log/evidence は
+  metadata-only、strict/no-store/same-origin/CSRF とし、raw content、credential、
+  PII、private contract/invoice/account identifier、local path、canonical private
+  bytes を返さない。estimated cost は invoice、課金、chargeback、quality
+  improvement、effect verdict、automatic model recommendation ではない。
 - Grafana JSON dashboard fallback。
 
 参考のみ:
@@ -222,7 +252,9 @@ Update (D039 / D042 / D050): Sprint18 の Local Monitor overview / trace-list �
 
 - Copilot の利用者数、利用回数、日次アクティブユーザーの集計。
 - 個人別の生産性評価、勤務監視、ランキング。
-- 経営向け利用状況 dashboard、課金、コスト配賦。
+- 経営向け利用状況 dashboard、invoice reconciliation、課金処理、組織/個人への
+  cost allocation / chargeback。Issue #95 の local deterministic estimated-cost
+  monitoring と明示設定 budget alert は含める。
 - DLP、機密情報検査、監査ログ基盤。
 - VS Code 内部ログ、workspaceStorage、chatSessions を入力ソースにした解析、および VS Code の in-editor Debug UI の複製。ただし受信済み OTel テレメトリから導出する sanitized agent-execution view は許可する（D021）。
 - Langfuse / Collector / Grafana の共有運用決定。
@@ -363,7 +395,7 @@ Repository に保存してはならないもの:
 
 Local Ingestion Monitor の raw / PII 表示は loopback-only の runtime surface であり、ここで定義する repository 保存禁止や §9 の static dashboard 非表示とは別物である。raw body（tool call arguments / results、sub-agent instructions / responses、system prompt）と PII（`user.id` / `user.email`）は **既定で表示する**（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元し、TraceDetail の raw section と full raw route を除外して PII を除外できる（D023 / D030）。`--sanitized-only` でも TraceDetail の sanitized tab shell は表示される。既定・`--sanitized-only` いずれの場合も raw / PII を repository-safe outputs、static dashboard、ログ、CI artifact へ出力してはならない。`/api/monitor/*` と SSE は常に sanitized metadata のみを返す。この表示は単一のローカル利用者が自分のデータを閲覧する用途に限り、cross-machine な露出（remote / non-loopback、browser 経由の off-machine 送出）から防御する。
 
-Windows Task Scheduler startup surface は Local Monitor を user logon 時に起動するだけであり、client routing 設定を書き換えない。既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下とする。Windows では別の明示操作として current user の永続環境変数（HKCU user environment）に raw-local-receiver / monitor 向け OTLP routing を設定・解除できる。これは Windows ユーザーで新規起動される VS Code GitHub Copilot Chat、GitHub Copilot CLI、その他同ユーザー process に継承される既定値であり、既存 process には再起動まで反映されない。永続化は user scope のみ、管理者権限不要、`setx` ではなく user environment API を使い、変更通知を送る。グローバル user environment では client 種別を一意に決められないため `client.kind` は設定しない。Task Scheduler 経由でも loopback-only、Host header validation、same-origin、`Cache-Control: no-store`、raw / PII 非ログ出力、repository-safe outputs への raw / PII 非送出を維持する。`--sanitized-only` は常時起動時にも指定できる任意 opt-out として残す。
+Windows Task Scheduler startup surface は Local Monitor を user logon 時に起動するだけであり、client routing 設定を書き換えない。既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下とする。Windows wrapper は optional `-PricingRegistryOverride <string[]>` を caller order の repeated host option として渡し、one-shot start では locator を永続化しない。Task Scheduler 登録へ明示した場合だけ private absolute path を current-user task action arguments に保存し、same-user/admin OS tooling から見えることを登録前に利用者へ開示する。app/wrapper はその path を log/state/API/UI/evidence へ複製せず、backup/restore にも含めない。Windows では別の明示操作として current user の永続環境変数（HKCU user environment）に raw-local-receiver / monitor 向け OTLP routing を設定・解除できる。これは Windows ユーザーで新規起動される VS Code GitHub Copilot Chat、GitHub Copilot CLI、その他同ユーザー process に継承される既定値であり、既存 process には再起動まで反映されない。永続化は user scope のみ、管理者権限不要、`setx` ではなく user environment API を使い、変更通知を送る。グローバル user environment では client 種別を一意に決められないため `client.kind` は設定しない。Task Scheduler 経由でも loopback-only、Host header validation、same-origin、`Cache-Control: no-store`、raw / PII 非ログ出力、repository-safe outputs への raw / PII 非送出を維持する。`--sanitized-only` は常時起動時にも指定できる任意 opt-out として残す。
 
 LocalMonitor Release ZIP は published app と操作スクリプトのみを配布媒体に含める。raw store / runtime DB / logs / state は利用者端末の local runtime artifact として扱い、Release ZIP、GitHub Actions logs、Release metadata、repository artifact、Issue、static dashboard、CI artifact に raw / PII / credentials / full tool arguments / tool results を含めてはならない。uninstall 時、DB / logs は既定で保持し、明示指定された場合のみ削除する。
 
@@ -391,7 +423,10 @@ exact owner marker を durable 化し、startup または同じ caller-selected 
 回収上限は owner-marker namespace の該当 entry に適用し、無関係な sibling の総数を
 raw state として扱わない。marker のない lookalike、malformed / active / nonregular
 owner は削除せず fail closed とする。Local Monitor startup は restore lease と回収を
-owner migration より前に確立し、owner migration 完了後に `runtime_backup` v1 を確定する。
+owner migration より前に確立し、owner migration で必要な `alert_engine` v1→v2 を
+byte-preserving に適用した後、`runtime_backup` v1、`pricing` v1 の順で一つの
+terminal ensure を完了する。online backup も同じ current vector を確定してから
+snapshot を作る。
 この startup sequencing は backup / restore の厳格な read-only preflight を緩めない。
 
 Restore は停止済み Local Monitor に対する offline CLI だけが実行できる。

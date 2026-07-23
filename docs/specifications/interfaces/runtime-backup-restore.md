@@ -210,7 +210,12 @@ safety, or repository safety.
 Before any schema write, the service validates the DB component vector, minimum
 shapes, integrity, executable SQLite object allowlist, and external-state
 policy. A future, unknown, or malformed component therefore remains
-byte-for-byte unchanged. It then ensures `runtime_backup` component v1 exists.
+byte-for-byte unchanged. For a supported vector with no alert engine it creates
+the exact engine-v2 schema directly; for exact engine v1 it applies the
+byte-preserving v1-to-v2 migration; exact v2 is validated. It then ensures
+`runtime_backup` v1 and `pricing` v1 in their fixed order before snapshot
+capture. A partial/malformed/future engine or pricing-without-engine vector is
+rejected, not repaired.
 It opens the source with pooling
 disabled and a bounded busy timeout, creates a same-directory private temporary
 SQLite file, and invokes `SqliteConnection.BackupDatabase`. It never copies a
@@ -260,24 +265,61 @@ describes.
 `runtime_backup` v1 is a component-owned migration in the standard
 `schema_version` table. Restore recognizes the current Wave 3
 `historical_instruction_analysis` v1, `historical_import` v1, and
-`sanitized_import` v1 components. Its fixed migration tail is
+`sanitized_import` v1 components. Issue #95 appends `pricing` v1 after the
+unchanged runtime-backup owner. The fixed migration tail is
 `historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
--> `runtime_backup`, preserving the storage-owner integration order
-#79 -> #86 -> #88. It does not reserve or change Session 13, Monitor 7,
+-> `runtime_backup` -> `pricing`, preserving #79 -> #86 -> #88 as an unchanged
+subsequence before #95. It does not reserve or change Session 13, Monitor 7,
 Retention 1, or a Retention store kind.
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather
 than a supported migration source.
+A declared `pricing` component without Session 13, `alert_engine` v2, or
+`runtime_backup` v1 is likewise an incompatible forged vector.
+
+Current backup component vectors record `alert_engine` v2 and `pricing` v1.
+An exact older P1 source may omit pricing and may declare alert-engine v1; both
+are supported upgrade sources. Restore upgrades alert-engine v1 to v2 before
+pricing-dependent startup and preserves each v1 evaluation/receipt/suppression
+canonical byte. Future alert-engine/pricing versions, a pricing namespace
+without `pricing=1`, an engine-v2 table with a v1 declaration, or a manifest
+that disagrees with either component is incompatible before mutation.
+
+Pricing validation calls the shared `PricingSchemaV1.IsValid/ValidateRows`
+authority; #88 does not copy its object list or DDL. Every canonical BLOB family
+reloads through its owner:
+`PricingCatalogSnapshotConsumer`, `CostConfigurationConsumerV1`,
+`CostConfigurationPreviewConsumerV1`, `CostConfigurationCommitConsumerV1`,
+`CostRecalculationRequestConsumerV1`, and `PricingEstimateConsumer` against its
+referenced exact catalog. Stored scalar projections, IDs/digests,
+preview/commit request-result bytes and SHA, mandatory one-to-one
+commit-to-head relation, commit-request-to-preview-digest scalar equality,
+configuration/head/run/target/result/event
+sequences, predecessors, and active head ledgers must agree with strict
+reserialization. The exact `PricingSchemaV1` trigger definitions—including the
+transient-preview owner-delete exception—and manifest row counts must match.
+Any mismatch, extra/missing owned object, consumer rejection, or cross-row
+inconsistency fails before source/staging mutation. A valid backup/restore
+round-trip preserves every pricing table row and canonical byte exactly.
+At most 32 preview rows may be present; each has the exact 15-minute expiry
+relation. A past expiry is not archive corruption because time may pass while
+the database is offline. Backup/restore preserves it byte-for-byte, and the
+pricing owner deletes expired preview rows during post-migration startup before
+HTTP readiness.
 
 Local Monitor startup is two-phase under one non-waiting restore lease. Before
 any owning store opens, phase one recovers exact owned transient/restore state
 and rejects malformed, unknown, future, or dependency-invalid component-version
 vectors without requiring every component to exist. Existing owning stores then
-run their canonical migrations. Phase two adds and validates only
-`runtime_backup` v1 before the HTTP host is built. This sequencing does not
-replace or relax the full read-only shape, executable-object, integrity, and
-external-state preflight required before a backup or restore migration.
+run their canonical migrations, creating exact alert-engine v2 when absent or
+applying the exact v1-to-v2 upgrade that preserves every v1 canonical byte.
+Phase two adds and validates `runtime_backup` v1 and then `pricing` v1 before
+the HTTP host is built. The two
+final ensures share one transaction so a current executable cannot leave a
+runtime-backup-only installed database. This sequencing does not replace or
+relax the full read-only shape, executable-object, integrity, and external-state
+preflight required before a backup or restore migration.
 
 The only component table is `runtime_backup_receipts`. It stores a UUIDv7
 operation ID, operation kind (`backup` or `restore`), lowercase artifact
@@ -328,7 +370,7 @@ restore-receipt write.
 Writable-schema objects hidden under the SQLite-reserved `sqlite_*` namespace
 are accepted only for the exact built-in table and auto-index shapes. The
 `doctor_`, `alert_`, `historical_instruction_analysis_`,
-`historical_import_`, `sanitized_import_`, `runtime_backup_`, and
+`historical_import_`, `sanitized_import_`, `runtime_backup_`, `pricing_`, and
 `first_trace_` namespaces accept only exact objects owned by a declared
 component; absent or extra objects fail closed.
 
@@ -350,8 +392,9 @@ the application.
 If a component is absent from `schema_version`, its reserved table/trigger
 namespace must also be absent. Case aliases such as an undeclared
 `RUNTIME_BACKUP_RECEIPTS`, doctor-prefixed objects, alert engine/lifecycle
-objects, historical-instruction/import/sanitized-import objects, or first-trace
-navigation objects are `restore_incompatible`; a production migrator never
+objects, historical-instruction/import/sanitized-import objects, pricing
+objects, or first-trace navigation objects are `restore_incompatible`; a
+production migrator never
 adopts or overwrites the collision.
 
 Restore preview additionally compares with the destination database and
@@ -465,9 +508,12 @@ The state machine is:
 3. extract the database to that journal-bound unique sibling staging file;
 4. validate checksums, compatibility, integrity, foreign keys, retention
    invariants, terminal reconciliation, and non-terminal reintroduction policy;
-5. apply supported component migrations to staging in the fixed integration
-   order, including `historical_instruction_analysis` v1,
-   `historical_import` v1, `sanitized_import` v1, then `runtime_backup` v1;
+5. create or migrate `alert_engine` to v2 in staging without reserializing a v1
+   row, validate lifecycle v1 against that parent, then apply supported
+   component migrations in the fixed integration order, including
+   `historical_instruction_analysis` v1,
+   `historical_import` v1, `sanitized_import` v1, `runtime_backup` v1, then
+   `pricing` v1; pricing is never created while the parent remains v1;
 6. create and validate a pre-restore `local-runtime-backup` by default when the
    target exists;
 7. append the sanitized, operation-bound restore receipt inside staging, close
@@ -481,6 +527,13 @@ The state machine is:
     `committed` phase without opening the target for write, then
     remove the exact rollback file first and the journal last; and
 12. report `restore_succeeded`.
+
+Step 6 does not invoke the live-target mutation path of normal backup. It
+read-only preflights and online-copies the unchanged target into a private
+owned snapshot, applies supported alert/runtime/pricing migrations only to that
+copy, validates/packages the migrated safety snapshot, and appends no receipt
+to the live target. Thus every failure before the atomic swap leaves the live
+target byte-identical even when its accepted component vector was older.
 
 The bounded sibling journal schema is `runtime-restore-journal.v2`. It binds one
 UUID operation ID, archive digest, a derived random sibling staging basename,

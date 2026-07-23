@@ -13,7 +13,7 @@ Langfuse、Docker Desktop、外部ネットワークは不要です。
 ある構成です。診断はバッジ → ポップオーバー →「詳細診断を開く」の順に開きます
 （`/diagnostics` への直接アクセスも可能）。
 
-画面は次の 11 個です。
+画面は次の 12 個です。
 
 | 画面 | 開き方 | 内容 |
 |---|---|---|
@@ -24,6 +24,7 @@ Langfuse、Docker Desktop、外部ネットワークは不要です。
 | エラー解析モード | エラーを含む trace の詳細画面 | エラー要約ストリップ、エラー一覧（回復済み / 未回復）、エラー詳細、入力トークン推移（128K 上限の目安線付き） |
 | Copilot 解析ドロワー | 詳細画面の「Copilot で解析」 | 観点を選んで raw trace をローカルの Copilot SDK で解析。チャット形式の追い質問（履歴再送）に対応 |
 | Alert Center | 概要の最新 critical alert、トレース詳細の「関連 Alert」、または `/alerts` | frozen alert receipt とその lifecycle を一覧・絞り込みし、根拠となる証拠、再発グループ、抑制状況を確認。acknowledge / dismiss / resolve / reopen を明示操作 |
+| Cost | Overview / Diagnostics の固定リンク、Session / Alert Center の文脈リンク、または `/costs` | pricing catalog/configuration の preview・commit、明示 recalculation と durable retry history、Session estimate history/delta、currency/registry 別 range total・UTC daily trend・analytics/coverage、Session / UTC calendar day / configured rolling period budget 状態を確認 |
 | 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴、リポジトリメタデータ診断 |
 | 履歴インポート | 診断ページの「履歴インポート」カード → `/historical-import` | 明示的に選択した GitHub Copilot CLI / Claude Code の履歴 source を preview し、対応済み source のみ確認後に import。live Session と historical observation は別 tab で表示 |
 | サニタイズ済み証拠の取り込み | `/sanitized-import` へ直接アクセス | frozen v1 ZIP の preview、明示確定、取り込み結果、bounded history。raw telemetry は復元しない |
@@ -40,7 +41,9 @@ Langfuse、Docker Desktop、外部ネットワークは不要です。
 | `GET /api/monitor/traces` | cursor 付き sanitized trace API（rollup 列付き） |
 | `GET /api/monitor/traces/{traceId}/spans` | cursor 付き sanitized span API |
 | `GET /api/alert-center/v1/alerts` | frozen receipt・lifecycle・根拠となる証拠・再発判定・抑制状況の sanitized snapshot |
+| `GET /api/alert-center/v2/alerts` | receipt v1/v2、multi-Session cost scope、pricing evidence、budget suppression を含む version-aware sanitized snapshot |
 | `POST /api/alert-center/v1/evaluations` | 特定の Session + trace を利用者が明示指定する評価。自動評価ではなく、現行 source manifest では receipt を作らず抑制状況を記録 |
+| `/api/costs/v1/*` | Cost configuration preview/commit、明示 recalculation/poll、Session estimate history、bounded analytics（POST は CSRF header 必須） |
 | `GET /traces/{traceId}/spans/{spanId}/detail` | スパンインスペクタ用の raw-bearing span 詳細（`--sanitized-only` 時は 404） |
 | `/api/sanitized-import/v1/*` | sanitized bundle の preview / 明示取り込み / history（same-origin、POST は CSRF header 必須） |
 | `POST /api/runtime-backup/v1/backups` | 稼働中 DB の online backup を作成（exact `{}`、CSRF header 必須） |
@@ -133,9 +136,34 @@ dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\mon
 | `--db` | `data/raw-store.db` | SQLite raw store のパス |
 | `--url` | `http://127.0.0.1:4320` | ループバック bind URL（非ループバックは拒否） |
 | `--sanitized-only` | off | metadata-only モード。raw 由来の表示（プロンプト、インスペクタ raw タブ、Copilot 解析ドロワー、raw route）と PII を除外する任意 opt-out。 |
+| `--pricing-registry-override <absolute-file>` | なし | estimated-cost 用の trusted local override registry。最大8回まで指定でき、指定順で bundled registry の後へ追加します。 |
 | `--apply-root user_config=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル user-config root |
 | `--apply-root skill=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル Skill root |
 | `--apply-root repository=<absolute-directory>` | なし | proposal apply で使う明示登録済みの repository working-tree root |
+
+Pricing override はローカルの通常ファイルだけを起動時に1回読みます。相対/UNC/
+network/device path、symlink/reparse を含む親、重複、1 MiB 超、malformed/
+credential-bearing registry は拒否され、最大64 document/4 MiB の catalog 上限も
+適用されます。private contract data を含む override は repository に commit しないで
+ください。path、document bytes、private rate/provenance は画面/API/logへ表示されません。
+画面へ出るのは検証済みの `bundled` / `local_override` 区分、repository-safe source
+label/identity、registry version、effective interval、review/stale date、currency、
+catalog SHA、estimate metadata、inert な reviewed public source reference に限られます。
+upload/fetch/edit はありません。変更を反映するには Local Monitor を再起動し、Cost
+configuration を preview/commit してから明示 recalculation を実行します。ただし
+override は catalog だけを変更し、positive source adapter の権限を追加しません。
+現行 production manifest では genuine positive estimate は unavailable のままで、
+synthetic success は live capability evidence ではありません。
+
+Release ZIP と repository-local wrapper の one-shot 起動では、同じ順序の file を
+`-PricingRegistryOverride <string[]>` で渡せます。one-shot 起動は path を保存しません。
+Task Scheduler へ永続登録する場合だけ、同じ parameter を
+`install-startup-task.ps1` へ明示指定します。この場合、private absolute path は
+current-user Task Scheduler action arguments に保存され、同一ユーザーまたは管理者の
+OS tooling から見えます。Local Monitor と wrapper はその path を log、state、画面、
+API、evidence へ複製しません。DB/runtime backup にも locator は含まれないため、
+restore 後は同じ reviewed file set/order を再指定するか、新しい catalog で
+configuration を preview/commit してください。
 
 ### Canvas proposal をローカルへ適用する
 
@@ -187,6 +215,15 @@ metadata-only の常時起動にしたい場合は `-SanitizedOnly` を付けま
 
 ```powershell
 .\scripts\local-monitor\install-startup-task.ps1 -SanitizedOnly -StartNow
+```
+
+pricing override をログオン起動へ保持する場合は、Task Scheduler arguments に private
+absolute path が保存されることを確認したうえで、明示的に登録します。
+
+```powershell
+.\scripts\local-monitor\install-startup-task.ps1 `
+  -PricingRegistryOverride @('<absolute-registry-a>','<absolute-registry-b>') `
+  -StartNow
 ```
 
 Task Scheduler 登録 script は VS Code 設定を書き換えません。クライアントを
@@ -358,6 +395,64 @@ capability manifest は frozen rule が
 成功した exact な区分について10ルール分の `missing_required_capability` または
 `source_not_applicable` を抑制状況として記録します。実際に発火した alert の表示は将来、
 exact な source/version manifest と adapter が認可された後に限って生成されます。
+
+Cost budget receipt は version-aware v2 一覧にも表示されます。Session scope は exact
+Session、UTC-day / configured rolling-period scope は ordered multi-Session
+membership と pricing estimate evidence へ遷移します。rolling period は明示した
+midnight-UTC cutoff までの 2..366 個の完全な UTC calendar day です。aggregate receipt
+はすでに一つの window を表すため、v1 の
+Recurring patterns へ重ねて集計しません。取得上限、missing/expired evidence、
+lifecycle revision conflict は v1 と同様に明示し、別の lifecycle は作りません。
+
+## Estimated-cost analytics
+
+`http://127.0.0.1:4320/costs` はサイドバーへ3項目目を増やさず、データがない場合も
+Overview と Diagnostics の固定 Cost entry から開けます。Session または Alert Center
+の文脈リンクでは exact Session / estimate に絞り込めます。次の順で使用します。
+
+1. safe catalog route から bundled/local-override catalog の metadata と provider
+   catalog state を確認する。cursor は opaque で、catalog が変わった場合は page one
+   から再取得する。
+2. source/billing route と、必要な場合は Session / UTC calendar day / configured
+   rolling period budget の `USD` currency、warning/critical threshold、
+   minimum coverage（0..10000 basis points）、window kind を明示して configuration
+   を preview する。rolling period は `window_days`（2..366）も明示する。
+3. selection/head/catalog が変わっていない preview だけを commit する。成功時の
+   `Location` は immutable configuration read を指すため、lost response の retry でも
+   exact commit receipt を確認できる。
+4. exact Session と budget scope を指定して recalculation を明示開始し、完了を poll
+   する。
+5. durable な recalculation attempt/retry history、Session estimate
+   history/predecessor delta、currency・registry version ごとに分離された range
+   total と UTC daily trend、analytics component group、coverage、budget
+   `receipt` / `suppression` / `no_match` を確認する。
+
+画面は loading / empty / incomplete / running / failed / unavailable / stale を
+分けて表示します。incomplete analytics は exact cap / lower-bound state を示し、
+global zero / total / latest / top result として表示しません。
+active estimate は timestamp が最新の行ではなく exact contiguous head だけです。
+missing、partial、not-estimable、failed、unavailable、stale はゼロではなく、otherwise
+eligible な Session の coverage denominator に残ります。ineligible Session は分母へ
+入りません。explicit estimated zero だけが covered zero です。currency は
+分離し、partial の既知 component subtotal は provisional であって lower bound や
+actual cost ではありません。
+
+Cost の catalog/configuration/estimate/analytics API と `/costs` は metadata-only で、
+`--sanitized-only` でも利用できます。すべて valid loopback Host、same-origin、
+`Cache-Control: no-store` を要求し、POST は strict JSON と
+`x-monitor-csrf: local-monitor` が必要です。sanitized export v1 は pricing と alert-v2
+を含めません。private runtime backup は pricing/alert-v2、および override から生成して
+DB に保存した canonicalized catalog snapshot（private rate/provenance を含み得る）を
+含みます。override path と original source-file bytes は含みません。このため runtime
+backup は raw-bearing private artifact として扱ってください。
+
+Budget rule は v1 currency `USD`、warning/critical threshold、minimum coverage
+（0..10000 basis points）、および scope-specific window（`session`、UTC calendar
+`utc_day`、または `rolling_period` + 2..366 `window_days`）を完全に明示するまで
+disabled です。insufficient coverage、empty scope、no covered estimate、
+unrepresentable amount は alert ではなく fixed suppression として表示します。
+Estimated cost は invoice、billing/chargeback、quality improvement、effect verdict、
+または automatic model recommendation ではありません。
 
 ## First-trace Doctor
 
