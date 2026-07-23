@@ -15,9 +15,16 @@ Required:
 
 Optional:
 
-- Codex App / app-server。
 - Issue #51 Session events from `copilot-sdk-stream` or
   `copilot-compatible-hook`, accepted by the installed Local Monitor only.
+
+Planned / blocked candidate:
+
+- Codex App / app-server。Issue #92 の Desktop production integration 判定は
+  `NO-GO` であり、現行の対応済み source ではない。standalone app-server の
+  sanitized attestation は Desktop-owned execution、repository-safe log
+  export、または production adapter を承認しない。Issue #93 は D072 の retry
+  gate を満たすまで開始しない。
 
 Reference-only:
 
@@ -88,9 +95,10 @@ Masking, sampling, TLS, SSO, and shared operation require separate product / sec
 ## WSL2 Docker Engine Path
 
 For `wsl2-docker-langfuse` and `wsl2-docker-collector-langfuse`, Docker Engine
-runs inside WSL2 while VS Code, GitHub Copilot CLI, or Codex App runs on
+runs inside WSL2 while supported VS Code or GitHub Copilot CLI clients run on
 Windows. The client endpoint must therefore be reachable from Windows, not only
-from inside the WSL2 distro.
+from inside the WSL2 distro. Legacy Codex App sample generation does not make
+Codex App a supported client under the Issue #92 `NO-GO`.
 
 Generated samples use:
 
@@ -885,6 +893,77 @@ later feature safely correlates it from observed telemetry.
 
 Codex App / app-server OTel routing config belongs in user-level `~/.codex/config.toml`.
 Project-local `.codex/config.toml` is not a routing source of truth.
+
+Issue #92 is `NO-GO` for Codex App Desktop production integration. Its
+content-disabled standalone probe used
+per-command configuration overrides and a disposable loopback receiver; it did
+not inspect its values or write the user-level source of truth. Codex still
+loaded the user configuration before layering the per-command overrides. The
+exact overridden keys were `otel.log_user_prompt`, `otel.environment`,
+`otel.exporter`, `otel.trace_exporter`, and `otel.metrics_exporter`; the
+thread-start profile additionally overrode `history.persistence` and
+`sqlite_home`. Other influence from the loaded global layer was not excluded.
+The observed producer was a
+standalone app-server at CLI/app-server version `0.145.0`. The independently
+detected Desktop package version was `26.715.10079.0`. The Desktop-bundled
+producer binary was present, but direct terminal execution was blocked by
+WindowsApps access control. The standalone producer is not a substitute for
+that failed Desktop-owned retry. This tuple does not prove Codex App Desktop
+support, Desktop ownership of the app-server process, or an App Session/window
+relationship.
+
+The `0.145.0` producer version was detected by the public CLI version command.
+The live trace inventory retained the `service.version` attribute key name but
+not its value, so that resource value is not version authority. A safe read-only
+process-tree diagnostic projected only process IDs, parent IDs, and executable
+paths and observed a package-root `codex.exe` process with a package-root OS
+parent process. It emitted no ID, path, or hash value and did not read command
+lines. It did not identify the child role or prove app-server identity,
+Desktop-owned OTel execution, App Session/window identity, or merge authority.
+An earlier command-line-reading attempt was invalidated and excluded; none of
+its values were retained.
+
+The standalone producer's trace envelope provided exact source trace/span
+identifiers, source-declared parent identifiers, timing, and producer version.
+Parent references outside an exported batch remain unresolved; the receiver
+must not invent a root or parent. A public `thread/start` response returned a
+native protocol thread ID, but the corresponding OTel span did not carry that
+native ID. The generic runtime `thread.id` attribute is instrumentation
+metadata and must not be treated as a native Codex thread ID.
+
+The correlation table is
+[`codex-app/exact-correlation.md`](../contracts/source-capabilities/v1/codex-app/exact-correlation.md).
+Native thread to OTel was observed unbound; turn to OTel is unverified because
+no turn ran. Desktop App/process/Session relations are unverified. Process ID,
+repository, workspace, cwd, timestamp, prompt similarity, and arrival order
+must not repair those gaps.
+
+The v1 manifest cannot scope an availability value to a standalone producer
+while excluding Desktop ownership. Therefore the Codex App manifest promotes
+only the independently observed source-version detector; trace and every
+Desktop-specific capability remain `unknown`.
+
+Issue #92 adds no receiver, adapter, Setup, Doctor, UI, persistence, or private
+state access. Issue #93 production adapter, Setup, Doctor, UI, trace-manifest
+promotion, and future-registry activation remain blocked and must not start from
+this attestation. A separately approved discovery retry and prerequisite
+configuration contract must first satisfy the machine-readable conditions.
+Unknown fields remain unknown, and no missing model, token, tool, TTFT, retry,
+error, permission, ownership, prompt/response, file, or diff value is inferred
+or zero-filled.
+
+Several `profile-codex-app-config` and legacy Codex App full-routing,
+Langfuse, and Collector samples generate log exporters. Official Advanced
+Configuration and the pinned
+`rust-v0.145.0` implementation show tool-result log attributes for arguments,
+output, and error text even with prompt logging disabled. These values can be
+content- or path-bearing, so their log-export
+configuration is not established as repository-safe. Issue #92 inventories
+this high-severity blocker but does not change the generated production
+samples. A separately approved prerequisite specification must define and test
+safe defaults or an explicitly non-content log mechanism before
+production-integration work starts, with separate authorization for any
+content-bearing profile.
 
 ## Aspire AppHost Boundary
 

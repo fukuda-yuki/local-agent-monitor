@@ -348,6 +348,78 @@ proxy, or UI DTO. The semantic rules and canonical locations are defined by
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),
 and [security data boundaries](specifications/security-data-boundaries.md).
 
+## Codex App discovery and production integration gate
+
+Issue #92 records a `NO-GO` result for Codex App Desktop production integration
+for the exact tuple in
+`specifications/contracts/source-capabilities/v1/codex-app/discovery-inventory.json`.
+The observed producer was a standalone app-server, not a process proven to be
+owned by the Desktop package. The Desktop-bundled producer binary was present,
+but direct terminal execution was blocked by WindowsApps access control; the
+standalone producer does not replace that blocked retry. A content-disabled,
+per-command-only probe routed OTLP JSON to a disposable loopback receiver and
+established source-declared trace/span identity, parent fields, timing,
+CLI-command-detected producer version, and accepted content-gate configuration
+for the standalone producer. The observed `service.version` key value was not
+retained and is not the source of the `0.145.0` claim. It
+did not establish Desktop launch ownership, App Session or window identity,
+native thread/turn to OTel correlation, concurrency, restart/resume continuity,
+or a complete log, metric, model, token, tool, TTFT, retry, error, permission,
+ownership, prompt/response, file, or diff inventory.
+
+Within the non-authoritative standalone attestation, observed OTel
+trace-to-span identity is exact and emitted parent identifiers are preserved
+with unresolved references left unresolved. Native protocol thread identity was
+observed as unbound from OTel. Native turn correlation is `unverified`, not
+unbound, because no turn was executed. The generic tracing-library `thread.id`
+attribute is not a Codex native thread identifier. Process, repository,
+workspace, current directory, timestamp, prompt, and arrival-order correlation
+are forbidden. None of these standalone observations authorizes a `codex-app`
+adapter or changes the Codex App manifest's unknown trace capability.
+
+A safe read-only OS process-tree diagnostic projected only process IDs, parent
+IDs, and executable paths and observed a package-root `codex.exe` process with a
+package-root parent process. It emitted no ID, path, or hash value and did not
+read command lines. It did not identify the child role or prove app-server
+identity, Desktop-owned OTel execution, App Session/window identity, or merge
+authority. An earlier command-line-reading attempt was invalidated and excluded;
+none of its values were retained. The `NO-GO` result is unchanged.
+
+The v1 manifest cannot express standalone-only availability while excluding
+Desktop ownership. The Codex App manifest therefore promotes only the
+independently observed source-version detector; trace and every
+Desktop-specific capability remain `unknown`. The separate inventory preserves
+the standalone structural evidence for a future approved discovery retry
+without overclaiming the manifest.
+
+Issue #92 adds no production adapter, Setup, Doctor, UI, persistence, or
+private-state integration. The probe's verbatim command, exact ephemeral
+harness, and raw output were not retained, so its committed counts, key names,
+identifier shapes, and parent-membership results are a non-replayable sanitized
+attestation rather than independently regenerable fixture provenance.
+
+Issue #93 production adapter, Setup, Doctor, UI, trace-manifest promotion, and
+future-registry activation remain blocked and must not start from this
+attestation. A separately approved discovery retry and prerequisite
+configuration contract must first establish Desktop-owned execution, a retained
+repository-safe replay harness, exact supported configuration and detection,
+safe log-export policy, source identity and parentage, and
+exact-or-explicitly-unbound native correlation. Codex CLI and generic standalone
+app-server remain out of scope.
+
+Several `profile-codex-app-config` and legacy Codex App full-routing,
+Langfuse, and Collector samples enable log export. Official Advanced
+Configuration and
+the pinned `rust-v0.145.0` implementation show that tool-result logs may include
+arguments, output, and error text even when prompt logging is disabled; those
+values may contain content or paths.
+Therefore those generated log-export profiles are not established as
+repository-safe and are a high-severity blocker. Issue #92 does not silently
+change production samples. A separately approved prerequisite specification
+must disable logs by default or prove an explicitly non-content mechanism and
+test exact detection before production-integration work starts, with separate
+authorization for any content-bearing profile.
+
 ## Historical source import contract v1
 
 Issue #76 freezes a policy/contract-only historical import boundary at

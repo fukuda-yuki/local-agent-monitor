@@ -5,7 +5,6 @@
 ```text
 VS Code GitHub Copilot Chat
 GitHub Copilot CLI
-Codex App / app-server
         |
         | OTLP HTTP via collection profile
         v
@@ -22,6 +21,9 @@ Config CLI
         v
 Static HTML dashboard
 ```
+
+`Codex App / app-server` は Issue #92 `NO-GO` の planned / blocked candidate
+であり、この active collection flow には含まれない。
 
 Issue #51 adds a parallel local Session path inside the installed Local Monitor:
 
@@ -96,7 +98,7 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
 
 - VS Code GitHub Copilot Chat: 必須 telemetry source。
 - GitHub Copilot CLI: 必須 telemetry source。
-- Codex App / app-server: 任意 telemetry source。OTel routing config は user-level `~/.codex/config.toml` を source of truth とし、project-local `.codex/config.toml` には依存しない。
+- Codex App / app-server: 宣言済みの任意 candidate surface だが、Issue #92 の Desktop production integration 判定は `NO-GO`。OTel routing config の将来の source of truth は user-level `~/.codex/config.toml` とし project-local `.codex/config.toml` には依存しない。Issue #93 の adapter / Setup / Doctor / UI は、別途承認された discovery retry と prerequisite configuration specification が Desktop-owned replayable evidence と安全な log-export contract を確立するまで開始しない。
 
 ### Langfuse
 
@@ -128,7 +130,7 @@ Config CLI は repository-local な中核ツールである。
 
 主な責務:
 
-- VS Code / Copilot CLI / Codex App 向け OTel 設定サンプル出力。
+- VS Code / Copilot CLI 向け OTel 設定サンプル出力。既存 Codex App command は互換性維持の legacy sample generator であり、Issue #92 `NO-GO` 下で対応済み surface または repository-safe log profile を意味しない。
 - raw OTLP JSON の ingest。
 - SQLite raw store への保存。
 - raw store から normalized measurement への変換。

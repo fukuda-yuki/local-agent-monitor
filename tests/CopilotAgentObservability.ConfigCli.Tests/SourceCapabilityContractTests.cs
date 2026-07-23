@@ -94,7 +94,9 @@ public sealed class SourceCapabilityContractTests
             var claudeAvailability = UnknownAvailabilityMatrix();
             claudeAvailability["source_version_detector"] = "available";
             AssertAvailabilityMatrix(manifests["claude-code"], claudeAvailability);
-            AssertAvailabilityMatrix(manifests["codex-app"], UnknownAvailabilityMatrix());
+            var codexAppAvailability = UnknownAvailabilityMatrix();
+            codexAppAvailability["source_version_detector"] = "available";
+            AssertAvailabilityMatrix(manifests["codex-app"], codexAppAvailability);
             AssertAvailabilityMatrix(manifests["codex-cli"], UnknownAvailabilityMatrix());
 
             Assert.NotEqual(
