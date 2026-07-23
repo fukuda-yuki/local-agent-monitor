@@ -21,7 +21,7 @@ public sealed class RuntimeBackupPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await page.Locator("#runtime-backup-link").ClickAsync();
-        await page.WaitForURLAsync($"{host.Url}/backup-restore");
+        await Expect(page).ToHaveURLAsync($"{host.Url}/backup-restore");
 
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "runtime backup と restore", Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByText("raw_content_included", new() { Exact = true })).ToBeVisibleAsync();
