@@ -35,6 +35,10 @@ public sealed class HistoricalAnalysisSpecificationTests
             "no heuristic lookup",
             "future-surface-registry.json",
             "Issue #91",
+            "issue-91-validation-handoff.json",
+            "91-H-075",
+            "91-S-075",
+            "91-L-075",
         ], required => Assert.Contains(required, specification, StringComparison.Ordinal));
     }
 
