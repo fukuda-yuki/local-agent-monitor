@@ -62,6 +62,16 @@ repository metadata cleanup.
 | [DOC-5B](doc-ux-readability-issues.md#DOC-5B) | Untranslated literal English phrases | Medium | Open | Translate raw English jargon (`reversible setup` etc.) |
 | [DOC-5C](doc-ux-readability-issues.md#DOC-5C) | Style inconsistency (常体/敬体) & passive voice | Medium | Open | Standardize tone to natural polite Japanese (です/ます) |
 
+### Commit `15fe4cbf` review cards (active)
+
+| Card | Feature unit / Aspect | Severity | Status | Plan boundary |
+| --- | --- | --- | --- | --- |
+| [DOC-6A](doc-ux-readability-review-15fe4cbf.md#DOC-6A) | CRLF injected into 2 of 10 files, hiding the real diff | High | Open | Normalize line endings back to LF; add `.gitattributes` to prevent recurrence |
+| [DOC-6B](doc-ux-readability-review-15fe4cbf.md#DOC-6B) | Still-valid "Sprint7 unconfirmed" caveat deleted, not reworded | High | Open | Restore the unconfirmed-status caveat in `telemetry-collection.md` without the `Sprint7` label |
+| [DOC-6C](doc-ux-readability-review-15fe4cbf.md#DOC-6C) | `static-dashboard.md` intro drill-down targets changed beyond wording | Medium | Open | Confirm intended content change or restore `raw store` / `sensitive bundle` mentions |
+| [DOC-6D](doc-ux-readability-review-15fe4cbf.md#DOC-6D) | `local-monitor.md` left ~unconverted despite "all user-facing documentation" claim | Medium | Open | Apply the same 5 readability patterns to `local-monitor.md`, or scope the claim down |
+| [DOC-6E](doc-ux-readability-review-15fe4cbf.md#DOC-6E) | BUG_ISSUE index still shows DOC-1..5C as Open while cards are marked Fixed | Low | Open (pre-existing) | Sync this README's index table with each card's actual Status |
+
 ## Active Feature Files
 
 | File | Purpose | Open cards |
@@ -70,6 +80,7 @@ repository metadata cleanup.
 | [M5-agent-execution-ui.md](M5-agent-execution-ui.md) | Trace-detail page, raw default behavior, raw lookup/rendering | M5-5 |
 | [Sprint10-monitor-design-views.md](Sprint10-monitor-design-views.md) | Sprint10 monitor design views, Playwright bootstrap, test reliability | S10-3 |
 | [doc-ux-readability-issues.md](doc-ux-readability-issues.md) | Documentation UX, demo mode confusion, image sync, troubleshooting, & Japanese tone | DOC-1A~1C, DOC-2A~2C, DOC-3A~3C, DOC-4A~4C, DOC-5A~5C |
+| [doc-ux-readability-review-15fe4cbf.md](doc-ux-readability-review-15fe4cbf.md) | Review of commit `15fe4cbf` (Japanese readability pass): line-ending corruption, dropped caveat, scope creep, `local-monitor.md` coverage gap | DOC-6A~6E |
 
 ## Archived Files (`_archive/`)
 
