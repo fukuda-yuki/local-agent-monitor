@@ -66,7 +66,7 @@ repository metadata cleanup.
 
 | Card | Feature unit / Aspect | Severity | Status | Plan boundary |
 | --- | --- | --- | --- | --- |
-| [DOC-6A](doc-ux-readability-review-15fe4cbf.md#DOC-6A) | CRLF injected into 2 of 10 files, hiding the real diff | High | Open | Normalize line endings back to LF; add `.gitattributes` to prevent recurrence |
+| [DOC-6A](doc-ux-readability-review-15fe4cbf.md#DOC-6A) | CRLF injected into 2 of 10 files, hiding the real diff | High | Fixed | Normalize line endings back to LF; add `.gitattributes` to prevent recurrence |
 | [DOC-6B](doc-ux-readability-review-15fe4cbf.md#DOC-6B) | Still-valid "Sprint7 unconfirmed" caveat deleted, not reworded | High | Open | Restore the unconfirmed-status caveat in `telemetry-collection.md` without the `Sprint7` label |
 | [DOC-6C](doc-ux-readability-review-15fe4cbf.md#DOC-6C) | `static-dashboard.md` intro drill-down targets changed beyond wording | Medium | Open | Confirm intended content change or restore `raw store` / `sensitive bundle` mentions |
 | [DOC-6D](doc-ux-readability-review-15fe4cbf.md#DOC-6D) | `local-monitor.md` left ~unconverted despite "all user-facing documentation" claim | Medium | Open | Apply the same 5 readability patterns to `local-monitor.md`, or scope the claim down |
