@@ -172,18 +172,28 @@ internal static class MonitorHost
         var historicalEvidenceStore = new SqliteHistoricalEvidenceDatasetStoreV1(options.DatabasePath);
         historicalEvidenceStore.CreateSchema();
         builder.Services.AddSingleton(historicalEvidenceStore);
-        var historicalEvidenceSource = new SqliteHistoricalEvidenceSnapshotSourceV1(options.DatabasePath, sessionStore);
+        var historicalEvidenceSource = testOptions?.HistoricalEvidenceSource
+            ?? new SqliteHistoricalEvidenceSnapshotSourceV1(options.DatabasePath, sessionStore);
         builder.Services.AddSingleton<IHistoricalEvidenceSnapshotSourceV1>(historicalEvidenceSource);
         var historicalEvidenceService = new HistoricalEvidenceApplicationServiceV1(historicalEvidenceSource, historicalEvidenceStore, timeProvider);
         builder.Services.AddSingleton(historicalEvidenceService);
         var historicalInstructionAnalysisStore = new SqliteHistoricalInstructionAnalysisStoreV1(options.DatabasePath);
         historicalInstructionAnalysisStore.CreateSchema();
         builder.Services.AddSingleton(historicalInstructionAnalysisStore);
-        builder.Services.AddSingleton(new HistoricalInstructionAnalysisCompositionV1(
+        var historicalInstructionComposition = new HistoricalInstructionAnalysisCompositionV1(
             historicalEvidenceService,
             historicalInstructionAnalysisStore,
             rawExecutionAllowed: !options.SanitizedOnly,
-            timeProvider: timeProvider));
+            timeProvider: timeProvider);
+        builder.Services.AddSingleton(historicalInstructionComposition);
+        builder.Services.AddSingleton(serviceProvider => new HistoricalAnalysisCoordinatorV1(
+            historicalEvidenceService,
+            historicalInstructionComposition,
+            testOptions?.HistoricalInstructionProvider,
+            serviceProvider.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
+            testOptions?.HistoricalEfficiencyExecutor,
+            timeProvider,
+            testOptions?.HistoricalEfficiencyTimeout));
         var proposalApplyRuntimePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.DatabasePath))!, "proposal-apply");
         var proposalApplyService = new ProposalApplyService(options.ApplyRoots ?? [], proposalApplyRuntimePath, sessionStore);
         builder.Services.AddSingleton(proposalApplyService);
@@ -270,6 +280,7 @@ internal static class MonitorHost
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
 
         var app = builder.Build();
+        var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
         _ = app.Services.GetRequiredService<RuntimeBackupMonitorLease>();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
         {
@@ -319,6 +330,16 @@ internal static class MonitorHost
                 if (HistoricalImportRoutes.IsPath(context.Request.Path))
                 {
                     await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, HistoricalImportErrorCodes.StoreUnavailable);
+                    return;
+                }
+                if (HistoricalAnalysisRoutes.IsPath(context.Request.Path))
+                {
+                    var tooLarge = exception is BadHttpRequestException historicalAnalysisBodyException
+                        && historicalAnalysisBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge;
+                    await HistoricalAnalysisRoutes.WriteErrorAsync(
+                        context,
+                        tooLarge ? StatusCodes.Status413PayloadTooLarge : StatusCodes.Status503ServiceUnavailable,
+                        tooLarge ? "request_too_large" : HistoricalAnalysisErrorCodesV1.StoreUnavailable);
                     return;
                 }
                 if (AlertCenterRoutes.IsPath(context.Request.Path))
@@ -387,9 +408,10 @@ internal static class MonitorHost
             var historicalImportPath = HistoricalImportRoutes.IsPath(context.Request.Path);
             var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
             var sanitizedImportPath = SanitizedImportRoutes.IsPath(context.Request.Path);
+            var historicalAnalysisPath = HistoricalAnalysisRoutes.IsPath(context.Request.Path);
             var runtimeBackupPath = !options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
-                || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath)
+                || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -402,6 +424,10 @@ internal static class MonitorHost
                 else if (historicalImportPath)
                 {
                     await HistoricalImportRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
+                else if (historicalAnalysisPath)
+                {
+                    await HistoricalAnalysisRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (sanitizedImportPath)
                 {
@@ -467,6 +493,7 @@ internal static class MonitorHost
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
+        HistoricalAnalysisRoutes.Map(app, historicalAnalysisCoordinator);
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);
         app.MapGet("/health/live", async context =>
         {
@@ -1870,6 +1897,14 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public IHistoricalEvidenceSnapshotSourceV1? HistoricalEvidenceSource { get; init; }
+
+    public IHistoricalInstructionAnalysisProviderV1? HistoricalInstructionProvider { get; init; }
+
+    public IHistoricalEfficiencyExecutorV1? HistoricalEfficiencyExecutor { get; init; }
+
+    public TimeSpan? HistoricalEfficiencyTimeout { get; init; }
+
     public IHistoricalImportApplication? HistoricalImportApplication { get; init; }
 
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
