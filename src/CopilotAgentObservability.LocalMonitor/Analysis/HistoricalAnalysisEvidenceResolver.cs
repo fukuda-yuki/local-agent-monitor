@@ -102,8 +102,9 @@ internal sealed class HistoricalAnalysisEvidenceResolverV1
         {
             var safe = extraction.RepositorySafe.ExcludedSessions[index];
             var raw = extraction.RawLocal.ExcludedSessions[index];
-            if (safe.Reason is not HistoricalSessionExclusionReasonV1.FilterMismatch
-                and not HistoricalSessionExclusionReasonV1.WindowTruncated)
+            if (raw.Metadata is null && safe.Metadata is null
+                && raw.Reason == HistoricalSessionExclusionReasonV1.MissingSessionReference
+                && safe.Reason == HistoricalSessionExclusionReasonV1.MissingSessionReference)
                 continue;
             if (raw.Metadata is null || safe.Metadata is null)
                 throw new HistoricalEvidenceValidationException(

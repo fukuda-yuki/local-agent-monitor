@@ -232,6 +232,69 @@ public sealed class HistoricalAnalysisCoordinatorTests
     }
 
     [Fact]
+    public async Task ResolveEvidence_IndexesEveryExistingExcludedSessionWithoutReadingEvidence()
+    {
+        using var temp = new MonitorTempDirectory();
+        var sessions = new[]
+        {
+            Metadata(5) with { Completeness = SessionCompleteness.Unbound },
+            Metadata(6) with
+            {
+                ContentState = SessionContentState.NotCaptured,
+                EvidenceLocations = [],
+            },
+            Metadata(7) with
+            {
+                SourceKind = HistoricalEvidenceSourceKindV1.HistoricalSummary,
+                ContentState = SessionContentState.ExpiredPendingDeletion,
+            },
+        };
+        var missing = Guid.Parse("018f0000-0000-7000-8000-000000000199");
+        var source = new PreviewSnapshotSource(sessions);
+        var owner = Owner(temp, source);
+        var coordinator = new HistoricalAnalysisCoordinatorV1(owner);
+        var preview = await coordinator.PreviewAsync(
+            new(
+                HistoricalAnalysisContractsV1.PreviewRequestSchemaVersion,
+                new("repo-a", null, null, null, [missing], [], null, null, 50, false)),
+            CancellationToken.None);
+        var unbound = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.Unbound);
+        var missingEvidence = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.MissingEvidenceReference);
+        var invalidHistorical = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.InvalidHistoricalCompleteness);
+        var missingSession = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.MissingSessionReference);
+
+        var response = coordinator.ResolveEvidence(new(
+            HistoricalAnalysisContractsV1.EvidenceResolveRequestSchemaVersion,
+            preview.ExtractionId,
+            preview.RepositorySafeSha256,
+            [unbound.SessionId, missingEvidence.SessionId, invalidHistorical.SessionId, missingSession.SessionId]));
+
+        Assert.Equal(
+            [
+                "/diagnostics?session_id=018f0000-0000-7000-8000-000000000005",
+                "/diagnostics?session_id=018f0000-0000-7000-8000-000000000006",
+                "/diagnostics?session_id=018f0000-0000-7000-8000-000000000007",
+                null,
+            ],
+            response.Resolutions.Select(value => value.Target));
+        Assert.Equal(
+            ["available", "not_captured", "expired_pending_deletion", "not_applicable"],
+            response.Resolutions.Select(value => value.ContentState));
+        Assert.Equal(
+            ["resolved", "resolved", "expired", "missing"],
+            response.Resolutions.Select(value => value.ResolutionState));
+        Assert.Empty(source.ReadSessionIds);
+    }
+
+    [Fact]
     public async Task EfficiencyRun_ApplicationCancellationCompletesCanceledAndDoesNotLeakTask()
     {
         using var temp = new MonitorTempDirectory();
