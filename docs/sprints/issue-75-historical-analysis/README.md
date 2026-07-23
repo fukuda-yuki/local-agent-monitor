@@ -1,0 +1,37 @@
+# Issue #75 historical analysis validation closeout
+
+Status: candidate-pinned automated, browser, and security validation complete;
+genuine provider-backed multi-Session execution remains `blocked_external`.
+
+This directory is historical validation evidence. It records how Issue #75
+was validated at the pinned candidate and does not define current product
+behavior. Current behavior remains defined by `docs/requirements.md`,
+`docs/spec.md`, and
+`docs/specifications/interfaces/historical-analysis.md`.
+
+## Candidate and matrix
+
+- Wave 4 kickoff: `2df115682f0e280d020c04b4936968d4602f623c`
+- Pre-freeze matrix activation: `da016c581e89dc3902e6e0332b618252d5028481`
+- Functional candidate: `23c5212e0bf0bf05885930974e53d051d731e117`
+- #72 repair source: `e9bc3a7bb6feb5bdefa084dcace420f19670fd1f`
+- #72 repair integration: `23c5212e0bf0bf05885930974e53d051d731e117`
+- Validation date: 2026-07-23
+- Matrix: `docs/sprints/issue-75-historical-analysis/validation-matrix.json`
+- Detailed evidence:
+  `docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md`
+
+| Row | Classification | Scope |
+| --- | --- | --- |
+| `91-H-075` | `passed` | Bounded scope/preview, included and excluded Sessions, independent analyses, state distinctions, exact drill-down, and browser behavior |
+| `91-S-075` | `passed` | Raw/sanitized boundary, exact ownership, inert rendering, accessibility, HTTP negatives, and repository-safe scanning |
+| `91-L-075` | `blocked_external` | Genuine provider-backed multi-Session execution using a reviewed source tuple |
+
+The release decision is `release_ready_with_external_blockers`. The live row
+is not converted into a fixture-backed pass. No separately authorized content
+capture or reviewed exact multi-Session provider tuple was available, so no
+genuine provider execution was attempted.
+
+Historical import, proposal apply, verified effect verdicts, provider pricing,
+Alert Center, and portability behavior remain owned by their existing Issues;
+Issue #75 did not absorb those scopes.
