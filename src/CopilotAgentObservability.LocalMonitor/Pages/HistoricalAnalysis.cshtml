@@ -13,7 +13,7 @@
 
     <form class="panel" id="historical-analysis-selection" aria-labelledby="historical-analysis-selection-heading" autocomplete="off">
         <div class="panel-head">
-            <span class="panel-title" id="historical-analysis-selection-heading">履歴スコープ</span>
+            <h3 class="panel-title" id="historical-analysis-selection-heading">履歴スコープ</h3>
             <span class="panel-meta">プレビュー前に分析は開始されません</span>
         </div>
         <div class="alert-filter-grid">
@@ -66,21 +66,21 @@
 
     <section class="panel" id="historical-analysis-preview" aria-labelledby="historical-analysis-preview-heading" hidden>
         <div class="panel-head">
-            <span class="panel-title" id="historical-analysis-preview-heading" tabindex="-1">スコープのプレビュー</span>
+            <h3 class="panel-title" id="historical-analysis-preview-heading" tabindex="-1">スコープのプレビュー</h3>
             <span class="panel-meta" id="historical-analysis-preview-count"></span>
         </div>
         <div class="error-strip" id="historical-analysis-warnings" role="status" hidden></div>
         <div class="monitor-table-wrapper" id="historical-analysis-included">
             <table class="monitor-table">
                 <caption>含まれる Session</caption>
-                <thead><tr><th>Session</th><th>Source</th><th>Completeness</th><th>Content</th><th>Exact reasons</th></tr></thead>
+                <thead><tr><th>Session</th><th>Source posture</th><th>Completeness / exact reasons</th><th>Content posture</th><th>Capabilities</th><th>Owner decision</th></tr></thead>
                 <tbody></tbody>
             </table>
         </div>
         <div class="monitor-table-wrapper" id="historical-analysis-excluded">
             <table class="monitor-table">
                 <caption>除外される Session</caption>
-                <thead><tr><th>Session</th><th>Exact reason</th><th>Metadata state</th></tr></thead>
+                <thead><tr><th>Session</th><th>Exact exclusion reason</th><th>Source posture</th><th>Completeness / exact reasons</th><th>Content posture</th><th>Capabilities</th></tr></thead>
                 <tbody></tbody>
             </table>
         </div>
@@ -89,7 +89,7 @@
     <div class="alert-center-grid">
         <section class="panel" aria-labelledby="historical-analysis-instruction-control-heading">
             <div class="panel-head">
-                <span class="panel-title" id="historical-analysis-instruction-control-heading">Instruction analysis</span>
+                <h3 class="panel-title" id="historical-analysis-instruction-control-heading">Instruction analysis</h3>
                 <span class="panel-meta">#73 · independent run</span>
             </div>
             <div class="alert-filter-grid">
@@ -112,7 +112,7 @@
 
         <section class="panel" aria-labelledby="historical-analysis-efficiency-control-heading">
             <div class="panel-head">
-                <span class="panel-title" id="historical-analysis-efficiency-control-heading">Efficiency analysis</span>
+                <h3 class="panel-title" id="historical-analysis-efficiency-control-heading">Efficiency analysis</h3>
                 <span class="panel-meta">#74 · independent run</span>
             </div>
             <p>exact repository-safe receipt を表示します。</p>
@@ -123,14 +123,14 @@
 
     <section class="panel" id="historical-analysis-instruction-result" aria-labelledby="historical-analysis-instruction-heading" hidden>
         <div class="panel-head">
-            <span class="panel-title" id="historical-analysis-instruction-heading" tabindex="-1">Instruction 分析結果</span>
+            <h3 class="panel-title" id="historical-analysis-instruction-heading" tabindex="-1">Instruction 分析結果</h3>
         </div>
         <div id="historical-analysis-instruction-body"></div>
     </section>
 
     <section class="panel" id="historical-analysis-efficiency-result" aria-labelledby="historical-analysis-efficiency-heading" hidden>
         <div class="panel-head">
-            <span class="panel-title" id="historical-analysis-efficiency-heading" tabindex="-1">Efficiency 分析結果</span>
+            <h3 class="panel-title" id="historical-analysis-efficiency-heading" tabindex="-1">Efficiency 分析結果</h3>
         </div>
         <p><strong>Boundary:</strong> efficiency drivers are not monetary cost, provider pricing, improvement, or a verified effect verdict.</p>
         <div id="historical-analysis-efficiency-body"></div>

@@ -99,9 +99,48 @@
     return reasons.length === 0 ? "none" : reasons.join(", ");
   };
 
+  const capabilities = value => {
+    if (!value || typeof value !== "object") return "metadata_omitted";
+    const entries = Object.entries(value);
+    return entries.length === 0
+      ? "none"
+      : entries.map(([key, available]) => `${key}=${exact(available)}`).join(", ");
+  };
+
+  const includedSourcePosture = session => {
+    const metadata = session.metadata;
+    const surfaces = list(metadata?.source_surfaces).join(", ") || "none";
+    const provenance = list(metadata?.source_provenance)
+      .map(item => `${exact(item.source_surface)}/${exact(item.source_application_version)}/${exact(item.adapter_version)}`)
+      .join(", ") || "none";
+    return `source_surface=${exact(session.source_surface)} · source_version=${exact(session.source_version)} · adapter_version=${exact(session.adapter_version)} · source_kind=${exact(session.source_kind)} · source_surfaces=${surfaces} · source_provenance=${provenance}`;
+  };
+
+  const excludedSourcePosture = metadata => {
+    if (!metadata) return "metadata_omitted";
+    const surfaces = list(metadata.source_surfaces).join(", ") || "none";
+    const provenance = list(metadata.source_provenance)
+      .map(item => `${exact(item.source_surface)}/${exact(item.source_application_version)}/${exact(item.adapter_version)}`)
+      .join(", ") || "none";
+    return `source_surfaces=${surfaces} · source_provenance=${provenance} · source_kind=${exact(metadata.source_kind)}`;
+  };
+
   const distribution = value => list(value)
     .map(item => `${exact(item.key)}=${exact(item.count)}`)
     .join(", ") || "none";
+
+  const clearProjection = () => {
+    previewPanel.hidden = true;
+    replace(byId("historical-analysis-included").querySelector("tbody"));
+    replace(byId("historical-analysis-excluded").querySelector("tbody"));
+    byId("historical-analysis-preview-count").textContent = "";
+    byId("historical-analysis-warnings").textContent = "";
+    byId("historical-analysis-warnings").hidden = true;
+    instructionResult.hidden = true;
+    efficiencyResult.hidden = true;
+    replace(byId("historical-analysis-instruction-body"));
+    replace(byId("historical-analysis-efficiency-body"));
+  };
 
   const renderPreview = value => {
     const includedBody = byId("historical-analysis-included").querySelector("tbody");
@@ -110,19 +149,26 @@
       const row = element("tr");
       row.append(
         cell(session.session_id),
-        cell(`${exact(session.source_surface)} / ${exact(session.source_kind)}`),
-        cell(exact(session.completeness)),
-        cell(`${exact(session.content_state)} / ${exact(session.descriptor_state)}`),
-        cell(decisionReasons(session))
+        cell(includedSourcePosture(session)),
+        cell(`${exact(session.completeness)} · reasons=${decisionReasons(session)}`),
+        cell(`content_state=${exact(session.content_state)} · descriptor_state=${exact(session.descriptor_state)}`),
+        cell(capabilities(session.capabilities)),
+        cell("included")
       );
       return row;
     });
     const excludedRows = list(value.excluded).map(session => {
       const row = element("tr");
+      const metadata = session.metadata;
       row.append(
         cell(session.session_id),
         cell(session.reason),
-        cell(session.metadata === null ? "metadata_omitted" : "metadata_available")
+        cell(excludedSourcePosture(metadata)),
+        cell(metadata
+          ? `${exact(metadata.completeness)} · reasons=${list(metadata.completeness_reasons).join(", ") || "none"}`
+          : "metadata_omitted"),
+        cell(metadata ? `content_state=${exact(metadata.content_state)}` : "metadata_omitted"),
+        cell(metadata ? capabilities(metadata.capabilities) : "metadata_omitted")
       );
       return row;
     });
@@ -131,7 +177,11 @@
     byId("historical-analysis-preview-count").textContent =
       `${includedRows.length} included · ${excludedRows.length} excluded`;
 
-    const sources = new Set(list(value.included).map(session => `${session.source_surface}/${session.source_kind}`));
+    const sources = new Set(list(value.included).flatMap(session => {
+      const surfaces = list(session.metadata?.source_surfaces);
+      return (surfaces.length > 0 ? surfaces : [session.source_surface])
+        .map(surface => `${surface}/${session.source_kind}`);
+    }));
     const completeness = new Set(list(value.included).map(session => session.completeness));
     const warnings = [];
     if (sources.size > 1) warnings.push("mixed source cohort");
@@ -170,6 +220,7 @@
     preview = null;
     previewGeneration += 1;
     const generation = previewGeneration;
+    clearProjection();
     instructionButton.disabled = true;
     efficiencyButton.disabled = true;
     previewButton.disabled = true;
@@ -183,6 +234,7 @@
       preview = value;
       renderPreview(value);
     } catch (error) {
+      if (generation !== previewGeneration) return;
       showValidation(exact(error.code));
     } finally {
       previewButton.disabled = false;
@@ -190,14 +242,17 @@
   });
 
   selectionForm.addEventListener("input", () => {
-    if (!preview) return;
+    const shouldAnnounce = preview !== null || !previewPanel.hidden || previewButton.disabled;
     preview = null;
     previewGeneration += 1;
+    clearProjection();
     instructionButton.disabled = true;
     efficiencyButton.disabled = true;
     byId("historical-analysis-instruction-state").textContent = "preview_required";
     byId("historical-analysis-efficiency-state").textContent = "preview_required";
-    announce("スコープが変更されました。分析を開始する前に再プレビューしてください。");
+    if (shouldAnnounce) {
+      announce("スコープが変更されました。分析を開始する前に再プレビューしてください。");
+    }
   });
 
   const stateText = state => {
@@ -242,13 +297,14 @@
     return [...new Set(tokens)];
   };
 
-  const evidenceControl = (token, binding) => {
+  const evidenceControl = (token, binding, label) => {
     const wrapper = element("div");
     wrapper.dataset.evidenceResolution = token;
-    const button = element("button", `Resolve evidence: ${token}`, "monitor-btn");
+    const button = element("button", `${label}: ${token}`, "monitor-btn");
     button.type = "button";
     button.dataset.evidenceReference = token;
     button.addEventListener("click", async () => {
+      if (preview !== binding) return;
       button.disabled = true;
       try {
         const response = await post("/evidence/resolve", {
@@ -257,6 +313,7 @@
           repository_safe_sha256: binding.repository_safe_sha256,
           references: [token]
         });
+        if (preview !== binding) return;
         const resolution = response.resolutions?.[0];
         const state = exact(resolution?.resolution_state);
         const content = exact(resolution?.content_state);
@@ -273,6 +330,7 @@
         }
         announce(`Evidence ${token}: ${state} · ${content}`);
       } catch (error) {
+        if (preview !== binding) return;
         replace(wrapper, element("span", `${token} · ${exact(error.code)}`));
         announce(`Evidence ${token}: ${exact(error.code)}`);
       }
@@ -281,15 +339,15 @@
     return wrapper;
   };
 
-  const appendEvidence = (parent, references, binding) => {
+  const appendEvidence = (parent, references, binding, label = "Exact evidence") => {
     const tokens = [...new Set(list(references).flatMap(referenceTokens))];
     if (tokens.length === 0) {
-      parent.append(element("p", "exact evidence: none"));
+      parent.append(element("p", `${label}: none`));
       return;
     }
     const section = element("div");
-    section.append(element("h5", "Exact evidence references"));
-    tokens.forEach(token => section.append(evidenceControl(token, binding)));
+    section.append(element("h5", `${label} references`));
+    tokens.forEach(token => section.append(evidenceControl(token, binding, label)));
     parent.append(section);
   };
 
@@ -365,10 +423,11 @@
         }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      byId("historical-analysis-instruction-state").textContent = "timed_out";
       if (generation !== previewGeneration) return;
-      renderInstruction({ state: "timed_out", dataset_projection: {} }, binding);
-      announce("Instruction: timed_out");
+      const stopped = byId("historical-analysis-instruction-state").textContent.split(" · ", 1)[0];
+      byId("historical-analysis-instruction-state").textContent =
+        `${stopped} · polling_stopped · retryable`;
+      announce(`Instruction: ${stopped} · polling_stopped · retryable`);
       instructionButton.disabled = false;
       instructionButton.focus();
     } catch (error) {
@@ -399,19 +458,30 @@
   };
 
   const renderDriver = (driver, binding) => {
+    const median = driver.cohort_median;
+    const percentile = driver.cohort_percentile;
     const card = element("article", null, "panel");
     card.append(
       element("h4", exact(driver.category)),
+      element("p", `subject Session: ${exact(driver.subject_session_id)}`),
+      element("p", `source Sessions: ${list(driver.source_sessions).join(", ") || "none"}`),
       element("p", `verdict: ${exact(driver.verdict)}`),
       element("p", `quality availability: ${exact(driver.quality_availability)}`),
       element("p", `formula: ${exact(driver.formula)}`),
       element("p", `threshold: ${exact(driver.threshold)}`),
       element("p", `observed: ${list(driver.observed_values).map(value => `${exact(value.name)}=${exact(value.value)} ${exact(value.unit)}`).join(", ") || "none"}`),
+      element("p", `cohort median: ${median ? `${exact(median.name)}=${exact(median.value)} ${exact(median.unit)}` : "unavailable"}`),
+      element("p", `cohort percentile: ${percentile ? `p${exact(percentile.percentile)} ${exact(percentile.name)}=${exact(percentile.value)} ${exact(percentile.unit)}` : "unavailable"}`),
+      element("p", `source surfaces: ${distribution(driver.source_distribution?.source_surfaces)}`),
+      element("p", `source kinds: ${distribution(driver.source_distribution?.source_kinds)}`),
+      element("p", `completeness: ${distribution(driver.completeness_distribution)}`),
       element("p", `comparison notes: ${list(driver.comparison_notes).join(", ") || "none"}`),
       element("p", `summary: ${exact(driver.summary)}`),
       element("p", `mitigation: ${exact(driver.mitigation?.code)} · ${exact(driver.mitigation?.summary)}`)
     );
-    appendEvidence(card, driver.evidence_refs, binding);
+    appendEvidence(card, driver.evidence_refs, binding, "Exact evidence");
+    appendEvidence(card, driver.quality_evidence_refs, binding, "Quality evidence");
+    appendEvidence(card, driver.mitigation?.evidence_refs, binding, "Mitigation evidence");
     return card;
   };
 
@@ -472,8 +542,10 @@
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       if (generation !== previewGeneration) return;
-      renderEfficiency({ state: "timed_out", receipt: null }, binding);
-      announce("Efficiency: timed_out");
+      const stopped = byId("historical-analysis-efficiency-state").textContent.split(" · ", 1)[0];
+      byId("historical-analysis-efficiency-state").textContent =
+        `${stopped} · polling_stopped · retryable`;
+      announce(`Efficiency: ${stopped} · polling_stopped · retryable`);
       efficiencyButton.disabled = false;
       efficiencyButton.focus();
     } catch (error) {

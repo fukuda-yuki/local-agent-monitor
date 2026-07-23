@@ -535,6 +535,7 @@ section {
 }
 
 .panel-title {
+    margin: 0;
     font-size: var(--monitor-text-md);
     font-weight: var(--monitor-weight-medium);
     color: var(--monitor-ink-subtle);

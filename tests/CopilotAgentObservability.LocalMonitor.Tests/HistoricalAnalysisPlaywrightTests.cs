@@ -16,6 +16,10 @@ public sealed class HistoricalAnalysisPlaywrightTests
     private const string ExpiredRef = "span-ref-22222222222222222222222222222222";
     private const string MissingRef = "session-ref-33333333333333333333333333333333";
     private const string RawMarker = "RAW_HISTORICAL_ANALYSIS_ARGUMENT_MARKER";
+    private const string SecretMarker = "SYNTHETIC_SECRET_CARRIER_MARKER";
+    private const string PathMarker = "LOCAL_PATH_CARRIER_MARKER/a/b";
+    private const string QualityRef = "span-ref-55555555555555555555555555555555";
+    private const string MitigationRef = "span-ref-66666666666666666666666666666666";
 
     [Fact(Timeout = 60_000)]
     public async Task PreviewAndIndependentStarts_AreSemanticKeyboardOperableAndBounded()
@@ -41,6 +45,9 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await page.GotoAsync($"{host.Url}/historical-analysis", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "履歴分析" })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "履歴スコープ" })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Instruction analysis" })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Efficiency analysis" })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeDisabledAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Efficiency 分析を開始" })).ToBeDisabledAsync();
         await Expect(page.GetByLabel("Repository")).ToBeVisibleAsync();
@@ -60,11 +67,21 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.Locator("#historical-analysis-preview")).ToBeVisibleAsync();
         await Expect(page.Locator("#historical-analysis-preview-heading")).ToBeFocusedAsync();
         await Expect(page.Locator("#historical-analysis-included tbody tr")).ToHaveCountAsync(2);
-        await Expect(page.Locator("#historical-analysis-excluded tbody tr")).ToHaveCountAsync(2);
+        await Expect(page.Locator("#historical-analysis-excluded tbody tr")).ToHaveCountAsync(4);
         await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("partial");
         await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("not_captured");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("source_version=safe-v1");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("adapter_version=safe-adapter");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("source_surfaces=copilot_sdk, claude_code");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("copilot_sdk/safe-v1/safe-adapter");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("token_rollup=true");
+        await Expect(page.Locator("#historical-analysis-included")).ToContainTextAsync("quality_reference=false");
         await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("filter_mismatch");
         await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("window_truncated");
+        await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("missing_evidence_reference");
+        await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("missing_session_reference");
+        await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("excluded-reason");
+        await Expect(page.Locator("#historical-analysis-excluded")).ToContainTextAsync("metadata_omitted");
         await Expect(page.Locator("#historical-analysis-warnings")).ToContainTextAsync("mixed");
         await Expect(page.Locator("#historical-analysis-warnings")).ToContainTextAsync("truncated_before");
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeEnabledAsync();
@@ -92,6 +109,14 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("incomplete");
         await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("coverage_reason");
         await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("not monetary cost");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("subject Session: session-ref-77777777777777777777777777777777");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("source Sessions: session-ref-77777777777777777777777777777777");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("source surfaces: copilot_sdk=2");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("completeness: full=2");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("cohort median: tokens=9 tokens");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("cohort percentile: p75 tokens=10 tokens");
+        await Expect(page.Locator($"button[data-evidence-reference='{QualityRef}']")).ToContainTextAsync("Quality evidence");
+        await Expect(page.Locator($"button[data-evidence-reference='{MitigationRef}']")).ToContainTextAsync("Mitigation evidence");
         await Expect(page.Locator("#historical-analysis-efficiency-heading")).ToBeFocusedAsync();
 
         Assert.All(
@@ -103,6 +128,12 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeDisabledAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Efficiency 分析を開始" })).ToBeDisabledAsync();
         await Expect(page.Locator("#historical-analysis-live")).ToContainTextAsync("再プレビュー");
+        await Expect(page.Locator("#historical-analysis-preview")).ToBeHiddenAsync();
+        await Expect(page.Locator("#historical-analysis-instruction-result")).ToBeHiddenAsync();
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToBeHiddenAsync();
+        await Expect(page.Locator("#historical-analysis-included tbody tr")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#historical-analysis-excluded tbody tr")).ToHaveCountAsync(0);
+        await Expect(page.Locator("[data-evidence-resolution]")).ToHaveCountAsync(0);
     }
 
     [Fact(Timeout = 60_000)]
@@ -140,7 +171,9 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
         var page = await browser.NewPageAsync();
         var console = new ConcurrentQueue<string>();
+        var requests = new ConcurrentQueue<IRequest>();
         page.Console += (_, message) => console.Enqueue(message.Text);
+        page.Request += (_, request) => requests.Enqueue(request);
         await RoutePreview(page);
         await RouteInstruction(page, InstructionSucceeded);
         await page.RouteAsync("**/api/historical-analysis/v1/evidence/resolve", async route =>
@@ -175,17 +208,160 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.Locator("[data-evidence-resolution='span-ref-44444444444444444444444444444444']").First).ToContainTextAsync("unresolved");
 
         await Expect(page.Locator("#historical-analysis-instruction-result img")).ToHaveCountAsync(0);
+        await Expect(page.Locator("#historical-analysis-instruction-result")).ToContainTextAsync(
+            "gap summary <img src=x onerror=window.__historicalAnalysisInjected=true>");
         Assert.False(await page.EvaluateAsync<bool>("() => window.__historicalAnalysisInjected === true"));
         var output = await page.ContentAsync();
-        Assert.DoesNotContain(RawMarker, output, StringComparison.Ordinal);
-        Assert.DoesNotContain(RawMarker, string.Join("\n", console), StringComparison.Ordinal);
-        Assert.DoesNotContain(RawMarker, await page.EvaluateAsync<string>(
+        foreach (var marker in new[] { RawMarker, SecretMarker, PathMarker })
+        {
+            Assert.DoesNotContain(marker, output, StringComparison.Ordinal);
+            Assert.DoesNotContain(marker, string.Join("\n", console), StringComparison.Ordinal);
+            Assert.DoesNotContain(marker, string.Join("\n", requests.Select(request => request.PostData)), StringComparison.Ordinal);
+            Assert.DoesNotContain(marker, await page.EvaluateAsync<string>(
             "() => JSON.stringify({local: Object.keys(localStorage), session: Object.keys(sessionStorage), url: location.href})"),
             StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            RawMarker,
-            Encoding.Latin1.GetString(await page.ScreenshotAsync()),
-            StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                marker,
+                Encoding.Latin1.GetString(await page.ScreenshotAsync()),
+                StringComparison.Ordinal);
+        }
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task ScopeEditDuringDelayedPreview_CannotAcceptTheStaleResponse()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync("**/api/historical-analysis/v1/preview", async route =>
+        {
+            entered.TrySetResult();
+            await release.Task;
+            await route.FulfillAsync(JsonResponse(Preview));
+        });
+
+        try
+        {
+            await page.GotoAsync($"{host.Url}/historical-analysis", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await page.GetByLabel("Repository").FillAsync("scope-before-request");
+            await page.GetByRole(AriaRole.Button, new() { Name = "スコープをプレビュー" }).ClickAsync();
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await page.GetByLabel("Workspace").FillAsync("scope-edited-while-preview-in-flight");
+            release.TrySetResult();
+
+            await Expect(page.Locator("#historical-analysis-live")).ToContainTextAsync("再プレビュー");
+            await Expect(page.Locator("#historical-analysis-preview")).ToBeHiddenAsync();
+            await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeDisabledAsync();
+            await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Efficiency 分析を開始" })).ToBeDisabledAsync();
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task StartingNewPreview_RemovesThePriorProjectionBeforeResponseArrives()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previewCount = 0;
+        await page.RouteAsync("**/api/historical-analysis/v1/preview", async route =>
+        {
+            previewCount++;
+            if (previewCount == 2)
+            {
+                secondEntered.TrySetResult();
+                await releaseSecond.Task;
+            }
+            await route.FulfillAsync(JsonResponse(Preview));
+        });
+        await RouteInstruction(page, InstructionSucceeded);
+
+        try
+        {
+            await page.GotoAsync($"{host.Url}/historical-analysis", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await page.GetByLabel("Repository").FillAsync("repo-safe");
+            await page.GetByRole(AriaRole.Button, new() { Name = "スコープをプレビュー" }).ClickAsync();
+            await page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" }).ClickAsync();
+            await Expect(page.Locator("#historical-analysis-instruction-result")).ToBeVisibleAsync();
+            await Expect(page.Locator("[data-evidence-resolution]")).Not.ToHaveCountAsync(0);
+
+            await page.GetByRole(AriaRole.Button, new() { Name = "スコープをプレビュー" }).ClickAsync();
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Expect(page.Locator("#historical-analysis-preview")).ToBeHiddenAsync();
+            await Expect(page.Locator("#historical-analysis-instruction-result")).ToBeHiddenAsync();
+            await Expect(page.Locator("#historical-analysis-included tbody tr")).ToHaveCountAsync(0);
+            await Expect(page.Locator("[data-evidence-resolution]")).ToHaveCountAsync(0);
+            await Expect(page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" })).ToBeDisabledAsync();
+
+            releaseSecond.TrySetResult();
+            await Expect(page.Locator("#historical-analysis-preview")).ToBeVisibleAsync();
+            await Expect(page.Locator("#historical-analysis-instruction-result")).ToBeHiddenAsync();
+        }
+        finally
+        {
+            releaseSecond.TrySetResult();
+        }
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task PollingBudgetExhaustion_PreservesLastServerStateAndReportsRetryableStop()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RoutePreview(page);
+        await RouteInstruction(page, InstructionTerminal("queued"));
+        await page.RouteAsync("**/api/historical-analysis/v1/efficiency-runs", route =>
+            route.FulfillAsync(JsonResponse(
+                """{"schema_version":"historical-analysis-efficiency-start.response.v1","analysis_run_id":"historical-efficiency-run-11111111111111111111111111111111","state":"queued"}""",
+                202)));
+        await page.RouteAsync("**/api/historical-analysis/v1/efficiency-runs/*", route =>
+            route.FulfillAsync(JsonResponse(JsonSerializer.Serialize(new
+            {
+                schema_version = "historical-analysis-efficiency-status.v1",
+                analysis_run_id = "historical-efficiency-run-11111111111111111111111111111111",
+                extraction_id = ExtractionId,
+                repository_safe_sha256 = SafeSha,
+                state = "running",
+                requested_at = "2026-07-23T00:00:00Z",
+                started_at = "2026-07-23T00:00:01Z",
+                completed_at = (string?)null,
+                receipt = (object?)null,
+                receipt_payload_sha256 = (string?)null,
+            }))));
+
+        await page.GotoAsync($"{host.Url}/historical-analysis", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.GetByLabel("Repository").FillAsync("repo-safe");
+        await page.GetByRole(AriaRole.Button, new() { Name = "スコープをプレビュー" }).ClickAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "Instruction 分析を開始" }).ClickAsync();
+        await page.GetByRole(AriaRole.Button, new() { Name = "Efficiency 分析を開始" }).ClickAsync();
+
+        await Expect(page.Locator("#historical-analysis-instruction-state")).ToContainTextAsync(
+            "queued · polling_stopped · retryable",
+            new LocatorAssertionsToContainTextOptions { Timeout = 10_000 });
+        await Expect(page.Locator("#historical-analysis-efficiency-state")).ToContainTextAsync(
+            "running · polling_stopped · retryable",
+            new LocatorAssertionsToContainTextOptions { Timeout = 10_000 });
+        await Expect(page.Locator("#historical-analysis-instruction-result")).ToContainTextAsync("queued");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).ToContainTextAsync("running");
+        await Expect(page.Locator("#historical-analysis-instruction-result")).Not.ToContainTextAsync("timed_out");
+        await Expect(page.Locator("#historical-analysis-efficiency-result")).Not.ToContainTextAsync("timed_out");
     }
 
     [Fact(Timeout = 60_000)]
@@ -368,9 +544,26 @@ public sealed class HistoricalAnalysisPlaywrightTests
                 session_id = "session-ref-11111111111111111111111111111111", source_surface = "copilot_sdk",
                 source_version = "safe-v1", adapter_version = "safe-adapter", completeness = "full",
                 completeness_reasons = Array.Empty<string>(), source_kind = "live_otel", content_state = "available",
-                descriptor_state = "not_requested", raw_local_descriptor = (string?)null,
-                capabilities = new { token_rollup = true },
-                metadata = new { repository = "repo-safe", workspace = (string?)null },
+                descriptor_state = "not_requested",
+                raw_local_descriptor = $"{RawMarker}|{SecretMarker}|{PathMarker}",
+                capabilities = new
+                {
+                    turn_rollup = true, token_rollup = true, cache_rollup = false, error_span = false,
+                    retry_chain = false, repeated_tool_call = false, permission_wait = false,
+                    subagent_fan_out = false, raw_local_descriptor = false, quality_reference = false,
+                    source_comparison = false, instruction_finding_reference = false,
+                },
+                metadata = new
+                {
+                    repository = "repo-safe",
+                    workspace = (string?)null,
+                    source_surfaces = new[] { "copilot_sdk", "claude_code" },
+                    source_provenance = new[]
+                    {
+                        new { source_surface = "copilot_sdk", source_application_version = "safe-v1", adapter_version = "safe-adapter" },
+                        new { source_surface = "claude_code", source_application_version = "safe-v2", adapter_version = "safe-adapter" },
+                    },
+                },
             },
             new
             {
@@ -378,18 +571,82 @@ public sealed class HistoricalAnalysisPlaywrightTests
                 source_version = "safe-v2", adapter_version = "safe-adapter", completeness = "partial",
                 completeness_reasons = new[] { "missing_session_reference" }, source_kind = "historical_summary",
                 content_state = "not_captured", descriptor_state = "unavailable", raw_local_descriptor = (string?)null,
-                capabilities = new { token_rollup = false },
-                metadata = new { repository = "repo-safe", workspace = (string?)null },
+                capabilities = new
+                {
+                    turn_rollup = true, token_rollup = false, cache_rollup = false, error_span = false,
+                    retry_chain = false, repeated_tool_call = false, permission_wait = false,
+                    subagent_fan_out = false, raw_local_descriptor = false, quality_reference = false,
+                    source_comparison = false, instruction_finding_reference = false,
+                },
+                metadata = new
+                {
+                    repository = "repo-safe",
+                    workspace = (string?)null,
+                    source_surfaces = new[] { "claude_code" },
+                    source_provenance = new[]
+                    {
+                        new { source_surface = "claude_code", source_application_version = "safe-v2", adapter_version = "safe-adapter" },
+                    },
+                },
             },
         },
         excluded = new object[]
         {
-            new { session_id = "session-ref-33333333333333333333333333333333", reason = "filter_mismatch", metadata = (object?)null },
-            new { session_id = "session-ref-44444444444444444444444444444444", reason = "window_truncated", metadata = (object?)null },
+            new
+            {
+                session_id = "session-ref-33333333333333333333333333333333",
+                reason = "filter_mismatch",
+                metadata = ExcludedMetadata("excluded-reason", "partial"),
+            },
+            new
+            {
+                session_id = "session-ref-44444444444444444444444444444444",
+                reason = "window_truncated",
+                metadata = ExcludedMetadata("window-reason", "full"),
+            },
+            new
+            {
+                session_id = "session-ref-55555555555555555555555555555555",
+                reason = "missing_evidence_reference",
+                metadata = ExcludedMetadata("no-exact-evidence", "partial"),
+            },
+            new
+            {
+                session_id = "session-ref-66666666666666666666666666666666",
+                reason = "missing_session_reference",
+                metadata = (object?)null,
+            },
         },
         truncated_before = true,
         truncated_session_count = 3,
     });
+
+    private static object ExcludedMetadata(string reason, string completeness) => new
+    {
+        repository = "repo-safe",
+        workspace = (string?)null,
+        started_at = "2026-07-23T00:00:00Z",
+        ended_at = "2026-07-23T00:01:00Z",
+        last_seen_at = "2026-07-23T00:01:00Z",
+        source_surfaces = new[] { "copilot_sdk" },
+        source_provenance = new[]
+        {
+            new { source_surface = "copilot_sdk", source_application_version = "safe-v1", adapter_version = "safe-adapter" },
+        },
+        model_observations = Array.Empty<object>(),
+        duration_observations = Array.Empty<object>(),
+        completeness,
+        completeness_reasons = new[] { reason },
+        source_kind = "live_otel",
+        content_state = "not_captured",
+        capabilities = new
+        {
+            turn_rollup = false, token_rollup = false, cache_rollup = false, error_span = false,
+            retry_chain = false, repeated_tool_call = false, permission_wait = false,
+            subagent_fan_out = false, raw_local_descriptor = false, quality_reference = false,
+            source_comparison = false, instruction_finding_reference = false,
+        },
+    };
 
     private static readonly string InstructionSucceeded = InstructionStatus(
         "succeeded",
@@ -541,15 +798,29 @@ public sealed class HistoricalAnalysisPlaywrightTests
                 new
                 {
                     driver_id = "driver-safe", category = "token_volume", formula = "safe-formula", threshold = "safe-threshold",
-                    evidence_refs = new[] { Evidence(TraceRef) }, quality_evidence_refs = Array.Empty<object>(),
+                    subject_session_id = "session-ref-77777777777777777777777777777777",
+                    source_sessions = new[] { "session-ref-77777777777777777777777777777777" },
+                    evidence_refs = new[] { Evidence(TraceRef) }, quality_evidence_refs = new[] { Evidence(QualityRef) },
                     observed_values = new[] { new { name = "tokens", value = 10, unit = "tokens" } },
+                    cohort_median = new { name = "tokens", value = 9, unit = "tokens" },
+                    cohort_percentile = new { percentile = 75, name = "tokens", value = 10, unit = "tokens" },
+                    source_distribution = new
+                    {
+                        source_surfaces = new[] { new { key = "copilot_sdk", count = 2 } },
+                        source_kinds = new[] { new { key = "live_otel", count = 2 } },
+                    },
+                    completeness_distribution = new[] { new { key = "full", count = 2 } },
                     quality_availability = "available", verdict = "supported", comparison_notes = Array.Empty<string>(),
-                    summary = "fixed summary", mitigation = new { code = "review", summary = "fixed mitigation", evidence_refs = new[] { Evidence(TraceRef) } },
+                    summary = "fixed summary", mitigation = new { code = "review", summary = "fixed mitigation", evidence_refs = new[] { Evidence(MitigationRef) } },
                 },
                 new
                 {
                     driver_id = "driver-incomplete", category = "context_growth", formula = "safe-formula", threshold = "safe-threshold",
+                    subject_session_id = (string?)null, source_sessions = Array.Empty<string>(),
                     evidence_refs = Array.Empty<object>(), quality_evidence_refs = Array.Empty<object>(), observed_values = Array.Empty<object>(),
+                    cohort_median = (object?)null, cohort_percentile = (object?)null,
+                    source_distribution = new { source_surfaces = Array.Empty<object>(), source_kinds = Array.Empty<object>() },
+                    completeness_distribution = Array.Empty<object>(),
                     quality_availability = "unavailable", verdict = "incomplete", comparison_notes = new[] { "quality_unavailable" },
                     summary = "fixed incomplete summary", mitigation = new { code = "review", summary = "fixed incomplete mitigation", evidence_refs = Array.Empty<object>() },
                 },
