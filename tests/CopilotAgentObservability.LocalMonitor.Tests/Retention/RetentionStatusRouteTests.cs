@@ -17,6 +17,15 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionStatusRouteTests
 {
     [Fact]
+    public void DirectStatusTestConnection_DoesNotUseTheProcessGlobalPool()
+    {
+        using var connection = CreateDirectTestConnection("retention-status-pooling-contract.db");
+        var options = new SqliteConnectionStringBuilder(connection.ConnectionString);
+
+        Assert.False(options.Pooling);
+    }
+
+    [Fact]
     public async Task StatusRoute_MatchesExactV1Schema()
     {
         var path = Path.Combine(Path.GetTempPath(), $"retention-status-full-{Guid.NewGuid():N}.db");
@@ -40,7 +49,7 @@ public sealed class RetentionStatusRouteTests
         {
             var catalog = new RetentionCatalogStore(path, new MutableTimeProvider(new DateTimeOffset(2026, 7, 19, 0, 1, 0, TimeSpan.Zero)));
             catalog.CreateSchema();
-            using (var connection = new SqliteConnection($"Data Source={path}"))
+            using (var connection = CreateDirectTestConnection(path))
             {
                 connection.Open();
                 using var command = connection.CreateCommand();
@@ -54,11 +63,7 @@ public sealed class RetentionStatusRouteTests
             Assert.DoesNotContain("PRIVATE_PATH_MARKER", json, StringComparison.Ordinal);
             Assert.Equal("ret-item-0001", snapshot!.Items.Single().ItemId);
         }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-            foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file);
-        }
+        finally { Delete(path); }
     }
 
     [Fact]
@@ -94,7 +99,7 @@ public sealed class RetentionStatusRouteTests
         {
             var catalog = new RetentionCatalogStore(path, new MutableTimeProvider(new DateTimeOffset(2026, 7, 19, 0, 1, 0, TimeSpan.Zero)));
             catalog.CreateSchema();
-            using var connection = new SqliteConnection($"Data Source={path}");
+            using var connection = CreateDirectTestConnection(path);
             connection.Open();
             for (var index = 0; index < 101; index++)
             {
@@ -106,10 +111,7 @@ public sealed class RetentionStatusRouteTests
             Assert.Equal(101, snapshot!.QueuedCount); Assert.Equal(100, snapshot.Items.Count);
             Assert.Equal("ret-item-0100", snapshot.Items[0].ItemId); Assert.Equal("ret-item-0001", snapshot.Items[^1].ItemId);
         }
-        finally
-        {
-            SqliteConnection.ClearAllPools(); foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file);
-        }
+        finally { Delete(path); }
     }
 
     [Fact]
@@ -144,7 +146,7 @@ public sealed class RetentionStatusRouteTests
             Assert.Equal("no-store", response.Headers.CacheControl?.ToString()); Assert.False(response.Headers.Contains("ETag")); Assert.Null(response.Content.Headers.LastModified);
             Assert.Equal(await FixtureAsync("status-empty.json"), await response.Content.ReadAsByteArrayAsync());
         }
-        finally { SqliteConnection.ClearAllPools(); foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file); }
+        finally { Delete(path); }
     }
 
     [Fact]
@@ -178,7 +180,7 @@ public sealed class RetentionStatusRouteTests
             Assert.Equal("no-store", response.Headers.CacheControl?.ToString()); Assert.False(response.Headers.Contains("ETag")); Assert.Null(response.Content.Headers.LastModified);
             Assert.Equal(await FixtureAsync("session-not-found.json"), await response.Content.ReadAsByteArrayAsync());
         }
-        finally { SqliteConnection.ClearAllPools(); foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file); }
+        finally { Delete(path); }
     }
 
     [Fact]
@@ -289,9 +291,14 @@ public sealed class RetentionStatusRouteTests
     private static void InsertItem(string path, string itemId, string sourceItemId, string state, string capturedAt, string expiresAt, string? readDeniedAt, string? queuedAt = null, long attemptCount = 0, string storeKind = "session_event_content") => Execute(path, "INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,read_denied_at,queued_at,lease_generation,attempt_count,retry_exhausted,adapter_coverage_version) SELECT $item,store_instance_id,$kind,$source,1,zeroblob(32),$captured,$expires,'raw-default-90d',1,$state,1,$denied,$queued,0,$attempt,0,1 FROM retention_store_instances WHERE id=1;", ("$item", itemId), ("$kind", storeKind), ("$source", sourceItemId), ("$captured", capturedAt), ("$expires", expiresAt), ("$state", state), ("$denied", (object?)readDeniedAt), ("$queued", (object?)queuedAt), ("$attempt", attemptCount));
     private static void Execute(string path, string sql, params (string Name, object? Value)[] parameters)
     {
-        using var connection = new SqliteConnection($"Data Source={path}"); connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
+        using var connection = CreateDirectTestConnection(path); connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value); command.ExecuteNonQuery();
     }
+    private static SqliteConnection CreateDirectTestConnection(string path) => new(new SqliteConnectionStringBuilder
+    {
+        DataSource = path,
+        Pooling = false
+    }.ToString());
     private static async Task AssertHeaders(HttpResponseMessage response)
     {
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType); Assert.Equal("no-store", response.Headers.CacheControl?.ToString()); Assert.False(response.Headers.Contains("ETag")); Assert.Null(response.Content.Headers.LastModified);
@@ -303,6 +310,6 @@ public sealed class RetentionStatusRouteTests
     }
     private static void Delete(string path)
     {
-        SqliteConnection.ClearAllPools(); foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file);
+        foreach (var file in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(file)) File.Delete(file);
     }
 }
