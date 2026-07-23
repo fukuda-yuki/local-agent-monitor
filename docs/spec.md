@@ -458,6 +458,26 @@ availability, and fixed mitigations for Issue #75. It adds no HTTP/UI surface,
 database or migration, historical import, monetary field, AI narrative,
 proposal, effect, or apply behavior.
 
+## Historical analysis
+
+Issue #75 freezes the Local Monitor presentation contract at
+[historical analysis](specifications/interfaces/historical-analysis.md). The
+page is `GET /historical-analysis`; its only API family is
+`/api/historical-analysis/v1/*`. Preview consumes only the #72 owner and
+shows included/excluded exact reasons before either independent instruction or
+efficiency execution. Instruction reads preserve the exact #73
+`historical-instruction-analysis.read.v1` DTO and canonical #59 nested bytes;
+efficiency reads preserve the exact #74 DTO/canonical bytes without formula or
+verdict recomputation. Safe-token evidence resolution maps only to the existing
+#53 escaped trace/diagnostics target and distinguishes missing, unresolved, and
+expired. Every response is repository-safe in raw-default and sanitized-only
+postures; normal provider-free composition returns the fixed public
+`provider_unavailable` condition. The surface retains loopback/Host,
+same-origin, CSRF-on-POST, JSON-only bounded strict requests, no CORS,
+`Cache-Control: no-store`, escaped inert text, and no browser storage/full
+history. It neither adds a provider nor absorbs import, apply, effect, pricing,
+Alert Center, portability, raw analysis, or content-enabled capture.
+
 ## Alert-rule engine foundation
 
 Issue #80 defines the source-neutral deterministic alert contract at
