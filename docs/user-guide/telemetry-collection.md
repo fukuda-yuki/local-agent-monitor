@@ -96,6 +96,7 @@ code .
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw data\raw-store.db --json tmp\raw-local-receiver\measurements.json
 ```
 
+VS Code からの直接テレメトリ受信は、まだライブ環境での確認が済んでいません。
 
 検証時は VS Code version、GitHub Copilot Chat extension version、receiver command、raw store path、trace id または raw record id、confirmed / unconfirmed signals を記録してください。
 
