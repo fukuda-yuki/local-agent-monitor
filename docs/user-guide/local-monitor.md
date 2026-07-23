@@ -622,13 +622,13 @@ server に永続化されることはありません。
 
 ### サニタイズ済み証拠の取り込み
 
-`/sanitized-import` では、Issue #85 の frozen v1 ZIP bundle を選び、厳密な archive / checksum /
+`/sanitized-import` では、出力されたサニタイズ済みエビデンス bundle（.zip）を選択し、厳密な archive / checksum /
 scanner 検証と現在の database に対する差分を preview してから明示的に確定できます。
 別の file を選ぶと既存 preview は無効になります。競合または stale preview は確定できず、
 既存 record を上書きしません。確定後は bounded な取り込み履歴を同じ画面で確認できます。
 
-この画面は raw telemetry、Session、alert lifecycle、backup を復元せず、#58 / #59 / #80 の
-sanitized carrier と provenance / graph だけを専用 table に保存します。選択した bundle bytes や
+この画面は raw telemetry、Session、alert lifecycle、backup を復元せず、サニタイズ済みのデータ構造と
+provenance / graph だけを専用 table に保存します。選択した bundle bytes や
 digest を browser storage に保存しません。画面と API は same-origin、`Cache-Control: no-store`、
 Host-header validation を強制し、POST は CSRF header を必要とします。検証成功は archive の内部
 整合性を示しますが、作成者、署名、権限、source store provenance を証明しません。

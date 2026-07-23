@@ -18,9 +18,9 @@ Source of truth checked: `docs/requirements.md`, `docs/spec.md`, `docs/specifica
 | **[DOC-3A](#DOC-3A)** | Troubleshooting | `README.md:171-176`, `docs/getting-started.md` | Medium | Fixed | Windows / PowerShell の `ExecutionPolicy`（企業ポリシーブロック）時の解決手順（`-ExecutionPolicy Bypass`）の欠落 |
 | **[DOC-3B](#DOC-3B)** | Troubleshooting | `README.md`, `docs/user-guide.md` | Medium | Fixed | ポート4320競合（Address in use）、VS Code環境変数非引き継ぎ、プロキシ等の企業環境トラブル対策の欠落 |
 | **[DOC-3C](#DOC-3C)** | Troubleshooting | `README.md:229-241`, `docs/user-guide.md` | Medium | Fixed | ドキュメント一覧やナビゲーションに「トラブルシューティング」項目およびリンクが一切存在しない |
-| **[DOC-4A](#DOC-4A)** | Structure | `docs/user-guide.md:1-121` | Medium | Open | `cc-switch` 理想モデルのような全体目次（TOC）やステップバイステップの案内構造が存在しない |
-| **[DOC-4B](#DOC-4B)** | Structure | `docs/user-guide/*.md` (6 files) | Medium | Open | ユーザーの目的軸ではなく内部実装モジュール軸（Raw Data Loop, Candidate Loop 等）で分断されている |
-| **[DOC-4C](#DOC-4C)** | Structure | `README.md:186`, `docs/user-guide.md:40-75` | Medium | Open | マニュアル内に内部実装・開発者用語（`change_set_id`, `Issue #69 の責務`, OTLP carrier等）が混入している |
+| **[DOC-4A](#DOC-4A)** | Structure | `docs/user-guide.md:1-121` | Medium | Fixed | `cc-switch` 理想モデルのような全体目次（TOC）やステップバイステップの案内構造が存在しない |
+| **[DOC-4B](#DOC-4B)** | Structure | `docs/user-guide/*.md` (6 files) | Medium | Fixed | ユーザーの目的軸ではなく内部実装モジュール軸（Raw Data Loop, Candidate Loop 等）で分断されている |
+| **[DOC-4C](#DOC-4C)** | Structure | `README.md:186`, `docs/user-guide.md:40-75` | Medium | Fixed | マニュアル内に内部実装・開発者用語（`change_set_id`, `Issue #69 の責務`, OTLP carrier等）が混入している |
 | **[DOC-5A](#DOC-5A)** | Natural Japanese | All doc files (`README.md`, `user-guide*.md`) | Medium | Open | `humanizer-ja` 観点での「〜することができます」「〜となります」「〜について説明します」の過多 |
 | **[DOC-5B](#DOC-5B)** | Natural Japanese | `README.md`, `docs/user-guide.md` | Medium | Open | 不自然な直訳英単語・名詞句（`reversible setup`, `canonical carrier`, `telemetry evidence`）の未翻訳露出 |
 | **[DOC-5C](#DOC-5C)** | Natural Japanese | `docs/getting-started.md` vs `README.md` | Medium | Open | ファイル間・ファイル内での文体（敬体「です・ます」と常体「だ・である」）の不統一と過剰な受動態 |

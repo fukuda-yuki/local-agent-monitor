@@ -1,45 +1,53 @@
-# 利用者向け詳細ガイド
+# 利用者向け詳細ガイド (User Guide Portal)
 
-このガイドは Copilot Agent Observability を使う人向けの入口です。
-最短手順だけを確認したい場合は [Getting Started](getting-started.md) を参照してください。
+Copilot Agent Observability の利用者向け公式マニュアルポータルです。  
+目的や学習フェーズに応じて、以下の体系的目次から各ガイドを参照してください。
+最短の体験手順のみを確認したい場合は [Getting Started](getting-started.md) を参照してください。
 
-## 何を確認できるか
+---
 
-Copilot Agent Observability は、Copilot agent workflow の実行過程を次の単位で確認します。
+## 全体目次 (Table of Contents)
 
-- Collection profile: `CAO_COLLECTION_PROFILE` で telemetry routing mode を選ぶ。
-- 個別 trace: Langfuse で span tree、prompt、response、tool call、token usage、duration、error を調査する。
-- Raw data loop: saved raw OTLP JSON を SQLite raw store に取り込み、normalized measurement dataset にする。
-- Candidate loop: normalized dataset から diagnosis / improvement / auto-decision / human decision record を作る。
-- Static dashboard: Agent workflow の傾向を filter、search、sort できる HTML dashboard として見る。
+### 1. はじめに・環境構築
+- [データ安全ポリシー (Data Safety)](user-guide/data-safety.md)  
+  ローカルデータ保護方針、収集データ範囲、外部送信を行わないデータセキュリティ境界について解説します。
+- [テレメトリ収集と初期セットアップ (Telemetry Collection)](user-guide/telemetry-collection.md)  
+  VS Code Copilot Chat、GitHub Copilot CLI、Codex App 等のテレメトリ収集手順とプロファイル設定を説明します。
 
-## 読む順番
+### 2. 画面別操作マニュアル
+- [Local Ingestion Monitor 利用ガイド](user-guide/local-monitor.md)  
+  リアルタイムでトレースを監視するローカル UI（概要ダッシュボード、トレース一覧、フロー/Waterfall、スパンインスペクタ、エラー解析モード、Copilot解析ドロワー）の操作ガイドです。
+- [Static Dashboard 利用ガイド](user-guide/static-dashboard.md)  
+  蓄積データから生成された静的 HTML ダッシュボードの閲覧・フィルタリング方法を解説します。
 
-1. [Data Safety](user-guide/data-safety.md)
-2. [Telemetry Collection](user-guide/telemetry-collection.md)
-3. [Local Ingestion Monitor](user-guide/local-monitor.md)
-4. [Raw Data Loop](user-guide/raw-data-loop.md)
-5. [Static Dashboard](user-guide/static-dashboard.md)
-6. [Diagnosis / Improvement Loop](user-guide/diagnosis-improvement-loop.md)
-7. [トラブルシューティング](user-guide/troubleshooting.md)
+### 3. タスク・ユースケース別ガイド
+- [ローカルデータ集計・変換 (Raw Data Loop)](user-guide/raw-data-loop.md)  
+  保存された raw OTLP データを SQLite raw store に取り込み、分析用データセットへ再現可能に集計・変換する手順です。
+- [エラー・遅延の自動診断と改善サイクル (Diagnosis / Improvement Loop)](user-guide/diagnosis-improvement-loop.md)  
+  失敗傾向やパフォーマンスボトルネックを自動検出し、プロンプトやスキルの改善提案を生成・評価する手順です。
 
-## 利用モード
+### 4. トラブルシューティング & 安全運用
+- [トラブルシューティングガイド](user-guide/troubleshooting.md)  
+  PowerShell スクリプトの実行権限エラー（ExecutionPolicy）、ポート4320衝突、VS Code環境変数引き継ぎ、企業プロキシ環境での解決方法をまとめています。
 
-最小 profile は `raw-only`、標準 full profile は `docker-desktop-langfuse` です。
-Profile の一覧は [collection profile specification](specifications/interfaces/collection-profiles.md) を参照してください。
+---
 
-| Mode | 使う場面 | 主要コマンド / UI |
+## 目的別の利用モード
+
+| タスク・目的 | 使う場面 | 主要コマンド / UI |
 | --- | --- | --- |
-| Live Trace Review | 1 件の agent run を詳しく調べる | Langfuse UI, `langfuse-*` config commands |
-| Raw Data Loop | trace を再現可能に集計したい | `ingest-raw`, `normalize-raw` |
-| Static Dashboard | 複数 run の傾向を俯瞰したい | `generate-dashboard-dataset`, `generate-static-dashboard` |
-| Diagnosis / Improvement Support | 失敗傾向と改善候補を整理したい | `generate-diagnosis-candidates`, `generate-improvement-candidates`, `generate-auto-decisions` |
-| Sanitized Evidence Sharing | scanner 検証済みの evidence bundle を共有したい | `sanitized-export preview`, `sanitized-export export`, `sanitized-export result` |
-| Sanitized Evidence Import | scanner 検証済みの evidence bundle をローカルへ取り込みたい | `sanitized-import preview`, `sanitized-import import`, `sanitized-import history`, Local Monitor `/sanitized-import` |
+| **1. リアルタイム観測** | エージェントの挙動やトークンコストをその場で確認したい | Local Ingestion Monitor (`http://127.0.0.1:4320`) |
+| **2. トレース詳細調査** | 1 件のチャット実行の全スパン・入出力を深掘りしたい | Local Monitor または Langfuse UI |
+| **3. データ集計・変換** | 蓄積されたトレースをデータセットへ変換したい | `ingest-raw`, `normalize-raw` |
+| **4. 傾向の視覚化** | 複数セッションの傾向を一覧ダッシュボードで共有したい | `generate-static-dashboard` |
+| **5. 改善候補の自動検出** | 失敗や遅延のボトルネックと改善提案を得たい | `generate-improvement-proposals` |
+| **6. 安全なエビデンス共有** | サニタイズ済みトレースデータ（エビデンス）を安全に輸出入したい | `sanitized-export`, `sanitized-import`, Local Monitor `/sanitized-import` |
 
-Sanitized Evidence Sharing の `preview` / `export` では、既存 Local Monitor
-database と `sanitized-export-control.v1` request を明示します。request に
-snapshot、record bytes、output path は含めません。
+### サニタイズ済みエビデンスデータの共有と取り込み
+
+データ保護が施されたトレースエビデンス（`.zip`）を出力・検証・取り込むコマンド手順です。プロンプトや機密情報を含まない安全な形式でデータをやり取りできます。
+
+**エビデンスデータの出力:**
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export preview --database data\local-monitor.db --request request.json
@@ -47,11 +55,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-export result --bundle bundle.zip
 ```
 
-`result` は archive の canonical carrier、inventory、checksum を検証しますが、
-artifact の origin / provenance を証明するものではありません。
-
-受け取った bundle は、まず現在の取り込み状態に対する preview を確認してから、
-返された `preview_digest` を指定して明示的に取り込みます。
+**受け取ったエビデンスデータの取り込み:**
 
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-import preview --database data\local-monitor.db --bundle bundle.zip
@@ -59,21 +63,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-import
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-import history --database data\local-monitor.db --limit 20
 ```
 
-同じ操作は Local Monitor の `/sanitized-import` でも行えます。取り込み対象は
-#58 / #59 / #80 の frozen sanitized carrier だけで、raw telemetry、Session、
-alert lifecycle、backup は復元しません。構造検証の成功は bundle の内部整合性を
-示しますが、作成者、署名、権限、source store provenance を証明しません。
-
-preview では source version / 作成日時、capability、completeness、processing version、
-競合、manifest が宣言した missing / external と現在の取り込み先で未解決の参照を
-分けた bounded detail に加え、`eligible_records` を
-new / updated / skipped / rejected に分けた件数を確認できます。後から exact definition が
-見つかった場合は global graph state だけが更新され、過去の bundle が宣言した
-missing / external state と、その時点の edge resolution は変更されません。
-
-確定 API が JSON error を返した場合、画面は「取り込みは確定されませんでした」と表示します。
-通信切断や解釈不能な response で結果を判定できない場合だけ、画面は自動再送せず履歴の再取得を
-案内します。
+同じ取り込み操作は Local Monitor 画面の `/sanitized-import` タブからも行えます。事前にプレビュー情報（件数、競合の有無）を確認してから安全に取り込むことができます。
 
 ## Claude Code の guided setup
 
