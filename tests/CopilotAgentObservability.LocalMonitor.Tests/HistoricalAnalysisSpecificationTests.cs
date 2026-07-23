@@ -51,6 +51,7 @@ public sealed class HistoricalAnalysisSpecificationTests
         Assert.Contains("Historical Analysis", requirements, StringComparison.Ordinal);
         Assert.Contains("/historical-analysis", specification, StringComparison.Ordinal);
         Assert.Contains("/api/historical-analysis/v1", security, StringComparison.Ordinal);
+        Assert.Contains("`invalid_host`", security, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -129,6 +130,7 @@ public sealed class HistoricalAnalysisSpecificationTests
         Assert.Equal(
         [
             (400, "invalid_historical_analysis_request"),
+            (400, "invalid_host"),
             (403, "cross_origin_forbidden"),
             (403, "csrf_required"),
             (404, "historical_analysis_run_not_found"),
@@ -141,6 +143,9 @@ public sealed class HistoricalAnalysisSpecificationTests
             (503, "provider_unavailable"),
             (503, "historical_analysis_store_unavailable"),
         ], mapping);
+        Assert.Contains("Malformed JSON, a closed-shape violation, or an invalid identifier is `400 invalid_historical_analysis_request`", specification, StringComparison.Ordinal);
+        Assert.Contains("An oversized body is `413 request_too_large`", specification, StringComparison.Ordinal);
+        Assert.Contains("A non-JSON media type is `415 unsupported_media_type`", specification, StringComparison.Ordinal);
         Assert.Contains("provider_unavailable creates no run", specification, StringComparison.Ordinal);
     }
 

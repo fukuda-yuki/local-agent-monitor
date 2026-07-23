@@ -21,8 +21,7 @@ dependency, database migration, or new capture authority.
 ## Operations
 
 All bodies are JSON, at most 1,048,576 bytes, and use closed v1 shapes with
-strict unknown-field rejection. Bad bodies, content types, or identifiers use
-`400 { "error": "invalid_historical_analysis_request" }` without echoing input.
+strict unknown-field rejection. Malformed JSON, a closed-shape violation, or an invalid identifier is `400 invalid_historical_analysis_request`. An oversized body is `413 request_too_large`. A non-JSON media type is `415 unsupported_media_type`. Every failure body follows the fixed error DTO and never echoes input.
 
 | Operation | Contract |
 | --- | --- |
@@ -265,6 +264,7 @@ independently without dropping, sorting, or de-duplicating a reference.
   "schema_version": "historical-analysis-error.v1",
   "errors": [
     { "http_status": 400, "error": "invalid_historical_analysis_request" },
+    { "http_status": 400, "error": "invalid_host" },
     { "http_status": 403, "error": "cross_origin_forbidden" },
     { "http_status": 403, "error": "csrf_required" },
     { "http_status": 404, "error": "historical_analysis_run_not_found" },

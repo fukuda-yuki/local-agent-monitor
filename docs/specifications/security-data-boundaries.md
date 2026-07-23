@@ -1271,6 +1271,8 @@ provenance. Issue #75 consumes this safe receipt without formula recomputation.
 Issue #75's `GET /historical-analysis` and
 `/api/historical-analysis/v1/*` surface is loopback-only, validates Host,
 emits no CORS headers, and sets `Cache-Control: no-store` on every response.
+An invalid Host is rejected before routing with the fixed `400`
+`invalid_host` error; no route-specific detail is returned.
 POST preview/start/resolve requests are same-origin and require
 `x-monitor-csrf: local-monitor`; all bodies are JSON-only, no more than
 1,048,576 bytes, and reject unknown fields. Fixed errors do not echo input,
