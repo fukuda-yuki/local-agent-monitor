@@ -1386,8 +1386,13 @@ extra members, canonical manifest, SHA-256, size ceilings, SQLite quick/foreign-
 key checks, and supported component vectors. A read-only version/shape preflight
 occurs before any production migrator. Staging and publication stay in a known
 sibling directory; archive names never select a filesystem target.
-Generated columns, expression/partial indexes, undeclared component namespace
-collisions, SQLite-reserved-name schema objects outside the exact built-in
+Live, current, and installed SQLite databases retain normal locking and change
+detection, including while restore owns its lease. `immutable=1` is limited to
+closed, service-owned snapshot/staging files with no sidecars and is never
+inferred solely from a momentary absence of sidecars.
+Generated columns, expression indexes, partial indexes outside the exact
+version-bound product allowlist, undeclared component namespace collisions,
+SQLite-reserved-name schema objects outside the exact built-in
 allowlist, malformed or replace-colliding receipt rows, native devices/FIFOs/sockets, DOS device
 aliases, and reparse ancestors fail read-only before migration or target
 mutation.

@@ -1,9 +1,12 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -11,16 +14,29 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupRestoreTests
 {
     [Fact]
+    public void Runtime_backup_schema_can_be_added_to_the_current_database()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "schema-source", includeRaw: true);
+        using var connection = temp.Open(temp.Source);
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        var exception = Record.Exception(() => RuntimeBackupSchemaV1.Ensure(connection, transaction));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
     public void Restore_reconciles_current_terminal_tombstone_and_never_restores_raw_bytes()
     {
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Source, "from-backup", includeRaw: true);
         var bundle = Path.Combine(temp.Root, "source.zip");
         var service = new SqliteRuntimeBackupService(temp.Clock);
-        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        Assert.True(created.Success, created.ErrorCode);
         File.Copy(temp.Source, temp.Target);
         temp.DeleteRawAndTombstone(temp.Target);
-
         var preview = service.Preview(bundle, temp.Target);
         var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
 
@@ -81,6 +97,37 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Failed_pre_swap_cleanup_escalates_the_domain_result_and_keeps_recoverable_controls()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "from-backup", includeRaw: true);
+        var bundle = Path.Combine(temp.Root, "cleanup-failure.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
+        File.Copy(temp.Source, temp.Target);
+        temp.DeleteRawWithoutTombstone(temp.Target);
+        var cleanupAttempted = false;
+        var service = new SqliteRuntimeBackupService(
+            temp.Clock,
+            checkpoint: null,
+            installedDoctorCheck: null,
+            restoreFailureCleanup: _ =>
+            {
+                cleanupAttempted = true;
+                return false;
+            });
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRollbackFailed, result.ErrorCode);
+        Assert.True(cleanupAttempted);
+        Assert.True(File.Exists(temp.Target + ".runtime-restore-journal.json"));
+        Assert.Single(Directory.GetFiles(temp.Root, ".runtime-restore-stage-*.sqlite"));
+        var recovered = new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target);
+        Assert.True(recovered.Success, recovered.ErrorCode);
+        temp.AssertNoRestoreControls();
+    }
+
+    [Fact]
     public void Current_read_denial_is_reconciled_without_confirmation_and_staged_raw_is_removed()
     {
         using var temp = new RestoreTemp();
@@ -103,6 +150,34 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal("expired_pending_deletion", temp.Scalar<string>(database, "SELECT state FROM retention_items;"));
         Assert.Equal("2026-04-01T00:00:00.0000000+00:00", temp.Scalar<string>(database, "SELECT read_denied_at FROM retention_items;"));
         Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM retention_tombstones;"));
+    }
+
+    [Fact]
+    public void Preview_and_restore_reject_a_current_non_deleted_item_with_a_tombstone()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "from-backup", includeRaw: true);
+        var bundle = Path.Combine(temp.Root, "source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        Assert.True(created.Success, created.ErrorCode);
+        File.Copy(temp.Source, temp.Target);
+        using (var target = temp.Open(temp.Target))
+        {
+            temp.Execute(target,
+                $"INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) VALUES('{new string('a', 32)}','2026-04-02T00:00:00.0000000+00:00','2026-04-02T00:00:00.0000000+00:00');");
+            temp.Execute(target, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
+
+        var preview = service.Preview(bundle, temp.Target);
+        var restore = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restore.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
     }
 
     [Fact]
@@ -307,11 +382,31 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "source.zip");
         var service = new SqliteRuntimeBackupService(temp.Clock);
         Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        var archivedSource = service.PreflightForMigration(temp.Source);
+        Assert.True(archivedSource.Success, Describe(archivedSource));
+        Assert.DoesNotContain("historical_instruction_analysis", archivedSource.ComponentVersions!.Keys);
+        Assert.DoesNotContain("historical_import", archivedSource.ComponentVersions.Keys);
+        Assert.DoesNotContain("sanitized_import", archivedSource.ComponentVersions.Keys);
+        Assert.Equal(
+            [
+                "historical_instruction_analysis:0->1",
+                "historical_import:0->1",
+                "sanitized_import:0->1",
+            ],
+            archivedSource.MigrationSteps!.Where(step =>
+                step.StartsWith("historical_", StringComparison.Ordinal)
+                || step.StartsWith("sanitized_import:", StringComparison.Ordinal)));
         var destination = Path.Combine(temp.Root, "fresh", "monitor.db");
 
         var result = service.Restore(bundle, destination, new RuntimeRestoreOptions());
 
         Assert.True(result.Success, result.ErrorCode);
+        var restoredPreflight = service.PreflightForMigration(destination);
+        Assert.True(restoredPreflight.Success, Describe(restoredPreflight));
+        Assert.Equal(1, restoredPreflight.ComponentVersions!["historical_instruction_analysis"]);
+        Assert.Equal(1, restoredPreflight.ComponentVersions["historical_import"]);
+        Assert.Equal(1, restoredPreflight.ComponentVersions["sanitized_import"]);
+        Assert.Empty(restoredPreflight.MigrationSteps!);
         using var restored = temp.Open(destination);
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1';"));
@@ -366,6 +461,31 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Doctor_check_failure_before_commit_rolls_back_the_exact_old_database()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "new", includeRaw: false);
+        var bundle = Path.Combine(temp.Root, "doctor-failure.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
+        var before = File.ReadAllBytes(temp.Target);
+        var service = new SqliteRuntimeBackupService(
+            temp.Clock,
+            checkpoint: null,
+            _ => throw new IOException("injected-doctor-failure"));
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRolledBack, result.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(temp.Target));
+        using var restored = temp.Open(temp.Target);
+        Assert.Equal("old", temp.Scalar<string>(restored, "SELECT value FROM runtime_probe WHERE id=1;"));
+        temp.AssertNoRestoreControls();
+    }
+
+    [Fact]
     public void Post_swap_retention_invariant_drift_is_detected_and_rolls_back_old_database()
     {
         using var temp = new RestoreTemp();
@@ -373,15 +493,23 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "source.zip");
         Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
         temp.CreateDatabase(temp.Target, "old", includeRaw: true);
+        var driftInjected = false;
         var service = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
-            if (checkpoint != RuntimeBackupCheckpoints.AfterSwap) return;
-            using var installed = temp.Open(temp.Target);
-            temp.Execute(installed, "UPDATE retention_items SET captured_at='invalid';");
+            if (checkpoint != RuntimeBackupCheckpoints.AfterStageValidated) return;
+            using var journal = JsonDocument.Parse(File.ReadAllBytes(temp.Target + ".runtime-restore-journal.json"));
+            var stage = Path.Combine(temp.Root, journal.RootElement.GetProperty("stage_file_name").GetString()!);
+            using (var staged = temp.Open(stage))
+            {
+                temp.Execute(staged, "UPDATE retention_items SET deleted_at='2026-04-02T00:00:00.0000000+00:00';");
+                temp.Execute(staged, "PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            driftInjected = true;
         });
 
         var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
 
+        Assert.True(driftInjected);
         Assert.False(result.Success);
         Assert.Equal(RuntimeBackupErrorCodes.RestoreRolledBack, result.ErrorCode);
         using var restored = temp.Open(temp.Target);
@@ -459,7 +587,7 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
-    public void Restore_uses_caller_selected_pre_restore_output_without_overwrite_or_path_disclosure()
+    public void Restore_uses_caller_selected_pre_restore_output_without_path_disclosure()
     {
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Source, "new", includeRaw: false);
@@ -480,6 +608,31 @@ public sealed class RuntimeBackupRestoreTests
             Assert.DoesNotContain(JsonStrings(json.RootElement), value => value.Contains(temp.Root, StringComparison.OrdinalIgnoreCase));
         using var restored = temp.Open(temp.Target);
         Assert.Equal("new", temp.Scalar<string>(restored, "SELECT value FROM runtime_probe WHERE id=1;"));
+    }
+
+    [Fact]
+    public void Restore_rejects_an_existing_caller_selected_pre_restore_output_without_mutation_or_path_disclosure()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "new", includeRaw: false);
+        var bundle = Path.Combine(temp.Root, "source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        var targetBefore = File.ReadAllBytes(temp.Target);
+        var preRestore = Path.Combine(temp.Root, "operator-pre-restore.zip");
+        var sentinel = Encoding.UTF8.GetBytes("caller-owned-sentinel");
+        File.WriteAllBytes(preRestore, sentinel);
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions(PreRestoreOutputPath: preRestore));
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.OutputExists, result.ErrorCode);
+        Assert.Equal(sentinel, File.ReadAllBytes(preRestore));
+        Assert.Equal(targetBefore, File.ReadAllBytes(temp.Target));
+        using (var json = JsonDocument.Parse(RuntimeBackupJson.SerializeResult(result)))
+            Assert.DoesNotContain(JsonStrings(json.RootElement), value => value.Contains(temp.Root, StringComparison.OrdinalIgnoreCase));
+        temp.AssertNoRestoreControls();
     }
 
     [Theory]
@@ -513,8 +666,10 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
-    public void Idle_live_sqlite_owner_and_active_sidecars_are_rejected_before_restore_work()
+    public void Windows_idle_sqlite_owner_is_rejected_before_restore_work()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
         using var temp = new RestoreTemp();
         temp.CreateDatabase(temp.Source, "new", includeRaw: false);
         var bundle = Path.Combine(temp.Root, "source.zip");
@@ -528,6 +683,38 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(result.Success);
         Assert.Equal(RuntimeBackupErrorCodes.MonitorMustBeStopped, result.ErrorCode);
         Assert.Equal("old", temp.Scalar<string>(liveOwner, "SELECT value FROM runtime_probe WHERE id=1;"));
+    }
+
+    [Fact]
+    public void Active_delete_journal_writer_is_rejected_before_restore_work()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "new", includeRaw: false);
+        var bundle = Path.Combine(temp.Root, "source.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        using (var setup = temp.Open(temp.Target))
+            temp.Execute(setup, "PRAGMA journal_mode=DELETE;");
+        var before = File.ReadAllBytes(temp.Target);
+        using var writer = temp.Open(temp.Target);
+        temp.Execute(writer, "PRAGMA locking_mode=EXCLUSIVE;");
+        temp.Execute(writer, "BEGIN EXCLUSIVE;");
+
+        RuntimeRestoreResult result;
+        try
+        {
+            result = new SqliteRuntimeBackupService(temp.Clock)
+                .Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+            Assert.False(result.Success);
+            Assert.Equal(RuntimeBackupErrorCodes.MonitorMustBeStopped, result.ErrorCode);
+        }
+        finally
+        {
+            temp.Execute(writer, "ROLLBACK;");
+        }
+        writer.Dispose();
+        Assert.Equal(before, File.ReadAllBytes(temp.Target));
     }
 
     [Fact]
@@ -602,6 +789,7 @@ public sealed class RuntimeBackupRestoreTests
         if (targetExisted)
         {
             temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+            Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
             before = File.ReadAllBytes(temp.Target);
         }
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
@@ -641,6 +829,7 @@ public sealed class RuntimeBackupRestoreTests
         if (targetExisted)
         {
             temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+            Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
             before = File.ReadAllBytes(temp.Target);
         }
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
@@ -735,6 +924,7 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "committed-fallback.zip");
         Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
         temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
         var before = File.ReadAllBytes(temp.Target);
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
@@ -766,6 +956,7 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "missing-installed.zip");
         Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
         temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
         var before = File.ReadAllBytes(temp.Target);
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
@@ -793,6 +984,7 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "completed-pre-commit-rollback.zip");
         Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
         temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
         var before = File.ReadAllBytes(temp.Target);
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
@@ -822,6 +1014,7 @@ public sealed class RuntimeBackupRestoreTests
         var bundle = Path.Combine(temp.Root, "completed-committed-fallback-rollback.zip");
         Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, bundle).Success);
         temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).Initialize(temp.Target).Success);
         var before = File.ReadAllBytes(temp.Target);
         var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
         {
@@ -1041,6 +1234,139 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Read_only_preflight_accepts_the_current_wave_3_component_vector()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "current-wave-3", includeRaw: false);
+        new SqliteHistoricalInstructionAnalysisStoreV1(temp.Source).CreateSchema();
+        new SqliteHistoricalImportStore(temp.Source).CreateSchema();
+        new SqliteSanitizedImportStore(temp.Source, temp.Clock).CreateSchema();
+        using (var connection = temp.Open(temp.Source))
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.True(result.Success, Describe(result));
+        Assert.Equal(1, result.ComponentVersions!["historical_instruction_analysis"]);
+        Assert.Equal(1, result.ComponentVersions["historical_import"]);
+        Assert.Equal(1, result.ComponentVersions["sanitized_import"]);
+    }
+
+    [Theory]
+    [InlineData("historical_instruction_analysis")]
+    [InlineData("historical_import")]
+    [InlineData("sanitized_import")]
+    public void Read_only_preflight_rejects_future_wave_3_component_versions_without_mutation(string component)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "future-wave-3", includeRaw: false);
+        new SqliteHistoricalInstructionAnalysisStoreV1(temp.Source).CreateSchema();
+        new SqliteHistoricalImportStore(temp.Source).CreateSchema();
+        new SqliteSanitizedImportStore(temp.Source, temp.Clock).CreateSchema();
+        using (var connection = temp.Open(temp.Source))
+        {
+            using var update = connection.CreateCommand();
+            update.CommandText = "UPDATE schema_version SET version=2 WHERE component=$component;";
+            update.Parameters.AddWithValue("$component", component);
+            Assert.Equal(1, update.ExecuteNonQuery());
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Read_only_preflight_rejects_sanitized_import_without_its_historical_import_dependency()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "missing-import-dependency", includeRaw: false);
+        using (var connection = temp.Open(temp.Source))
+        using (var transaction = connection.BeginTransaction())
+        {
+            SanitizedImportSchemaV1.Ensure(connection, transaction);
+            transaction.Commit();
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Read_only_preflight_does_not_modify_the_offline_database()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "offline-preflight", includeRaw: false);
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.True(result.Success, Describe(result));
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Read_only_preflight_does_not_bypass_an_exclusive_delete_journal_writer()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "exclusive-preflight", includeRaw: false);
+        using var writer = temp.Open(temp.Source);
+        temp.Execute(writer, "PRAGMA journal_mode=DELETE;");
+        temp.Execute(writer, "PRAGMA locking_mode=EXCLUSIVE;");
+        temp.Execute(writer, "BEGIN EXCLUSIVE;");
+
+        try
+        {
+            var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+            Assert.False(result.Success);
+            Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        }
+        finally
+        {
+            temp.Execute(writer, "ROLLBACK;");
+        }
+    }
+
+    [Fact]
+    public void Preflight_orders_missing_wave_3_storage_migrations_before_runtime_backup()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "pre-wave-3", includeRaw: false);
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.True(result.Success, Describe(result));
+        var steps = result.MigrationSteps!.ToArray();
+        var instruction = Array.IndexOf(steps, "historical_instruction_analysis:0->1");
+        var historicalImport = Array.IndexOf(steps, "historical_import:0->1");
+        var sanitizedImport = Array.IndexOf(steps, "sanitized_import:0->1");
+        var runtimeBackup = Array.IndexOf(steps, "runtime_backup:0->1");
+        Assert.True(instruction >= 0);
+        Assert.True(instruction < historicalImport);
+        Assert.True(historicalImport < sanitizedImport);
+        Assert.True(sanitizedImport < runtimeBackup);
+        Assert.Equal(
+            [
+                "first_trace_navigation:0->1",
+                "historical_instruction_analysis:0->1",
+                "historical_import:0->1",
+                "sanitized_import:0->1",
+                "runtime_backup:0->1",
+            ],
+            steps[^5..]);
+    }
+
+    [Fact]
     public void Restore_to_fresh_destination_preserves_original_retention_clock_and_is_cross_directory_portable()
     {
         using var temp = new RestoreTemp();
@@ -1071,8 +1397,12 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
         Assert.Equal(1, preflight.ComponentVersions["alert_engine"]);
         Assert.Equal(1, preflight.ComponentVersions["alert_lifecycle"]);
+        Assert.Equal(1, preflight.ComponentVersions["historical_instruction_analysis"]);
+        Assert.Equal(1, preflight.ComponentVersions["historical_import"]);
+        Assert.Equal(1, preflight.ComponentVersions["sanitized_import"]);
         Assert.Equal(1, preflight.ComponentVersions["runtime_backup"]);
         Assert.Equal(1, preflight.ComponentVersions["first_trace_navigation"]);
+        Assert.Empty(preflight.MigrationSteps!);
     }
 
     private sealed class RestoreTemp : IDisposable
@@ -1254,6 +1584,9 @@ public sealed class RuntimeBackupRestoreTests
         }
         public void Dispose() { try { Directory.Delete(Root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
+
+    private static string Describe(RuntimeBackupPreflightResult result) =>
+        $"{result.ErrorCode}; components={string.Join(',', result.ComponentVersions?.Select(item => $"{item.Key}:{item.Value}") ?? [])}; migrations={string.Join(',', result.MigrationSteps ?? [])}";
 
     private static IEnumerable<string> JsonStrings(JsonElement element)
     {

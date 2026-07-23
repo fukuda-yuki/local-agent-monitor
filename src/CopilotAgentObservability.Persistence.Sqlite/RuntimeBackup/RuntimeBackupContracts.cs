@@ -71,6 +71,7 @@ public static class RuntimeBackupErrorCodes
 
 public static class RuntimeBackupCheckpoints
 {
+    internal const string BeforeInspectionStageFlush = "before-inspection-stage-flush";
     public const string BeforeOnlineSnapshot = "before-online-snapshot";
     public const string AfterOnlineSnapshot = "after-online-snapshot";
     public const string BeforeOfflineCheckpoint = "before-offline-checkpoint";

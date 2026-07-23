@@ -14,6 +14,11 @@ internal enum RuntimeBackupNativePathKind
 
 internal static class RuntimeBackupNativePathClassifier
 {
+    internal static DriveType ReadWindowsDriveType(string rootPath) =>
+        OperatingSystem.IsWindows()
+            ? WindowsPathMetadata.ReadDriveType(rootPath)
+            : DriveType.Unknown;
+
     internal static RuntimeBackupNativePathKind Read(string path)
     {
         try
@@ -96,6 +101,8 @@ internal static class RuntimeBackupNativePathClassifier
                 : RuntimeBackupNativePathKind.OtherOrUnavailable;
         }
 
+        internal static DriveType ReadDriveType(string rootPath) => (DriveType)GetDriveType(rootPath);
+
         private static bool IsMissing(int error) => error is ErrorFileNotFound or ErrorPathNotFound;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -125,6 +132,9 @@ internal static class RuntimeBackupNativePathClassifier
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint GetFileType(SafeFileHandle file);
+
+        [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode)]
+        private static extern uint GetDriveType(string rootPathName);
     }
 
     private static class LinuxPathMetadata

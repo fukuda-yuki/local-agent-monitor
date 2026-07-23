@@ -29,7 +29,7 @@ public sealed class RuntimeBackupPlaywrightTests
         await Expect(page.GetByText("retention_backup_not_purged", new() { Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByLabel("検査する backup archive")).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Status)).ToHaveAttributeAsync("aria-labelledby", "result-heading");
-        await Expect(page.GetByText("config-cli runtime-backup restore", new() { Exact = true })).ToBeVisibleAsync();
+        await Expect(page.GetByText("config-cli runtime-backup restore --bundle <bundle.zip> --database <monitor.db>", new() { Exact = true })).ToBeVisibleAsync();
         await Expect(page.GetByRole(AriaRole.Button, new() { NameRegex = new("restore", System.Text.RegularExpressions.RegexOptions.IgnoreCase) })).ToHaveCountAsync(0);
 
         await page.Locator("#preview").ClickAsync();

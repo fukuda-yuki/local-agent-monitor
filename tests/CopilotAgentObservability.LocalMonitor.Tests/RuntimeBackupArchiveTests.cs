@@ -67,6 +67,32 @@ public sealed class RuntimeBackupArchiveTests
     }
 
     [Fact]
+    public void Online_snapshot_does_not_bypass_an_exclusive_delete_journal_writer()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("committed-value");
+        var snapshot = Path.Combine(temp.DirectoryPath, "exclusive-writer-snapshot.sqlite");
+        using var writer = RuntimeBackupTemp.Open(temp.DatabasePath);
+        RuntimeBackupTemp.Execute(writer, "PRAGMA journal_mode=DELETE;");
+        RuntimeBackupTemp.Execute(writer, "PRAGMA locking_mode=EXCLUSIVE;");
+        RuntimeBackupTemp.Execute(writer, "BEGIN EXCLUSIVE;");
+
+        try
+        {
+            var exception = Record.Exception(() =>
+                SqliteRuntimeBackupService.OnlineSnapshot(temp.DatabasePath, snapshot));
+
+            var sqlite = Assert.IsType<SqliteException>(exception);
+            Assert.Contains(sqlite.SqliteErrorCode, new[] { 5, 6 });
+        }
+        finally
+        {
+            RuntimeBackupTemp.Execute(writer, "ROLLBACK;");
+            if (File.Exists(snapshot)) File.Delete(snapshot);
+        }
+    }
+
+    [Fact]
     public void Permission_failure_after_online_snapshot_fails_publication_and_cleans_owned_artifacts_without_receipt()
     {
         using var temp = new RuntimeBackupTemp();
@@ -87,6 +113,73 @@ public sealed class RuntimeBackupArchiveTests
         Assert.Empty(Directory.EnumerateFiles(temp.DirectoryPath, ".runtime-backup-*.partial*"));
         using var connection = RuntimeBackupTemp.Open(temp.DatabasePath);
         Assert.Equal(0L, RuntimeBackupTemp.Scalar(connection, "SELECT COUNT(*) FROM runtime_backup_receipts;"));
+    }
+
+    [Fact]
+    public void Non_busy_sqlite_snapshot_failure_is_sanitized_and_cleans_owned_transients()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("source-value");
+        var bundle = Path.Combine(temp.DirectoryPath, "sqlite-io-failure.zip");
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.BeforeOnlineSnapshot)
+                throw new SqliteException("private-sqlite-detail", 10);
+        });
+
+        var result = service.CreateAndPublish(temp.DatabasePath, bundle);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.SnapshotStoreUnavailable, result.ErrorCode);
+        Assert.False(File.Exists(bundle));
+        Assert.Empty(Directory.EnumerateFiles(temp.DirectoryPath, ".*.online-snapshot*"));
+        Assert.Empty(Directory.EnumerateFiles(temp.DirectoryPath, ".runtime-backup-*.partial*"));
+    }
+
+    [Fact]
+    public void Inspection_stage_storage_failure_is_not_reported_as_invalid_archive()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("source-value");
+        var bundle = Path.Combine(temp.DirectoryPath, "inspection-stage-failure.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.TimeProvider).CreateAndPublish(temp.DatabasePath, bundle).Success);
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.BeforeInspectionStageFlush)
+                throw new IOException("injected-inspection-stage-failure");
+        });
+        var target = Path.Combine(temp.DirectoryPath, "fresh", "monitor.db");
+
+        var inspection = service.Inspect(bundle);
+        var preview = service.Preview(bundle, target);
+        var restore = service.Restore(bundle, target, new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.SnapshotStoreUnavailable, inspection.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.SnapshotStoreUnavailable, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.SnapshotStoreUnavailable, restore.ErrorCode);
+        Assert.False(File.Exists(target));
+        Assert.Empty(Directory.EnumerateFiles(temp.DirectoryPath, ".runtime-backup-inspect-*.sqlite*"));
+    }
+
+    [Fact]
+    public void Archive_inspection_ignores_an_owned_online_snapshot_for_another_database()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("source-value");
+        var bundle = Path.Combine(temp.DirectoryPath, "inspect-with-unrelated-owner.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.TimeProvider).CreateAndPublish(temp.DatabasePath, bundle).Success);
+        var unrelated = Path.Combine(temp.DirectoryPath, $".other.db.{new string('a', 32)}.online-snapshot");
+        File.WriteAllText(unrelated, "private-other-database-snapshot");
+        File.WriteAllText(unrelated + ".owner.v1", "runtime-backup-transient-owner.v1\n");
+
+        var result = new SqliteRuntimeBackupService(temp.TimeProvider).Inspect(bundle);
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.True(File.Exists(unrelated));
+        Assert.True(File.Exists(unrelated + ".owner.v1"));
     }
 
     [Fact]
@@ -345,6 +438,24 @@ public sealed class RuntimeBackupArchiveTests
     }
 
     [Fact]
+    public void Windows_backup_output_rejects_mixed_case_transient_owner_marker_namespace()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("value");
+        var output = Path.Combine(
+            temp.DirectoryPath,
+            ".RUNTIME-BACKUP-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.PARTIAL.OWNER.V1");
+
+        var result = new SqliteRuntimeBackupService(temp.TimeProvider)
+            .CreateAndPublish(temp.DatabasePath, output);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.InvalidArguments, result.ErrorCode);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
     public void Cli_path_contract_rejects_non_native_lexical_forms_before_resolving_other_arguments()
     {
         using var temp = new RuntimeBackupTemp();
@@ -463,6 +574,10 @@ public sealed class RuntimeBackupArchiveTests
                  {
                      Path.Combine(temp.DirectoryPath, "NUL"),
                      Path.Combine(temp.DirectoryPath, "COM1.txt", "backup.zip"),
+                     Path.Combine(temp.DirectoryPath, "CONIN$", "backup.zip"),
+                     Path.Combine(temp.DirectoryPath, "CONOUT$.txt", "backup.zip"),
+                     Path.Combine(temp.DirectoryPath, "COM¹.txt", "backup.zip"),
+                     Path.Combine(temp.DirectoryPath, "LPT³", "backup.zip"),
                  })
         {
             var result = service.CreateAndPublish(temp.DatabasePath, output);
@@ -471,6 +586,43 @@ public sealed class RuntimeBackupArchiveTests
         }
 
         Assert.Equal(before, Directory.EnumerateFileSystemEntries(temp.DirectoryPath).Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(DriveType.Unknown, false)]
+    [InlineData(DriveType.NoRootDirectory, false)]
+    [InlineData(DriveType.Removable, true)]
+    [InlineData(DriveType.Fixed, true)]
+    [InlineData(DriveType.Network, false)]
+    [InlineData(DriveType.CDRom, true)]
+    [InlineData(DriveType.Ram, true)]
+    public void Windows_runtime_backup_path_requires_a_proven_local_drive_type(
+        DriveType driveType,
+        bool expected)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        Assert.Equal(expected, SqliteRuntimeBackupService.IsHostNativeAbsoluteLocalPath(
+            @"Z:\monitor.db",
+            _ => driveType));
+    }
+
+    [Fact]
+    public void Unix_special_file_in_an_allowed_runtime_root_slot_fails_closed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("value");
+        var allowedName = Path.Combine(temp.DirectoryPath, "local-monitor.pid");
+        Assert.Equal(0, MkFifo(allowedName, Convert.ToUInt32("600", 8)));
+        var bundle = Path.Combine(temp.DirectoryPath, "special-runtime-root.zip");
+
+        var result = new SqliteRuntimeBackupService(temp.TimeProvider)
+            .CreateAndPublish(temp.DatabasePath, bundle);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.ExternalRuntimeStateUnsafe, result.ErrorCode);
+        Assert.False(File.Exists(bundle));
     }
 
     [Fact]
@@ -600,7 +752,7 @@ public sealed class RuntimeBackupArchiveTests
     {
         using var temp = new RuntimeBackupTemp();
         temp.CreateDatabase("value");
-        var outputDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "operator-output")).FullName;
+        var outputDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "runtime-backups")).FullName;
         var partial = Path.Combine(outputDirectory, $".runtime-backup-{new string('c', 32)}.partial");
         var stage = Path.Combine(outputDirectory, $".runtime-backup-inspect-{new string('d', 32)}.sqlite");
         foreach (var raw in new[] { partial, stage })
@@ -657,11 +809,58 @@ public sealed class RuntimeBackupArchiveTests
     }
 
     [Fact]
+    public void Direct_restore_recovers_owned_transients_in_bundle_and_database_directories()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("source");
+        var bundleDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "runtime-backups")).FullName;
+        var bundle = Path.Combine(bundleDirectory, "source.zip");
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        Assert.True(service.CreateAndPublish(temp.DatabasePath, bundle).Success);
+        var targetDirectory = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"runtime-restore-target-{Guid.NewGuid():N}")).FullName;
+        var target = Path.Combine(targetDirectory, "monitor.db");
+        var partial = Path.Combine(bundleDirectory, $".runtime-backup-{new string('a', 32)}.partial");
+        File.WriteAllText(partial, "private-partial");
+        File.WriteAllText(partial + ".owner.v1", "runtime-backup-transient-owner.v1\n");
+        var snapshot = Path.Combine(targetDirectory, $".{Path.GetFileName(target)}.{new string('b', 32)}.online-snapshot");
+        foreach (var path in new[] { snapshot, snapshot + "-wal", snapshot + "-shm" })
+            File.WriteAllText(path, "private-snapshot");
+        File.WriteAllText(snapshot + ".owner.v1", "runtime-backup-transient-owner.v1\n");
+
+        var result = service.Restore(bundle, target, new RuntimeRestoreOptions());
+
+        Assert.True(result.Success, result.ErrorCode);
+        foreach (var path in new[] { partial, partial + ".owner.v1", snapshot, snapshot + "-wal", snapshot + "-shm", snapshot + ".owner.v1" })
+            Assert.False(File.Exists(path));
+        Directory.Delete(targetDirectory, recursive: true);
+    }
+
+    [Fact]
+    public void Empty_raw_replay_directory_is_backup_compatible_but_any_child_fails_closed()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("source");
+        var replayDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "raw-replays")).FullName;
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+        var emptyOutput = Path.Combine(temp.DirectoryPath, "empty-raw-replays.zip");
+
+        var empty = service.CreateAndPublish(temp.DatabasePath, emptyOutput);
+        File.WriteAllText(Path.Combine(replayDirectory, "capture.bin"), "raw-private");
+        var populatedOutput = Path.Combine(temp.DirectoryPath, "populated-raw-replays.zip");
+        var populated = service.CreateAndPublish(temp.DatabasePath, populatedOutput);
+
+        Assert.True(empty.Success, empty.ErrorCode);
+        Assert.False(populated.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.ExternalRuntimeStateUnknown, populated.ErrorCode);
+        Assert.False(File.Exists(populatedOutput));
+    }
+
+    [Fact]
     public void Recovery_after_partial_rename_removes_only_inert_owner_marker_and_preserves_published_archive()
     {
         using var temp = new RuntimeBackupTemp();
         temp.CreateDatabase("value");
-        var outputDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "renamed-output")).FullName;
+        var outputDirectory = Directory.CreateDirectory(Path.Combine(temp.DirectoryPath, "runtime-backups")).FullName;
         var service = new SqliteRuntimeBackupService(temp.TimeProvider);
         var published = Path.Combine(outputDirectory, "published.zip");
         Assert.True(service.CreateAndPublish(temp.DatabasePath, published).Success);
@@ -880,6 +1079,12 @@ public sealed class RuntimeBackupArchiveTests
         Assert.False(caseAlias.Success);
         Assert.Equal(RuntimeBackupErrorCodes.ExternalRuntimeStateUnsafe, caseAlias.ErrorCode);
         File.Delete(Path.Combine(proposal.FullName, "apply-root-map.json"));
+        var draftFile = Path.Combine(proposal.FullName, "private-draft.json");
+        File.WriteAllText(draftFile, "private");
+        var privateFile = service.CreateAndPublish(temp.DatabasePath, Path.Combine(backups.FullName, "private-file-blocked.zip"));
+        Assert.False(privateFile.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.ExternalRuntimeStateActive, privateFile.ErrorCode);
+        File.Delete(draftFile);
         Directory.CreateDirectory(Path.Combine(proposal.FullName, "drafts"));
         File.WriteAllText(Path.Combine(proposal.FullName, "drafts", "private.json"), "private");
 
@@ -1140,6 +1345,9 @@ public sealed class RuntimeBackupArchiveTests
     [InlineData("alert_engine", "CREATE TABLE alert_unowned_collision(bad TEXT);")]
     [InlineData("alert_lifecycle", "CREATE TABLE alert_lifecycle_events(bad TEXT);")]
     [InlineData("first_trace_navigation", "CREATE TABLE first_trace_evidence_navigation(bad TEXT);")]
+    [InlineData("historical_instruction_analysis", "CREATE TABLE HISTORICAL_INSTRUCTION_ANALYSIS_RUNS(bad TEXT);")]
+    [InlineData("historical_import", "CREATE TABLE historical_import_unowned_collision(bad TEXT);")]
+    [InlineData("sanitized_import", "CREATE TABLE sanitized_import_unowned_collision(bad TEXT);")]
     public void Absent_component_namespace_collision_is_rejected_by_read_only_preflight(
         string component,
         string collisionSql)
@@ -1355,7 +1563,7 @@ public sealed class RuntimeBackupArchiveTests
         var result = new SqliteRuntimeBackupService(temp.TimeProvider).CreateAndPublish(temp.DatabasePath, output);
 
         Assert.False(result.Success);
-        Assert.Equal(RuntimeBackupErrorCodes.ManifestInvalid, result.ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
         Assert.False(File.Exists(output));
     }
 

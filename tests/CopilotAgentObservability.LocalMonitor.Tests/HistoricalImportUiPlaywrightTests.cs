@@ -163,76 +163,84 @@ public sealed class HistoricalImportUiPlaywrightTests
             Body = LiveSessions,
         }));
 
-        await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        Assert.DoesNotContain(requests, request => request.Method == "POST");
-
-        const string privateReference = "C:\\Users\\person\\SECRET_HISTORY_PATH.jsonl";
-        await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("参照方法").SelectOptionAsync("selected_root");
-        await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
-        await page.GetByLabel("Session ID").FillAsync("session-1");
-        await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
-        await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
-        await page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" }).ClickAsync();
-
-        var preview = page.Locator("#historical-import-preview-details");
-        await Expect(preview).ToContainTextAsync("3");
-        await Expect(preview).ToContainTextAsync("partial");
-        await Expect(preview).ToContainTextAsync("historical_summary_only");
-        await Expect(preview).ToContainTextAsync("trace_identity");
-        await Expect(preview).ToContainTextAsync("not_applicable");
-        await Expect(page.Locator("#historical-import-preview-badge")).ToHaveTextAsync("Historical");
-
-        await page.GetByRole(AriaRole.Button, new() { Name = "確認してインポート" }).EvaluateAsync("button => button.click()");
-        await confirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         try
         {
-            await Expect(page.GetByLabel("履歴ソース")).ToBeDisabledAsync();
-            await Expect(page.GetByLabel("正確なローカル参照")).ToBeDisabledAsync();
-            await Expect(page.GetByLabel("ソースアプリケーション版")).ToBeDisabledAsync();
-            await Expect(page.Locator(".historical-import-source-card").First).ToBeDisabledAsync();
-            await Expect(page.Locator("#historical-import-progress")).ToBeVisibleAsync();
+            await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            Assert.DoesNotContain(requests, request => request.Method == "POST");
+
+            const string privateReference = "C:\\Users\\person\\SECRET_HISTORY_PATH.jsonl";
+            await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
+            await page.GetByLabel("参照方法").SelectOptionAsync("selected_root");
+            await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+            await page.GetByLabel("Session ID").FillAsync("session-1");
+            await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
+            await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
+            await page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" }).ClickAsync();
+
+            var preview = page.Locator("#historical-import-preview-details");
+            await Expect(preview).ToContainTextAsync("3");
+            await Expect(preview).ToContainTextAsync("partial");
+            await Expect(preview).ToContainTextAsync("historical_summary_only");
+            await Expect(preview).ToContainTextAsync("trace_identity");
+            await Expect(preview).ToContainTextAsync("not_applicable");
+            await Expect(page.Locator("#historical-import-preview-badge")).ToHaveTextAsync("Historical");
+
+            await page.GetByRole(AriaRole.Button, new() { Name = "確認してインポート" }).EvaluateAsync("button => button.click()");
+            await confirmationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            try
+            {
+                await Expect(page.GetByLabel("履歴ソース")).ToBeDisabledAsync();
+                await Expect(page.GetByLabel("正確なローカル参照")).ToBeDisabledAsync();
+                await Expect(page.GetByLabel("ソースアプリケーション版")).ToBeDisabledAsync();
+                await Expect(page.Locator(".historical-import-source-card").First).ToBeDisabledAsync();
+                await Expect(page.Locator("#historical-import-progress")).ToBeVisibleAsync();
+            }
+            finally
+            {
+                releaseConfirmation.TrySetResult();
+            }
+            await Expect(page.Locator("#historical-import-progress")).ToContainTextAsync("トランザクションを実行しています");
+            releaseImport.SetResult();
+
+            await Expect(page.Locator("#historical-import-result")).ToBeVisibleAsync();
+            await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("succeeded");
+            await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("committed");
+            await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("1");
+            await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("分析は自動実行されません");
+
+            await page.GetByRole(AriaRole.Tab, new() { Name = "Historical" }).ClickAsync();
+            await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Historical");
+            await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("partial");
+            await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("event_identity");
+            await page.GetByRole(AriaRole.Button, new() { Name = "詳細を表示" }).ClickAsync();
+            await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("historical_summary_only");
+            await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("synthetic-contract-profile");
+            await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("model_tokens.model");
+            await Expect(page.Locator("#historical-import-observation-detail img")).ToHaveCountAsync(0);
+            Assert.False(await page.EvaluateAsync<bool>("Boolean(window.__historicalInjected)"));
+            await Expect(page.GetByRole(AriaRole.Button, new() { Name = "トレースを開く" })).ToBeDisabledAsync();
+            await Expect(page.Locator("#historical-import-trace-unavailable")).ToContainTextAsync("ナビゲーション専用");
+
+            await page.GetByRole(AriaRole.Tab, new() { Name = "Live" }).ClickAsync();
+            await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Live OTel");
+            await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Hook / SDK");
+            await Expect(page.GetByRole(AriaRole.Link, new() { Name = "Session 詳細を開く" })).ToHaveAttributeAsync(
+                "href",
+                "/diagnostics?session_id=0198a5ac-7180-7c85-b0d8-000000000001#doctor-session");
+            Assert.DoesNotContain(requests, request => request.Url.Contains("analysis", StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(privateReference, await page.ContentAsync(), StringComparison.Ordinal);
+            Assert.DoesNotContain(privateReference, await page.EvaluateAsync<string>("JSON.stringify({local: localStorage, session: sessionStorage, url: location.href})"), StringComparison.Ordinal);
+            Assert.DoesNotContain(requests, request => request.Url.Contains(privateReference, StringComparison.OrdinalIgnoreCase));
+
+            var importPosts = requests.Where(request => request.Method == "POST" && request.Url.Contains("/api/historical-import/v1/", StringComparison.Ordinal)).ToArray();
+            Assert.Equal(3, importPosts.Length);
+            Assert.All(importPosts, request => Assert.Equal("local-monitor", request.Headers["x-monitor-csrf"]));
         }
         finally
         {
             releaseConfirmation.TrySetResult();
+            releaseImport.TrySetResult();
         }
-        await Expect(page.Locator("#historical-import-progress")).ToContainTextAsync("トランザクションを実行しています");
-        releaseImport.SetResult();
-
-        await Expect(page.Locator("#historical-import-result")).ToBeVisibleAsync();
-        await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("succeeded");
-        await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("committed");
-        await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("1");
-        await Expect(page.Locator("#historical-import-result")).ToContainTextAsync("分析は自動実行されません");
-
-        await page.GetByRole(AriaRole.Tab, new() { Name = "Historical" }).ClickAsync();
-        await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Historical");
-        await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("partial");
-        await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("event_identity");
-        await page.GetByRole(AriaRole.Button, new() { Name = "詳細を表示" }).ClickAsync();
-        await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("historical_summary_only");
-        await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("synthetic-contract-profile");
-        await Expect(page.Locator("#historical-import-observation-detail")).ToContainTextAsync("model_tokens.model");
-        await Expect(page.Locator("#historical-import-observation-detail img")).ToHaveCountAsync(0);
-        Assert.False(await page.EvaluateAsync<bool>("Boolean(window.__historicalInjected)"));
-        await Expect(page.GetByRole(AriaRole.Button, new() { Name = "トレースを開く" })).ToBeDisabledAsync();
-        await Expect(page.Locator("#historical-import-trace-unavailable")).ToContainTextAsync("ナビゲーション専用");
-
-        await page.GetByRole(AriaRole.Tab, new() { Name = "Live" }).ClickAsync();
-        await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Live OTel");
-        await Expect(page.Locator("#historical-import-observation-list")).ToContainTextAsync("Hook / SDK");
-        await Expect(page.GetByRole(AriaRole.Link, new() { Name = "Session 詳細を開く" })).ToHaveAttributeAsync(
-            "href",
-            "/diagnostics?session_id=0198a5ac-7180-7c85-b0d8-000000000001#doctor-session");
-        Assert.DoesNotContain(requests, request => request.Url.Contains("analysis", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(privateReference, await page.ContentAsync(), StringComparison.Ordinal);
-        Assert.DoesNotContain(privateReference, await page.EvaluateAsync<string>("JSON.stringify({local: localStorage, session: sessionStorage, url: location.href})"), StringComparison.Ordinal);
-        Assert.DoesNotContain(requests, request => request.Url.Contains(privateReference, StringComparison.OrdinalIgnoreCase));
-
-        var importPosts = requests.Where(request => request.Method == "POST" && request.Url.Contains("/api/historical-import/v1/", StringComparison.Ordinal)).ToArray();
-        Assert.Equal(3, importPosts.Length);
-        Assert.All(importPosts, request => Assert.Equal("local-monitor", request.Headers["x-monitor-csrf"]));
     }
 
     [Fact(Timeout = 60_000)]
@@ -562,33 +570,40 @@ public sealed class HistoricalImportUiPlaywrightTests
             Body = EmptyObservations,
         }));
 
-        await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        const string privateReference = "C:\\Users\\person\\SECRET_IN_FLIGHT_HISTORY.jsonl";
-        await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
-        await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
-        await page.GetByLabel("Session ID").FillAsync("session-1");
-        await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
-        await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
-        var previewButton = page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" });
-        await previewButton.ClickAsync();
-        await previewStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Expect(previewButton).ToBeDisabledAsync();
-
         try
         {
-            await page.GetByLabel("ソースアプリケーション版").FillAsync("changed-after-request");
-            await Expect(previewButton).ToBeEnabledAsync();
+            await page.GotoAsync($"{host.Url}/historical-import", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            const string privateReference = "C:\\Users\\person\\SECRET_IN_FLIGHT_HISTORY.jsonl";
+            await page.GetByLabel("履歴ソース").SelectOptionAsync("github-copilot-cli");
+            await page.GetByLabel("正確なローカル参照").FillAsync(privateReference);
+            await page.GetByLabel("Session ID").FillAsync("session-1");
+            await page.GetByLabel("ソースアプリケーション版").FillAsync("9.9.9-synthetic");
+            await page.GetByLabel("メタデータだけを読み取ることに同意します").CheckAsync();
+            var previewButton = page.GetByRole(AriaRole.Button, new() { Name = "プレビューを作成" });
+            await previewButton.ClickAsync();
+            await previewStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Expect(previewButton).ToBeDisabledAsync();
+
+            try
+            {
+                await page.GetByLabel("ソースアプリケーション版").FillAsync("changed-after-request");
+                await Expect(previewButton).ToBeEnabledAsync();
+            }
+            finally
+            {
+                releasePreview.TrySetResult();
+            }
+
+            await Expect(page.Locator("#historical-import-preview")).ToBeHiddenAsync();
+            await Expect(page.Locator("#historical-import-confirm-button")).ToBeDisabledAsync();
+            await Expect(page.Locator("#historical-import-error")).ToBeHiddenAsync();
+            await Expect(page.Locator("#historical-import-live")).ToContainTextAsync("入力が変更されたため");
+            Assert.DoesNotContain(privateReference, await page.ContentAsync(), StringComparison.Ordinal);
         }
         finally
         {
             releasePreview.TrySetResult();
         }
-
-        await Expect(page.Locator("#historical-import-preview")).ToBeHiddenAsync();
-        await Expect(page.Locator("#historical-import-confirm-button")).ToBeDisabledAsync();
-        await Expect(page.Locator("#historical-import-error")).ToBeHiddenAsync();
-        await Expect(page.Locator("#historical-import-live")).ToContainTextAsync("入力が変更されたため");
-        Assert.DoesNotContain(privateReference, await page.ContentAsync(), StringComparison.Ordinal);
     }
 
     [Fact(Timeout = 60_000)]

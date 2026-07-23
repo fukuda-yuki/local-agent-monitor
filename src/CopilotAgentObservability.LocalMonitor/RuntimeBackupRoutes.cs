@@ -53,7 +53,16 @@ internal static class RuntimeBackupRoutes
     private static async Task DownloadAsync(HttpContext context, Application application, string backupId)
     {
         if (!AuthorizeRead(context)) { await ErrorAsync(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden"); return; }
-        if (!application.TryOpen(backupId, out var stream)) { await ErrorAsync(context, StatusCodes.Status404NotFound, "backup_not_found"); return; }
+        if (!application.TryOpen(backupId, out var stream, out var errorCode))
+        {
+            await ErrorAsync(
+                context,
+                errorCode == RuntimeBackupErrorCodes.SnapshotStoreUnavailable
+                    ? StatusCodes.Status503ServiceUnavailable
+                    : StatusCodes.Status404NotFound,
+                errorCode);
+            return;
+        }
         await using (stream)
         {
             Prepare(context.Response, "application/zip");
@@ -67,12 +76,29 @@ internal static class RuntimeBackupRoutes
     private static async Task PreviewAsync(HttpContext context, Application application)
     {
         if (!await AuthorizePostAsync(context, "application/zip")) return;
+        var configuredBodyLimit = context.Features
+            .Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>()?
+            .MaxRequestBodySize;
+        if (configuredBodyLimit is { } limit && context.Request.ContentLength > limit)
+        {
+            await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "request_too_large");
+            return;
+        }
         if (context.Request.ContentLength > RuntimeBackupLimits.MaximumArchiveBytes)
         {
             await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, RuntimeBackupErrorCodes.BundleTooLarge);
             return;
         }
-        var result = await application.PreviewAsync(context.Request.Body, context.RequestAborted);
+        RuntimeRestorePreview result;
+        try
+        {
+            result = await application.PreviewAsync(context.Request.Body, context.RequestAborted);
+        }
+        catch (BadHttpRequestException exception) when (exception.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            await ErrorAsync(context, StatusCodes.Status413PayloadTooLarge, "request_too_large");
+            return;
+        }
         if (!result.Success) { await ErrorAsync(context, Status(result.ErrorCode!), result.ErrorCode!); return; }
         await JsonAsync(context, StatusCodes.Status200OK, result);
     }
@@ -192,9 +218,10 @@ internal static class RuntimeBackupRoutes
             return false;
         }
 
-        internal bool TryOpen(string id, out FileStream stream)
+        internal bool TryOpen(string id, out FileStream stream, out string errorCode)
         {
             stream = null!;
+            errorCode = "backup_not_found";
             if (!TryGet(id, out _)) return false;
             try
             {
@@ -203,6 +230,8 @@ internal static class RuntimeBackupRoutes
                 var inspection = service.Inspect(stream);
                 if (!inspection.Success || inspection.ArchiveSha256 != id)
                 {
+                    if (inspection.ErrorCode == RuntimeBackupErrorCodes.SnapshotStoreUnavailable)
+                        errorCode = RuntimeBackupErrorCodes.SnapshotStoreUnavailable;
                     stream.Dispose();
                     stream = null!;
                     return false;
@@ -210,10 +239,17 @@ internal static class RuntimeBackupRoutes
                 stream.Position = 0;
                 return true;
             }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                stream?.Dispose();
+                stream = null!;
+                return false;
+            }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
             {
                 stream?.Dispose();
                 stream = null!;
+                errorCode = RuntimeBackupErrorCodes.SnapshotStoreUnavailable;
                 return false;
             }
         }
@@ -233,7 +269,7 @@ internal static class RuntimeBackupRoutes
         <ul><li><code>raw_content_included</code></li><li><code>not_repository_safe</code></li><li><code>retention_backup_not_purged</code></li></ul>
         <button id="create" type="button">online backup を作成</button><a id="download" hidden>backup をダウンロード</a>
         <h2>offline restore 前の検査</h2><label for="bundle">検査する backup archive</label><input id="bundle" type="file" accept="application/zip" required aria-describedby="bundle-help"><span id="bundle-help">ZIP archive を1つ選択してください。</span><button id="preview" type="button">archive を検査</button>
-        <h2 id="result-heading">操作結果</h2><pre id="result" role="status" aria-live="polite" aria-labelledby="result-heading" tabindex="-1"></pre><p>この Web UI から restore は実行できません。preview を確認し、Local Monitor を停止してから <code>config-cli runtime-backup restore</code> を使用してください。</p></main>
+        <h2 id="result-heading">操作結果</h2><pre id="result" role="status" aria-live="polite" aria-labelledby="result-heading" tabindex="-1"></pre><p>この Web UI から restore は実行できません。preview を確認し、Local Monitor を停止してから <code>config-cli runtime-backup restore --bundle &lt;bundle.zip&gt; --database &lt;monitor.db&gt;</code> を使用してください。</p></main>
         <script>
         const out=document.querySelector('#result');
         const download=document.querySelector('#download');

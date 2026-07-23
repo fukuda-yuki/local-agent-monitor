@@ -355,18 +355,25 @@ public sealed class AlertCenterPlaywrightTests
             await route.ContinueAsync();
         });
 
-        await page.GotoAsync($"{host.Url}/alerts", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(2);
-        await page.Locator("#alert-filter-severity").SelectOptionAsync("critical");
-        await staleStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await page.Locator("#alert-filter-severity").SelectOptionAsync("warning");
-        await Expect(page.Locator("#alert-detail-heading")).ToHaveTextAsync("Fresh warning result");
-        releaseStale.TrySetResult();
-        await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            await page.GotoAsync($"{host.Url}/alerts", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(2);
+            await page.Locator("#alert-filter-severity").SelectOptionAsync("critical");
+            await staleStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await page.Locator("#alert-filter-severity").SelectOptionAsync("warning");
+            await Expect(page.Locator("#alert-detail-heading")).ToHaveTextAsync("Fresh warning result");
+            releaseStale.TrySetResult();
+            await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("severity=warning"));
-        await Expect(page.Locator("#alert-detail-heading")).ToHaveTextAsync("Fresh warning result");
-        await Expect(page.Locator("#alert-rows")).Not.ToContainTextAsync("High tool failure ratio");
+            await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("severity=warning"));
+            await Expect(page.Locator("#alert-detail-heading")).ToHaveTextAsync("Fresh warning result");
+            await Expect(page.Locator("#alert-rows")).Not.ToContainTextAsync("High tool failure ratio");
+        }
+        finally
+        {
+            releaseStale.TrySetResult();
+        }
     }
 
     [Fact(Timeout = 60_000)]
@@ -596,18 +603,25 @@ public sealed class AlertCenterPlaywrightTests
             await route.FulfillAsync(JsonResponse(response));
         });
 
-        await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await staleStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
-        await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
-        await Expect(page.Locator("#overview-alert-body a")).ToHaveAttributeAsync("href", $"/alerts?alert={AlertB}&period=7d");
-        releaseStale.TrySetResult();
-        await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await staleStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await page.Locator("#period-toggle .period-btn[data-period='7d']").ClickAsync();
+            await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
+            await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
+            await Expect(page.Locator("#overview-alert-body a")).ToHaveAttributeAsync("href", $"/alerts?alert={AlertB}&period=7d");
+            releaseStale.TrySetResult();
+            await staleFinished.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
-        await Expect(page.Locator("#overview-alert-body")).Not.ToContainTextAsync("High tool failure ratio");
-        await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
+            await Expect(page.Locator("#overview-alert-body")).ToContainTextAsync("Fresh seven-day alert");
+            await Expect(page.Locator("#overview-alert-body")).Not.ToContainTextAsync("High tool failure ratio");
+            await Expect(page.Locator("#overview-alert-title")).ToContainTextAsync("7日");
+        }
+        finally
+        {
+            releaseStale.TrySetResult();
+        }
     }
 
     private const string AlertA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

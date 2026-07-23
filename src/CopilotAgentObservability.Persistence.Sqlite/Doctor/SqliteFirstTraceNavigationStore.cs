@@ -133,6 +133,12 @@ internal sealed partial class SqliteFirstTraceNavigationStore
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
+        EnsureSchema(connection, transaction);
+        transaction.Commit();
+    }
+
+    internal static void EnsureSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
         Execute(connection, transaction,
             "CREATE TABLE IF NOT EXISTS schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);");
         using (var version = connection.CreateCommand())
@@ -162,7 +168,6 @@ internal sealed partial class SqliteFirstTraceNavigationStore
             """);
         Execute(connection, transaction,
             "INSERT OR IGNORE INTO schema_version(component,version) VALUES('first_trace_navigation',1);");
-        transaction.Commit();
     }
 
     private SqliteConnection Open()

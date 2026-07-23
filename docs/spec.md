@@ -676,14 +676,19 @@ bounded external-state/prerequisite inventory. Operator-selected backup files
 are outside Retention cleanup and always warn
 `retention_backup_not_purged`.
 
+Live, current, and installed database reads retain normal SQLite locking and
+change detection. SQLite `immutable=1` is restricted to closed, service-owned
+snapshot/staging files whose sidecars are absent.
+
 Raw snapshot/partial/inspection transients are created only after a flushed
 path-free exact owner marker. Startup or the next operation in an arbitrary
 caller-selected directory performs bounded no-follow cleanup of that exact
 marker-derived basename; malformed, active, nonregular, or unmarked lookalikes
 are preserved and fail closed. Archive bytes are durably flushed around atomic
-publication. Read-only compatibility also rejects executable indexes/generated
-columns, undeclared component namespaces, malformed receipt rows, and native or
-lexical device paths before migration.
+publication. Read-only compatibility also rejects generated columns,
+expression indexes, partial indexes outside the exact version-bound product
+allowlist, undeclared component namespaces, malformed receipt rows, and native
+or lexical device paths before migration.
 
 Restore is offline CLI only. It strictly inspects untrusted input, validates and
 migrates a sibling staging database, carries current tombstones/read denial and

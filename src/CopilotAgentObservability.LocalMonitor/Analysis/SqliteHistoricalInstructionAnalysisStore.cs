@@ -2,43 +2,15 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.InstructionFindings;
+using CopilotAgentObservability.Persistence.Sqlite.HistoricalInstructionAnalysis;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
 internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
 {
-    internal const string SchemaComponent = "historical_instruction_analysis";
-    internal const int SchemaVersion = 1;
-    private const string RunsTable = "historical_instruction_analysis_runs";
-    private const string RunsTableSql =
-        """
-        CREATE TABLE historical_instruction_analysis_runs (
-            run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_schema_version TEXT NOT NULL,
-            extraction_id TEXT NOT NULL,
-            extraction_sha256 TEXT NOT NULL CHECK(length(extraction_sha256)=64 AND extraction_sha256=lower(extraction_sha256)),
-            model TEXT NOT NULL,
-            provider TEXT NOT NULL,
-            configuration_sha256 TEXT NOT NULL CHECK(length(configuration_sha256)=64 AND configuration_sha256=lower(configuration_sha256)),
-            timeout_ms INTEGER NOT NULL CHECK(timeout_ms>0 AND timeout_ms<=3600000),
-            prompt_template_version TEXT NOT NULL,
-            dataset_projection_json TEXT NOT NULL CHECK(length(CAST(dataset_projection_json AS BLOB))<=67108864),
-            dataset_projection_sha256 TEXT NOT NULL CHECK(length(dataset_projection_sha256)=64 AND dataset_projection_sha256=lower(dataset_projection_sha256)),
-            state TEXT NOT NULL CHECK(state IN (
-                'queued','running','succeeded','zero_findings','no_eligible_sessions','content_unavailable',
-                'stale_extraction','extraction_invalid','invalid_citation','provider_partial','provider_failed','timed_out','canceled')),
-            requested_at TEXT NOT NULL,
-            started_at TEXT NULL,
-            completed_at TEXT NULL,
-            receipt_json TEXT NULL CHECK(receipt_json IS NULL OR length(CAST(receipt_json AS BLOB))<=67108864),
-            receipt_sha256 TEXT NULL,
-            handoff_json TEXT NULL CHECK(handoff_json IS NULL OR length(CAST(handoff_json AS BLOB))<=1048576),
-            handoff_sha256 TEXT NULL,
-            CHECK((receipt_json IS NULL)=(receipt_sha256 IS NULL)),
-            CHECK((handoff_json IS NULL)=(handoff_sha256 IS NULL))
-        );
-        """;
+    internal const string SchemaComponent = HistoricalInstructionAnalysisSchemaV1.Component;
+    internal const int SchemaVersion = HistoricalInstructionAnalysisSchemaV1.Version;
     private readonly string databasePath;
 
     internal SqliteHistoricalInstructionAnalysisStoreV1(string databasePath)
@@ -53,17 +25,7 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var version = ReadSchemaVersion(connection, transaction);
-            if (version is null)
-            {
-                if (AnyOwnedObjectExists(connection, transaction)) throw InvalidPersistence();
-                Execute(connection, transaction,
-                    "CREATE TABLE IF NOT EXISTS schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);");
-                Execute(connection, transaction, RunsTableSql);
-                Execute(connection, transaction,
-                    "INSERT INTO schema_version(component,version) VALUES('historical_instruction_analysis',1);");
-            }
-            if (!IsSchemaValid(connection, transaction)) throw InvalidPersistence();
+            HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
             transaction.Commit();
         }
         catch (HistoricalInstructionAnalysisValidationException) { throw; }
@@ -358,56 +320,6 @@ internal sealed class SqliteHistoricalInstructionAnalysisStoreV1
 
     private static string Sha256(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-
-    private static long? ReadSchemaVersion(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        if (!TableExists(connection, transaction, "schema_version")) return null;
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT version FROM schema_version WHERE component='historical_instruction_analysis';";
-        var value = command.ExecuteScalar();
-        return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
-    }
-
-    private static bool IsSchemaValid(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        if (ReadSchemaVersion(connection, transaction) != SchemaVersion) return false;
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$name;";
-        command.Parameters.AddWithValue("$name", RunsTable);
-        return command.ExecuteScalar() is string actual
-            && NormalizeSql(actual) == NormalizeSql(RunsTableSql);
-    }
-
-    private static bool AnyOwnedObjectExists(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'historical_instruction_analysis_*';";
-        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
-    }
-
-    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=$name;";
-        command.Parameters.AddWithValue("$name", name);
-        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
-    }
-
-    private static string NormalizeSql(string value) =>
-        string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).TrimEnd(';');
-
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
 
     private SqliteConnection Open()
     {

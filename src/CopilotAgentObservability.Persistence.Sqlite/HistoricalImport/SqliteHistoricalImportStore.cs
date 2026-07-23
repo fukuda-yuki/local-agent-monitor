@@ -253,6 +253,10 @@ public sealed class SqliteHistoricalImportStore
             throw new InvalidOperationException("The historical import schema is partial.");
     }
 
+    internal static bool IsSchemaValid(SqliteConnection connection, SqliteTransaction transaction) =>
+        ReadVersion(connection, transaction) == SchemaVersion
+        && SchemaMatches(connection, transaction, ReadOwnedObjects(connection, transaction));
+
     internal void SavePreview(HistoricalStoredPreview value)
     {
         var probe = value.Probe ?? throw new InvalidOperationException("A newly created preview requires a probe.");

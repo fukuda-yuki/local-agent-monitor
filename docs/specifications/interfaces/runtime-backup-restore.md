@@ -48,8 +48,9 @@ outside SQLite is handled explicitly as follows.
 | Active `sensitive_bundle` or `analysis_sdk_directory` Retention item, unresolved or orphan/mismatched external capture reservation/journal, or legacy external-bundle blocker | Raw store outside SQLite and source-host recovery authority | Backup fails `external_raw_store_active` without reading or emitting its private locator | Complete/abandon the capture or delete/expire the item through its owner. A recorded legacy blocker has no v1 clearance operation and requires a future profile that explicitly carries/adopts it. |
 | Prior runtime backup files | Operator-owned backup policy A | Not inventoried in the manifest, included, or purged. A bounded direct-sibling safety scan may read only the strict archive envelope and canonical manifest needed to distinguish a prior v1 backup from unknown runtime state; it never extracts or opens the database member. | Operator retains/deletes separately |
 
-An empty `proposal-apply/` directory and a directory containing only the exact,
-canonical, terminal `apply-root-map.json` shape are allowed. The service
+An empty `proposal-apply/` directory, its exact empty `drafts/` scaffold, and a
+directory containing only that scaffold plus the exact, canonical, terminal
+`apply-root-map.json` shape are allowed. The service
 validates only that closed configuration-file shape; it neither inventories nor
 emits configured path values. Empty, malformed, duplicate, non-canonical,
 unknown, reparse-bearing, or unreadable root-map state fails closed. A terminal deleted external
@@ -65,14 +66,17 @@ Retention item. An orphan or mismatch is still active external authority. Any un
 regular file directly under the database runtime directory fails
 `external_runtime_state_unknown`, except the database and its SQLite sidecars,
 the documented ephemeral files/directories above, `setup/`,
-`proposal-apply/`, `sanitized-exports/`, and `runtime-backups/`. The scanner
-never follows a symlink, junction, mount reparse point, or other reparse entry.
+`proposal-apply/`, `sanitized-exports/`, and `runtime-backups/`. The
+product-owned `raw-replays/` parent is allowed only when it is an exact
+non-reparse empty directory after Retention external-state validation; any child
+or unreadable entry remains unknown/unsafe external state. The scanner never
+follows a symlink, junction, mount reparse point, or other reparse entry.
 Two or more caller-selected direct-sibling v1 backups therefore remain
-backupable, while a malformed/tampered archive envelope or manifest, or an
-unrelated regular file, still fails closed. Database-member corruption is
-rejected by inspect/preview/restore, not by this intentionally envelope-only
-runtime-root classification. This recognition does not add backup inventory, emit a
-backup list, or authorize cleanup of an operator backup.
+backupable, while a malformed, non-canonical, or CRC-invalid archive envelope
+or manifest, or an unrelated regular file, still fails closed. Database-member
+corruption is rejected by inspect/preview/restore, not by this intentionally
+envelope-only runtime-root classification. This recognition does not add backup
+inventory, emit a backup list, or authorize cleanup of an operator backup.
 
 The manifest contains a closed `external_state` array in the table order. Each
 entry contains only `kind`, `source_state`, `included=false`, `consistency`, and
@@ -211,6 +215,11 @@ It opens the source with pooling
 disabled and a bounded busy timeout, creates a same-directory private temporary
 SQLite file, and invokes `SqliteConnection.BackupDatabase`. It never copies a
 live database file or its `-wal`/`-shm` sidecars.
+The live source and every current or installed database use normal SQLite
+locking and change detection, including while restore owns its lease. SQLite
+`immutable=1` is restricted to closed, service-owned snapshot/staging files
+whose sidecars are absent; it is never selected merely because a live path
+happens to have no sidecar at one instant.
 
 The destination is closed and reopened read-only. `PRAGMA quick_check` must be
 the single row `ok`; `PRAGMA foreign_key_check` must be empty. Version, count,
@@ -247,8 +256,17 @@ describes.
 ## 6. Runtime-backup persistence component
 
 `runtime_backup` v1 is a component-owned migration in the standard
-`schema_version` table. It is integrated after #79 and #86 and does not reserve
-or change Session 13, Monitor 7, Retention 1, or a Retention store kind.
+`schema_version` table. Restore recognizes the current Wave 3
+`historical_instruction_analysis` v1, `historical_import` v1, and
+`sanitized_import` v1 components. Its fixed migration tail is
+`historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
+-> `runtime_backup`, preserving the storage-owner integration order
+#79 -> #86 -> #88. It does not reserve or change Session 13, Monitor 7,
+Retention 1, or a Retention store kind.
+Because every valid `sanitized_import` v1 schema is created only after
+`historical_import` v1 in the same transaction, a declared `sanitized_import`
+component without `historical_import` is an incompatible forged vector rather
+than a supported migration source.
 
 The only component table is `runtime_backup_receipts`. It stores a UUIDv7
 operation ID, operation kind (`backup` or `restore`), lowercase artifact
@@ -286,9 +304,10 @@ exists: any reservation, capture/legacy journal, or blocker row whose required
 catalog pairing table is absent remains active authority and fails closed.
 
 Before any source or staging write, read-only inspection rejects every SQLite
-view and virtual table, every generated/hidden column, every expression or
-partial index, and every trigger outside the exact product-owned trigger
-allowlist for the declared supported component versions. An allowlisted trigger
+view and virtual table, every generated/hidden column, every expression index,
+and every partial index outside the exact version-bound product-owned index
+allowlist. Every trigger outside the corresponding exact trigger allowlist is
+also rejected. An allowlisted index or trigger
 must have its exact name, target table, and normalized SQL definition. Supported
 older schemas may omit triggers that their production migration creates, but
 may not substitute or redefine them. This same validation runs again against
@@ -297,9 +316,10 @@ restore-receipt write.
 
 Writable-schema objects hidden under the SQLite-reserved `sqlite_*` namespace
 are accepted only for the exact built-in table and auto-index shapes. The
-`doctor_`, `alert_`, `runtime_backup_`, and `first_trace_` namespaces accept
-only exact objects owned by a declared component; absent or extra objects fail
-closed.
+`doctor_`, `alert_`, `historical_instruction_analysis_`,
+`historical_import_`, `sanitized_import_`, `runtime_backup_`, and
+`first_trace_` namespaces accept only exact objects owned by a declared
+component; absent or extra objects fail closed.
 
 Schema metadata is guard-first for every table, index, and trigger before a
 component-specific validator runs: object/table/column identifiers are limited
@@ -319,8 +339,9 @@ the application.
 If a component is absent from `schema_version`, its reserved table/trigger
 namespace must also be absent. Case aliases such as an undeclared
 `RUNTIME_BACKUP_RECEIPTS`, doctor-prefixed objects, alert engine/lifecycle
-objects, or first-trace navigation objects are `restore_incompatible`; a
-production migrator never adopts or overwrites the collision.
+objects, historical-instruction/import/sanitized-import objects, or first-trace
+navigation objects are `restore_incompatible`; a production migrator never
+adopts or overwrites the collision.
 
 Restore preview additionally compares with the destination database and
 returns:
@@ -412,10 +433,16 @@ SQLite write/sidecar state with `monitor_must_be_stopped`.
 A private sibling `<database>.runtime-restore.lock` lease spans recovery, staging,
 pre-restore backup, swap, installed validation, and receipt persistence. Normal
 Local Monitor initialization acquires the same non-waiting lease, so a new
-monitor cannot start during restore. For an existing target, restore also
-checkpoints and rejects remaining `-wal`/`-shm` state, then holds a read/delete
-sharing database guard through the atomic swap; an already-running or idle
-SQLite owner therefore cannot be mistaken for an offline target.
+monitor cannot start during restore. This lease is the portable ownership proof
+for product processes. For an existing target, restore also performs a normal
+SQLite locking probe, checkpoints and rejects remaining `-wal`/`-shm` state,
+and on Windows holds a read/delete-sharing database guard through the atomic
+swap. On Windows, the sharing guard rejects incompatible non-product handles.
+On Unix, no non-product SQLite connection state is part of the supported
+restore boundary; the operator must close every non-product database client.
+The normal SQLite probe detects conflicting exclusive ownership but does not
+claim to enumerate shared, reserved, or idle connections. The exact original
+target hash and external state are checked again immediately before swap.
 
 The state machine is:
 
@@ -428,7 +455,8 @@ The state machine is:
 4. validate checksums, compatibility, integrity, foreign keys, retention
    invariants, terminal reconciliation, and non-terminal reintroduction policy;
 5. apply supported component migrations to staging in the fixed integration
-   order, including `runtime_backup` v1;
+   order, including `historical_instruction_analysis` v1,
+   `historical_import` v1, `sanitized_import` v1, then `runtime_backup` v1;
 6. create and validate a pre-restore `local-runtime-backup` by default when the
    target exists;
 7. append the sanitized, operation-bound restore receipt inside staging, close
@@ -455,6 +483,9 @@ The target is never opened for a SQLite write after swap, so it cannot acquire a
 new rollback journal or WAL in the recovery window. Recovery nevertheless
 rejects any target `-journal`/`-wal`/`-shm` before hashing or replacing the
 target. Any failure before step 9 leaves the target byte-for-byte unchanged. Any
+pre-swap domain result is returned only after its owned stage/journal cleanup is
+verified; cleanup failure instead returns `restore_rollback_failed` and retains
+the exact recovery controls. Any
 failure after step 9 but before the flushed `committed` marker restores the
 rollback file atomically and validates the old target before reporting
 `restore_rolled_back`. If rollback cannot be

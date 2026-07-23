@@ -20,6 +20,7 @@
     "FullyQualifiedName~RuntimeBackupManifestValidationTests",
     "FullyQualifiedName~RuntimeBackupArchiveTests",
     "FullyQualifiedName~RuntimeBackupRestoreTests",
+    "FullyQualifiedName~RuntimeBackupWave3ComponentRoundTripTests",
     "FullyQualifiedName~RuntimeBackupSurfaceTests",
     "FullyQualifiedName~RuntimeBackupPlaywrightTests",
     "FullyQualifiedName~RuntimeBackupCliTests",

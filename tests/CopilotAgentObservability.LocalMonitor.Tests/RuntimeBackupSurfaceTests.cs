@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using Microsoft.AspNetCore.Http;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -33,11 +34,11 @@ public sealed class RuntimeBackupSurfaceTests
             Content = Zip(new byte[1024]),
         };
         oversizedPreviewRequest.Headers.Add("x-monitor-csrf", "local-monitor");
-        using var oversizedPreview = await host.Client.SendAsync(oversizedPreviewRequest);
         using var ui = await host.Client.GetAsync("/backup-restore");
         using var invalidHostRequest = new HttpRequestMessage(HttpMethod.Get, "/backup-restore");
         invalidHostRequest.Headers.Host = "monitor.example.invalid";
         using var invalidHost = await host.Client.SendAsync(invalidHostRequest);
+        using var oversizedPreview = await host.Client.SendAsync(oversizedPreviewRequest);
 
         Assert.All(
             new[] { create, invalidCreate, result, download, oversizedPreview, ui, invalidHost },
@@ -155,6 +156,86 @@ public sealed class RuntimeBackupSurfaceTests
     }
 
     [Fact]
+    public async Task Raw_backup_surface_enforces_host_origin_csrf_and_media_type_on_every_route_kind()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers());
+        var digest = new string('a', 64);
+
+        foreach (var request in new[]
+                 {
+                     new HttpRequestMessage(HttpMethod.Get, "/backup-restore"),
+                     new HttpRequestMessage(HttpMethod.Get, $"/api/runtime-backup/v1/backups/{digest}"),
+                     new HttpRequestMessage(HttpMethod.Get, $"/api/runtime-backup/v1/backups/{digest}/archive"),
+                     CreateRequest(),
+                     PreviewRequest(Zip([])),
+                 })
+        {
+            using (request)
+            {
+                request.Headers.Host = "example.invalid";
+                using var response = await host.Client.SendAsync(request);
+                await AssertErrorAsync(response, HttpStatusCode.BadRequest, "invalid_host");
+            }
+        }
+
+        foreach (var request in new[]
+                 {
+                     new HttpRequestMessage(HttpMethod.Get, "/backup-restore"),
+                     new HttpRequestMessage(HttpMethod.Get, $"/api/runtime-backup/v1/backups/{digest}"),
+                     new HttpRequestMessage(HttpMethod.Get, $"/api/runtime-backup/v1/backups/{digest}/archive"),
+                     CreateRequest(),
+                     PreviewRequest(Zip([])),
+                 })
+        {
+            using (request)
+            {
+                request.Headers.TryAddWithoutValidation("Origin", "https://foreign.example");
+                using var response = await host.Client.SendAsync(request);
+                await AssertErrorAsync(response, HttpStatusCode.Forbidden, "cross_origin_forbidden");
+            }
+        }
+
+        using var wrongCreateCsrf = CreateRequest();
+        wrongCreateCsrf.Headers.Remove("x-monitor-csrf");
+        wrongCreateCsrf.Headers.Add("x-monitor-csrf", "Local-Monitor");
+        await AssertErrorAsync(await host.Client.SendAsync(wrongCreateCsrf), HttpStatusCode.Forbidden, "csrf_required");
+        using var wrongPreviewCsrf = PreviewRequest(Zip([]));
+        wrongPreviewCsrf.Headers.Remove("x-monitor-csrf");
+        wrongPreviewCsrf.Headers.Add("x-monitor-csrf", "Local-Monitor");
+        await AssertErrorAsync(await host.Client.SendAsync(wrongPreviewCsrf), HttpStatusCode.Forbidden, "csrf_required");
+
+        using var wrongCreateMedia = PreviewRequest(Zip([]), "/api/runtime-backup/v1/backups");
+        await AssertErrorAsync(await host.Client.SendAsync(wrongCreateMedia), HttpStatusCode.UnsupportedMediaType, "unsupported_media_type");
+        using var wrongPreviewMedia = PreviewRequest(Json("{}"u8.ToArray()));
+        await AssertErrorAsync(await host.Client.SendAsync(wrongPreviewMedia), HttpStatusCode.UnsupportedMediaType, "unsupported_media_type");
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "runtime-backups")));
+    }
+
+    [Fact]
+    public async Task Known_backup_download_maps_storage_io_failure_to_sanitized_service_unavailable()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers());
+        using var createRequest = CreateRequest();
+        using var create = await host.Client.SendAsync(createRequest);
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        using var created = JsonDocument.Parse(await create.Content.ReadAsByteArrayAsync());
+        var backupId = created.RootElement.GetProperty("backup_id").GetString()!;
+        var stored = Assert.Single(Directory.EnumerateFiles(
+            Path.Combine(temp.Path, "runtime-backups"),
+            "runtime-backup-*.zip"));
+        using var exclusive = new FileStream(stored, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        using var response = await host.Client.GetAsync($"/api/runtime-backup/v1/backups/{backupId}/archive");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal("{\"error\":\"snapshot_store_unavailable\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Web_surface_has_no_restore_endpoint_and_explains_offline_restore()
     {
         using var temp = new MonitorTempDirectory();
@@ -184,6 +265,33 @@ public sealed class RuntimeBackupSurfaceTests
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
         Assert.Equal("{\"error\":\"request_too_large\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Preview_respects_kestrel_body_limit_when_content_length_is_unknown()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, maxRequestBodyBytes: 128, testOptions: DisabledWorkers());
+        using var request = PreviewRequest(new UnknownLengthZipContent(new byte[1024]));
+
+        using var response = await host.Client.SendAsync(request);
+
+        await AssertErrorAsync(response, HttpStatusCode.RequestEntityTooLarge, "request_too_large");
+    }
+
+    [Fact]
+    public async Task Preview_application_preserves_an_unknown_length_kestrel_body_limit_failure_for_route_mapping()
+    {
+        using var temp = new MonitorTempDirectory();
+        var body = new ThrowingRequestBodyStream(
+            new BadHttpRequestException("request body too large", StatusCodes.Status413PayloadTooLarge));
+
+        var exception = await Assert.ThrowsAsync<BadHttpRequestException>(() =>
+            new SqliteRuntimeBackupService(temp.TimeProvider)
+                .PreviewAsync(body, temp.DatabasePath, CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, exception.StatusCode);
+        Assert.Equal(1, body.ReadCount);
     }
 
     [Fact]
@@ -386,6 +494,23 @@ public sealed class RuntimeBackupSurfaceTests
         return content;
     }
 
+    private static HttpRequestMessage PreviewRequest(HttpContent content, string path = "/api/runtime-backup/v1/previews")
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = content };
+        request.Headers.Add("x-monitor-csrf", "local-monitor");
+        return request;
+    }
+
+    private static async Task AssertErrorAsync(HttpResponseMessage response, HttpStatusCode status, string code)
+    {
+        using (response)
+        {
+            Assert.Equal(status, response.StatusCode);
+            Assert.True(response.Headers.CacheControl?.NoStore);
+            Assert.Equal($"{{\"error\":\"{code}\"}}", await response.Content.ReadAsStringAsync());
+        }
+    }
+
     private static int CountOccurrences(string value, string search)
     {
         var count = 0;
@@ -412,5 +537,45 @@ public sealed class RuntimeBackupSurfaceTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingRequestBodyStream(Exception exception) : Stream
+    {
+        internal int ReadCount { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) { ReadCount++; throw exception; }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            ReadCount++;
+            return ValueTask.FromException<int>(exception);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class UnknownLengthZipContent : HttpContent
+    {
+        private readonly byte[] bytes;
+
+        internal UnknownLengthZipContent(byte[] bytes)
+        {
+            this.bytes = bytes;
+            Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(bytes).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
     }
 }

@@ -84,27 +84,34 @@ public sealed class SanitizedImportUiTests
             }
             await route.ContinueAsync();
         });
-        var commitResponse = page.WaitForResponseAsync(response =>
-            response.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal));
-        await page.Locator("#sanitized-import-commit-button").ClickAsync();
-        await commitReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Expect(input).ToBeDisabledAsync();
-        releaseCommit.TrySetResult(true);
-        Assert.Equal(201, (await commitResponse).Status);
+        try
+        {
+            var commitResponse = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal));
+            await page.Locator("#sanitized-import-commit-button").ClickAsync();
+            await commitReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Expect(input).ToBeDisabledAsync();
+            releaseCommit.TrySetResult(true);
+            Assert.Equal(201, (await commitResponse).Status);
 
-        await Expect(page.Locator("#sanitized-import-result")).ToBeVisibleAsync();
-        await Expect(input).ToBeEnabledAsync();
-        await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("committed");
-        await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("対象レコード");
-        await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("graph state 更新");
-        await Expect(page.Locator("#sanitized-import-history tbody tr")).ToHaveCountAsync(1);
-        await Expect(page.Locator("#sanitized-import-history")).ToContainTextAsync("スキップ");
-        Assert.Equal(2, posts.Count(request => request.Url.EndsWith("/api/sanitized-import/v1/previews", StringComparison.Ordinal)));
-        var importRequest = Assert.Single(posts, request => request.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal));
-        Assert.Equal("application/zip", await importRequest.HeaderValueAsync("Content-Type"));
-        Assert.Equal("local-monitor", await importRequest.HeaderValueAsync("x-monitor-csrf"));
-        Assert.Equal(64, (await importRequest.HeaderValueAsync("X-Sanitized-Import-Preview-Digest"))?.Length);
-        Assert.Equal(0, await page.EvaluateAsync<int>("() => localStorage.length + sessionStorage.length"));
+            await Expect(page.Locator("#sanitized-import-result")).ToBeVisibleAsync();
+            await Expect(input).ToBeEnabledAsync();
+            await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("committed");
+            await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("対象レコード");
+            await Expect(page.Locator("#sanitized-import-result-content")).ToContainTextAsync("graph state 更新");
+            await Expect(page.Locator("#sanitized-import-history tbody tr")).ToHaveCountAsync(1);
+            await Expect(page.Locator("#sanitized-import-history")).ToContainTextAsync("スキップ");
+            Assert.Equal(2, posts.Count(request => request.Url.EndsWith("/api/sanitized-import/v1/previews", StringComparison.Ordinal)));
+            var importRequest = Assert.Single(posts, request => request.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal));
+            Assert.Equal("application/zip", await importRequest.HeaderValueAsync("Content-Type"));
+            Assert.Equal("local-monitor", await importRequest.HeaderValueAsync("x-monitor-csrf"));
+            Assert.Equal(64, (await importRequest.HeaderValueAsync("X-Sanitized-Import-Preview-Digest"))?.Length);
+            Assert.Equal(0, await page.EvaluateAsync<int>("() => localStorage.length + sessionStorage.length"));
+        }
+        finally
+        {
+            releaseCommit.TrySetResult(true);
+        }
     }
 
     [Fact(Timeout = 60_000)]
@@ -157,33 +164,41 @@ public sealed class SanitizedImportUiTests
             await route.FulfillAsync(HistoryResponse("new-import"));
         });
 
-        await page.GotoAsync($"{host.Url}/sanitized-import", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await firstHistoryReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var input = page.Locator("#sanitized-import-file");
-        await input.SetInputFilesAsync(golden);
-        await page.Locator("#sanitized-import-preview-button").ClickAsync();
-        await firstPreviewReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await input.SetInputFilesAsync(alternate);
-        releaseFirstPreview.TrySetResult(true);
+        try
+        {
+            await page.GotoAsync($"{host.Url}/sanitized-import", new() { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await firstHistoryReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var input = page.Locator("#sanitized-import-file");
+            await input.SetInputFilesAsync(golden);
+            await page.Locator("#sanitized-import-preview-button").ClickAsync();
+            await firstPreviewReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await input.SetInputFilesAsync(alternate);
+            releaseFirstPreview.TrySetResult(true);
 
-        await Expect(page.Locator("#sanitized-import-preview")).ToBeHiddenAsync();
-        await Expect(page.Locator("#sanitized-import-error")).ToBeHiddenAsync();
-        await Expect(page.Locator("#sanitized-import-preview-button")).ToBeEnabledAsync();
-        var currentPreviewResponse = page.WaitForResponseAsync(response =>
-            response.Url.EndsWith("/api/sanitized-import/v1/previews", StringComparison.Ordinal) && response.Status == 200);
-        await page.Locator("#sanitized-import-preview-button").ClickAsync();
-        await currentPreviewResponse;
-        await Expect(page.Locator("#sanitized-import-commit-button")).ToBeEnabledAsync();
-        var commitResponse = page.WaitForResponseAsync(response =>
-            response.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal) && response.Request.Method == "POST");
-        await page.Locator("#sanitized-import-commit-button").ClickAsync();
-        Assert.Equal(201, (await commitResponse).Status);
+            await Expect(page.Locator("#sanitized-import-preview")).ToBeHiddenAsync();
+            await Expect(page.Locator("#sanitized-import-error")).ToBeHiddenAsync();
+            await Expect(page.Locator("#sanitized-import-preview-button")).ToBeEnabledAsync();
+            var currentPreviewResponse = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/sanitized-import/v1/previews", StringComparison.Ordinal) && response.Status == 200);
+            await page.Locator("#sanitized-import-preview-button").ClickAsync();
+            await currentPreviewResponse;
+            await Expect(page.Locator("#sanitized-import-commit-button")).ToBeEnabledAsync();
+            var commitResponse = page.WaitForResponseAsync(response =>
+                response.Url.EndsWith("/api/sanitized-import/v1/imports", StringComparison.Ordinal) && response.Request.Method == "POST");
+            await page.Locator("#sanitized-import-commit-button").ClickAsync();
+            Assert.Equal(201, (await commitResponse).Status);
 
-        await Expect(page.Locator("#sanitized-import-history tbody")).ToContainTextAsync("new-import");
-        releaseFirstHistory.TrySetResult(true);
-        await firstHistoryFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Expect(page.Locator("#sanitized-import-history tbody")).ToContainTextAsync("new-import");
-        await Expect(page.Locator("#sanitized-import-history tbody")).Not.ToContainTextAsync("old-import");
+            await Expect(page.Locator("#sanitized-import-history tbody")).ToContainTextAsync("new-import");
+            releaseFirstHistory.TrySetResult(true);
+            await firstHistoryFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Expect(page.Locator("#sanitized-import-history tbody")).ToContainTextAsync("new-import");
+            await Expect(page.Locator("#sanitized-import-history tbody")).Not.ToContainTextAsync("old-import");
+        }
+        finally
+        {
+            releaseFirstPreview.TrySetResult(true);
+            releaseFirstHistory.TrySetResult(true);
+        }
     }
 
     [Fact(Timeout = 60_000)]

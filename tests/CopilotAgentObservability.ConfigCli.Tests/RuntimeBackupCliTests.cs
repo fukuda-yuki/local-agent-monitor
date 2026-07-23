@@ -132,7 +132,7 @@ public sealed class RuntimeBackupCliTests
 
             var restored = Run(["runtime-backup", "restore", "--bundle", bundle, "--database", target]);
 
-            Assert.Equal(0, restored.Exit);
+            Assert.True(restored.Exit == 0, $"exit={restored.Exit}; error={restored.Error}");
             Assert.Equal(string.Empty, restored.Error);
             using var json = JsonDocument.Parse(restored.Output);
             var result = json.RootElement;
@@ -150,6 +150,92 @@ public sealed class RuntimeBackupCliTests
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT value FROM cli_probe;";
             Assert.Equal("source-value", command.ExecuteScalar());
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    [Fact]
+    public void Restore_honors_a_caller_selected_pre_restore_output_without_disclosing_its_path()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-cli-pre-restore-{Guid.NewGuid():N}");
+        var sourceDirectory = Directory.CreateDirectory(Path.Combine(root, "source")).FullName;
+        var targetDirectory = Directory.CreateDirectory(Path.Combine(root, "target")).FullName;
+        var source = Path.Combine(sourceDirectory, "source.db");
+        var target = Path.Combine(targetDirectory, "target.db");
+        var bundle = Path.Combine(sourceDirectory, "source.zip");
+        var preRestore = Path.Combine(targetDirectory, "operator-selected-pre-restore.zip");
+        try
+        {
+            CreateDatabase(source, "source-value");
+            CreateDatabase(target, "target-value");
+            Assert.Equal(0, Run(["runtime-backup", "create", "--database", source, "--output", bundle]).Exit);
+
+            var restored = Run([
+                "runtime-backup", "restore",
+                "--bundle", bundle,
+                "--database", target,
+                "--pre-restore-output", preRestore,
+            ]);
+
+            Assert.Equal(0, restored.Exit);
+            Assert.Equal(string.Empty, restored.Error);
+            Assert.True(File.Exists(preRestore));
+            using var json = JsonDocument.Parse(restored.Output);
+            Assert.True(json.RootElement.GetProperty("pre_restore_backup_created").GetBoolean());
+            Assert.DoesNotContain(JsonStrings(json.RootElement), value =>
+                value.Contains(root, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    [Fact]
+    public void Restore_incompatible_and_external_state_failures_use_fixed_exit_classes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-cli-exits-{Guid.NewGuid():N}");
+        var sourceDirectory = Directory.CreateDirectory(Path.Combine(root, "source")).FullName;
+        var targetDirectory = Directory.CreateDirectory(Path.Combine(root, "target")).FullName;
+        var source = Path.Combine(sourceDirectory, "source.db");
+        var target = Path.Combine(targetDirectory, "target.db");
+        var bundle = Path.Combine(sourceDirectory, "source.zip");
+        try
+        {
+            CreateDatabase(source, "source-value");
+            CreateDatabase(target, "target-value");
+            Assert.Equal(0, Run(["runtime-backup", "create", "--database", source, "--output", bundle]).Exit);
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = target, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE schema_version SET version=999 WHERE component='monitor';";
+                Assert.Equal(1, command.ExecuteNonQuery());
+            }
+
+            var incompatible = Run(["runtime-backup", "preview", "--bundle", bundle, "--database", target]);
+
+            Assert.Equal(3, incompatible.Exit);
+            Assert.Equal("restore_incompatible" + Environment.NewLine, incompatible.Error);
+            Assert.DoesNotContain(root, incompatible.Output + incompatible.Error, StringComparison.OrdinalIgnoreCase);
+
+            var proposalDrafts = Directory.CreateDirectory(Path.Combine(sourceDirectory, "proposal-apply", "drafts"));
+            File.WriteAllText(Path.Combine(proposalDrafts.FullName, "private-draft.json"), "private");
+            var blockedOutput = Path.Combine(sourceDirectory, "blocked.zip");
+
+            var external = Run(["runtime-backup", "create", "--database", source, "--output", blockedOutput]);
+
+            Assert.Equal(4, external.Exit);
+            Assert.Equal("external_runtime_state_active" + Environment.NewLine, external.Error);
+            Assert.DoesNotContain(root, external.Output + external.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(blockedOutput));
         }
         finally
         {

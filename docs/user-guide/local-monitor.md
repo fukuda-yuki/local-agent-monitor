@@ -13,7 +13,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 2 項目のみ）、下部に受信ステータスバッジがあり、診断はバッジ → ポップオーバー →
 「詳細診断を開く」の段階的動線で開きます（`/diagnostics` への直接アクセスも可能）。
 
-画面は次の 10 個です。
+画面は次の 11 個です。
 
 | 画面 | 開き方 | 内容 |
 |---|---|---|
@@ -27,6 +27,7 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 | 診断 | ステータスバッジ → ポップオーバー →「詳細診断を開く」 | 取り込みパイプライン 4 段の状態、コンポーネント確認、readiness しきい値、取り込み履歴、リポジトリメタデータ診断 |
 | 履歴インポート | 診断ページの「履歴インポート」カード → `/historical-import` | 明示的に選択した GitHub Copilot CLI / Claude Code の履歴 source を preview し、対応済み source のみ確認後に import。live Session と historical observation は別 tab で表示 |
 | サニタイズ済み証拠の取り込み | `/sanitized-import` へ直接アクセス | frozen v1 ZIP の preview、明示確定、取り込み結果、bounded history。raw telemetry は復元しない |
+| runtime backup と restore | 概要の「runtime backup と restore」→ `/backup-restore` | raw-bearing な online backup の作成・ダウンロードと archive の復元前検査。restore は Local Monitor を停止して Config CLI から実行 |
 
 主な API は次のとおりです。
 
@@ -42,8 +43,15 @@ UI は Console 型の構成です。左に 208px のサイドバー（ナビは 
 | `POST /api/alert-center/v1/evaluations` | exact Session + trace を利用者が明示指定する評価。自動評価ではなく、現行 source manifest では receipt を作らず suppression coverage を記録 |
 | `GET /traces/{traceId}/spans/{spanId}/detail` | スパンインスペクタ用の raw-bearing span 詳細（`--sanitized-only` 時は 404） |
 | `/api/sanitized-import/v1/*` | sanitized bundle の preview / 明示取り込み / history（same-origin、POST は CSRF header 必須） |
+| `POST /api/runtime-backup/v1/backups` | 稼働中 DB の online backup を作成（exact `{}`、CSRF header 必須） |
+| `GET /api/runtime-backup/v1/backups/{backup_id}` | online backup の作成結果を取得 |
+| `GET /api/runtime-backup/v1/backups/{backup_id}/archive` | process-owned backup archive をダウンロード |
+| `POST /api/runtime-backup/v1/previews` | 選択した backup ZIP の互換性と offline restore 前提を preview（`application/zip`、CSRF header 必須） |
 | `/api/doctor/*` | source-independent な Doctor evaluation / verification の 5 route（後述、UI なし） |
 | `/api/historical-import/v1/*` | 履歴 import の preview / confirmation / result / history / observation（sanitized、no-store） |
+
+HTTP restore endpoint はありません。restore は Local Monitor を停止し、Config CLI の
+`runtime-backup restore` だけで実行します。
 
 API（`/api/monitor/*`）と SSE は **sanitized metadata のみ** を返します（プロンプトを含みません）。
 raw body（tool arguments / results、sub-agent instructions / responses、system prompt）と PII は
