@@ -1,7 +1,8 @@
 # Static Dashboard
 
 Static Dashboard は、収集したトレースデータの概要を一覧で確認するための静的な HTML 画面です。
-個別トレースの詳細は Langfuse や Local Monitor のトレース詳細画面で確認します。
+個別トレースの詳細は、Langfuse のトレース詳細画面、raw store、明示的に opt-in した場合の
+sensitive bundle、または Local Ingestion Monitor で確認します。
 
 ## 生成フロー
 
