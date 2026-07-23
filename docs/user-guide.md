@@ -65,17 +65,18 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- sanitized-import
 
 同じ取り込み操作は Local Monitor 画面の `/sanitized-import` タブからも行えます。事前にプレビュー情報（件数、競合の有無）を確認してから安全に取り込むことができます。
 
-## Claude Code の guided setup
+## Claude Code のガイド付きセットアップ
 
-Claude Code 2.1.207 以上では、対象にする Claude project の root へ移動してから、設定値や path そのものを含まない redacted な member state、operation、対象 label を表示する plan を作成します。setup は実行 directory 直下の `.claude/settings.local.json` と `.claude/settings.json` だけを確認し、親 directory、子 directory、Git root、`--add-dir` の project は探索しません。plan だけでは設定を書き換えません。
+Claude Code（2.1.207 以上）を設定する場合は、対象となる Claude プロジェクトのルートディレクトリに移動し、設定変更計画（plan）を作成します。事前計画を出力することで、意図しない設定変更を防ぐことができます。
 
 ```powershell
 pwsh scripts\local-monitor\setup.ps1 plan --adapter claude-code --target cli
 ```
 
-interactive CLI と `claude -p` は同じ user settings を使います。既定 plan は OTel の prompt / tool content gate を変更しませんが、mapper 対応済み Hook は raw-bearing event を取得し得るため、`claude_hooks_capture_raw_content` warning を確認してください。OTel content gate も明示的に有効化する場合だけ `--include-content-capture` を追加します。
+対話型 CLI と `claude -p`（非対話モード）は同じユーザー設定を共有します。デフォルトの計画では OpenTelemetry のプロンプト/ツール内容の出力変更は行われません。
 
-WSL2 から実行する場合は、WSL 内の process から Local Monitor の loopback readiness に到達できることを確認し、`--allow-wsl2-routing` を明示します。Windows native ではこの option を指定しません。gateway / non-loopback fallback はありません。Agent SDK は `--target app-sdk` で Python / TypeScript の caller-managed guidance を確認できますが、setup はアプリケーションコードを書き換えません。plan 後の apply / rollback は返された change-set ID を使います。setup 完了は static configuration の確認であり、first real trace / Doctor の成功を意味しません。
+> [!NOTE]
+> 設定スクリプト実行直後の成功判定は設定ファイルの静的更新成功を意味します。実際のテレメトリ受信用設定の完了は、Local Monitor 画面上でのトレース受領確認（動的確認）によって判定してください。
 
 ## 最小の安全ルール
 

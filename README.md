@@ -167,7 +167,7 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 
 ## GitHub Copilot のガイド付きセットアップ
 
-Config CLI の復元可能なセットアップ（reversible setup）は、変更内容を事前にマスキング済み計画（redacted plan）として保存し、返された `change_set_id` を指定した場合にのみ適用されます。
+Config CLI による自動セットアップは、設定変更前にマスキング済みの変更計画を出力し、返された `change_set_id` を指定した場合にのみ安全に適用されます。
 
 ```powershell
 pwsh -ExecutionPolicy Bypass scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
@@ -191,13 +191,13 @@ Windows x64 Release ZIP では、同じ引数を `.\scripts\setup.ps1` に渡し
 
 ## クイックスタート（Docker Desktop + Langfuse）
 
-1. Docker Desktop を起動し、Langfuse self-host をローカルで起動する
-2. Langfuse でプロジェクトと API key を作成する
-3. Config CLI で VS Code / Copilot CLI 向けの OTel 設定を出力する
-4. VS Code Copilot Chat または Copilot CLI を OTel 設定付きで起動する
-5. 検証用または合成データのみで Copilot を実行する
-6. Langfuse UI でトレースを確認する
-7. saved raw OTLP JSON がある場合は raw data loop と static dashboard を生成する
+1. Docker Desktop を起動し、Langfuse self-host をローカルで起動します。
+2. Langfuse 上でプロジェクトを作成し、API キーを発行します。
+3. Config CLI で VS Code / Copilot CLI 向けの OTel 設定を出力します。
+4. VS Code Copilot Chat または Copilot CLI を OTel 設定付きで起動します。
+5. 検証用または合成データのみで Copilot を実行します。
+6. Langfuse UI でリアルタイムにトレースを確認します。
+7. 保存済みの raw OTLP JSON がある場合は、raw data loop と static dashboard を生成します。
 
 ```powershell
 # VS Code / CLI 向け設定を出力
