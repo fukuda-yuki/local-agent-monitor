@@ -125,6 +125,113 @@ public sealed class HistoricalAnalysisCoordinatorTests
     }
 
     [Fact]
+    public async Task ResolveEvidence_IndexesMetadataOnlyDurationAndModelReferencesByTokenMembership()
+    {
+        using var temp = new MonitorTempDirectory();
+        var baseline = Metadata(1);
+        var durationA = new HistoricalRawEvidenceReferenceV1(
+            baseline.SessionId, "trace-a", "duration-span-a", 1, HistoricalEvidenceRelativePositionV1.Anchor);
+        var durationB = new HistoricalRawEvidenceReferenceV1(
+            baseline.SessionId, "trace-b", "duration-span-b", 2, HistoricalEvidenceRelativePositionV1.Anchor);
+        var model = new HistoricalRawEvidenceReferenceV1(
+            baseline.SessionId, "model-trace", "model-span", 3, HistoricalEvidenceRelativePositionV1.Anchor);
+        var metadata = baseline with
+        {
+            EvidenceLocations =
+            [
+                .. baseline.EvidenceLocations,
+                Location(durationA),
+                Location(durationB),
+                Location(model),
+            ],
+            DurationObservations =
+            [
+                new(100, durationA),
+                new(100, durationB),
+            ],
+            ModelObservations = [new("model-a", model)],
+        };
+        var owner = Owner(temp, new PreviewSnapshotSource([metadata]));
+        var coordinator = new HistoricalAnalysisCoordinatorV1(owner);
+        var preview = await CreatePreview(coordinator);
+        var extraction = Assert.IsType<HistoricalEvidenceExtractionV1>(owner.Get(preview.ExtractionId));
+        var raw = Assert.Single(extraction.RawLocal.Sessions);
+        var safe = Assert.Single(extraction.RepositorySafe.Sessions);
+        var tokenizedRawDurationOrder = raw.Metadata.DurationObservations
+            .Select(value => InstructionFindingReferenceTokenizationV1.TokenizeTrace(value.EvidenceRef.TraceId));
+        Assert.False(tokenizedRawDurationOrder.SequenceEqual(
+            safe.Metadata.DurationObservations.Select(value => value.EvidenceRef.TraceId)));
+
+        var response = coordinator.ResolveEvidence(new(
+            HistoricalAnalysisContractsV1.EvidenceResolveRequestSchemaVersion,
+            preview.ExtractionId,
+            preview.RepositorySafeSha256,
+            [
+                InstructionFindingReferenceTokenizationV1.TokenizeTrace("trace-a"),
+                Tokenized(durationB).SpanId!,
+                InstructionFindingReferenceTokenizationV1.TokenizeTrace("model-trace"),
+                Tokenized(model).SpanId!,
+            ]));
+
+        Assert.Equal(
+            [
+                "/traces/trace-a",
+                "/traces/trace-b?span=duration-span-b",
+                "/traces/model-trace",
+                "/traces/model-trace?span=model-span",
+            ],
+            response.Resolutions.Select(value => value.Target));
+        Assert.All(response.Resolutions, value => Assert.Equal("resolved", value.ResolutionState));
+    }
+
+    [Fact]
+    public async Task ResolveEvidence_IndexesExistingExcludedSessionsButKeepsMissingSessionNonNavigable()
+    {
+        using var temp = new MonitorTempDirectory();
+        var sessions = new[]
+        {
+            Metadata(1),
+            Metadata(2),
+            Metadata(3),
+            Metadata(4) with { Repository = "repo-b" },
+        };
+        var missing = Guid.Parse("018f0000-0000-7000-8000-000000000099");
+        var source = new PreviewSnapshotSource(sessions);
+        var owner = Owner(temp, source);
+        var coordinator = new HistoricalAnalysisCoordinatorV1(owner);
+        var preview = await coordinator.PreviewAsync(
+            new(
+                HistoricalAnalysisContractsV1.PreviewRequestSchemaVersion,
+                new("repo-a", null, null, null, [sessions[3].SessionId, missing], [], null, null, 2, false)),
+            CancellationToken.None);
+        var window = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.WindowTruncated);
+        var filter = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.FilterMismatch);
+        var missingReference = Assert.Single(
+            preview.Excluded,
+            value => value.Reason == HistoricalSessionExclusionReasonV1.MissingSessionReference);
+
+        var response = coordinator.ResolveEvidence(new(
+            HistoricalAnalysisContractsV1.EvidenceResolveRequestSchemaVersion,
+            preview.ExtractionId,
+            preview.RepositorySafeSha256,
+            [filter.SessionId, missingReference.SessionId, window.SessionId]));
+
+        Assert.Equal(
+            [
+                "/diagnostics?session_id=018f0000-0000-7000-8000-000000000004",
+                null,
+                "/diagnostics?session_id=018f0000-0000-7000-8000-000000000001",
+            ],
+            response.Resolutions.Select(value => value.Target));
+        Assert.Equal(["resolved", "missing", "resolved"], response.Resolutions.Select(value => value.ResolutionState));
+        Assert.Equal([sessions[1].SessionId, sessions[2].SessionId], source.ReadSessionIds);
+    }
+
+    [Fact]
     public async Task EfficiencyRun_ApplicationCancellationCompletesCanceledAndDoesNotLeakTask()
     {
         using var temp = new MonitorTempDirectory();
@@ -386,6 +493,22 @@ public sealed class HistoricalAnalysisCoordinatorTests
             [new(id, $"trace-{number}", $"span-{number}", 1, HistoricalEvidenceRelativePositionV1.Anchor)],
             []);
     }
+
+    private static HistoricalEvidenceLocationV1 Location(HistoricalRawEvidenceReferenceV1 reference) =>
+        new(
+            reference.SessionId,
+            reference.TraceId,
+            reference.SpanId,
+            reference.TurnIndex,
+            reference.RelativePosition);
+
+    private static InstructionEvidenceReferenceV1 Tokenized(HistoricalRawEvidenceReferenceV1 reference) =>
+        InstructionFindingReferenceTokenizationV1.Tokenize(new(
+            reference.SessionId.ToString(),
+            reference.TraceId,
+            reference.SpanId,
+            reference.TurnIndex,
+            (InstructionEvidenceRelativePositionV1)(int)reference.RelativePosition));
 
     private sealed class PreviewSnapshotSource(IReadOnlyList<HistoricalSessionMetadataV1> sessions)
         : IHistoricalEvidenceSnapshotSourceV1

@@ -39,13 +39,11 @@ internal sealed class HistoricalAnalysisEvidenceResolverV1
         {
             var safe = extraction.RepositorySafe.Sessions[index];
             var raw = extraction.RawLocal.Sessions[index];
-            Add(
-                candidates,
-                safe.SessionId,
-                new(
-                    $"/diagnostics?session_id={Uri.EscapeDataString(raw.SessionId)}",
-                    SessionWire.ToWire(safe.ContentState)));
+            AddSessionCandidate(candidates, raw.SessionId, safe.SessionId, safe.ContentState);
+            AddMetadataCandidates(candidates, raw.Metadata, safe.Metadata);
         }
+
+        AddExcludedSessionCandidates(candidates, extraction);
 
         for (var groupIndex = 0; groupIndex < extraction.RepositorySafe.EvidenceGroups.Count; groupIndex++)
         {
@@ -54,37 +52,117 @@ internal sealed class HistoricalAnalysisEvidenceResolverV1
             var safeReferences = safeGroup.References.ToHashSet();
             foreach (var raw in rawGroup.References)
             {
-                var tokenized = InstructionFindingReferenceTokenizationV1.Tokenize(new(
-                    raw.SessionId,
-                    raw.TraceId,
-                    raw.SpanId,
-                    raw.TurnIndex,
-                    (InstructionEvidenceRelativePositionV1)(int)raw.RelativePosition));
-                var safe = new HistoricalEvidenceReferenceV1(
-                    tokenized.SessionId!,
-                    tokenized.TraceId,
-                    tokenized.SpanId,
-                    tokenized.TurnIndex,
-                    raw.RelativePosition);
+                var safe = TokenizeReference(raw);
                 if (!safeReferences.Contains(safe))
                     throw new HistoricalEvidenceValidationException(
                         HistoricalEvidenceValidationCodeV1.InvalidPersistence);
-                Add(
-                    candidates,
-                    safe.TraceId,
-                    new($"/traces/{Uri.EscapeDataString(raw.TraceId)}", "not_applicable"));
-                if (safe.SpanId is not null && raw.SpanId is not null)
-                {
-                    Add(
-                        candidates,
-                        safe.SpanId,
-                        new(
-                            $"/traces/{Uri.EscapeDataString(raw.TraceId)}?span={Uri.EscapeDataString(raw.SpanId)}",
-                            "not_applicable"));
-                }
+                AddReferenceCandidates(candidates, raw, safe);
             }
         }
         return candidates;
+    }
+
+    private static void AddMetadataCandidates(
+        IDictionary<string, HashSet<Candidate>> candidates,
+        HistoricalDecisionMetadataV1 raw,
+        HistoricalDecisionMetadataV1 safe)
+    {
+        var safeModels = safe.ModelObservations.ToHashSet();
+        foreach (var observation in raw.ModelObservations)
+        {
+            var safeReference = TokenizeReference(observation.EvidenceRef);
+            var safeObservation = new HistoricalModelObservationV1(
+                HistoricalEvidenceExtractorV1.TokenizeLabel("model", observation.Model)!,
+                safeReference);
+            if (!safeModels.Contains(safeObservation))
+                throw new HistoricalEvidenceValidationException(
+                    HistoricalEvidenceValidationCodeV1.InvalidPersistence);
+            AddReferenceCandidates(candidates, observation.EvidenceRef, safeReference);
+        }
+
+        var safeDurations = safe.DurationObservations.ToHashSet();
+        foreach (var observation in raw.DurationObservations)
+        {
+            var safeReference = TokenizeReference(observation.EvidenceRef);
+            var safeObservation = new HistoricalDurationObservationV1(
+                observation.DurationMs,
+                safeReference);
+            if (!safeDurations.Contains(safeObservation))
+                throw new HistoricalEvidenceValidationException(
+                    HistoricalEvidenceValidationCodeV1.InvalidPersistence);
+            AddReferenceCandidates(candidates, observation.EvidenceRef, safeReference);
+        }
+    }
+
+    private static void AddExcludedSessionCandidates(
+        IDictionary<string, HashSet<Candidate>> candidates,
+        HistoricalEvidenceExtractionV1 extraction)
+    {
+        for (var index = 0; index < extraction.RepositorySafe.ExcludedSessions.Count; index++)
+        {
+            var safe = extraction.RepositorySafe.ExcludedSessions[index];
+            var raw = extraction.RawLocal.ExcludedSessions[index];
+            if (safe.Reason is not HistoricalSessionExclusionReasonV1.FilterMismatch
+                and not HistoricalSessionExclusionReasonV1.WindowTruncated)
+                continue;
+            if (raw.Metadata is null || safe.Metadata is null)
+                throw new HistoricalEvidenceValidationException(
+                    HistoricalEvidenceValidationCodeV1.InvalidPersistence);
+            AddSessionCandidate(
+                candidates,
+                raw.SessionId,
+                safe.SessionId,
+                safe.Metadata.ContentState);
+        }
+    }
+
+    private static void AddSessionCandidate(
+        IDictionary<string, HashSet<Candidate>> candidates,
+        string rawSessionId,
+        string safeSessionId,
+        SessionContentState contentState) =>
+        Add(
+            candidates,
+            safeSessionId,
+            new(
+                $"/diagnostics?session_id={Uri.EscapeDataString(rawSessionId)}",
+                SessionWire.ToWire(contentState)));
+
+    private static void AddReferenceCandidates(
+        IDictionary<string, HashSet<Candidate>> candidates,
+        HistoricalEvidenceReferenceV1 raw,
+        HistoricalEvidenceReferenceV1 safe)
+    {
+        Add(
+            candidates,
+            safe.TraceId,
+            new($"/traces/{Uri.EscapeDataString(raw.TraceId)}", "not_applicable"));
+        if (safe.SpanId is not null && raw.SpanId is not null)
+        {
+            Add(
+                candidates,
+                safe.SpanId,
+                new(
+                    $"/traces/{Uri.EscapeDataString(raw.TraceId)}?span={Uri.EscapeDataString(raw.SpanId)}",
+                    "not_applicable"));
+        }
+    }
+
+    private static HistoricalEvidenceReferenceV1 TokenizeReference(
+        HistoricalEvidenceReferenceV1 raw)
+    {
+        var tokenized = InstructionFindingReferenceTokenizationV1.Tokenize(new(
+            raw.SessionId,
+            raw.TraceId,
+            raw.SpanId,
+            raw.TurnIndex,
+            (InstructionEvidenceRelativePositionV1)(int)raw.RelativePosition));
+        return new(
+            tokenized.SessionId!,
+            tokenized.TraceId,
+            tokenized.SpanId,
+            tokenized.TurnIndex,
+            raw.RelativePosition);
     }
 
     private static void Add(
