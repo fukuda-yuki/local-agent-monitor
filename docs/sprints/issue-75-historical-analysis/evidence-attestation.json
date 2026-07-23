@@ -1,0 +1,38 @@
+{
+  "schema_version": "evidence-attestation.v1",
+  "issue": 75,
+  "functional_candidate_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+  "evidence_materialization_sha": "fb25065973e42d5f85a64c8ff108c82b132002aa",
+  "evidence_materialization_parent_sha": "23c5212e0bf0bf05885930974e53d051d731e117",
+  "relationship": "The evidence materialization is a docs-only child of the exact functional candidate; it does not change production, specification, fixture, or test behavior.",
+  "checksum_algorithm": "SHA-256",
+  "artifacts_at_evidence_materialization": [
+    {
+      "path": "docs/sprints/issue-75-historical-analysis/README.md",
+      "sha256": "abe6d2015aa68f43fe56dcf44528d2f98b4c4d08e0e9a7c1250da13c39952e27"
+    },
+    {
+      "path": "docs/sprints/issue-75-historical-analysis/validation-matrix.json",
+      "sha256": "00110e1269c151731ec22386b76194790f5a98fa6a6ab6d1b2d03505a2fd94c7"
+    },
+    {
+      "path": "docs/sprints/issue-75-historical-analysis/milestones/M1-historical-analysis/live-validation.md",
+      "sha256": "962d1524e04290ed3aec9c598364a54798bed4f10d3fddbc932f3252ee219e6b"
+    },
+    {
+      "path": "docs/specifications/contracts/historical-analysis/v1/issue-91-validation-handoff.json",
+      "sha256": "73517a06fb6f890b9141493166c10c72c1ba0fe30a2e8e515fdbe156c5ec33ad"
+    }
+  ],
+  "verification": {
+    "materialization_parent_matches_candidate": true,
+    "artifact_existence_and_checksums": "passed",
+    "matrix_validator": "passed: rows=3 decision=release_ready_with_external_blockers",
+    "evidence_scanner": "passed: files=3 variants=354 matches=0"
+  },
+  "publication": {
+    "local_only": true,
+    "pushed": false,
+    "pull_request_created_or_updated": false
+  }
+}
