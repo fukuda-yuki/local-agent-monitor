@@ -114,6 +114,14 @@ Successful later runs do not erase these required failures:
   read sidecars before the new restored-target guard was reacquired. Exact
   empty-sidecar cleanup before guard reacquisition corrected the cause;
   RuntimeBackupRestore then passed 99/99 and Local Monitor passed 3,074/3,074.
+- Later #92 and #94 full-solution runs each timed out in the unchanged #88
+  Playwright navigation check after the destination URL had already matched.
+  Both stacks entered Playwright 1.61 `WaitForLoadStateAsync`; their call logs
+  observed only the later `NetworkIdle` event after the default `Load` event
+  had been missed. Focused retries and the HTTP surface matrix passed, but do
+  not erase those two failures. The test now uses a web-first URL assertion
+  followed by the existing destination-heading readiness assertion; production
+  behavior and the runtime backup contract are unchanged.
 
 Final review also corrected the two-phase monitor startup lease, retention-only
 unknown/future/malformed component rejection, relevant-owner-marker bounds,

@@ -21,6 +21,21 @@ public sealed class RetentionCatalogMigrationFixtureTests
     private static readonly string[] ReviewedRetentionIdentities = ["retention/retention-catalog-v1.sqlite"];
 
     [Fact]
+    public void CommittedRetentionFixtureConnection_IsReadOnlyNonPooledAndAllowsHashingWhileOpen()
+    {
+        var schemaRoot = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations");
+        var fixture = Assert.Single(ReadManifest(Path.Combine(schemaRoot, "retention", "manifest.json")).Fixtures);
+        var fixturePath = Path.Combine(schemaRoot, "retention", fixture.File);
+
+        using var connection = OpenCommittedFixture(fixturePath);
+        var options = new SqliteConnectionStringBuilder(connection.ConnectionString);
+
+        Assert.Equal(SqliteOpenMode.ReadOnly, options.Mode);
+        Assert.False(options.Pooling);
+        Assert.Equal(fixture.Sha256, Hash(fixturePath));
+    }
+
+    [Fact]
     public void Committed_fixture_manifests_enumerate_every_reviewed_source_and_the_retention_catalog_v1_fixture()
     {
         var schemaRoot = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations");
@@ -39,7 +54,7 @@ public sealed class RetentionCatalogMigrationFixtureTests
         Assert.Equal("00000000000000000000000000000089", fixture.Sentinels.StoreInstanceId);
         Assert.Equal(1, fixture.Sentinels.CatalogSchemaVersion);
         Assert.Equal(0, fixture.Sentinels.ItemCount);
-        using (var fixtureConnection = Open(Path.Combine(schemaRoot, "retention", fixture.File)))
+        using (var fixtureConnection = OpenCommittedFixture(Path.Combine(schemaRoot, "retention", fixture.File)))
             Assert.Equal(fixture.IntegrityCheck, Scalar<string>(fixtureConnection, "PRAGMA integrity_check;"));
 
         var sessionIdentities = session.Fixtures.Select(entry => $"session/{entry.File}").ToArray();
@@ -405,6 +420,17 @@ public sealed class RetentionCatalogMigrationFixtureTests
     private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+    private static SqliteConnection OpenCommittedFixture(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        return connection;
+    }
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Pooling=False"); connection.Open(); return connection; }
     private static bool TableExists(string path, string table) { using var connection = Open(path); return TableExists(connection, table); }
     private static bool TableExists(SqliteConnection connection, string table) { using var command = connection.CreateCommand(); command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", table); return Convert.ToInt64(command.ExecuteScalar()) == 1; }

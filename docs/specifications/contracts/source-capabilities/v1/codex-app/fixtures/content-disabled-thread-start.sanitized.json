@@ -1,0 +1,76 @@
+{
+  "schema_version": "codex-app-otel-sanitized-fixture.v1",
+  "fixture_id": "content-disabled-thread-start",
+  "source_surface": "codex-app",
+  "observed_producer": "standalone_app_server",
+  "producer_version": "0.145.0",
+  "producer_version_source": "cli_version_command",
+  "capture_profile": "content_disabled",
+  "driver": "public_app_server_protocol",
+  "routing": {
+    "configuration": "per_command_overrides_only",
+    "receiver": "disposable_loopback",
+    "global_configuration_loaded_by_process": true,
+    "global_configuration_values_inspected": false,
+    "global_configuration_written": false,
+    "overridden_key_names": [
+      "otel.log_user_prompt",
+      "otel.environment",
+      "otel.exporter",
+      "otel.trace_exporter",
+      "otel.metrics_exporter",
+      "history.persistence",
+      "sqlite_home"
+    ],
+    "unoverridden_global_influence_excluded": false
+  },
+  "requests": [
+    {
+      "path": "/v1/traces",
+      "capture_profile_executed": true,
+      "observation": "observed",
+      "content_type": "application/json",
+      "count": 1
+    },
+    {
+      "path": "/v1/logs",
+      "capture_profile_executed": false,
+      "observation": "not_observed",
+      "content_type": null,
+      "count": null
+    }
+  ],
+  "signal_observation": {
+    "signal": "trace",
+    "scope_name": "codex-app-server",
+    "span_count": 7,
+    "thread_start_span_observed": true,
+    "thread_start_attribute_keys": [
+      "app_server.api_version",
+      "app_server.client_name",
+      "app_server.client_version",
+      "app_server.connection_id",
+      "rpc.method",
+      "rpc.request_id",
+      "rpc.system",
+      "rpc.transport"
+    ]
+  },
+  "protocol_binding": {
+    "thread_profile_executed": true,
+    "turn_profile_executed": false,
+    "native_thread_id_returned": true,
+    "native_turn_id_returned": null,
+    "otel_native_thread_id_observed": false,
+    "otel_native_turn_id_observed": null,
+    "generic_thread_id_observed": true,
+    "generic_thread_id_rejected_as_native": true
+  },
+  "content_safety": {
+    "raw_payload_retained": false,
+    "content_values_retained": false,
+    "identifier_values_retained": false,
+    "resource_attribute_values_retained": false,
+    "machine_paths_retained": false
+  }
+}

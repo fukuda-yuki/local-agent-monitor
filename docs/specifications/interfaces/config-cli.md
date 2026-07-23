@@ -36,6 +36,19 @@ config-cli doctor verification cancel --database <file> --verification-id <uuid-
 
 Configuration commands must emit placeholders instead of real credentials.
 
+The Codex App commands remain existing compatibility sample generators only.
+Issue #92 is `NO-GO` for Codex App Desktop production integration; these
+commands do not prove a supported source or authorize Issue #93. Several
+full-routing, Langfuse, and Collector samples enable log export, and pinned
+`rust-v0.145.0` tool-result logs carry
+arguments, output, and error text that may contain content or paths even when
+prompt logging is disabled. The generated Codex App
+log profiles are therefore not established as repository-safe or remote-safe.
+Issue #92 does not silently change their output. A safe default or explicitly
+non-content mechanism, exact detection, and separate authorization for any
+content-bearing profile must be defined and tested by a separately approved
+prerequisite specification before production-integration work starts.
+
 `--profile` uses the values defined in
 [collection-profiles.md](collection-profiles.md).
 When `--profile` is omitted, profile-aware commands read

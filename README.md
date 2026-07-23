@@ -1,6 +1,6 @@
 # Copilot Agent Observability
 
-GitHub Copilot Chat・Copilot CLI・Codex App の OpenTelemetry テレメトリを収集し、  
+GitHub Copilot Chat・Copilot CLI の OpenTelemetry テレメトリを収集し、
 **エージェントの動作をトレース・集計・診断の 3 つの視点で確認できる、ローカル完結型の観測ツール**です。
 
 ---
@@ -157,11 +157,10 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-dashboa
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-dashboard tmp\dashboard-demo\dashboard.json --out-dir tmp\dashboard-demo\site
 ```
 
-### オプション（必要な場合のみ）
-
-| 追加で必要なもの | 用途 |
-| --- | --- |
-| Codex App / app-server | Codex App のテレメトリも収集したい場合 |
+> [!WARNING]
+> Codex App Desktop integration は Issue #92 で `NO-GO` です。互換性維持の
+> legacy sample generator は対応済み surface を意味せず、log-export profile
+> は repository-safe な既定として使用できません。
 
 ---
 

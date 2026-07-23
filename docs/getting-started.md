@@ -62,8 +62,9 @@ dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-
 ```powershell
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-vscode-env
 dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-copilot-cli-env
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- langfuse-codex-app-config
 ```
+
+`langfuse-codex-app-config` は互換性維持のため残っている legacy sample generator ですが、上の代表的な実行例からは除外しています。Codex App Desktop integration に対する Issue #92 の結論は `NO-GO` です。この sample は log exporter を有効化し、prompt logging が無効でも tool arguments / output / error が content や path を含み得るため、repository-safe または remote-safe な既定として使用しないでください。
 
 ※ Langfuse の API キーや認証ヘッダー、シークレット情報はリポジトリへコミットしないでください。
 

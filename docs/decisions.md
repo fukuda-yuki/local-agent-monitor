@@ -2536,3 +2536,72 @@ unmarked/malformed/active owners untouched. The restore crash journal remains
 the sole owner of restore staging outside the database being swapped. The canonical
 interface is
 [runtime backup and restore](specifications/interfaces/runtime-backup-restore.md).
+
+## D072: Codex App Desktop production integration is NO-GO
+
+Status: Accepted (2026-07-24)
+
+Issue #92 is `NO-GO` for Codex App Desktop production integration. The
+validated tuple contains Desktop package `26.715.10079.0` and Codex
+CLI/app-server `0.145.0`, but those versions were detected independently. The
+Desktop-bundled producer binary was present, yet direct terminal execution was
+blocked by WindowsApps access control. The live producer was instead a
+standalone app-server driven through its public protocol. That successful
+standalone run does not replace the blocked Desktop-owned retry, and no
+evidence proved that the Desktop package owned its process, Session, window,
+thread, or turn.
+
+A content-disabled probe used per-command overrides only and a disposable
+loopback receiver. It observed OTLP JSON traces with source trace/span IDs,
+parent fields, and timing. Producer version `0.145.0` came from the public CLI
+version command; the observed `service.version` key value was not retained.
+Parent references outside the
+exported batch remain unresolved. A native protocol thread ID returned by
+`thread/start` was absent from the matching OTel span, and generic
+instrumentation `thread.id` is not accepted as the native Codex thread ID.
+Therefore the standalone attestation has exact OTel trace-to-span identity and
+an observed unbound native thread relation, but no authority for a `codex-app`
+adapter. Native turn correlation is `unverified` because no turn ran.
+Repository, workspace, cwd, process, timestamp, prompt, and arrival-order joins
+remain forbidden.
+
+A safe read-only OS process-tree diagnostic projected only process IDs, parent
+IDs, and executable paths and observed a package-root `codex.exe` process whose
+OS parent executable was also under that package root. It emitted no ID, path,
+or hash value and did not read command lines. It did not identify the child role
+or prove app-server identity, Desktop-owned OTel execution, an App
+Session/window relationship, or merge authority. An earlier command-line-
+reading attempt was invalidated and excluded; none of its values were retained.
+
+The v1 manifest cannot label a capability as standalone-only while excluding
+Desktop ownership. It therefore promotes only the independently observed
+source-version detector; trace and all Desktop-specific capabilities remain
+`unknown`. The standalone structural inventory is retained separately for a
+future approved discovery retry only. A manifest capability grants no content
+authority. Official Advanced Configuration and the pinned `rust-v0.145.0`
+implementation show tool-result log attributes for arguments, output, and error
+text even when prompt logging is disabled. Those values can be content- or
+path-bearing, so `log_user_prompt = false` alone is not a repository-safe log
+profile. Content-enabled capture was not
+authorized and no raw payload, identifier value, resource-attribute value,
+private App state, or machine path is committed.
+
+Several existing Codex App full-routing, Langfuse, and Collector configuration
+samples enable log export. Tool-result logs may include content- or path-bearing arguments,
+output, and error text even when prompt logging is disabled, so these generated log-export profiles are not
+established as repository-safe. Issue #92 does not silently change production
+samples. Safe default redesign or an explicitly non-content log mechanism,
+exact detection, and separate authorization for content-bearing profiles are a
+high-severity prerequisite blocker.
+
+Issue #92 implements no adapter, Setup, Doctor, or UI. Issue #93 production
+adapter, Setup, Doctor, UI, trace-manifest promotion, and future-registry
+activation remain blocked and must not start from this attestation. A separately
+approved discovery retry and prerequisite configuration specification must
+first establish Desktop-owned execution, a retained repository-safe replay
+harness, exact configuration/detection, safe log policy, source
+identity/parentage, and exact-or-explicitly-unbound native correlation.
+Codex CLI and generic standalone app-server remain out of scope.
+The future-surface registry remains `not_available`; activation requires a
+later production adapter and executable tests only after those prerequisites
+have been satisfied.

@@ -7,7 +7,6 @@ Copilot クライアントから OpenTelemetry テレメトリを収集する手
 ```text
 VS Code GitHub Copilot Chat
 GitHub Copilot CLI
-Codex App / app-server
         |
         | OTLP HTTP via collection profile
         v
@@ -176,6 +175,16 @@ $env:OTEL_RESOURCE_ATTRIBUTES="user.id=example-user,user.email=user@example.com,
 
 Codex App の OTel routing config は user-level `$HOME\.codex\config.toml` に置きます。
 project-local `.codex/config.toml` は routing source として扱いません。
+
+> [!WARNING]
+> Issue #92 の結論は Codex App Desktop production integration に対する
+> `NO-GO` です。以下の `profile-codex-app-config` と legacy Codex App
+> commands は既存互換の sample generator であり、対応済み source を意味しません。
+> 生成例は log exporter を有効にし、`log_user_prompt=false` でも
+> tool arguments / output / error が content や path を含み得ます。別途承認
+> された prerequisite specification が安全な既定または非 content mechanism
+> を定義して検証するまで、repository-safe / remote-safe な構成として
+> 使用しないでください。
 
 TOML 例:
 

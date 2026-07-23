@@ -1,0 +1,278 @@
+{
+  "schema_version": "codex-app-discovery.v1",
+  "source_surface": "codex-app",
+  "decision": "no_go",
+  "evaluated_on": "2026-07-24",
+  "kickoff_sha": "07dc219c4f5c5ef56e7810a23c6466a52e90aa97",
+  "validated_versions": {
+    "desktop_package": "26.715.10079.0",
+    "cli": "0.145.0",
+    "app_server_scope": "codex-app-server"
+  },
+  "surface_boundary": {
+    "inventory_target": "Codex App",
+    "observed_producer": "standalone_app_server",
+    "desktop_package_process_parent_relationship_observed": true,
+    "desktop_owned_execution_observed": false,
+    "desktop_to_producer_ownership_observed": false,
+    "standalone_app_server_is_not_desktop_support": true
+  },
+  "version_detection": {
+    "desktop_package": "public_package_metadata",
+    "cli": "codex_version_command",
+    "producer": "codex_version_command",
+    "package_install_location_resolved_for_execution_retry": true,
+    "absolute_install_path_value_retained": false,
+    "private_app_state_read": false,
+    "global_configuration_values_inspected": false
+  },
+  "configuration_contract": {
+    "mutation": "per_command_overrides_only",
+    "receiver": "disposable_loopback",
+    "content_capture": "disabled",
+    "global_configuration_loaded_by_process": true,
+    "global_configuration_values_inspected": false,
+    "global_configuration_written": false,
+    "overridden_key_names": [
+      "otel.log_user_prompt",
+      "otel.environment",
+      "otel.exporter",
+      "otel.trace_exporter",
+      "otel.metrics_exporter"
+    ],
+    "unoverridden_global_influence_excluded": false,
+    "strict_config_probe": "config_layer_observation_only_excluded_from_signal_and_capability_evidence"
+  },
+  "evidence": {
+    "official_documentation": [
+      "https://developers.openai.com/codex/config-reference/",
+      "https://developers.openai.com/codex/config-advanced/#observability-and-telemetry",
+      "https://developers.openai.com/codex/app-server/",
+      "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json",
+      "https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/core/src/tools/registry.rs",
+      "https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/otel/src/events/session_telemetry.rs"
+    ],
+    "sanitized_fixtures": [
+      "fixtures/content-disabled-initialize.sanitized.json",
+      "fixtures/content-disabled-thread-start.sanitized.json"
+    ],
+    "live_evidence_scope": "standalone_app_server_content_disabled_structure_only",
+    "desktop_bundled_producer_retry": {
+      "package_metadata_readable": true,
+      "binary_present": true,
+      "direct_execution": "blocked_windowsapps_access_control",
+      "standalone_substitution_allowed": false
+    },
+    "desktop_process_diagnostic": {
+      "classification": "non_authoritative_package_process_tree_observation",
+      "package_root_codex_process_observed": true,
+      "package_root_parent_process_relationship_observed": true,
+      "app_server_identity_observed": false,
+      "desktop_otel_execution_observed": false,
+      "pid_values_retained": false,
+      "path_values_retained": false,
+      "hash_values_retained": false,
+      "command_line_read": false,
+      "merge_authority": false,
+      "replay_template": "scripts/validation/issue-92/observe-desktop-process-tree.ps1"
+    },
+    "live_probe_attestation": {
+      "classification": "non_replayable_attestation",
+      "execution_environment": "Windows x64; PowerShell 7; codex-cli 0.145.0; public app-server stdio; disposable loopback JSON OTLP receiver",
+      "repository_safe_command_template": "codex -c <otel.log_user_prompt> -c <otel.environment> -c <otel.exporter> -c <otel.trace_exporter> -c <otel.metrics_exporter> app-server --listen stdio; thread/start additionally overrides <history.persistence> and <sqlite_home>",
+      "protocol_method_sequence": ["initialize", "initialized", "thread/start"],
+      "verbatim_command_retained": false,
+      "exact_ephemeral_harness_retained": false,
+      "raw_probe_output_retained": false,
+      "limitation": "Counts, identifier shapes, key names, and parent-membership results are retained as sanitized attestation only and cannot be independently regenerated from committed artifacts."
+    },
+    "excluded_attempts": [
+      "receiver_not_ready",
+      "early_standard_input_close",
+      "strict_config_with_existing_global_unknown_key_config_layer_observation_only",
+      "process_tree_attempt_that_read_command_line_excluded_no_values_retained"
+    ]
+  },
+  "content_boundary": {
+    "content_enabled_capture": "not_authorized",
+    "raw_payloads_committed": false,
+    "identifier_values_committed": false,
+    "resource_attribute_values_committed": false,
+    "official_log_events_can_contain_content_when_prompt_logging_is_disabled": true
+  },
+  "correlation": [
+    {
+      "mapping": "desktop_package_to_package_root_process_tree",
+      "status": "non_authoritative_diagnostic",
+      "evidence": "A safe replay using only process identifiers and executable paths observed a package-root Codex process with a package-root OS parent process; it did not identify the child role.",
+      "allowed_use": "Report the sanitized package-root process-tree relationship as a diagnostic only; it grants no app-server identity, telemetry ownership, or merge authority.",
+      "forbidden_fallbacks": ["process_match", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "app_package_to_app_server_process",
+      "status": "unverified",
+      "evidence": "The accepted safe process diagnostic did not read command lines or otherwise identify the child role; an earlier command-line-reading attempt was excluded.",
+      "allowed_use": "Keep app-server identity and Desktop telemetry ownership unverified.",
+      "forbidden_fallbacks": ["process_match", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "app_server_process_to_app_session",
+      "status": "unverified",
+      "evidence": "No Desktop-owned session or window was exercised.",
+      "allowed_use": "Keep App Session identity absent.",
+      "forbidden_fallbacks": ["process_match", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "protocol_thread_to_otel_trace",
+      "status": "unbound",
+      "evidence": "thread/start returned a native protocol thread identifier, but the matching OTel span did not carry that native identifier.",
+      "allowed_use": "Store the trace as exact OTel metadata with no native Session binding.",
+      "forbidden_fallbacks": ["generic_thread_id_as_native", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "protocol_turn_to_otel_span",
+      "status": "unverified",
+      "evidence": "The turn profile was not executed; native turn and OTel turn fields are unobserved and represented as null in sanitized fixtures.",
+      "allowed_use": "Make no turn-to-span support or absence claim.",
+      "forbidden_fallbacks": ["generic_thread_id_as_native", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "otel_trace_to_span",
+      "status": "exact",
+      "evidence": "Every observed span carried its source trace identifier.",
+      "allowed_use": "Use source-declared OTel trace and span identifiers.",
+      "forbidden_fallbacks": ["timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "otel_span_to_parent",
+      "status": "source_declared_partial",
+      "evidence": "Parent span identifier fields were emitted, while two references pointed outside the exported batch.",
+      "allowed_use": "Retain source-declared parentage and mark unresolved parents; do not synthesize roots.",
+      "forbidden_fallbacks": ["timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "concurrent_windows_or_threads",
+      "status": "unverified",
+      "evidence": "No concurrent Desktop window or protocol thread profile was executed.",
+      "allowed_use": "Expose no concurrency ownership claim.",
+      "forbidden_fallbacks": ["process_match", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    },
+    {
+      "mapping": "restart_resume_continuity",
+      "status": "unverified",
+      "evidence": "No Desktop restart, protocol restart, or resume profile was executed.",
+      "allowed_use": "Expose no continuity claim.",
+      "forbidden_fallbacks": ["process_match", "timestamp_match", "repository_match", "workspace_match", "cwd_match", "arrival_order"]
+    }
+  ],
+  "blocked_profiles": [
+    {
+      "profile_id": "desktop_bundled_producer_execution",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "WindowsApps access control denied direct execution of the present Desktop-bundled producer binary.",
+      "retry_condition": "Launch the Desktop-bundled producer through an authorized Desktop-owned path and capture content-disabled OTLP with a disposable loopback receiver.",
+      "unverified_capability": "Desktop-bundled producer telemetry execution."
+    },
+    {
+      "profile_id": "desktop_ownership_and_session",
+      "classification": "unverified",
+      "severity": "high",
+      "blocker": "A safe package-root child/parent process relationship was observed without identifying the child role; no Desktop-owned telemetry execution, App Session, or window was exercised.",
+      "retry_condition": "Execute an authorized Desktop-owned content-disabled run and observe an explicit source-owned process-to-Session relationship without private-state reads.",
+      "unverified_capability": "Desktop package ownership of the producer and App Session/window identity."
+    },
+    {
+      "profile_id": "native_thread_to_otel_binding",
+      "classification": "unverified",
+      "severity": "high",
+      "blocker": "The public protocol returned a native thread ID, but the corresponding OTel span did not carry it.",
+      "retry_condition": "Observe the same native thread identifier or an explicit source link on both the public protocol result and OTel evidence in one approved run.",
+      "unverified_capability": "Exact native thread to OTel trace binding."
+    },
+    {
+      "profile_id": "native_turn_to_otel_binding",
+      "classification": "unverified",
+      "severity": "high",
+      "blocker": "The turn profile was not executed, so native turn and OTel turn fields remain unobserved rather than observed-absent.",
+      "retry_condition": "Run a separately approved turn with log export disabled, or with a separately authorized and proven non-content log mechanism, and observe the same native turn identifier or explicit source link in public protocol and OTel evidence.",
+      "unverified_capability": "Exact native turn to OTel span binding."
+    },
+    {
+      "profile_id": "concurrent_windows_or_threads",
+      "classification": "unverified",
+      "severity": "medium",
+      "blocker": "No concurrent Desktop window or protocol thread profile was executed.",
+      "retry_condition": "Execute at least two concurrent approved Desktop-owned windows or protocol threads and prove isolation using only source-native exact identity.",
+      "unverified_capability": "Concurrent window/thread ownership and isolation."
+    },
+    {
+      "profile_id": "restart_resume_continuity",
+      "classification": "unverified",
+      "severity": "medium",
+      "blocker": "No Desktop restart, app-server restart, reconnect, or resume profile was executed.",
+      "retry_condition": "Execute approved restart, reconnect, and resume cases and observe explicit source-native continuity or an honest unbound result.",
+      "unverified_capability": "Restart, reconnect, and resume continuity."
+    },
+    {
+      "profile_id": "complete_signal_inventory",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "Only trace profiles were executed; log and metric profiles were not executed, and documented tool-result log events may carry content even when prompt logging is disabled.",
+      "retry_condition": "Obtain separate content authorization or establish an explicitly non-content log capture mechanism, then run trace, log, and metric exporters through disposable loopback receivers and inventory structures without retaining values.",
+      "unverified_capability": "Complete trace, log, and metric event inventory."
+    },
+    {
+      "profile_id": "semantic_field_inventory",
+      "classification": "unverified",
+      "severity": "high",
+      "blocker": "No turn, tool/file, shell, error, retry, permission, or full model/token profile was executed.",
+      "retry_condition": "Execute separately approved simple-turn, multi-turn, tool/file, shell, error, retry, and permission cases with log export disabled, or with a separately authorized and proven non-content log mechanism, and inventory key names and absence states.",
+      "unverified_capability": "Model, token, cache, reasoning token, tool, timing, TTFT, retry, error, permission, ownership, prompt/response, file, and diff fields."
+    },
+    {
+      "profile_id": "existing_generated_log_exporter_profiles",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "Several profile-codex-app-config and legacy full-routing, Langfuse, and Collector samples enable log export, while pinned rust-v0.145.0 tool-result logs include arguments, output, and error text that may contain content or paths even with prompt logging disabled.",
+      "retry_condition": "A separately approved prerequisite specification must disable generated log export by default or prove an explicitly non-content mechanism, define exact detection and plan tests, and require separate authorization for any content-bearing log profile before production-integration work starts.",
+      "unverified_capability": "Repository-safe generated Codex App routing configuration."
+    },
+    {
+      "profile_id": "content_enabled_delta",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "Content-enabled capture was outside the approved authorization.",
+      "retry_condition": "Obtain separate explicit authorization, use disposable loopback and private raw-local storage, then publish only leak-scanned repository-safe structural deltas.",
+      "unverified_capability": "Content-enabled field and event delta plus raw/sanitized boundary behavior."
+    }
+  ],
+  "production_integration_gate": {
+    "state": "blocked",
+    "implementation_scope": "no_production_integration",
+    "capability_level": "no_go",
+    "session_support_authorized": false,
+    "maximum_session_completeness": null,
+    "permitted_before_prerequisites": [],
+    "forbidden": [
+      "standalone_attestation_as_codex_app_authority",
+      "desktop_session_support_claim",
+      "full_completeness",
+      "heuristic_correlation",
+      "content_capture",
+      "private_state_read",
+      "unsupported_field_promotion",
+      "generic_standalone_app_server_support_claim"
+    ],
+    "blocked_until_retry": [
+      "production_adapter",
+      "trace_manifest_promotion",
+      "setup_integration",
+      "doctor_integration",
+      "ui_integration",
+      "future_registry_activation"
+    ],
+    "promotion_condition": "A separately approved discovery retry and prerequisite configuration contract must first establish Desktop-owned execution with a retained repository-safe replay harness, exact supported configuration and detection, safe log-export policy, source identity and parentage, and exact-or-explicitly-unbound native correlation."
+  }
+}

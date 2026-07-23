@@ -166,3 +166,86 @@ range and diff, inventory, migration corpus, focused tests, and pinned full
 validation; spec compliance and code quality passed with no blockers. Issue
 #89 is complete and close-ready; pin/delete-now remains the separate
 responsibility of Issue #90.
+
+## Post-close test-integrity correction
+
+The P1 integration validation later exposed a #89-owned test-only race while
+validating the local #92 candidate
+`e222efc6b0ab0440b161b8a1a2244acc0bc08150`. The exact solution test command
+failed in
+`RetentionStatusRouteTests.StatusRoute_FailsClosedWhenExposedCatalogFieldsAreNotDiagnosticSafe`
+with `ObjectDisposedException` for `SQLitePCL.sqlite3` at the direct test SQL
+helper's `ExecuteNonQuery` call. The candidate's #88 delta changed only a
+Playwright test and its evidence, so it did not cause this SQLite failure.
+
+The LocalMonitor test assembly had 78 process-global
+`SqliteConnection.ClearAllPools()` calls across 35 files while
+`RetentionStatusRouteTests` used three default-pooled direct connections.
+The failing test passed alone and in ten isolated runs, which ruled out its SQL
+and fixture content. A provider-level concurrency probe reproduced four
+disposed-handle failures in 80,000 default-pooled operations and eleven in
+120,000 phase-instrumented operations, all during command execution. The same
+80,000-operation probe with only `Pooling=false` changed had zero failures and
+zero other errors. The production `RetentionCatalogStore` and
+`SqliteSessionStore` connection policies were already non-pooled.
+
+The correction is therefore limited to
+`RetentionStatusRouteTests`: a contract test pins `Pooling=false`, all three
+direct connections use the one non-pooled helper, and cleanup removes only the
+test's exact database, WAL, and SHM files. That class no longer invokes
+`ClearAllPools`. Production code, product specifications, migrations, schemas,
+and runtime behavior are unchanged.
+
+### Correction validation ledger
+
+| Command or probe | Result |
+| --- | --- |
+| pooling contract test before correction | expected RED; 0 passed, 1 failed; `Expected: False`, `Actual: True` |
+| pooling contract test after correction | PASS; 1 passed, 0 failed, 0 skipped |
+| original failed status-route test, ten isolated runs | PASS; 10/10 |
+| all `RetentionStatusRouteTests` | PASS; 15 passed, 0 failed, 0 skipped |
+| first Retention namespace run in the fresh worktree | FAIL; 436 passed, 6 failed because the pinned Playwright browser was not installed |
+| `pwsh scripts\test\install-playwright-chromium.ps1` | PASS; exit 0 |
+| first Retention retry after browser installation | FAIL; 441 passed, 1 failed on the shared committed retention fixture lock described below |
+| exact failed fixture test, ten isolated runs | PASS; 10/10 |
+| first corrected Retention namespace run | PASS; 442 passed, 0 failed, 0 skipped; the prior 441 tests plus the new pooling contract |
+| two fixture read-only contract tests before the fixture correction | expected RED; 0 passed, 2 failed; both reported `Expected: ReadOnly`, `Actual: ReadWriteCreate` |
+| two fixture read-only contract tests after the fixture correction | PASS; 2 passed, 0 failed, 0 skipped; each hashed the committed fixture while its connection remained open |
+| exact three-class overlap after the fixture correction | PASS; 20/20 runs, with 12 passed, 0 failed, 0 skipped in every run |
+| final Retention namespace run after both corrections | PASS; 444 passed, 0 failed, 0 skipped |
+| scanner self-test | PASS; 118 transformation cases and 5 negative cases |
+| scanner over the four changed files | PASS; 4 files, 472 variants, 0 matches |
+| `git diff --check` | PASS |
+
+The shared-fixture failure was
+`RetentionFileCaptureSchemaTests.CreateSchema_AddsFileCaptureReservationAndMemberTablesToTheCommittedRetentionV1Fixture`.
+Its exact stack was `System.IO.IOException` from
+`SafeFileHandle.CreateFile` through `File.OpenHandle` and
+`File.ReadAllBytes`, terminating at
+`RetentionFileCaptureSchemaTests.cs:20`. `File.ReadAllBytes` could not open
+`retention-catalog-v1.sqlite` while another parallel #89 fixture test held the
+same committed fixture through a default read/write SQLite open. A three-test
+parallel overlap probe that included the file-capture, catalog-manifest, and
+worker-migration fixture tests produced one failed run in twenty. A controlled
+temporary-copy probe confirmed the Windows sharing boundary: an open
+read/write SQLite connection blocked `File.ReadAllBytes`, while an otherwise
+identical read-only connection allowed it. This is a separate latent #89
+parallel fixture-read artifact; the status-route correction uses unique
+temporary databases and neither opens nor copies the committed fixture, so it
+is not causal.
+
+The second correction remains test-only. The catalog-manifest test now uses a
+dedicated `Mode=ReadOnly;Pooling=false` helper only for its direct committed
+retention-fixture integrity read; its general helper keeps the prior mutable
+default for temporary migration copies. The worker migration/query-plan test
+helper is now `Mode=ReadOnly;Pooling=false` because every call through that
+helper is `SELECT`, `PRAGMA`, or `EXPLAIN`. Two contract tests pin both
+connection-string properties and hash the committed fixture before disposing
+the open read-only connection. Existing manifest SHA-256, byte-length,
+integrity, sentinel, migration-source hash, and source-evidence immutability
+assertions remain in place. No retry, collection serialization, or file-share
+workaround was added.
+
+Final full-solution validation is intentionally left to the integration
+coordinator after the correction receives an exact local commit SHA. No retry
+above replaces or erases either recorded failure.

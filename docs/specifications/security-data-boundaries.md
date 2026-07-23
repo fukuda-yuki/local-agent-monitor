@@ -915,6 +915,61 @@ available. Later adapters must preserve these boundaries while emitting the
 required provenance; the contract itself authorizes no new receiver, adapter,
 database, migration, HTTP, proxy, or UI DTO.
 
+Issue #92 Codex App discovery is structural and content-disabled. It may use
+only per-command overrides and a disposable loopback receiver. Codex loads the
+user configuration before layering overrides; Issue #92 did not inspect its
+values or write it. The exact overridden keys were `otel.log_user_prompt`,
+`otel.environment`, `otel.exporter`, `otel.trace_exporter`, and
+`otel.metrics_exporter`; the thread-start run also overrode
+`history.persistence` and `sqlite_home`. Other influence from the loaded global
+layer was not excluded. Issue #92 did not read private App databases, caches,
+histories, or content. The Desktop execution retry resolved the package
+InstallLocation and package-relative producer binary locally; no absolute path
+value was retained or committed. Committed fixtures contain field names,
+counts, version metadata, identifier shapes, and relationship states only.
+They contain no raw OTLP body, identifier value,
+resource-attribute value, prompt/response, tool body, credential, PII, or
+machine path.
+
+A read-only process-tree replay template may inspect package metadata, process
+IDs, parent IDs, and executable paths only in memory. It explicitly projects
+those process properties and does not request or read command lines. It emits
+fixed booleans and never emits or retains process IDs, paths, or hashes. The
+observed package-root `codex.exe` child/parent relationship is diagnostic-only:
+it does not identify the child role and grants no app-server identity, Desktop
+telemetry, Session identity, or merge authority. An earlier command-line-
+reading diagnostic was invalidated and excluded; none of its values were
+retained.
+
+`log_user_prompt = false` is not a general repository-safe log guarantee:
+official Advanced Configuration and the pinned `rust-v0.145.0` implementation
+show tool-result log arguments, output, and error text independently from raw
+prompt export. Those values can contain content or paths. Content-enabled
+capture requires separate authorization and was not
+authorized for Issue #92. No documentation-only field or unexecuted signal is
+promoted to available solely because it is listed by the producer.
+
+Issue #92 itself adds no production adapter, Setup, Doctor, or UI integration.
+Issue #93 production adapter, Setup, Doctor, UI, trace-manifest promotion, and
+future-registry activation remain blocked and must not start from this
+attestation. A separately approved discovery retry and prerequisite
+configuration specification must first establish Desktop-owned, independently
+replayable evidence and exact configuration/detection and safe-log conditions.
+Production integration must not expose content, read private state, promote
+unsupported fields, infer Desktop ownership, or join
+App/app-server/Session evidence by process, repository, workspace, cwd,
+timestamp, prompt similarity, or arrival order.
+
+Several existing Codex App full-routing, Langfuse, and Collector configuration
+generators enable log export. Since tool-result log arguments, output, and error text may carry
+content or paths even with prompt logging disabled, these log-export profiles
+are not currently
+established as repository-safe. They are a high-severity blocker, not approved
+Issue #92 configuration. Issue #92 does not modify the production generators;
+a separately approved prerequisite specification must first define and test a
+safe default or explicitly non-content mechanism, and any content-bearing
+alternative requires separate authorization.
+
 `POST /api/session-ingest/v1/events` accepts raw-bearing SDK/Hook event payloads.
 Requests require JSON and `X-CAO-Session-Event-Version: 1`, are bounded to 1 MiB
 and 1..100 events, and return `204` only after commit. Fixed error responses use

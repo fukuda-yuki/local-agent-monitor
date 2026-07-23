@@ -1,0 +1,32 @@
+{
+  "schema_version": "issue-92-artifact-checksums.v1",
+  "candidate_base": "07dc219c4f5c5ef56e7810a23c6466a52e90aa97",
+  "algorithm": "SHA-256",
+  "verification_date": "2026-07-24",
+  "artifacts": [
+    {
+      "path": "docs/specifications/contracts/source-capabilities/v1/codex-app/discovery-inventory.json",
+      "sha256": "cca102ab34b8af5682d31744503f26b0d6d065be8625434351b04ec38efc9bbb"
+    },
+    {
+      "path": "docs/specifications/contracts/source-capabilities/v1/codex-app/fixtures/content-disabled-initialize.sanitized.json",
+      "sha256": "8ab410ba42b88f4cf3c60033b808a7b501eeaf81e680486b6519303a9c8b9f6e"
+    },
+    {
+      "path": "docs/specifications/contracts/source-capabilities/v1/codex-app/fixtures/content-disabled-thread-start.sanitized.json",
+      "sha256": "90eef2c723a8ca706d0cfed1a657a4ec699f2b333905d4fff157edf2afa0715c"
+    },
+    {
+      "path": "docs/specifications/contracts/source-capabilities/v1/codex-app/exact-correlation.md",
+      "sha256": "5c6f7437cac2ef2ff38277c7efe6cf35c7e3982dca39083251d087ba61b548df"
+    },
+    {
+      "path": "scripts/validation/issue-92/observe-desktop-process-tree.ps1",
+      "sha256": "192acfc51b48ad63094617f3d33dbe62be2abccc10d3af82ae52462658bdb827"
+    },
+    {
+      "path": "docs/sprints/issue-92-codex-app-inventory/live-validation.md",
+      "sha256": "534ac70ca9ae0dec3be308e17f96206eba2848ebb2f1e21a657d98d68a69ebe6"
+    }
+  ]
+}
