@@ -42,6 +42,26 @@ S10-1, S10-2, S10-4, S10-5 are Fixed but stay in the active feature file because
 CM-1 is Fixed and remains in its feature file as the record for the Canvas VCS
 repository metadata cleanup.
 
+### Documentation UX & Readability Fix Cards (active)
+
+| Card | Feature unit / Aspect | Severity | Status | Plan boundary |
+| --- | --- | --- | --- | --- |
+| [DOC-1A](doc-ux-readability-issues.md#DOC-1A) | Synthetic demo order in docs vs live setup | High | Open | Separate demo trial & live telemetry setup order |
+| [DOC-1B](doc-ux-readability-issues.md#DOC-1B) | Config CLI `success: true` vs real trace arrival | High | Open | Clarify static config vs first-trace arrival verification |
+| [DOC-1C](doc-ux-readability-issues.md#DOC-1C) | UI screenshot demo mode labeling | Medium | Open | Add explicit demo dataset watermark & status badge docs |
+| [DOC-2A](doc-ux-readability-issues.md#DOC-2A) | `user-guide.md` missing Local Monitor images | Medium | Open | Embed Local Monitor overview images in main user-guide portal |
+| [DOC-2B](doc-ux-readability-issues.md#DOC-2B) | `local-monitor.md` end-of-file image dump | Medium | Open | Move images from bottom dump directly below feature sections |
+| [DOC-2C](doc-ux-readability-issues.md#DOC-2C) | README vs user-guide screenshot sync | Medium | Open | Harmonize image selections, captions, & UI versions |
+| [DOC-3A](doc-ux-readability-issues.md#DOC-3A) | PowerShell ExecutionPolicy script block | Medium | Open | Add `-ExecutionPolicy Bypass` commands & corporate environment notes |
+| [DOC-3B](doc-ux-readability-issues.md#DOC-3B) | Port 4320 conflict & VS Code env inheritance | Medium | Open | Add port conflict troubleshooting & terminal scope guidelines |
+| [DOC-3C](doc-ux-readability-issues.md#DOC-3C) | Missing Troubleshooting navigation links | Medium | Open | Add direct links to Troubleshooting guide in README & user-guide |
+| [DOC-4A](doc-ux-readability-issues.md#DOC-4A) | `user-guide.md` TOC & step-by-step structure | Medium | Open | Restructure user-guide portal with TOC (`cc-switch` model) |
+| [DOC-4B](doc-ux-readability-issues.md#DOC-4B) | Task-oriented vs module-oriented layout | Medium | Open | Reorganize files by user goals rather than internal modules |
+| [DOC-4C](doc-ux-readability-issues.md#DOC-4C) | Internal dev jargon leakage in user manual | Medium | Open | Remove internal issue #s & implementation jargon from user guide |
+| [DOC-5A](doc-ux-readability-issues.md#DOC-5A) | AI-like redundant Japanese phrasing | Medium | Open | Refactor "〜することができる/となります" per `humanizer-ja` |
+| [DOC-5B](doc-ux-readability-issues.md#DOC-5B) | Untranslated literal English phrases | Medium | Open | Translate raw English jargon (`reversible setup` etc.) |
+| [DOC-5C](doc-ux-readability-issues.md#DOC-5C) | Style inconsistency (常体/敬体) & passive voice | Medium | Open | Standardize tone to natural polite Japanese (です/ます) |
+
 ## Active Feature Files
 
 | File | Purpose | Open cards |
@@ -49,6 +69,7 @@ repository metadata cleanup.
 | [M2-span-projection.md](M2-span-projection.md) | Projection builder, token rollup, field sanitization | M2-8, M2-9 |
 | [M5-agent-execution-ui.md](M5-agent-execution-ui.md) | Trace-detail page, raw default behavior, raw lookup/rendering | M5-5 |
 | [Sprint10-monitor-design-views.md](Sprint10-monitor-design-views.md) | Sprint10 monitor design views, Playwright bootstrap, test reliability | S10-3 |
+| [doc-ux-readability-issues.md](doc-ux-readability-issues.md) | Documentation UX, demo mode confusion, image sync, troubleshooting, & Japanese tone | DOC-1A~1C, DOC-2A~2C, DOC-3A~3C, DOC-4A~4C, DOC-5A~5C |
 
 ## Archived Files (`_archive/`)
 
