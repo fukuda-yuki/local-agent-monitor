@@ -109,7 +109,7 @@ public sealed partial class SqliteAlertEngineStore
         ReadOneV2("alert_evaluations", "evaluation_id", evaluationId, AlertContractVersionsV2.Evaluation);
 
     public AlertEngineStoreReadResultV2 GetReceiptV2(string alertId) =>
-        ReadOneV2("alert_receipts", "alert_id", alertId, AlertContractVersionsV2.Receipt);
+        ReadReceiptV2(alertId);
 
     public AlertEngineStoreListResultV2 ListSuppressionsV2(string evaluationId)
     {
@@ -320,6 +320,60 @@ public sealed partial class SqliteAlertEngineStore
             {
                 AlertReceiptConsumerV2.Validate(bytes);
             }
+            return new(AlertEngineQueryStatus.Success, Array.AsReadOnly(bytes));
+        }
+        catch (SqliteException exception) when (IsBusy(exception))
+        {
+            return new(AlertEngineQueryStatus.Busy, [], "alert_store_busy");
+        }
+        catch (Exception exception) when (IsNonFatalV2(exception))
+        {
+            return new(AlertEngineQueryStatus.Unavailable, [], "alert_store_unavailable");
+        }
+    }
+
+    private AlertEngineStoreReadResultV2 ReadReceiptV2(string alertId)
+    {
+        if (!CanonicalHash(alertId))
+        {
+            return new(AlertEngineQueryStatus.NotFound, [], "alert_not_found");
+        }
+        try
+        {
+            using var connection = Open();
+            if (!AlertSchemaV2.IsValid(connection, null))
+            {
+                return new(AlertEngineQueryStatus.Unavailable, [], "alert_store_unavailable");
+            }
+            using var command = Command(
+                connection,
+                null,
+                """
+                SELECT r.schema_version,r.canonical_json,e.schema_version
+                FROM alert_receipts r
+                LEFT JOIN alert_evaluations e ON e.evaluation_id=r.evaluation_id
+                WHERE r.alert_id=$id;
+                """,
+                ("$id", alertId));
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+            {
+                return new(AlertEngineQueryStatus.NotFound, [], "alert_not_found");
+            }
+
+            var receiptSchema = reader.GetString(0);
+            var evaluationSchema = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (!ValidReceiptOwnerPair(receiptSchema, evaluationSchema))
+            {
+                return new(AlertEngineQueryStatus.Unavailable, [], "alert_store_unavailable");
+            }
+            if (receiptSchema != AlertContractVersionsV2.Receipt)
+            {
+                return new(AlertEngineQueryStatus.NotFound, [], "alert_not_found");
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(reader.GetString(1));
+            AlertReceiptConsumerV2.Validate(bytes);
             return new(AlertEngineQueryStatus.Success, Array.AsReadOnly(bytes));
         }
         catch (SqliteException exception) when (IsBusy(exception))

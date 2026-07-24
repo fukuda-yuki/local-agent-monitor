@@ -16,6 +16,7 @@ public sealed partial class SqliteAlertEngineStore
         {
             using var connection = Open();
             if (!AlertSchemaV2.IsRecognized(connection, null)) return UnavailableReceipts();
+            if (HasInvalidReceiptOwnerGraph(connection, afterAlertId)) return UnavailableReceipts();
             using var command = Command(
                 connection,
                 null,
@@ -86,6 +87,36 @@ public sealed partial class SqliteAlertEngineStore
         {
             return UnavailableReceipts();
         }
+    }
+
+    private static bool HasInvalidReceiptOwnerGraph(
+        SqliteConnection connection,
+        string? afterAlertId)
+    {
+        using var command = Command(
+            connection,
+            null,
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM alert_receipts r
+                LEFT JOIN alert_evaluations e ON e.evaluation_id=r.evaluation_id
+                WHERE ($after IS NULL OR r.alert_id>$after)
+                  AND (
+                    e.evaluation_id IS NULL
+                    OR NOT (
+                        r.schema_version='alert.receipt.v1'
+                        AND e.schema_version='alert.evaluation.v1'
+                        OR r.schema_version='alert.receipt.v2'
+                        AND e.schema_version='alert.evaluation.v2'
+                    )
+                  )
+            );
+            """,
+            ("$after", afterAlertId is null ? DBNull.Value : afterAlertId));
+        return Convert.ToInt64(
+            command.ExecuteScalar(),
+            System.Globalization.CultureInfo.InvariantCulture) != 0;
     }
 
     public AlertEvaluationQueryPage ListEvaluations(string? afterEvaluationId, int limit)
