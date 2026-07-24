@@ -187,24 +187,39 @@ public sealed class PricingCatalogProviderTests
         using var temp = new PricingCatalogProviderTempDirectory();
         var path = Path.Combine(temp.Root, "private-pricing-fifo");
         Assert.Equal(0, MakeFifo(path, 0x180));
-        var loadTask = Task.Run(
-            () => Record.Exception(() => DefaultPricingCatalogProvider.Create([path])));
+        var loadTask = Task.Factory.StartNew(
+            () => Record.Exception(() => DefaultPricingCatalogProvider.Create([path])),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         var completed = await Task.WhenAny(loadTask, Task.Delay(TimeSpan.FromSeconds(2)));
 
         if (completed != loadTask)
         {
-            await using var writer = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Write,
-                FileShare.ReadWrite);
-            await loadTask.WaitAsync(TimeSpan.FromSeconds(2));
+            await ReleaseWaitingFifoReaderAsync(path);
+            await Task.WhenAny(loadTask, Task.Delay(TimeSpan.FromSeconds(2)));
         }
 
         Assert.Same(loadTask, completed);
         var failure = Assert.IsType<PricingCatalogUnavailableException>(await loadTask);
         Assert.Equal("pricing_catalog_unavailable", failure.Message);
         Assert.DoesNotContain(path, failure.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task ReleaseWaitingFifoReaderAsync(string path)
+    {
+        const int writeOnlyNonBlocking = 0x801;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var descriptor = OpenFile(path, writeOnlyNonBlocking);
+            if (descriptor >= 0)
+            {
+                Assert.Equal(0, CloseFile(descriptor));
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+        }
     }
 
     [Fact]
@@ -335,4 +350,12 @@ public sealed class PricingCatalogProviderTests
     private static extern int MakeFifo(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
         uint mode);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenFile(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        int flags);
+
+    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    private static extern int CloseFile(int descriptor);
 }
