@@ -38,11 +38,32 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
     ];
     private static readonly string[] FindingColumns = ["analysis_run_id", "schema_version", "payload_json", "payload_sha256", "created_at"];
     private readonly string databasePath;
+    private readonly SQLitePCL.strdelegate_trace? statementObserver;
+    private readonly SQLitePCL.strdelegate_authorizer? readObserver;
 
     public SqliteSanitizedExportSnapshotProvider(string databasePath)
+        : this(databasePath, null, null)
+    {
+    }
+
+    internal SqliteSanitizedExportSnapshotProvider(
+        string databasePath,
+        Action<string>? statementObserver,
+        Action<string, string>? readObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.databasePath = Path.GetFullPath(databasePath);
+        if (statementObserver is not null)
+            this.statementObserver = (_, statement) => statementObserver(statement);
+        if (readObserver is not null)
+        {
+            this.readObserver = (_, action, table, column, _, _) =>
+            {
+                if (action == SQLitePCL.raw.SQLITE_READ && table is not null && column is not null)
+                    readObserver(table, column);
+                return SQLitePCL.raw.SQLITE_OK;
+            };
+        }
     }
 
     public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection)
@@ -110,6 +131,14 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
             DefaultTimeout = BusyTimeoutMilliseconds / 1000,
         }.ToString());
         connection.Open();
+        if (statementObserver is not null)
+            SQLitePCL.raw.sqlite3_trace(connection.Handle, statementObserver, null);
+        if (readObserver is not null
+            && SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, readObserver, null) != SQLitePCL.raw.SQLITE_OK)
+        {
+            connection.Dispose();
+            throw new InvalidOperationException();
+        }
         return connection;
     }
 

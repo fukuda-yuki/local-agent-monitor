@@ -251,22 +251,38 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     }
 
     [Fact]
-    public void Capture_OversizedV2AndUnreadablePricingPayloadsAreNeverRead()
+    public void Capture_V2OnlyReadPlanNeverSelectsV2PayloadsOrPricingOwnedTables()
     {
         using var fixture = new Fixture();
         fixture.InitializeAlertEngineV2();
         fixture.SeedOpaqueV2Alert("semantically-invalid-v2");
         fixture.PoisonV2PayloadsBeyondV1CarrierLimit();
-        fixture.SeedUnreadablePricingPayloads();
+        var statements = new List<string>();
+        var reads = new List<(string Table, string Column)>();
 
-        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+        var result = new SqliteSanitizedExportSnapshotProvider(
+                fixture.DatabasePath,
+                statements.Add,
+                (table, column) => reads.Add((table, column)))
             .Capture(new(ReceiptTypes: ["alert_receipt"]));
 
         Assert.True(result.Success, result.ErrorCode);
         Assert.Empty(result.Snapshot!.Records);
         Assert.Equal("missing", result.Snapshot.Capabilities.AlertReceipts);
         Assert.Equal("2", result.Snapshot.ProcessingVersions!["alert_engine_schema"]);
-        Assert.DoesNotContain(result.Snapshot.ProcessingVersions.Keys, key => key.Contains("pricing", StringComparison.Ordinal));
+        Assert.Contains(reads, read => read == ("alert_receipts", "canonical_json"));
+        Assert.DoesNotContain(reads, read =>
+            read is ("alert_evaluations", "canonical_json") or ("alert_suppressions", "canonical_json")
+            || read.Table.StartsWith("pricing_", StringComparison.Ordinal));
+        Assert.DoesNotContain(statements, statement => statement.Contains("pricing_", StringComparison.Ordinal));
+        Assert.All(
+            statements.Where(statement => statement.Contains("canonical_json", StringComparison.Ordinal)),
+            statement => Assert.Contains(
+                "FROM alert_receipts WHERE schema_version='alert.receipt.v1'",
+                statement,
+                StringComparison.Ordinal));
+
+        // Pending dependency: add the exact 13-table PricingSchemaV1 fixture after the accepted pricing branch is integrated.
     }
 
     [Theory]
@@ -485,24 +501,6 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
                 SET canonical_json=json_object(
                     'evaluation_id',evaluation_id,
                     'opaque',printf('%.*c',$length,'x'));
-                """;
-            command.Parameters.AddWithValue("$length", SanitizedExportLimits.MaximumRecordBytes + 1);
-            command.ExecuteNonQuery();
-        }
-
-        internal void SeedUnreadablePricingPayloads()
-        {
-            using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
-            connection.Open();
-            using var command = connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO schema_version(component,version) VALUES('pricing',1);
-                CREATE TABLE pricing_catalog_snapshots(canonical_blob BLOB NOT NULL);
-                CREATE TABLE pricing_estimates(canonical_blob BLOB NOT NULL);
-                INSERT INTO pricing_catalog_snapshots(canonical_blob) VALUES(x'80ff');
-                INSERT INTO pricing_estimates(canonical_blob) VALUES(x'80ff');
-                INSERT INTO pricing_catalog_snapshots(canonical_blob) VALUES(zeroblob($length));
-                INSERT INTO pricing_estimates(canonical_blob) VALUES(zeroblob($length));
                 """;
             command.Parameters.AddWithValue("$length", SanitizedExportLimits.MaximumRecordBytes + 1);
             command.ExecuteNonQuery();
