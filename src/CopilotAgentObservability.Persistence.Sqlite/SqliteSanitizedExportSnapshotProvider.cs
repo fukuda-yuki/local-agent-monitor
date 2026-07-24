@@ -38,11 +38,32 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
     ];
     private static readonly string[] FindingColumns = ["analysis_run_id", "schema_version", "payload_json", "payload_sha256", "created_at"];
     private readonly string databasePath;
+    private readonly SQLitePCL.strdelegate_trace? statementObserver;
+    private readonly SQLitePCL.strdelegate_authorizer? readObserver;
 
     public SqliteSanitizedExportSnapshotProvider(string databasePath)
+        : this(databasePath, null, null)
+    {
+    }
+
+    internal SqliteSanitizedExportSnapshotProvider(
+        string databasePath,
+        Action<string>? statementObserver,
+        Action<string, string>? readObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.databasePath = Path.GetFullPath(databasePath);
+        if (statementObserver is not null)
+            this.statementObserver = (_, statement) => statementObserver(statement);
+        if (readObserver is not null)
+        {
+            this.readObserver = (_, action, table, column, _, _) =>
+            {
+                if (action == SQLitePCL.raw.SQLITE_READ && table is not null && column is not null)
+                    readObserver(table, column);
+                return SQLitePCL.raw.SQLITE_OK;
+            };
+        }
     }
 
     public SanitizedExportSnapshotCapture Capture(SanitizedExportSelection selection)
@@ -58,7 +79,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
 
             var findingState = OptionalTableState(connection, transaction, "instruction_finding_handoffs", FindingColumns);
             if (findingState == OptionalState.Invalid) return Failure("snapshot_store_unavailable");
-            var alertState = ValidateAlertState(connection, transaction);
+            var alertState = ValidateAlertState(connection, transaction, out var alertSchemaVersion);
             if (alertState == OptionalState.Invalid) return Failure("snapshot_store_unavailable");
 
             var descriptors = ReadDescriptors(connection, transaction, selection, findingState, alertState);
@@ -76,7 +97,8 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
                 ["session_schema"] = "13",
                 ["sanitized_export"] = "1",
             };
-            if (alertState == OptionalState.Valid) processingVersions["alert_engine_schema"] = "1";
+            if (alertState == OptionalState.Valid)
+                processingVersions["alert_engine_schema"] = alertSchemaVersion.ToString(CultureInfo.InvariantCulture);
 
             var capabilities = new SanitizedExportCapabilityStates(
                 records.Any(record => record.RecordType == "instruction_finding_handoff") ? "available" : "missing",
@@ -109,6 +131,14 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
             DefaultTimeout = BusyTimeoutMilliseconds / 1000,
         }.ToString());
         connection.Open();
+        if (statementObserver is not null)
+            SQLitePCL.raw.sqlite3_trace(connection.Handle, statementObserver, null);
+        if (readObserver is not null
+            && SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, readObserver, null) != SQLitePCL.raw.SQLITE_OK)
+        {
+            connection.Dispose();
+            throw new InvalidOperationException();
+        }
         return connection;
     }
 
@@ -120,11 +150,21 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
         && ExactColumns(connection, transaction, "session_runs", SessionRunColumns)
         && ExactColumns(connection, transaction, "session_events", SessionEventColumns);
 
-    private static OptionalState ValidateAlertState(SqliteConnection connection, SqliteTransaction transaction)
+    private static OptionalState ValidateAlertState(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        out long alertSchemaVersion)
     {
-        var present = AlertSchemaV1.AnyEngineTableExists(connection, transaction) || Version(connection, transaction, AlertSchemaV1.Component) is not null;
+        var version = Version(connection, transaction, AlertSchemaV1.Component);
+        alertSchemaVersion = version ?? 0;
+        var present = AlertSchemaV1.AnyEngineTableExists(connection, transaction) || version is not null;
         if (!present) return OptionalState.Absent;
-        return AlertSchemaV1.IsValid(connection, transaction) ? OptionalState.Valid : OptionalState.Invalid;
+        return version switch
+        {
+            AlertSchemaV1.Version when AlertSchemaV1.IsValid(connection, transaction) => OptionalState.Valid,
+            AlertSchemaV2.Version when AlertSchemaV2.IsValid(connection, transaction) => OptionalState.Valid,
+            _ => OptionalState.Invalid,
+        };
     }
 
     private static OptionalState OptionalTableState(SqliteConnection connection, SqliteTransaction transaction, string table, string[] columns)
@@ -166,7 +206,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
         var selectedSql = $"SELECT * FROM ({string.Join(" UNION ALL ", selectableBranches)}) d WHERE {predicate}";
         var includeAlerts = alerts == OptionalState.Valid && (selection.ReceiptTypes is not { Count: > 0 } || selection.ReceiptTypes.Contains("alert_receipt", StringComparer.Ordinal));
         var opaqueAlerts = includeAlerts
-            ? " UNION ALL SELECT 'alert_receipt',alert_id,NULL,NULL,NULL,NULL,NULL,NULL,'0001-01-01T00:00:00.0000000Z','unknown','unknown','unknown',length(CAST(canonical_json AS BLOB)) FROM alert_receipts"
+            ? " UNION ALL SELECT 'alert_receipt',alert_id,NULL,NULL,NULL,NULL,NULL,NULL,'0001-01-01T00:00:00.0000000Z','unknown','unknown','unknown',length(CAST(canonical_json AS BLOB)) FROM alert_receipts WHERE schema_version='alert.receipt.v1'"
             : string.Empty;
         command.CommandText = $"SELECT * FROM ({selectedSql}{opaqueAlerts}) ORDER BY observed_at COLLATE BINARY,record_type COLLATE BINARY,source_id COLLATE BINARY LIMIT {SanitizedExportLimits.MaximumRecords + 1};";
         using var reader = command.ExecuteReader();
@@ -262,17 +302,29 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
             }
             else
             {
-                var stored = ReadCarrier(connection, transaction, "alert_receipts", "alert_id", descriptor.SourceId, "schema_version,canonical_json");
-                bytes = Encoding.UTF8.GetBytes(stored[1]);
-                var envelope = AlertReceiptConsumerV1.Validate(bytes);
-                if (stored[0] != "alert.receipt.v1" || envelope.AlertId != descriptor.RecordId)
+                var stored = ReadCarrier(
+                    connection,
+                    transaction,
+                    "alert_receipts",
+                    "alert_id",
+                    descriptor.SourceId,
+                    "schema_version,evaluation_id,canonical_json");
+                if (stored[0] != AlertContractVersions.Receipt)
                     throw new InvalidOperationException();
+                bytes = Encoding.UTF8.GetBytes(stored[2]);
+                var receipt = AlertCenterReceiptConsumerV1.Validate(bytes);
+                if (receipt.AlertId != descriptor.RecordId
+                    || receipt.EvaluationId != stored[1]
+                    || !ValidAlertOwner(connection, transaction, receipt))
+                {
+                    throw new InvalidOperationException();
+                }
                 materialized = descriptor with
                 {
-                    SessionId = envelope.SessionId,
-                    TraceId = envelope.TraceId,
-                    SourceSurface = envelope.SourceSurface,
-                    ObservedAt = envelope.LastObservedAt,
+                    SessionId = receipt.SessionId,
+                    TraceId = receipt.TraceId,
+                    SourceSurface = receipt.SourceSurface,
+                    ObservedAt = receipt.LastObservedAt,
                 };
                 if (!MatchesSelection(materialized, selection)) continue;
             }
@@ -295,6 +347,31 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
         var result = Enumerable.Range(0, reader.FieldCount).Select(reader.GetString).ToArray();
         if (reader.Read()) throw new InvalidOperationException();
         return result;
+    }
+
+    private static bool ValidAlertOwner(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        AlertCenterReceiptProjectionV1 receipt)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1
+                FROM alert_evaluations
+                WHERE evaluation_id=$evaluation_id
+                  AND schema_version='alert.evaluation.v1'
+                  AND input_hash=$input_hash
+                  AND configuration_version=$configuration_version
+                  AND configuration_hash=$configuration_hash
+            );
+            """;
+        command.Parameters.AddWithValue("$evaluation_id", receipt.EvaluationId);
+        command.Parameters.AddWithValue("$input_hash", receipt.EvaluationInputHash);
+        command.Parameters.AddWithValue("$configuration_version", receipt.ConfigurationVersion);
+        command.Parameters.AddWithValue("$configuration_hash", receipt.ConfigurationHash);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 
     private static IReadOnlyList<SanitizedExportAgentVersion> ReadAgentVersions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyList<SanitizedExportRecord> records)

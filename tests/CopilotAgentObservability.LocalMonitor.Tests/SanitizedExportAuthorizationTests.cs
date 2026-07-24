@@ -26,6 +26,19 @@ public sealed class SanitizedExportAuthorizationTests
     }
 
     [Theory]
+    [InlineData("alert.receipt.v2")]
+    [InlineData("pricing.estimate.v1")]
+    [InlineData("pricing.catalog-snapshot.v1")]
+    public void PreviewAndCreate_RejectDirectV2AndPricingCarrierAttempts(string recordType)
+    {
+        var request = Request([Record("records/forbidden.json", recordType, "forbidden", Encoding.UTF8.GetBytes("{}"))]);
+        var service = new SanitizedExportService();
+
+        Assert.Equal("unsupported_record_type", service.Preview(request).ErrorCode);
+        Assert.Equal("unsupported_record_type", service.Create(request).ErrorCode);
+    }
+
+    [Theory]
     [InlineData("alert.receipt.v2", "sanitized-alert-receipt.v1")]
     [InlineData("alert.receipt.v1", "sanitized-alert-receipt.v2")]
     public void PreviewAndCreate_RejectUnknownAlertVersionOrProfile(string version, string profile)
