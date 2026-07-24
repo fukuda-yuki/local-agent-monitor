@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CopilotAgentObservability.Pricing;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Costs;
 
@@ -46,6 +47,11 @@ public sealed record CostBudgetEntryV1(
     int MinimumCoverageBasisPoints,
     string ScopeKind,
     int? WindowDays);
+
+public sealed record CostConfigurationPreviewRequestV1(
+    string SchemaVersion,
+    IReadOnlyList<CostSourceEntryV1> SourceEntries,
+    IReadOnlyList<CostBudgetEntryV1> BudgetEntries);
 
 public sealed record CostConfigurationV1(
     string SchemaVersion,
@@ -173,7 +179,8 @@ public static class CostConfigurationCanonicalJsonV1
                 || !SafeVersion.IsMatch(source.AdapterCapabilityVersion)
                 || !LowerToken.IsMatch(source.Provider)
                 || !LowerToken.IsMatch(source.BillingMode)
-                || !LowerToken.IsMatch(source.PricingRoute))
+                || !LowerToken.IsMatch(source.PricingRoute)
+                || !IsProviderBillingRoute(source))
                 throw new ArgumentException("Cost source entry is invalid.");
         }
         foreach (var budget in budgets)
@@ -229,7 +236,7 @@ public static class CostConfigurationCanonicalJsonV1
         writer.WriteString("created_at_utc", CostJsonV1.Timestamp(value.CreatedAtUtc));
     }
 
-    private static void WriteSources(Utf8JsonWriter writer, IReadOnlyList<CostSourceEntryV1> values)
+    internal static void WriteSources(Utf8JsonWriter writer, IReadOnlyList<CostSourceEntryV1> values)
     {
         writer.WriteStartArray("source_entries");
         foreach (var value in values)
@@ -246,7 +253,7 @@ public static class CostConfigurationCanonicalJsonV1
         writer.WriteEndArray();
     }
 
-    private static void WriteBudgets(Utf8JsonWriter writer, IReadOnlyList<CostBudgetEntryV1> values)
+    internal static void WriteBudgets(Utf8JsonWriter writer, IReadOnlyList<CostBudgetEntryV1> values)
     {
         writer.WriteStartArray("budget_entries");
         foreach (var value in values)
@@ -293,12 +300,169 @@ public static class CostConfigurationCanonicalJsonV1
             && result >= 0;
     }
 
+    private static bool IsProviderBillingRoute(CostSourceEntryV1 source) =>
+        (source.Provider, source.BillingMode, source.PricingRoute) switch
+        {
+            (
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.GitHubAiCredits,
+                PricingRoutes.CreditConsumingInteraction) => true,
+            (
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.GitHubLegacyRequests,
+                PricingRoutes.LegacyRequest) => true,
+            (
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.PlanIncluded,
+                PricingRoutes.CreditConsumingInteraction
+                    or PricingRoutes.CodeCompletion
+                    or PricingRoutes.NextEditSuggestion) => true,
+            (
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.CustomEnterprise,
+                PricingRoutes.SubscriptionOrContract) => true,
+            (
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.Unknown,
+                PricingRoutes.Unknown) => true,
+            (
+                PricingProviders.ClaudeCode,
+                PricingBillingModes.AnthropicApiTokens,
+                PricingRoutes.StandardGlobal
+                    or PricingRoutes.UsOnlyInference
+                    or PricingRoutes.Batch) => true,
+            (
+                PricingProviders.ClaudeCode,
+                PricingBillingModes.CloudProviderApiTokens,
+                PricingRoutes.CloudProviderConfigured) => true,
+            (
+                PricingProviders.ClaudeCode,
+                PricingBillingModes.Subscription
+                    or PricingBillingModes.CustomEnterprise,
+                PricingRoutes.SubscriptionOrContract) => true,
+            (
+                PricingProviders.ClaudeCode,
+                PricingBillingModes.Unknown,
+                PricingRoutes.Unknown) => true,
+            (
+                PricingProviders.CodexApp,
+                PricingBillingModes.Subscription
+                    or PricingBillingModes.CustomEnterprise,
+                PricingRoutes.SubscriptionOrContract) => true,
+            (
+                PricingProviders.CodexApp,
+                PricingBillingModes.Unknown,
+                PricingRoutes.Unknown) => true,
+            (
+                PricingProviders.Unknown,
+                PricingBillingModes.Unknown,
+                PricingRoutes.Unknown) => true,
+            _ => false,
+        };
+
     internal static byte[] Write(Action<Utf8JsonWriter> write)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
             write(writer);
         return stream.ToArray();
+    }
+}
+
+public static class CostConfigurationPreviewRequestCanonicalJsonV1
+{
+    public const string SchemaVersion = "cost.configuration-preview-request.v1";
+
+    public static CostConfigurationPreviewRequestV1 Create(
+        IReadOnlyList<CostSourceEntryV1> sourceEntries,
+        IReadOnlyList<CostBudgetEntryV1> budgetEntries)
+    {
+        var validated = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            new string('0', 64),
+            sourceEntries,
+            budgetEntries,
+            DateTimeOffset.UnixEpoch);
+        return new(
+            SchemaVersion,
+            validated.SourceEntries,
+            validated.BudgetEntries);
+    }
+
+    public static byte[] Serialize(CostConfigurationPreviewRequestV1 request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var frozen = Create(request.SourceEntries, request.BudgetEntries);
+        if (request.SchemaVersion != SchemaVersion)
+            throw new ArgumentException(
+                "Cost configuration preview request schema is invalid.",
+                nameof(request));
+        var bytes = CostConfigurationCanonicalJsonV1.Write(writer =>
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schema_version", SchemaVersion);
+            CostConfigurationCanonicalJsonV1.WriteSources(
+                writer,
+                frozen.SourceEntries);
+            CostConfigurationCanonicalJsonV1.WriteBudgets(
+                writer,
+                frozen.BudgetEntries);
+            writer.WriteEndObject();
+        });
+        if (bytes.Length > CostConfigurationCanonicalJsonV1.MaximumBytes)
+            throw new ArgumentException(
+                "Cost configuration preview request exceeds the v1 bound.",
+                nameof(request));
+        return bytes;
+    }
+}
+
+public static class CostConfigurationPreviewRequestConsumerV1
+{
+    public static CostConsumerResult<CostConfigurationPreviewRequestV1> Consume(
+        ReadOnlyMemory<byte> canonicalBytes)
+    {
+        if (canonicalBytes.Length > CostConfigurationCanonicalJsonV1.MaximumBytes)
+            return new(CostConsumerStatus.TooLarge, null);
+        if (canonicalBytes.Length == 0)
+            return new(CostConsumerStatus.Invalid, null);
+        try
+        {
+            var bytes = canonicalBytes.ToArray();
+            using var document = CostJsonV1.Parse(bytes, 16);
+            var schema = document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty(
+                    "schema_version",
+                    out var schemaElement)
+                && schemaElement.ValueKind == JsonValueKind.String
+                    ? schemaElement.GetString()
+                    : null;
+            if (schema != CostConfigurationPreviewRequestCanonicalJsonV1.SchemaVersion)
+                return new(
+                    CostContractSchemaVersionV1.IsRecognizedFuture(
+                        schema,
+                        "cost.configuration-preview-request.v")
+                        ? CostConsumerStatus.Unsupported
+                        : CostConsumerStatus.Invalid,
+                    null);
+            var value = JsonSerializer.Deserialize<CostConfigurationPreviewRequestV1>(
+                bytes,
+                CostJsonV1.Options);
+            if (value is null)
+                return new(CostConsumerStatus.Invalid, null);
+            var frozen = CostConfigurationPreviewRequestCanonicalJsonV1.Create(
+                value.SourceEntries,
+                value.BudgetEntries);
+            return bytes.AsSpan().SequenceEqual(
+                    CostConfigurationPreviewRequestCanonicalJsonV1.Serialize(frozen))
+                ? new(CostConsumerStatus.Success, frozen)
+                : new(CostConsumerStatus.Invalid, null);
+        }
+        catch (Exception exception) when (
+            exception is JsonException or ArgumentException or InvalidOperationException)
+        {
+            return new(CostConsumerStatus.Invalid, null);
+        }
     }
 }
 
