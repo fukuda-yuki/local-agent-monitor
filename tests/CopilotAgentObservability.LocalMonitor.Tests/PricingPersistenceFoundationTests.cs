@@ -10,6 +10,23 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class PricingPersistenceFoundationTests
 {
+    public static TheoryData<string> SupportedHistoricalSessionFixtures => new()
+    {
+        "session-v1.sqlite",
+        "session-v2.sqlite",
+        "session-v3.sqlite",
+        "session-v4.sqlite",
+        "session-v5.sqlite",
+        "session-v6.sqlite",
+        "session-v7.sqlite",
+        "session-v8.sqlite",
+        "session-v9.sqlite",
+        "session-v10.sqlite",
+        "session-v10-from-v4.sqlite",
+        "session-v10-from-v5.sqlite",
+        "session-v10-from-v6.sqlite",
+    };
+
     [Fact]
     public void PricingSchemaV1_Ensure_CreatesExactComponentAfterRequiredDependencies()
     {
@@ -126,6 +143,36 @@ public sealed class PricingPersistenceFoundationTests
             Scalar<long>(
                 connection,
                 "SELECT COUNT(*) FROM schema_version WHERE component='session' AND version=13;"));
+    }
+
+    [Theory]
+    [MemberData(nameof(SupportedHistoricalSessionFixtures))]
+    public void PricingSchemaV1_Ensure_AcceptsEverySupportedHistoricalSessionWholeProfile(
+        string fixtureFile)
+    {
+        using var database = new PricingDatabase();
+        var fixturePath = System.IO.Path.Combine(
+            AppContext.BaseDirectory,
+            "TestData",
+            "SchemaMigrations",
+            "session",
+            fixtureFile);
+        File.Copy(fixturePath, database.Path);
+
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using (var migratedConnection = database.Open())
+            Assert.True(
+                SqliteSessionStore.IsCurrentSchemaValid(migratedConnection, null),
+                $"{fixtureFile} was rejected immediately after the supported Session migration.");
+
+        database.CreateDependencies();
+
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        PricingSchemaV1.Ensure(connection, transaction);
+        transaction.Commit();
+        Assert.True(PricingSchemaV1.IsValid(connection, null));
     }
 
     [Theory]

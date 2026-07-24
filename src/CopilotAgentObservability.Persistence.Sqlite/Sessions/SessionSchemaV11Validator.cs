@@ -96,8 +96,25 @@ internal static class SessionSchemaV11Validator
             var canonical = BuildProfile(tableSql, expectedVersion)
                 ?? throw new InvalidOperationException("Unable to construct the canonical Session schema.");
 
+            IReadOnlyDictionary<string, string> supportedHistoricalTableSql = tableSql;
+            DatabaseProfile? migratedCanonical = null;
+            if (expectedVersion == 13)
+            {
+                var migratedTableSql = new Dictionary<string, string>(
+                    tableSql,
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["session_event_content"] = QuoteMigratedSessionEventContentTableName(
+                        tableSql["session_event_content"]),
+                };
+                supportedHistoricalTableSql = migratedTableSql;
+                migratedCanonical = BuildProfile(migratedTableSql, expectedVersion)
+                    ?? throw new InvalidOperationException(
+                        "Unable to construct the migrated Session schema.");
+            }
+
             var versionThree = BuildDerivedProfile(
-                tableSql,
+                supportedHistoricalTableSql,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["improvement_proposals"] = "revision",
@@ -106,7 +123,7 @@ internal static class SessionSchemaV11Validator
                 historicalUpdatedAtDefault: false,
                 expectedVersion: expectedVersion);
             var versionFour = BuildDerivedProfile(
-                tableSql,
+                supportedHistoricalTableSql,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["improvement_proposals"] = "revision",
@@ -117,7 +134,7 @@ internal static class SessionSchemaV11Validator
                 historicalUpdatedAtDefault: true,
                 expectedVersion: expectedVersion);
             var versionsFiveAndSix = BuildDerivedProfile(
-                tableSql,
+                supportedHistoricalTableSql,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["improvement_proposals"] = "revision",
@@ -128,9 +145,17 @@ internal static class SessionSchemaV11Validator
                 historicalUpdatedAtDefault: false,
                 expectedVersion: expectedVersion);
 
+            var profiles = new List<DatabaseProfile> { canonical };
+            if (migratedCanonical is not null)
+            {
+                profiles.Add(migratedCanonical);
+            }
+            profiles.Add(versionThree);
+            profiles.Add(versionFour);
+            profiles.Add(versionsFiveAndSix);
             var expected = new ExpectedSchemas(
                 tableNames,
-                [canonical, versionThree, versionFour, versionsFiveAndSix]);
+                profiles);
             ExpectedSchemasByVersion.Add(expectedVersion, expected);
             return expected;
         }
@@ -226,6 +251,28 @@ internal static class SessionSchemaV11Validator
         }
         definitions.RemoveAt(index);
         return RecomposeCreateTable(sql, table, definitions);
+    }
+
+    private static string QuoteMigratedSessionEventContentTableName(string sql)
+    {
+        const string tableName = "session_event_content";
+        var openingParenthesis = FindNextOutsideQuotesAndComments(sql, 0, '(');
+        var tableNameIndex = openingParenthesis < 0
+            ? -1
+            : sql.LastIndexOf(
+                tableName,
+                openingParenthesis,
+                StringComparison.OrdinalIgnoreCase);
+        if (tableNameIndex < 0)
+        {
+            throw new InvalidOperationException(
+                "Canonical Session DDL is missing session_event_content.");
+        }
+        return sql[..tableNameIndex]
+            + '"'
+            + sql.Substring(tableNameIndex, tableName.Length)
+            + '"'
+            + sql[(tableNameIndex + tableName.Length)..];
     }
 
     private static string RecomposeCreateTable(
