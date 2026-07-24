@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalInstructionAnalysis;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -25,13 +26,14 @@ public sealed class SqliteRuntimeBackupService
     private const int ReconciliationPageSize = 16;
     private static readonly IReadOnlyDictionary<string, int> SupportedComponents = new Dictionary<string, int>(StringComparer.Ordinal)
     {
-        ["alert_engine"] = 1,
+        ["alert_engine"] = 2,
         ["alert_lifecycle"] = 1,
         ["doctor"] = 1,
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
         ["monitor"] = 7,
+        ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
         ["sanitized_import"] = 1,
@@ -52,6 +54,7 @@ public sealed class SqliteRuntimeBackupService
         "historical_import",
         "sanitized_import",
         "runtime_backup",
+        "pricing",
     ];
     private readonly TimeProvider timeProvider;
     private readonly Action<string>? checkpoint;
@@ -162,7 +165,7 @@ public sealed class SqliteRuntimeBackupService
     {
         var preparation = PrepareMonitorInitializationWithLease(database);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
-        EnsureRuntimeBackupSchema(database);
+        EnsureCurrentBackupTail(database);
         using var guard = TryAcquireRecoveryGuard(database);
         if (guard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var result = ValidateMonitorComponentVersions(database);
@@ -191,7 +194,7 @@ public sealed class SqliteRuntimeBackupService
         }
         recoveryGuard?.Dispose();
         if (!preflight.Success) return preflight;
-        EnsureRuntimeBackupSchema(database);
+        EnsureCurrentBackupTail(database);
         using var finalGuard = TryAcquireRecoveryGuard(database);
         if (finalGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var final = PreflightForMigration(database, immutableReadOnly: false);
@@ -216,6 +219,8 @@ public sealed class SqliteRuntimeBackupService
                     return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             }
             if (versions.ContainsKey("sanitized_import") && !versions.ContainsKey("historical_import"))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (!HasValidPricingParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             return new(true, null, versions, []);
         }
@@ -243,7 +248,7 @@ public sealed class SqliteRuntimeBackupService
         if (!sourcePreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
         try
         {
-            EnsureRuntimeBackupSchema(database);
+            EnsureCurrentBackupTail(database);
             if (!PreflightForMigration(database).Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             var result = CreateArchive(database, output, scanRuntimeRoot: true);
             if (!result.Success) return result;
@@ -337,6 +342,8 @@ public sealed class SqliteRuntimeBackupService
             }
             if (versions.ContainsKey("sanitized_import") && !versions.ContainsKey("historical_import"))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (!HasValidPricingParents(versions))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             var migrations = MigrationOrder.Where(component => SupportedComponents.TryGetValue(component, out var supported)
@@ -347,6 +354,12 @@ public sealed class SqliteRuntimeBackupService
         catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
         { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
     }
+
+    private static bool HasValidPricingParents(IReadOnlyDictionary<string, int> versions) =>
+        !versions.ContainsKey("pricing")
+        || versions.TryGetValue("session", out var session) && session == SupportedComponents["session"]
+            && versions.TryGetValue("alert_engine", out var alert) && alert == SupportedComponents["alert_engine"]
+            && versions.TryGetValue("runtime_backup", out var backup) && backup == SupportedComponents["runtime_backup"];
 
     public RuntimeRestorePreview Preview(string bundlePath, string databasePath)
     {
@@ -1189,7 +1202,10 @@ public sealed class SqliteRuntimeBackupService
                 || !HasColumns(connection, "session_events", "event_id", "session_id", "source_surface", "content_state")) return false;
         }
         if (versions.ContainsKey("doctor") && !DoctorSchemaV1.IsValid(connection, null)) return false;
-        if (versions.ContainsKey("alert_engine") && !AlertSchemaV1.IsValid(connection, null)) return false;
+        if (versions.TryGetValue("alert_engine", out var alertVersion)
+            && (alertVersion == AlertSchemaV1.Version
+                ? !AlertSchemaV1.IsValid(connection, null)
+                : alertVersion != AlertSchemaV2.Version || !AlertSchemaV2.IsValid(connection, null))) return false;
         if (versions.ContainsKey("alert_lifecycle") && !AlertLifecycleSchemaV1.IsValid(connection, null)) return false;
         if (versions.ContainsKey("first_trace_navigation")
             && !HasColumns(connection, "first_trace_evidence_navigation", "verification_id", "evidence_ref", "target_kind", "target_id")) return false;
@@ -1203,6 +1219,9 @@ public sealed class SqliteRuntimeBackupService
             if (versions.ContainsKey("sanitized_import"))
                 SanitizedImportSchemaV1.ValidateStructure(connection, transaction);
             if (versions.ContainsKey("runtime_backup") && !RuntimeBackupSchemaV1.IsValid(connection, transaction)) return false;
+            if (versions.ContainsKey("pricing")
+                && (!PricingSchemaV1.IsValid(connection, transaction)
+                    || !PricingSchemaV1.ValidateRows(connection, transaction))) return false;
             return true;
         }
         finally
@@ -1280,6 +1299,11 @@ public sealed class SqliteRuntimeBackupService
             allowed["runtime_backup_receipts_no_update"] = ("runtime_backup_receipts", RuntimeBackupSchemaV1.ReceiptNoUpdateTriggerSql);
             allowed["runtime_backup_receipts_no_delete"] = ("runtime_backup_receipts", RuntimeBackupSchemaV1.ReceiptNoDeleteTriggerSql);
             allowed["runtime_backup_receipts_no_replace"] = ("runtime_backup_receipts", RuntimeBackupSchemaV1.ReceiptNoReplaceTriggerSql);
+        }
+        if (versions.ContainsKey("pricing"))
+        {
+            foreach (var trigger in PricingSchemaV1.OwnedObjects.Where(item => item.Type == "trigger"))
+                allowed[trigger.Name] = (trigger.TableName, trigger.Sql);
         }
 
         var actual = new HashSet<string>(StringComparer.Ordinal);
@@ -1442,6 +1466,8 @@ public sealed class SqliteRuntimeBackupService
             ["runtime_backup_receipts_no_replace"] = "runtime_backup",
             ["first_trace_evidence_navigation"] = "first_trace_navigation",
         };
+        foreach (var item in PricingSchemaV1.OwnedObjects)
+            owners[item.Name] = "pricing";
         var prefixes = new[]
         {
             "doctor_",
@@ -1450,6 +1476,7 @@ public sealed class SqliteRuntimeBackupService
             "historical_import_",
             "sanitized_import_",
             "runtime_backup_",
+            "pricing_",
             "first_trace_",
         };
         using var command = connection.CreateCommand();
@@ -2083,13 +2110,21 @@ public sealed class SqliteRuntimeBackupService
                 SqliteSessionStore.InitializeSchema(connection, transaction);
             new RetentionCatalogStore(path, timeProvider).InitializeForWrite(connection, transaction);
             EnsureDoctorSchema(connection, transaction);
-            EnsureAlertSchema(connection, transaction);
-            EnsureAlertLifecycleSchema(connection, transaction);
             SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
             HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
             SqliteHistoricalImportStore.EnsureSchema(connection, transaction);
             SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys: false);
+            transaction.Commit();
+        }
+
+        EnsureAlertSchemaV2(path);
+
+        using (var connection = Open(path, SqliteOpenMode.ReadWrite))
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            EnsureAlertLifecycleSchema(connection, transaction);
             RuntimeBackupSchemaV1.Ensure(connection, transaction);
+            PricingSchemaV1.Ensure(connection, transaction);
             transaction.Commit();
         }
     }
@@ -2115,15 +2150,32 @@ public sealed class SqliteRuntimeBackupService
         if (!DoctorSchemaV1.IsValid(connection, transaction)) throw new InvalidOperationException();
     }
 
-    private static void EnsureAlertSchema(SqliteConnection connection, SqliteTransaction transaction)
+    private static void EnsureAlertSchemaV2(string path)
     {
-        var version = AlertSchemaV1.ReadVersion(connection, transaction);
-        if (version is null)
+        using var connection = Open(path, SqliteOpenMode.ReadWrite);
+        try
         {
-            if (AlertSchemaV1.AnyEngineTableExists(connection, transaction)) throw new InvalidOperationException();
-            AlertSchemaV1.Create(connection, transaction);
+            SetPragma(connection, "foreign_keys", false);
+            SetPragma(connection, "legacy_alter_table", true);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var version = AlertSchemaV1.ReadVersion(connection, transaction);
+            if (version is null)
+            {
+                if (AlertSchemaV1.AnyEngineTableExists(connection, transaction)) throw new InvalidOperationException();
+                AlertSchemaV2.Create(connection, transaction);
+            }
+            else if (version == AlertSchemaV1.Version)
+            {
+                AlertSchemaV2.MigrateFromV1(connection, transaction);
+            }
+            if (!AlertSchemaV2.IsValid(connection, transaction)) throw new InvalidOperationException();
+            transaction.Commit();
         }
-        if (!AlertSchemaV1.IsValid(connection, transaction)) throw new InvalidOperationException();
+        finally
+        {
+            SetPragma(connection, "legacy_alter_table", false);
+            SetPragma(connection, "foreign_keys", true);
+        }
     }
 
     private static void EnsureAlertLifecycleSchema(SqliteConnection connection, SqliteTransaction transaction)
@@ -2137,9 +2189,39 @@ public sealed class SqliteRuntimeBackupService
         if (!AlertLifecycleSchemaV1.IsValid(connection, transaction)) throw new InvalidOperationException();
     }
 
-    private static void EnsureRuntimeBackupSchema(string path)
+    private static void SetPragma(SqliteConnection connection, string name, bool enabled)
     {
-        using var connection = Open(path, SqliteOpenMode.ReadWrite); using var transaction = connection.BeginTransaction(deferred: false); RuntimeBackupSchemaV1.Ensure(connection, transaction); transaction.Commit();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA {name}={(enabled ? "ON" : "OFF")};";
+        command.ExecuteNonQuery();
+    }
+
+    private static void EnsureCurrentBackupTail(string path)
+    {
+        Dictionary<string, int> versions;
+        using (var read = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: false))
+        {
+            versions = ReadComponentVersions(read, requireSharedSchemaVersion: false);
+            if (versions.TryGetValue("session", out var sessionVersion)
+                && (sessionVersion != SupportedComponents["session"]
+                    || !SqliteSessionStore.IsCurrentSchemaValid(read, null)))
+                throw new InvalidOperationException();
+        }
+        if (!versions.ContainsKey("session"))
+        {
+            using var legacyConnection = Open(path, SqliteOpenMode.ReadWrite);
+            using var legacyTransaction = legacyConnection.BeginTransaction(deferred: false);
+            RuntimeBackupSchemaV1.Ensure(legacyConnection, legacyTransaction);
+            legacyTransaction.Commit();
+            return;
+        }
+
+        EnsureAlertSchemaV2(path);
+        using var connection = Open(path, SqliteOpenMode.ReadWrite);
+        using var transaction = connection.BeginTransaction(deferred: false);
+        RuntimeBackupSchemaV1.Ensure(connection, transaction);
+        PricingSchemaV1.Ensure(connection, transaction);
+        transaction.Commit();
     }
 
     private bool TryAppendReceipt(

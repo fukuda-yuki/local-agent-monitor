@@ -7,6 +7,7 @@ using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -32,7 +33,7 @@ public sealed class RuntimeBackupRestoreTests
         using var temp = new RestoreTemp();
         using (var database = temp.Open(temp.Target))
         {
-            temp.Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version(component,version) VALUES('session',13);");
+            temp.Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);");
         }
         var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
         var service = new SqliteRuntimeBackupService(temp.Clock);
@@ -49,6 +50,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(competing.Result.Success);
         Assert.Equal(RuntimeBackupErrorCodes.MonitorMustBeStopped, competing.Result.ErrorCode);
         Assert.Null(competing.Lease);
+        new SqliteSessionStore(temp.Target).CreateSchema();
 
         var completed = service.CompleteMonitorInitialization(lease);
 
@@ -1401,17 +1403,19 @@ public sealed class RuntimeBackupRestoreTests
         var historicalImport = Array.IndexOf(steps, "historical_import:0->1");
         var sanitizedImport = Array.IndexOf(steps, "sanitized_import:0->1");
         var runtimeBackup = Array.IndexOf(steps, "runtime_backup:0->1");
+        var pricing = Array.IndexOf(steps, "pricing:0->1");
         Assert.True(instruction >= 0);
         Assert.True(instruction < historicalImport);
         Assert.True(historicalImport < sanitizedImport);
         Assert.True(sanitizedImport < runtimeBackup);
+        Assert.True(runtimeBackup < pricing);
         Assert.Equal(
             [
-                "first_trace_navigation:0->1",
                 "historical_instruction_analysis:0->1",
                 "historical_import:0->1",
                 "sanitized_import:0->1",
                 "runtime_backup:0->1",
+                "pricing:0->1",
             ],
             steps[^5..]);
     }
@@ -1445,12 +1449,13 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(13, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
-        Assert.Equal(1, preflight.ComponentVersions["alert_engine"]);
+        Assert.Equal(2, preflight.ComponentVersions["alert_engine"]);
         Assert.Equal(1, preflight.ComponentVersions["alert_lifecycle"]);
         Assert.Equal(1, preflight.ComponentVersions["historical_instruction_analysis"]);
         Assert.Equal(1, preflight.ComponentVersions["historical_import"]);
         Assert.Equal(1, preflight.ComponentVersions["sanitized_import"]);
         Assert.Equal(1, preflight.ComponentVersions["runtime_backup"]);
+        Assert.Equal(1, preflight.ComponentVersions["pricing"]);
         Assert.Equal(1, preflight.ComponentVersions["first_trace_navigation"]);
         Assert.Empty(preflight.MigrationSteps!);
     }
