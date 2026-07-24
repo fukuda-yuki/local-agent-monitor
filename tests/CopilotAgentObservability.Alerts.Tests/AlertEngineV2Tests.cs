@@ -140,6 +140,96 @@ public sealed class AlertEngineV2Tests
     }
 
     [Fact]
+    public void Evaluate_CanonicalPricingModelLabelWithSpaces_IsAcceptedExactly()
+    {
+        var fixture = Fixture();
+        var member = fixture.Snapshot.Members[0] with
+        {
+            Provider = "github_copilot",
+            Model = "GPT-5 mini",
+            BillingMode = "github_ai_credits",
+        };
+        var snapshot = fixture.Snapshot with { Members = [member] };
+
+        var result = fixture.Engine.Evaluate(
+            new("session-estimated-cost-threshold", "1"),
+            snapshot,
+            fixture.Configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(AlertEvaluationEngineStatusV2.Success, result.Status);
+        var receipt = Assert.Single(result.Evaluation!.Receipts);
+        Assert.Equal("github_copilot", Assert.Single(receipt.Members).Provider);
+        Assert.Equal("GPT-5 mini", Assert.Single(receipt.Members).Model);
+        Assert.Equal("github_ai_credits", Assert.Single(receipt.Members).BillingMode);
+
+        var projection = AlertCenterReceiptConsumerV2.Validate(
+            AlertCanonicalJsonV2.SerializeReceipt(receipt));
+        Assert.Equal("GPT-5 mini", Assert.Single(projection.Members).Model);
+    }
+
+    [Fact]
+    public void Evaluate_UnsafeOrUnboundedPricingModelLabels_AreRejected()
+    {
+        var fixture = Fixture();
+        var unsafeLabels = new[]
+        {
+            "",
+            " ",
+            ".",
+            "..",
+            "model\u0000label",
+            "https://example.test/model",
+            "../private/model",
+            @"C:\private\model",
+            "person@example.test",
+            "Authorization: Bearer secret",
+            new string('m', 257),
+            "\ud800",
+        };
+
+        foreach (var model in unsafeLabels)
+        {
+            var member = fixture.Snapshot.Members[0] with { Model = model };
+            var snapshot = fixture.Snapshot with { Members = [member] };
+
+            var result = fixture.Engine.Evaluate(
+                new("session-estimated-cost-threshold", "1"),
+                snapshot,
+                fixture.Configuration,
+                fixture.EvidenceScope);
+
+            Assert.Equal(AlertEvaluationEngineStatusV2.ContractRejected, result.Status);
+            Assert.Equal("invalid_snapshot", result.Code);
+            Assert.Null(result.Evaluation);
+        }
+    }
+
+    [Fact]
+    public void Evaluate_ProviderAndBillingModeRemainTokenBounded()
+    {
+        var fixture = Fixture();
+        var invalidMembers = new[]
+        {
+            fixture.Snapshot.Members[0] with { Provider = "github copilot" },
+            fixture.Snapshot.Members[0] with { BillingMode = "github ai credits" },
+        };
+
+        foreach (var member in invalidMembers)
+        {
+            var result = fixture.Engine.Evaluate(
+                new("session-estimated-cost-threshold", "1"),
+                fixture.Snapshot with { Members = [member] },
+                fixture.Configuration,
+                fixture.EvidenceScope);
+
+            Assert.Equal(AlertEvaluationEngineStatusV2.ContractRejected, result.Status);
+            Assert.Equal("invalid_snapshot", result.Code);
+            Assert.Null(result.Evaluation);
+        }
+    }
+
+    [Fact]
     public void ReceiptConsumer_RejectsCanonicalSemanticMismatch()
     {
         var receipt = Assert.Single(Evaluation().Receipts);
