@@ -49,6 +49,7 @@ public sealed class Issue95ValidationContractTests
                 "FullyQualifiedName~CostRouteTests",
                 "FullyQualifiedName~CostPageTests",
                 "FullyQualifiedName~CostPagePlaywrightTests",
+                "FullyQualifiedName~AlertEngineV2Tests",
                 "FullyQualifiedName~GoldenAlertReceiptTests",
                 "FullyQualifiedName~AlertEvaluationApplicationTests",
                 "FullyQualifiedName~SqliteAlertEngineStoreV2Tests",
