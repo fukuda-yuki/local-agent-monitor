@@ -1811,8 +1811,8 @@ exactly that query followed by
 only through the exact-estimate API above. It never scans paged history to find
 the estimate.
 
-The page supports date/source/model/
-mode/status/registry filters, component and coverage detail, configuration
+The page supports date/source/model/mode/status/registry plus exact
+repository/workspace filters, component and coverage detail, configuration
 preview/commit, exact bundled/local-override source and effective dates,
 configuration/provider catalog match/changed state, explicit recalculation,
 history/delta, budget state, the selected range's estimated and explicitly
@@ -1826,6 +1826,15 @@ latest, or top result. Keyboard order,
 visible focus, native labels, status live regions, and reduced-motion behavior
 are required. Full canonical history or raw evidence is never retained in
 long-lived browser state.
+
+Repository/workspace inputs submit the exact accepted label without
+normalization or inference, and each component row preserves those two
+dimensions separately from null/unknown. Exact estimate presentation includes
+its catalog SHA plus registry review and stale-after dates. It shows a stale
+registry-metadata warning exactly when the UTC date of
+`calculation_time_utc` is later than `stale_after_date`, matching the #94
+estimation time basis. An `included_zero_incremental_cost` component is labeled
+as zero additional cost and never as a free plan, seat, or subscription.
 
 The browser keeps at most one configuration/preview, one catalog page of at most
 100 entries plus at most 64 source projections, one 100-target/eight-scope

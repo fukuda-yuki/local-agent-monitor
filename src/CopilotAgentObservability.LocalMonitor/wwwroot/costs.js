@@ -108,6 +108,14 @@
     return `${date}T00:00:00.0000000Z`;
   }
 
+  function boundedCatalog(value) {
+    return {
+      ...value,
+      sources: (value?.sources ?? []).slice(0, 64),
+      entries: (value?.entries ?? []).slice(0, 100),
+    };
+  }
+
   function analyticsUrl(after = null) {
     const range = currentRange();
     const query = new URLSearchParams({
@@ -121,6 +129,8 @@
       ["billing_mode", "cost-filter-mode"],
       ["status", "cost-filter-status"],
       ["registry_version", "cost-filter-registry"],
+      ["repository", "cost-filter-repository"],
+      ["workspace", "cost-filter-workspace"],
     ];
     for (const [name, id] of fields) {
       const value = byId(id).value;
@@ -156,7 +166,9 @@
       }
       const values = await Promise.all(reads);
       if (request.generation !== state.generation) return;
-      [state.configuration, state.catalog, state.analytics] = values;
+      state.configuration = values[0];
+      state.catalog = boundedCatalog(values[1]);
+      state.analytics = values[2];
       if (sessionId) {
         state.estimateHistory = values[3];
         state.attemptHistory = values[4];
@@ -252,7 +264,7 @@
     if (!sources.length && !entries.length) {
       container.append(node("p", "empty-state", "安全な catalog projection はありません。"));
     }
-    for (const item of sources.slice(0, 64)) {
+    for (const item of sources) {
       const card = node("article", "cost-catalog-item");
       card.append(
         node("strong", null, `${item.source_kind} · ${item.source_label}`),
@@ -265,13 +277,16 @@
     const previous = selector.value;
     selector.replaceChildren(node("option", null, "既存 mapping を維持"));
     selector.firstElementChild.value = "";
-    for (const item of entries.slice(0, 100)) {
+    for (const item of entries) {
       const card = node("article", "cost-catalog-item");
       card.append(
         node("strong", null, `${item.source_kind} · ${item.source_label}`),
         node("span", "monitor-mono", `${item.registry_version} · ${item.provider} · ${item.model}`),
         node("span", null, `${item.billing_mode} / ${item.pricing_route} · ${item.currency} · ${item.selection_state}`),
         node("span", null, `${dateText(item.effective_from_utc)} — ${dateText(item.effective_to_utc)}`),
+        node("span", null, item.included_zero_incremental_cost
+          ? "追加コスト 0（plan/seat 自体の価格が 0 という意味ではありません）"
+          : "included zero incremental cost · no"),
         node("span", null, `source reference (inert text) · ${item.source_reference ?? "not exposed"}`),
       );
       container.append(card);
@@ -385,9 +400,9 @@
     for (const group of groups.slice(0, 100)) {
       const row = node("tr");
       const cells = [
-        `${group.utc_date} UTC\n${group.source_surface}`,
+        `${group.utc_date} UTC\n${group.source_surface}\nrepository ${group.repository ?? "(missing)"} / workspace ${group.workspace ?? "(missing)"}`,
         `${group.provider ?? "unknown"} / ${group.model ?? "unknown"} / ${group.billing_mode ?? "unknown"}`,
-        `${group.registry_version ?? "unknown"} / ${group.component_category ?? "unknown"}`,
+        `${group.registry_version ?? "(missing)"} / ${group.currency ?? "currency (missing)"} / ${group.component_category ?? "unknown"}`,
         `${group.estimated_session_count}/${group.eligible_session_count} · ${percent(group.coverage_basis_points)}`,
         `${amount(group.estimated_amount, group.currency)} · ${group.estimated_amount_state}`,
         `${amount(group.partial_known_component_amount, group.currency)} · ${group.partial_known_component_amount_state}\n${(group.partial_reason_counts ?? []).map(item => item.reason).join(", ")}`,
@@ -433,8 +448,10 @@
         ["amount", `${item.amount_kind} · ${amount(item.amount, item.currency)}`],
         ["provider / model", `${item.provider ?? "unknown"} / ${item.model ?? "unknown"}`],
         ["billing / route", `${item.billing_mode ?? "unknown"} / ${item.pricing_route ?? "unknown"}`],
+        ["catalog SHA", item.catalog_sha256],
         ["registry", registry ? `${registry.registry_version} · ${registry.source_kind} · ${registry.source_label}` : "not selected"],
         ["effective", registry ? `${dateText(registry.effective_from_utc)} — ${dateText(registry.effective_to_utc)}` : "—"],
+        ["registry provenance", registry ? `reviewed ${registry.last_reviewed_date} · stale after ${registry.stale_after_date}` : "not selected"],
         ["source reference (inert text)", registry?.source_reference ?? "not exposed"],
         ["coverage", `${item.coverage?.estimated_categories?.length ?? 0}/${item.coverage?.required_categories?.length ?? 0} categories`],
         ["missing", (item.coverage?.missing_categories ?? []).join(", ") || "none"],
@@ -445,10 +462,21 @@
     );
     const components = node("ul", "cost-component-list");
     for (const component of item.components ?? []) {
+      const category = component.category === "included_zero_incremental_cost"
+        ? "追加コスト 0（plan/seat 自体の価格が 0 という意味ではありません）"
+        : component.category;
       components.append(node("li", null,
-        `${component.category} · ${component.state} · ${amount(component.amount, item.currency)} · ${component.missing_reason ?? "complete"}`));
+        `${category} · ${component.state} · ${amount(component.amount, item.currency)} · ${component.missing_reason ?? "complete"}`));
     }
     container.append(components);
+    if (registry && String(item.calculation_time_utc).slice(0, 10) > registry.stale_after_date) {
+      const warning = node(
+        "p",
+        "cost-provisional",
+        `registry metadata warning · calculation UTC date ${String(item.calculation_time_utc).slice(0, 10)} > stale after ${registry.stale_after_date}`);
+      warning.setAttribute("role", "note");
+      container.append(warning);
+    }
   }
 
   function renderEstimateHistory() {
@@ -518,7 +546,7 @@
     if (!after) return;
     return replacePage(
       catalogUrl(after),
-      value => { state.catalog = value; },
+      value => { state.catalog = boundedCatalog(value); },
       renderCatalog,
       "次の catalog page を読み込みました。",
       "cost-config-heading");
@@ -841,7 +869,7 @@
     }
     for (const budget of value.budget_results ?? []) {
       container.append(node("p", null,
-        `${budget.rule_id} · ${budget.outcome?.kind ?? "unknown"} · ${budget.outcome?.code ?? "evaluated"}`));
+        `${budget.rule_id} · ${budget.outcome?.kind ?? "unknown"} · ${budget.outcome?.code ?? budget.outcome?.alert_id ?? "evaluated"}`));
     }
   }
 
@@ -909,6 +937,8 @@
     byId("cost-filter-mode").value = "";
     byId("cost-filter-status").value = "";
     byId("cost-filter-registry").value = "";
+    byId("cost-filter-repository").value = "";
+    byId("cost-filter-workspace").value = "";
     byId("cost-filter-from").value = "";
     byId("cost-filter-to").value = "";
     initializeDates();

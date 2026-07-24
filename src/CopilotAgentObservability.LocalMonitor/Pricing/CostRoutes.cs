@@ -673,11 +673,11 @@ internal sealed class CostHttpApplication : BackgroundService
             ? new { result.Kind, result.Status, result.EstimateId }
             : new { result.Kind, result.Code };
 
-    private static object BudgetResult(CostRecalculationBudgetResultReadV1 result) =>
+    internal static object BudgetResult(CostRecalculationBudgetResultReadV1 result) =>
         new
         {
             result.ScopeOrdinal,
-            result.Scope,
+            scope = BudgetScope(result.Scope),
             result.RuleId,
             result.RuleVersion,
             outcome = result.OutcomeKind switch
@@ -696,6 +696,27 @@ internal sealed class CostHttpApplication : BackgroundService
                     result.Code,
                 },
                 _ => new { kind = result.OutcomeKind, result.EvaluationId },
+            },
+        };
+
+    private static object BudgetScope(CostBudgetScopeV1 scope) =>
+        scope.ScopeKind switch
+        {
+            "session" => new
+            {
+                scope.ScopeKind,
+                scope.SessionId,
+            },
+            "utc_day" => new
+            {
+                scope.ScopeKind,
+                scope.UtcDate,
+            },
+            _ => new
+            {
+                scope.ScopeKind,
+                scope.CutoffUtc,
+                scope.WindowDays,
             },
         };
 
