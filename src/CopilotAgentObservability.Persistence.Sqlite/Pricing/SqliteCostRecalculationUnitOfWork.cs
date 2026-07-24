@@ -52,6 +52,88 @@ internal sealed record CompletionTargetSnapshot(
     string? BaseEstimateId,
     long BaseAttemptRevision);
 
+internal sealed record PricingBudgetTransactionCandidateV1(
+    IReadOnlyList<AlertEvaluationResultV2> Evaluations,
+    IReadOnlyList<PricingBudgetResultWrite> BudgetResults);
+
+internal sealed class PricingRecalculationInputChangedException : Exception;
+
+internal sealed class PricingBudgetEvaluationPlanV1
+{
+    private readonly Func<
+        SqliteConnection,
+        SqliteTransaction,
+        PricingBudgetTransactionCandidateV1> rebuild;
+
+    internal PricingBudgetEvaluationPlanV1(
+        IReadOnlyList<AlertEvaluationResultV2> preflightEvaluations,
+        IReadOnlyList<PricingBudgetResultWrite> preflightBudgetResults,
+        Func<
+            SqliteConnection,
+            SqliteTransaction,
+            PricingBudgetTransactionCandidateV1> rebuild)
+    {
+        ArgumentNullException.ThrowIfNull(preflightEvaluations);
+        ArgumentNullException.ThrowIfNull(preflightBudgetResults);
+        this.rebuild = rebuild ?? throw new ArgumentNullException(nameof(rebuild));
+        PreflightEvaluations = Array.AsReadOnly(preflightEvaluations.ToArray());
+        PreflightBudgetResults = Array.AsReadOnly(preflightBudgetResults.ToArray());
+    }
+
+    internal IReadOnlyList<AlertEvaluationResultV2> PreflightEvaluations { get; }
+    internal IReadOnlyList<PricingBudgetResultWrite> PreflightBudgetResults { get; }
+
+    internal PricingBudgetTransactionCandidateV1 Rebuild(
+        SqliteConnection connection,
+        SqliteTransaction transaction) =>
+        rebuild(connection, transaction);
+
+    internal static bool ByteEquivalent(
+        IReadOnlyList<AlertEvaluationResultV2> expected,
+        IReadOnlyList<AlertEvaluationResultV2> actual)
+    {
+        if (expected.Count != actual.Count) return false;
+        for (var ordinal = 0; ordinal < expected.Count; ordinal++)
+        {
+            if (!AlertCanonicalJsonV2.SerializeEvaluation(expected[ordinal])
+                .AsSpan()
+                .SequenceEqual(AlertCanonicalJsonV2.SerializeEvaluation(actual[ordinal])))
+                return false;
+        }
+        return true;
+    }
+
+    internal static bool BudgetEquivalent(
+        IReadOnlyList<PricingBudgetResultWrite> expected,
+        IReadOnlyList<PricingBudgetResultWrite> actual)
+    {
+        if (expected.Count != actual.Count) return false;
+        for (var ordinal = 0; ordinal < expected.Count; ordinal++)
+        {
+            var left = expected[ordinal];
+            var right = actual[ordinal];
+            if (left.ScopeOrdinal != right.ScopeOrdinal
+                || left.ScopeKind != right.ScopeKind
+                || left.ScopeId != right.ScopeId
+                || left.EligibilityDigest != right.EligibilityDigest
+                || !left.EligibleSessionIds.SequenceEqual(
+                    right.EligibleSessionIds,
+                    StringComparer.Ordinal)
+                || left.ScopeStartUtc != right.ScopeStartUtc
+                || left.ScopeEndUtc != right.ScopeEndUtc
+                || left.RuleId != right.RuleId
+                || left.RuleVersion != right.RuleVersion
+                || left.EvaluationId != right.EvaluationId
+                || left.OutcomeKind != right.OutcomeKind
+                || left.AlertId != right.AlertId
+                || left.SuppressionOrdinal != right.SuppressionOrdinal
+                || left.SuppressionCode != right.SuppressionCode)
+                return false;
+        }
+        return true;
+    }
+}
+
 internal sealed class SqliteCostRecalculationUnitOfWork
 {
     private readonly string databasePath;
@@ -91,7 +173,58 @@ internal sealed class SqliteCostRecalculationUnitOfWork
         string runId,
         IReadOnlyList<PricingTargetCompletionWrite> targetResults,
         IReadOnlyList<AlertEvaluationResultV2> alertEvaluations,
-        IReadOnlyList<PricingBudgetResultWrite> budgetResults)
+        IReadOnlyList<PricingBudgetResultWrite> budgetResults) =>
+        CompleteCore(
+            runId,
+            targetResults,
+            alertEvaluations,
+            budgetResults,
+            null,
+            null,
+            false);
+
+    internal PricingCompletionResult Complete(
+        string runId,
+        IReadOnlyList<PricingTargetCompletionWrite> targetResults,
+        PricingBudgetEvaluationPlanV1 budgetPlan)
+    {
+        ArgumentNullException.ThrowIfNull(budgetPlan);
+        return CompleteCore(
+            runId,
+            targetResults,
+            budgetPlan.PreflightEvaluations,
+            budgetPlan.PreflightBudgetResults,
+            budgetPlan,
+            null,
+            false);
+    }
+
+    internal PricingCompletionResult Fail(
+        string runId,
+        IReadOnlyList<PricingTargetCompletionWrite> targetResults,
+        PricingRunFailureWrite failure,
+        bool preserveUnavailable = true)
+    {
+        ArgumentNullException.ThrowIfNull(targetResults);
+        ArgumentNullException.ThrowIfNull(failure);
+        return CompleteCore(
+            runId,
+            targetResults,
+            [],
+            [],
+            null,
+            failure,
+            preserveUnavailable);
+    }
+
+    private PricingCompletionResult CompleteCore(
+        string runId,
+        IReadOnlyList<PricingTargetCompletionWrite> targetResults,
+        IReadOnlyList<AlertEvaluationResultV2> alertEvaluations,
+        IReadOnlyList<PricingBudgetResultWrite> budgetResults,
+        PricingBudgetEvaluationPlanV1? budgetPlan,
+        PricingRunFailureWrite? suppliedFailure,
+        bool preserveSuppliedUnavailable)
     {
         ArgumentNullException.ThrowIfNull(targetResults);
         ArgumentNullException.ThrowIfNull(alertEvaluations);
@@ -191,8 +324,78 @@ internal sealed class SqliteCostRecalculationUnitOfWork
                 preserveUnavailable = true;
                 core = new(PricingStoreStatus.ContractRejected);
             }
+            else if (suppliedFailure is not null)
+            {
+                selectedFailure = suppliedFailure;
+                preserveUnavailable = preserveSuppliedUnavailable;
+                core = new(PricingStoreStatus.ContractRejected);
+            }
             else
             {
+                if (budgetPlan is not null)
+                {
+                    try
+                    {
+                        var transactionCandidate = budgetPlan.Rebuild(
+                            connection,
+                            transaction);
+                        if (!PricingBudgetEvaluationPlanV1.ByteEquivalent(
+                                frozenAlertEvaluations,
+                                transactionCandidate.Evaluations)
+                            || !PricingBudgetEvaluationPlanV1.BudgetEquivalent(
+                                frozenBudgetResults,
+                                transactionCandidate.BudgetResults))
+                        {
+                            selectedFailure = new(
+                                "alert_evaluation",
+                                "scope",
+                                FirstDifferentOrdinal(
+                                    frozenAlertEvaluations,
+                                    transactionCandidate.Evaluations),
+                                "alert_evaluation_failed");
+                            preserveUnavailable = true;
+                            core = new(PricingStoreStatus.ContractRejected);
+                            transaction.Rollback();
+                            return CloseFailure(
+                                runId,
+                                frozenTargetResults,
+                                selectedFailure,
+                                preserveUnavailable);
+                        }
+                    }
+                    catch (PricingRecalculationInputChangedException)
+                    {
+                        selectedFailure = new(
+                            "head_input",
+                            "target",
+                            0,
+                            "stale_recalculation_input");
+                        preserveUnavailable = true;
+                        core = new(PricingStoreStatus.Conflict);
+                        transaction.Rollback();
+                        return CloseFailure(
+                            runId,
+                            frozenTargetResults,
+                            selectedFailure,
+                            preserveUnavailable);
+                    }
+                    catch (Exception)
+                    {
+                        selectedFailure = new(
+                            "alert_evaluation",
+                            "scope",
+                            0,
+                            "alert_evaluation_failed");
+                        preserveUnavailable = true;
+                        core = new(PricingStoreStatus.ContractRejected);
+                        transaction.Rollback();
+                        return CloseFailure(
+                            runId,
+                            frozenTargetResults,
+                            selectedFailure,
+                            preserveUnavailable);
+                    }
+                }
                 core = store.AppendRecalculationCompletionCore(
                     runId,
                     frozenTargetResults,
@@ -270,6 +473,21 @@ internal sealed class SqliteCostRecalculationUnitOfWork
             frozenTargetResults,
             selectedFailure,
             preserveUnavailable);
+    }
+
+    private static int FirstDifferentOrdinal(
+        IReadOnlyList<AlertEvaluationResultV2> expected,
+        IReadOnlyList<AlertEvaluationResultV2> actual)
+    {
+        var compared = Math.Min(expected.Count, actual.Count);
+        for (var ordinal = 0; ordinal < compared; ordinal++)
+        {
+            if (!AlertCanonicalJsonV2.SerializeEvaluation(expected[ordinal])
+                .AsSpan()
+                .SequenceEqual(AlertCanonicalJsonV2.SerializeEvaluation(actual[ordinal])))
+                return ordinal;
+        }
+        return compared == 0 ? 0 : compared - 1;
     }
 
     private PricingCompletionResult CloseFailure(
@@ -584,12 +802,13 @@ public sealed partial class SqlitePricingStore
                 }
             }
 
+            CostConfigurationV1 configuration;
             using (var head = Command(
                 connection,
                 transaction,
                 """
                 SELECT h.head_revision,h.configuration_id,c.catalog_sha256,
-                       s.canonical_blob
+                       s.canonical_blob,c.canonical_blob
                 FROM pricing_configuration_heads h
                 JOIN pricing_configurations c ON c.configuration_id=h.configuration_id
                 JOIN pricing_catalog_snapshots s ON s.catalog_sha256=c.catalog_sha256
@@ -605,6 +824,12 @@ public sealed partial class SqlitePricingStore
                     || providerCatalog.CatalogSha256 != request.CatalogSha256
                     || !((byte[])reader[3]).AsSpan().SequenceEqual(providerBytes))
                     return Rollback<string>(transaction, PricingStoreStatus.Conflict);
+                var consumedConfiguration =
+                    CostConfigurationConsumerV1.Consume((byte[])reader[4]);
+                if (consumedConfiguration.Status != CostConsumerStatus.Success
+                    || consumedConfiguration.Value is null)
+                    return Rollback<string>(transaction, PricingStoreStatus.Unavailable);
+                configuration = consumedConfiguration.Value;
             }
 
             using (var overlap = Command(
@@ -698,10 +923,29 @@ public sealed partial class SqlitePricingStore
                     baseAttempt));
             }
 
+            var admission = ValidateBudgetAdmission(
+                connection,
+                transaction,
+                request,
+                configuration);
+            if (admission == BudgetAdmissionStatus.TooLarge)
+            {
+                transaction.Rollback();
+                return new(
+                    PricingStoreStatus.CapacityReached,
+                    null,
+                    "cost_request_too_large");
+            }
+            if (admission == BudgetAdmissionStatus.SessionIneligible)
+                return Rollback<string>(transaction, PricingStoreStatus.Conflict);
+
             foreach (var scope in request.BudgetScopes.Where(item => item.ScopeKind == "session"))
             {
                 var target = targets.Single(item => item.SessionId == scope.SessionId);
-                if (target.SourcePartitionState != "resolved")
+                if (target.SourcePartitionState != "resolved"
+                    || !configuration.SourceEntries.Any(entry =>
+                        entry.SourceSurface == target.SourceSurface
+                        && entry.ApplicationVersion == target.SourceApplicationVersion))
                     return Rollback<string>(transaction, PricingStoreStatus.Conflict);
             }
 
@@ -797,6 +1041,102 @@ public sealed partial class SqlitePricingStore
             CultureInfo.InvariantCulture,
             DateTimeStyles.None);
 
+    private static BudgetAdmissionStatus ValidateBudgetAdmission(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CostRecalculationRequestV1 request,
+        CostConfigurationV1 configuration)
+    {
+        long memberOccurrences = 0;
+        foreach (var scope in request.BudgetScopes)
+        {
+            long scopeMembers = 0;
+            using var command = BudgetAdmissionSessions(
+                connection,
+                transaction,
+                scope);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var sessionId = reader.GetString(0);
+                var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+                    connection,
+                    transaction,
+                    sessionId);
+                if (source.State != CostSessionSourcePartitionStateV1.Resolved
+                    || !configuration.SourceEntries.Any(entry =>
+                        entry.SourceSurface == source.SourceSurface
+                        && entry.ApplicationVersion == source.SourceApplicationVersion))
+                    continue;
+                scopeMembers++;
+                if (memberOccurrences + scopeMembers > 4_000)
+                    return BudgetAdmissionStatus.TooLarge;
+            }
+
+            if (scope.ScopeKind == "session" && scopeMembers != 1)
+                return BudgetAdmissionStatus.SessionIneligible;
+            memberOccurrences = checked(memberOccurrences + scopeMembers);
+            if (checked(memberOccurrences * 2) > 8_000)
+                return BudgetAdmissionStatus.TooLarge;
+        }
+        return BudgetAdmissionStatus.Accepted;
+    }
+
+    private static SqliteCommand BudgetAdmissionSessions(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CostBudgetScopeV1 scope)
+    {
+        const string select =
+            """
+            SELECT session_id
+            FROM sessions
+            WHERE status IN ('completed','failed')
+            """;
+        return scope.ScopeKind switch
+        {
+            "session" => Command(
+                connection,
+                transaction,
+                select + " AND session_id=$session ORDER BY last_seen_at,session_id;",
+                ("$session", scope.SessionId!)),
+            "utc_day" => BudgetAdmissionWindow(
+                connection,
+                transaction,
+                select,
+                UtcDay(scope.UtcDate!)),
+            "rolling_period" => BudgetAdmissionWindow(
+                connection,
+                transaction,
+                select,
+                (
+                    scope.CutoffUtc!.Value.AddDays(-scope.WindowDays!.Value),
+                    scope.CutoffUtc.Value)),
+            _ => throw new InvalidOperationException("Budget scope is invalid."),
+        };
+    }
+
+    private static SqliteCommand BudgetAdmissionWindow(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string select,
+        (DateTimeOffset Start, DateTimeOffset End) window) =>
+        Command(
+            connection,
+            transaction,
+            select
+                + " AND last_seen_at >= $start AND last_seen_at < $end"
+                + " ORDER BY last_seen_at,session_id;",
+            ("$start", Format(window.Start)),
+            ("$end", Format(window.End)));
+
+    private static (DateTimeOffset Start, DateTimeOffset End) UtcDay(string utcDate)
+    {
+        var date = DateOnly.ParseExact(utcDate, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var start = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+        return (start, start.AddDays(1));
+    }
+
     private static string Wire(CostSessionSourcePartitionStateV1 state) =>
         state switch
         {
@@ -806,4 +1146,11 @@ public sealed partial class SqlitePricingStore
             CostSessionSourcePartitionStateV1.Resolved => "resolved",
             _ => throw new ArgumentOutOfRangeException(nameof(state)),
         };
+
+    private enum BudgetAdmissionStatus
+    {
+        Accepted,
+        SessionIneligible,
+        TooLarge,
+    }
 }
