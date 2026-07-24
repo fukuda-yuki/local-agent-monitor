@@ -1,5 +1,9 @@
+using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using Microsoft.Playwright;
 using static Microsoft.Playwright.Assertions;
 
@@ -51,7 +55,9 @@ public sealed class CostPagePlaywrightTests
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costStorageTouched === true"));
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costServiceWorkerTouched === true"));
         Assert.False(await page.EvaluateAsync<bool>("() => window.__costDatabaseTouched === true"));
+        Assert.False(await page.EvaluateAsync<bool>("() => window.__costCacheTouched === true"));
         Assert.Equal(0, await page.EvaluateAsync<int>("() => localStorage.length + sessionStorage.length"));
+        Assert.Equal(string.Empty, await page.EvaluateAsync<string>("() => location.hash"));
         Assert.Equal(0, await page.Locator("#cost-catalog a, #cost-catalog img, #cost-catalog script").CountAsync());
     }
 
@@ -233,7 +239,7 @@ public sealed class CostPagePlaywrightTests
         });
 
         await page.GotoAsync($"{host.Url}/costs", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await Expect(page.GetByLabel("Source surface", new() { Exact = true })).ToHaveValueAsync("github-copilot-vscode");
+        await Expect(page.GetByLabel("Source surface", new() { Exact = true })).ToHaveValueAsync("a-");
         await Expect(page.GetByLabel("configure session-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
         await Expect(page.GetByLabel("configure daily-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
         await Expect(page.GetByLabel("configure period-estimated-cost-threshold", new() { Exact = true })).ToBeCheckedAsync();
@@ -297,6 +303,39 @@ public sealed class CostPagePlaywrightTests
         await page.Locator("#cost-config-clear-sources").UncheckAsync();
         await Expect(page.Locator("#cost-config-surface")).ToBeEnabledAsync();
         await Expect(page.Locator("#cost-config-entry")).ToBeEnabledAsync();
+    }
+
+    [Theory(Timeout = 60_000)]
+    [InlineData("matching", true)]
+    [InlineData("unconfigured", false)]
+    [InlineData("changed", false)]
+    public async Task CostPage_RecalculationRequiresCanonicalMatchingConfiguration(
+        string catalogState,
+        bool expectedEnabled)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await page.RouteAsync("**/api/costs/v1/configuration", route =>
+            route.FulfillAsync(Json(ConfigurationForState(catalogState))));
+        await page.RouteAsync("**/api/costs/v1/catalog?*", route =>
+            route.FulfillAsync(Json(Catalog)));
+        await page.RouteAsync("**/api/costs/v1/analytics?*", route =>
+            route.FulfillAsync(Json(CompleteAnalytics)));
+        await RouteSessionReads(page);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        if (expectedEnabled)
+            await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
+        else
+            await Expect(page.Locator("#cost-recalculate")).ToBeDisabledAsync();
+        await Expect(page.Locator("#cost-config-state")).ToContainTextAsync(catalogState);
     }
 
     [Fact(Timeout = 60_000)]
@@ -570,6 +609,13 @@ public sealed class CostPagePlaywrightTests
                 const original = indexedDB[method].bind(indexedDB);
                 indexedDB[method] = (...args) => { window.__costDatabaseTouched = true; return original(...args); };
               }
+              window.__costCacheTouched = false;
+              if (window.caches) {
+                for (const method of ["open", "delete"]) {
+                  const original = caches[method].bind(caches);
+                  caches[method] = (...args) => { window.__costCacheTouched = true; return original(...args); };
+                }
+              }
               window.__costServiceWorkerTouched = false;
               if (navigator.serviceWorker) {
                 const original = navigator.serviceWorker.register.bind(navigator.serviceWorker);
@@ -580,13 +626,10 @@ public sealed class CostPagePlaywrightTests
 
     private static string CreatePreview(CostConfigurationPreviewRequestV1 request)
     {
-        const string predecessor =
-            "cost-configuration-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        const string catalogSha =
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var predecessor = EmptyConfiguration.ConfigurationId;
         var configuration = CostConfigurationCanonicalJsonV1.Create(
             predecessor,
-            catalogSha,
+            CatalogSha,
             request.SourceEntries,
             request.BudgetEntries,
             new DateTimeOffset(2026, 7, 23, 4, 0, 0, TimeSpan.Zero));
@@ -594,7 +637,7 @@ public sealed class CostPagePlaywrightTests
             configuration,
             1,
             predecessor,
-            catalogSha,
+            CatalogSha,
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             1,
             1,
@@ -602,6 +645,53 @@ public sealed class CostPagePlaywrightTests
             1,
             "exact");
         return Encoding.UTF8.GetString(CostConfigurationPreviewCanonicalJsonV1.Serialize(preview));
+    }
+
+    private static string ConfigurationForState(string catalogState) =>
+        catalogState switch
+        {
+            "matching" => Configuration,
+            "changed" => SerializeConfiguration(EmptyConfiguration, "changed", 1, ChangedCatalogSha),
+            "unconfigured" => SerializeApi(new CostConfigurationReadApplicationV1(
+                "cost.configuration-read.v1",
+                0,
+                null,
+                null,
+                CatalogSha,
+                "unconfigured",
+                null,
+                0,
+                "exact")),
+            _ => throw new ArgumentOutOfRangeException(nameof(catalogState)),
+        };
+
+    private static string SerializeConfiguration(
+        CostConfigurationV1 configuration,
+        string catalogState,
+        int selectedSessionCount,
+        string providerCatalogSha = CatalogSha) =>
+        SerializeApi(new CostConfigurationReadApplicationV1(
+            "cost.configuration-read.v1",
+            1,
+            configuration.ConfigurationId,
+            configuration.CatalogSha256,
+            providerCatalogSha,
+            catalogState,
+            configuration,
+            selectedSessionCount,
+            "exact"));
+
+    private static string SerializeApi<T>(T value) =>
+        JsonSerializer.Serialize(value, ApiJson);
+
+    private static JsonSerializerOptions CreateApiJsonOptions()
+    {
+        var options = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        };
+        options.Converters.Add(new TestUtcDateTimeOffsetConverter());
+        return options;
     }
 
     private static RouteFulfillOptions Json(string body, int status = 200) => new()
@@ -619,12 +709,80 @@ public sealed class CostPagePlaywrightTests
         StartRetentionCleanupWorker = false,
     };
 
-    private const string Configuration =
-        """{"schema_version":"cost.configuration-read.v1","head_revision":1,"configuration":{"schema_version":"cost.configuration.v1","configuration_id":"cost-configuration-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","predecessor_configuration_id":null,"catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_entries":[],"budget_entries":[],"created_at_utc":"2026-07-23T00:00:00.0000000Z"},"configuration_catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","provider_catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","catalog_state":"matched","selection":{"eligible_session_count":1,"selected_session_count":1,"unselected_session_count":0}}""";
-    private const string PreservedConfiguration =
-        """{"schema_version":"cost.configuration-read.v1","head_revision":1,"configuration":{"schema_version":"cost.configuration.v1","configuration_id":"cost-configuration-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","predecessor_configuration_id":null,"catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_entries":[{"source_surface":"github-copilot-vscode","application_version":"1.0.4","adapter_capability_version":"synthetic-pricing-v1","provider":"github_copilot","billing_mode":"github_ai_credits","pricing_route":"credit_consuming_interaction"},{"source_surface":"a_","application_version":"2.0.0","adapter_capability_version":"synthetic-pricing-v1","provider":"unknown","billing_mode":"unknown","pricing_route":"unknown"},{"source_surface":"a-","application_version":"2.0.0","adapter_capability_version":"synthetic-pricing-v1","provider":"unknown","billing_mode":"unknown","pricing_route":"unknown"}],"budget_entries":[{"rule_id":"session-estimated-cost-threshold","rule_version":"1","enabled":true,"currency":"USD","warning_threshold":"10","critical_threshold":"20","minimum_coverage_basis_points":10000,"scope_kind":"session","window_days":null},{"rule_id":"daily-estimated-cost-threshold","rule_version":"1","enabled":false,"currency":"USD","warning_threshold":"50","critical_threshold":"100","minimum_coverage_basis_points":9000,"scope_kind":"utc_day","window_days":null},{"rule_id":"period-estimated-cost-threshold","rule_version":"1","enabled":true,"currency":"USD","warning_threshold":"200","critical_threshold":"400","minimum_coverage_basis_points":8000,"scope_kind":"rolling_period","window_days":30}],"created_at_utc":"2026-07-23T00:00:00.0000000Z"},"configuration_catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","provider_catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","catalog_state":"matched","selection":{"eligible_session_count":2,"selected_session_count":2,"unselected_session_count":0}}""";
-    private const string Catalog =
-        """{"catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sources":[{"source_kind":"bundled","source_id":"github-public","source_label":"GitHub public pricing","registry_version":"2026-07-01","last_reviewed_date":"2026-07-01","stale_after_date":"2026-08-01"}],"entries":[{"source_kind":"bundled","source_id":"github-public","source_label":"GitHub public pricing","registry_version":"2026-07-01","entry_key":"github-copilot:gpt-4.1:credit","supersedes_entry_key":null,"selection_state":"active","superseded_by_entry_key":null,"provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","pricing_route":"credit_consuming_interaction","effective_from_utc":"2026-07-01T00:00:00.0000000Z","effective_to_utc":null,"last_reviewed_date":"2026-07-01","stale_after_date":"2026-08-01","currency":"USD","included_zero_incremental_cost":false,"source_reference":"https://example.com/pricing/%3Cscript%3E"}],"next_after":null}""";
+    private sealed class TestUtcDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
+    {
+        public override DateTimeOffset Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options) =>
+            throw new NotSupportedException();
+
+        public override void Write(
+            Utf8JsonWriter writer,
+            DateTimeOffset value,
+            JsonSerializerOptions options) =>
+            writer.WriteStringValue(value.ToUniversalTime().ToString(
+                "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+                CultureInfo.InvariantCulture));
+    }
+
+    private const string CatalogSha =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string ChangedCatalogSha =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private static readonly JsonSerializerOptions ApiJson = CreateApiJsonOptions();
+    private static readonly CostConfigurationV1 EmptyConfiguration =
+        CostConfigurationCanonicalJsonV1.Create(
+            null,
+            CatalogSha,
+            [],
+            [],
+            new DateTimeOffset(2026, 7, 23, 0, 0, 0, TimeSpan.Zero));
+    private static readonly CostConfigurationV1 PreservedConfigurationModel =
+        CostConfigurationCanonicalJsonV1.Create(
+            null,
+            CatalogSha,
+            [
+                new("github-copilot-vscode", "1.0.4", "synthetic-pricing-v1", "github_copilot", "github_ai_credits", "credit_consuming_interaction"),
+                new("a_", "2.0.0", "synthetic-pricing-v1", "unknown", "unknown", "unknown"),
+                new("a-", "2.0.0", "synthetic-pricing-v1", "unknown", "unknown", "unknown"),
+            ],
+            [
+                new("session-estimated-cost-threshold", "1", true, "USD", "10", "20", 10000, "session", null),
+                new("daily-estimated-cost-threshold", "1", false, "USD", "50", "100", 9000, "utc_day", null),
+                new("period-estimated-cost-threshold", "1", true, "USD", "200", "400", 8000, "rolling_period", 30),
+            ],
+            new DateTimeOffset(2026, 7, 23, 0, 0, 0, TimeSpan.Zero));
+    private static readonly string Configuration =
+        SerializeConfiguration(EmptyConfiguration, "matching", 1);
+    private static readonly string PreservedConfiguration =
+        SerializeConfiguration(PreservedConfigurationModel, "matching", 3);
+    private static readonly string Catalog = SerializeApi(
+        new CostCatalogApplicationV1(
+            "cost.catalog.v1",
+            CatalogSha,
+            [new("bundled", "github-public", "GitHub public pricing", "2026-07-01", new DateOnly(2026, 7, 1), new DateOnly(2026, 8, 1))],
+            [new(
+                "bundled",
+                "github-public",
+                "GitHub public pricing",
+                "2026-07-01",
+                "github-copilot:gpt-4.1:credit",
+                null,
+                "active",
+                null,
+                "github_copilot",
+                "gpt-4.1",
+                "github_ai_credits",
+                "credit_consuming_interaction",
+                new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero),
+                null,
+                new DateOnly(2026, 7, 1),
+                new DateOnly(2026, 8, 1),
+                "USD",
+                false,
+                "https://example.com/pricing/%3Cscript%3E")],
+            null));
     private const string CompleteAnalytics =
         """{"schema_version":"cost.analytics.v1","snapshot_id":"cost-analytics-snapshot-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"complete","cap_reason":null,"eligible_session_count":4,"eligible_session_lower_bound":null,"group_lower_bound":null,"filters":{"from":"2026-07-22T00:00:00.0000000Z","to":"2026-07-24T00:00:00.0000000Z","source_surface":null,"provider":null,"model":null,"billing_mode":null,"status":null,"registry_version":null,"currency":null,"repository":null,"workspace":null,"limit":50},"overall":{"eligible_session_count":4,"estimated_session_count":2,"partial_session_count":1,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":1,"unavailable_session_count":0,"stale_session_count":0,"coverage_numerator":2,"coverage_denominator":4,"coverage_basis_points":5000},"range_totals":[{"registry_version":"2026-07-01","currency":"USD","estimated_amount_state":"available","estimated_amount":"12.50","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"daily_totals":[{"utc_date":"2026-07-23","registry_version":"2026-07-01","currency":"USD","estimated_amount_state":"available","estimated_amount":"12.50","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"groups":[{"utc_date":"2026-07-23","source_surface":"github-copilot-vscode","provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","repository":null,"workspace":null,"registry_version":"2026-07-01","currency":"USD","component_category":"input","group_id":"cost-analytics-group-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unknown_dimensions":["repository","workspace"],"eligible_session_count":4,"estimated_session_count":2,"partial_session_count":1,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":1,"unavailable_session_count":0,"stale_session_count":0,"coverage_basis_points":5000,"component_session_count":3,"estimated_component_session_count":2,"partial_component_session_count":1,"estimated_amount_state":"available","estimated_amount":"8.00","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"next_cursor":null}""";
     private const string IncompleteAnalytics =
