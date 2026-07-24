@@ -21,7 +21,10 @@ public enum PricingStoreStatus
 
 public sealed record PricingStoreResult(PricingStoreStatus Status);
 
-public sealed record PricingStoreResult<T>(PricingStoreStatus Status, T? Value);
+public sealed record PricingStoreResult<T>(
+    PricingStoreStatus Status,
+    T? Value,
+    string? ErrorCode = null);
 
 public sealed record PersistedPricingCatalogSnapshot(
     string CatalogSha256,
@@ -505,6 +508,214 @@ public sealed partial class SqlitePricingStore
         }
     }
 
+    internal PricingStoreResult<CostConfigurationPreviewV1>
+        CreateConfigurationPreviewApplication(
+            CostConfigurationPreviewRequestV1 proposal,
+            string providerCatalogSha256)
+    {
+        ArgumentNullException.ThrowIfNull(proposal);
+        if (!IsLowerSha(providerCatalogSha256))
+            return new(
+                PricingStoreStatus.ContractRejected,
+                null,
+                "cost_invalid_configuration");
+
+        try
+        {
+            using var connection = Open(SqliteOpenMode.ReadWrite);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (!PricingSchemaV1.ValidateRows(connection, transaction))
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.Unavailable);
+
+            var createdAtUtc = timeProvider.GetUtcNow();
+            using (var cleanup = Command(
+                connection,
+                transaction,
+                "DELETE FROM pricing_configuration_previews WHERE expires_at_utc<=$now;",
+                ("$now", Format(createdAtUtc))))
+                cleanup.ExecuteNonQuery();
+
+            long expectedHeadRevision = 0;
+            string? expectedConfigurationId = null;
+            CostConfigurationV1? currentConfiguration = null;
+            using (var head = Command(
+                connection,
+                transaction,
+                """
+                SELECT h.head_revision,h.configuration_id,c.canonical_blob
+                FROM pricing_configuration_heads h
+                JOIN pricing_configurations c ON c.configuration_id=h.configuration_id
+                ORDER BY h.head_revision DESC LIMIT 1;
+                """))
+            using (var reader = head.ExecuteReader())
+            {
+                if (reader.Read())
+                {
+                    expectedHeadRevision = reader.GetInt64(0);
+                    expectedConfigurationId = reader.GetString(1);
+                    var consumed = CostConfigurationConsumerV1.Consume(
+                        ((byte[])reader[2]).ToArray());
+                    if (consumed.Status != CostConsumerStatus.Success
+                        || consumed.Value is null
+                        || consumed.Value.ConfigurationId != expectedConfigurationId)
+                        return Rollback<CostConfigurationPreviewV1>(
+                            transaction,
+                            PricingStoreStatus.Unavailable);
+                    currentConfiguration = consumed.Value;
+                }
+            }
+
+            CostConfigurationV1 configuration;
+            try
+            {
+                configuration = CostConfigurationCanonicalJsonV1.Create(
+                    expectedConfigurationId,
+                    providerCatalogSha256,
+                    proposal.SourceEntries,
+                    proposal.BudgetEntries,
+                    createdAtUtc);
+            }
+            catch (ArgumentException)
+            {
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.ContractRejected,
+                    "cost_invalid_configuration");
+            }
+
+            var proposed = ReadConfigurationSelection(
+                connection,
+                transaction,
+                configuration,
+                2_001);
+            if (proposed is null)
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.Unavailable);
+            if (proposed.Count > 2_000)
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.ContractRejected,
+                    "cost_request_too_large");
+
+            var current = currentConfiguration is null
+                ? []
+                : ReadConfigurationSelection(
+                    connection,
+                    transaction,
+                    currentConfiguration,
+                    2_001);
+            if (current is null)
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.Unavailable);
+
+            var currentState = current.Count <= 2_000 ? "exact" : "lower_bound";
+            var proposedIds = proposed
+                .Select(item => item.SessionId)
+                .ToHashSet(StringComparer.Ordinal);
+            var overlapCount = current.Count(item => proposedIds.Contains(item.SessionId));
+            CostConfigurationPreviewV1 preview;
+            byte[] canonical;
+            try
+            {
+                preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+                    configuration,
+                    expectedHeadRevision,
+                    expectedConfigurationId,
+                    providerCatalogSha256,
+                    PricingConfigurationSelectionDigestV1.Create(proposed),
+                    proposed.Count,
+                    current.Count,
+                    currentState,
+                    overlapCount,
+                    currentState);
+                canonical = CostConfigurationPreviewCanonicalJsonV1.Serialize(preview);
+            }
+            catch (ArgumentException)
+            {
+                return Rollback<CostConfigurationPreviewV1>(
+                    transaction,
+                    PricingStoreStatus.ContractRejected,
+                    "cost_invalid_configuration");
+            }
+
+            using (var existing = Command(
+                connection,
+                transaction,
+                """
+                SELECT canonical_blob FROM pricing_configuration_previews
+                WHERE preview_digest=$digest;
+                """,
+                ("$digest", preview.PreviewDigest)))
+            {
+                var stored = existing.ExecuteScalar();
+                if (stored is byte[] bytes)
+                {
+                    transaction.Rollback();
+                    return bytes.AsSpan().SequenceEqual(canonical)
+                        ? new(PricingStoreStatus.Success, preview)
+                        : new(
+                            PricingStoreStatus.Conflict,
+                            null,
+                            "cost_idempotency_conflict");
+                }
+            }
+            using (var count = Command(
+                connection,
+                transaction,
+                "SELECT COUNT(*) FROM pricing_configuration_previews;"))
+            {
+                if (Convert.ToInt64(
+                        count.ExecuteScalar(),
+                        CultureInfo.InvariantCulture) >= 32)
+                    return Rollback<CostConfigurationPreviewV1>(
+                        transaction,
+                        PricingStoreStatus.CapacityReached);
+            }
+
+            using (var insert = Command(
+                connection,
+                transaction,
+                """
+                INSERT INTO pricing_configuration_previews(
+                    preview_digest,canonical_sha256,canonical_blob,configuration_id,
+                    expected_head_revision,expected_configuration_id,catalog_sha256,
+                    selection_digest,created_at_utc,expires_at_utc)
+                VALUES($digest,$canonical_sha,$blob,$configuration_id,$head,
+                    $expected_configuration_id,$catalog_sha,$selection_digest,
+                    $created_at,$expires_at);
+                """,
+                ("$digest", preview.PreviewDigest),
+                ("$canonical_sha", Convert.ToHexString(SHA256.HashData(canonical))
+                    .ToLowerInvariant()),
+                ("$blob", canonical),
+                ("$configuration_id", preview.Configuration.ConfigurationId),
+                ("$head", preview.ExpectedHeadRevision),
+                ("$expected_configuration_id",
+                    (object?)preview.ExpectedConfigurationId ?? DBNull.Value),
+                ("$catalog_sha", preview.CatalogSha256),
+                ("$selection_digest", preview.SelectionDigest),
+                ("$created_at", Format(preview.Configuration.CreatedAtUtc)),
+                ("$expires_at",
+                    Format(preview.Configuration.CreatedAtUtc.AddMinutes(15)))))
+                insert.ExecuteNonQuery();
+
+            transaction.Commit();
+            return new(PricingStoreStatus.Success, preview);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return new(PricingStoreStatus.Busy, null, "cost_store_busy");
+        }
+        catch (SqliteException)
+        {
+            return new(PricingStoreStatus.Unavailable, null, "cost_store_unavailable");
+        }
+    }
+
     public int CountConfigurationPreviews()
     {
         try
@@ -523,13 +734,12 @@ public sealed partial class SqlitePricingStore
     internal PricingStoreResult<CostConfigurationCommitResultV1> AppendConfigurationCommitApplication(
         CostConfigurationPreviewV1 preview,
         PricingProviderCatalogWrite providerCatalog,
-        IReadOnlyList<PricingConfigurationSelectionFactWrite> recomputedSelection)
+        IReadOnlyList<PricingConfigurationSelectionFactWrite>? recomputedSelection)
     {
         ArgumentNullException.ThrowIfNull(providerCatalog);
-        ArgumentNullException.ThrowIfNull(recomputedSelection);
         byte[] requestBytes;
         byte[] providerCatalogBytes;
-        PricingConfigurationSelectionFactWrite[] selection;
+        PricingConfigurationSelectionFactWrite[]? selection;
         CostConfigurationPreviewV1 strict;
         try
         {
@@ -539,11 +749,14 @@ public sealed partial class SqlitePricingStore
                 return new(PricingStoreStatus.ContractRejected, null);
             strict = consumed.Value;
             providerCatalogBytes = providerCatalog.CanonicalBytes.ToArray();
-            selection = recomputedSelection.Select(FreezeSelectionFact).ToArray();
+            selection = recomputedSelection?.Select(FreezeSelectionFact).ToArray();
         }
         catch (ArgumentException)
         {
-            return new(PricingStoreStatus.ContractRejected, null);
+            return new(
+                PricingStoreStatus.ContractRejected,
+                null,
+                "cost_invalid_configuration");
         }
 
         try
@@ -556,19 +769,66 @@ public sealed partial class SqlitePricingStore
             using (var replay = Command(
                 connection,
                 transaction,
-                "SELECT canonical_request_blob,canonical_result_blob FROM pricing_configuration_commits WHERE head_revision=$revision;",
+                """
+                SELECT k.canonical_request_blob,k.canonical_result_blob,
+                    h.configuration_id,c.catalog_sha256,c.canonical_blob
+                FROM pricing_configuration_commits k
+                JOIN pricing_configuration_heads h
+                  ON h.head_revision=k.head_revision
+                  AND h.configuration_id=k.configuration_id
+                JOIN pricing_configurations c
+                  ON c.configuration_id=h.configuration_id
+                WHERE k.head_revision=$revision;
+                """,
                 ("$revision", successor)))
             using (var reader = replay.ExecuteReader())
             {
                 if (reader.Read())
                 {
-                    var same = ((byte[])reader[0]).AsSpan().SequenceEqual(requestBytes);
+                    var replayRequestBytes = (byte[])reader[0];
                     var replayResultBytes = (byte[])reader[1];
+                    var replayConfigurationId = reader.GetString(2);
+                    var replayCatalogSha256 = reader.GetString(3);
+                    var replayConfigurationBytes = (byte[])reader[4];
                     transaction.Rollback();
+                    var consumedRequest =
+                        CostConfigurationCommitConsumerV1.ConsumeRequest(
+                            replayRequestBytes);
                     var consumedResult = CostConfigurationCommitConsumerV1.ConsumeResult(replayResultBytes);
-                    return same && consumedResult.Status == CostConsumerStatus.Success
+                    var consumedConfiguration =
+                        CostConfigurationConsumerV1.Consume(
+                            replayConfigurationBytes);
+                    if (consumedRequest.Status != CostConsumerStatus.Success
+                        || consumedRequest.Value is null
+                        || consumedResult.Status != CostConsumerStatus.Success
+                        || consumedResult.Value is null
+                        || consumedConfiguration.Status != CostConsumerStatus.Success
+                        || consumedConfiguration.Value is null
+                        || consumedResult.Value.HeadRevision != successor
+                        || consumedResult.Value.ConfigurationId
+                            != replayConfigurationId
+                        || consumedResult.Value.CatalogSha256
+                            != replayCatalogSha256
+                        || consumedConfiguration.Value.ConfigurationId
+                            != replayConfigurationId
+                        || consumedConfiguration.Value.CatalogSha256
+                            != replayCatalogSha256
+                        || consumedConfiguration.Value.PredecessorConfigurationId
+                            != consumedRequest.Value.ExpectedConfigurationId
+                        || consumedRequest.Value.Configuration.ConfigurationId
+                            != replayConfigurationId
+                        || consumedRequest.Value.CatalogSha256
+                            != replayCatalogSha256)
+                        return new(
+                            PricingStoreStatus.Unavailable,
+                            null,
+                            "cost_store_unavailable");
+                    return replayRequestBytes.AsSpan().SequenceEqual(requestBytes)
                         ? new(PricingStoreStatus.Success, consumedResult.Value)
-                        : new(PricingStoreStatus.Conflict, null);
+                        : new(
+                            PricingStoreStatus.Conflict,
+                            null,
+                            "cost_idempotency_conflict");
                 }
             }
 
@@ -590,7 +850,10 @@ public sealed partial class SqlitePricingStore
                     || !((byte[])reader[0]).AsSpan().SequenceEqual(
                         CostConfigurationPreviewCanonicalJsonV1.Serialize(strict))
                     || string.CompareOrdinal(reader.GetString(1), Format(committedAtUtc)) <= 0)
-                    return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+                    return Rollback<CostConfigurationCommitResultV1>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_stale_preview");
             }
 
             PricingCatalog currentCatalog;
@@ -604,7 +867,10 @@ public sealed partial class SqlitePricingStore
             }
             if (providerCatalog.CatalogSha256 != currentCatalog.CatalogSha256
                 || strict.CatalogSha256 != currentCatalog.CatalogSha256)
-                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+                return Rollback<CostConfigurationCommitResultV1>(
+                    transaction,
+                    PricingStoreStatus.Conflict,
+                    "cost_catalog_changed");
 
             using (var head = Command(connection, transaction, "SELECT head_revision,configuration_id FROM pricing_configuration_heads ORDER BY head_revision DESC LIMIT 1;"))
             using (var reader = head.ExecuteReader())
@@ -613,21 +879,40 @@ public sealed partial class SqlitePricingStore
                 if ((hasHead ? reader.GetInt64(0) : 0) != strict.ExpectedHeadRevision
                     || (hasHead ? reader.GetString(1) : null) != strict.ExpectedConfigurationId
                     || strict.Configuration.PredecessorConfigurationId != strict.ExpectedConfigurationId)
-                    return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+                    return Rollback<CostConfigurationCommitResultV1>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_stale_head");
             }
 
             string selectionDigest;
             try
             {
+                selection ??= ReadConfigurationSelection(
+                    connection,
+                    transaction,
+                    strict.Configuration,
+                    2_001)?.ToArray();
+                if (selection is null || selection.Length > 2_000)
+                    return Rollback<CostConfigurationCommitResultV1>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_selection_changed");
                 selectionDigest = PricingConfigurationSelectionDigestV1.Create(selection);
             }
             catch (ArgumentException)
             {
-                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.ContractRejected);
+                return Rollback<CostConfigurationCommitResultV1>(
+                    transaction,
+                    PricingStoreStatus.ContractRejected,
+                    "cost_invalid_configuration");
             }
             if (selection.Length != strict.ProposedMatchCount
                 || selectionDigest != strict.SelectionDigest)
-                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+                return Rollback<CostConfigurationCommitResultV1>(
+                    transaction,
+                    PricingStoreStatus.Conflict,
+                    "cost_selection_changed");
 
             var catalogInsertStatus = InsertCatalogSnapshot(
                 connection,
@@ -1477,6 +1762,118 @@ public sealed partial class SqlitePricingStore
         return value with { };
     }
 
+    private static List<PricingConfigurationSelectionFactWrite>?
+        ReadConfigurationSelection(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            CostConfigurationV1 configuration,
+            int maximum)
+    {
+        var values = new List<PricingConfigurationSelectionFactWrite>();
+        string? lastSeen = null;
+        string? lastSessionId = null;
+        while (values.Count < maximum)
+        {
+            using var command = Command(
+                connection,
+                transaction,
+                """
+                SELECT session_id,status,last_seen_at,updated_at
+                FROM sessions
+                WHERE status IN ('completed','failed')
+                  AND ($last_seen IS NULL OR last_seen_at>$last_seen
+                    OR (last_seen_at=$last_seen AND session_id>$last_session))
+                ORDER BY last_seen_at,session_id LIMIT 256;
+                """,
+                ("$last_seen", (object?)lastSeen ?? DBNull.Value),
+                ("$last_session", (object?)lastSessionId ?? DBNull.Value));
+            using var reader = command.ExecuteReader();
+            var candidates =
+                new List<(string SessionId, string Status, string LastSeen, string Updated)>(
+                    256);
+            while (reader.Read())
+                candidates.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3)));
+            reader.Close();
+            if (candidates.Count == 0) break;
+
+            foreach (var candidate in candidates)
+            {
+                var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+                    connection,
+                    transaction,
+                    candidate.SessionId);
+                if (source.State != CostSessionSourcePartitionStateV1.Resolved
+                    || configuration.SourceEntries.Count(item =>
+                        item.SourceSurface == source.SourceSurface
+                        && item.ApplicationVersion == source.SourceApplicationVersion) != 1)
+                    continue;
+
+                long? activeHeadRevision = null;
+                string? activeEstimateId = null;
+                using (var head = Command(
+                    connection,
+                    transaction,
+                    """
+                    SELECT head_revision,estimate_id
+                    FROM pricing_estimate_heads
+                    WHERE session_id=$session
+                    ORDER BY head_revision DESC LIMIT 1;
+                    """,
+                    ("$session", candidate.SessionId)))
+                using (var headReader = head.ExecuteReader())
+                {
+                    if (headReader.Read())
+                    {
+                        activeHeadRevision = headReader.GetInt64(0);
+                        activeEstimateId = headReader.GetString(1);
+                    }
+                }
+
+                long attemptRevision;
+                using (var attempt = Command(
+                    connection,
+                    transaction,
+                    """
+                    SELECT COALESCE(MAX(attempt_revision),0)
+                    FROM pricing_session_attempts WHERE session_id=$session;
+                    """,
+                    ("$session", candidate.SessionId)))
+                    attemptRevision = Convert.ToInt64(
+                        attempt.ExecuteScalar(),
+                        CultureInfo.InvariantCulture);
+
+                values.Add(new(
+                    candidate.SessionId,
+                    candidate.Status,
+                    ParseStoredTimestamp(candidate.LastSeen),
+                    ParseStoredTimestamp(candidate.Updated),
+                    "resolved",
+                    source.ObservationCount,
+                    source.Digest,
+                    source.SourceSurface!,
+                    source.SourceApplicationVersion!,
+                    activeHeadRevision,
+                    activeEstimateId,
+                    attemptRevision));
+                if (values.Count == maximum) break;
+            }
+
+            lastSeen = candidates[^1].LastSeen;
+            lastSessionId = candidates[^1].SessionId;
+        }
+        return values;
+    }
+
+    private static DateTimeOffset ParseStoredTimestamp(string value) =>
+        DateTimeOffset.Parse(
+            value,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+
     private static PricingBudgetResultWrite FreezeBudgetResult(
         PricingBudgetResultWrite value)
     {
@@ -1825,6 +2222,15 @@ public sealed partial class SqlitePricingStore
     {
         transaction.Rollback();
         return new(status, default);
+    }
+
+    private static PricingStoreResult<T> Rollback<T>(
+        SqliteTransaction transaction,
+        PricingStoreStatus status,
+        string errorCode)
+    {
+        transaction.Rollback();
+        return new(status, default, errorCode);
     }
 
     private static SqliteCommand Command(SqliteConnection connection, SqliteTransaction? transaction, string sql, params (string Name, object Value)[] parameters)

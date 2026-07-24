@@ -1143,7 +1143,7 @@ public sealed class PricingPersistenceFoundationTests
         var configuration = CostConfigurationCanonicalJsonV1.Create(
             null,
             new string('a', 64),
-            [new("surface", "cost.configuration-preview.v1", "capability.v1", "provider", "billing", "route")],
+            [new("surface", "cost.configuration-preview.v1", "capability.v1", "github_copilot", "plan_included", "code_completion")],
             [],
             new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero));
         var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
@@ -1410,7 +1410,7 @@ public sealed class PricingPersistenceFoundationTests
         var secondConfiguration = CostConfigurationCanonicalJsonV1.Create(
             firstPreview.Configuration.ConfigurationId,
             catalog.CatalogSha256,
-            [new("surface", "1.0.2", "capability.v1", "provider", "billing", "route")],
+            [new("surface", "1.0.2", "capability.v1", "github_copilot", "plan_included", "code_completion")],
             [],
             createdAt.AddMinutes(2));
         var secondPreview = CostConfigurationPreviewCanonicalJsonV1.Create(
@@ -1983,7 +1983,7 @@ public sealed class PricingPersistenceFoundationTests
         var configuration = CostConfigurationCanonicalJsonV1.Create(
             null,
             catalogSha,
-            [new("surface", $"1.0.{discriminator}", "capability.v1", "provider", "billing", "route")],
+            [new("surface", $"1.0.{discriminator}", "capability.v1", "github_copilot", "plan_included", "code_completion")],
             [],
             createdAt);
         return CostConfigurationPreviewCanonicalJsonV1.Create(
