@@ -258,6 +258,10 @@ internal static class MonitorHost
         }
         var alertConnectionString = new SqliteConnectionStringBuilder { DataSource = options.DatabasePath, Pooling = false }.ToString();
         var alertEngineStore = testOptions?.AlertEngineStore ?? new SqliteAlertEngineStore(alertConnectionString);
+        var alertEngineV2Ready = testOptions?.AlertCenterReadModelV2 is not null
+            || testOptions?.AlertCenterReadModel is not null
+            || alertEngineStore is not IAlertEngineStoreV2 alertEngineStoreV2
+            || alertEngineStoreV2.InitializeV2().Status == AlertEngineStoreStatusV2.Success;
         var alertLifecycleStore = testOptions?.AlertLifecycleStore ?? new SqliteAlertLifecycleStore(alertConnectionString, timeProvider);
         var alertEvidenceResolver = new AlertCenterEvidenceResolver(sessionStore, projectionStore, compatibilityStore);
         var alertEngineQueryStore = alertEngineStore as IAlertEngineQueryStore;
@@ -272,6 +276,19 @@ internal static class MonitorHost
                     sessionStore,
                     alertEvidenceResolver,
                     timeProvider));
+        var alertCenterReadModelV2 = testOptions?.AlertCenterReadModelV2
+            ?? (testOptions?.AlertCenterReadModel is not null
+                ? (IAlertCenterReadModelV2)new AlertCenterV1AdapterReadModelV2(alertCenterReadModel)
+                : (IAlertCenterReadModelV2?)null)
+            ?? (alertEngineV2Ready
+                && alertEngineStore is IAlertEngineVersionedQueryStore versionedQueryStore
+                ? new SqliteAlertCenterReadModelV2(
+                    versionedQueryStore,
+                    alertLifecycleStore,
+                    alertCenterReadModel,
+                    testOptions?.CostAlertPresentationResolver
+                        ?? new UnavailableCostAlertPresentationResolverV1())
+                : new UnavailableAlertCenterReadModelV2());
         var alertCenterPolicy = AlertCenterEvaluationPolicy.Create();
         var alertCenterEvaluationCoordinator = testOptions?.AlertCenterEvaluationCoordinator ?? new AlertCenterEvaluationCoordinator(
             new AlertCenterEvaluationSnapshotComposer(sessionStore, projectionStore, compatibilityStore),
@@ -350,7 +367,7 @@ internal static class MonitorHost
                 }
                 if (AlertCenterRoutes.IsPath(context.Request.Path))
                 {
-                    await AlertCenterRoutes.WriteErrorAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_center_store_unavailable");
+                    await AlertCenterRoutes.WriteErrorForPathAsync(context, StatusCodes.Status503ServiceUnavailable, "alert_center_store_unavailable");
                     return;
                 }
                 if (AlertLifecycleRoutes.IsAlertPath(context.Request.Path)
@@ -457,7 +474,7 @@ internal static class MonitorHost
                 }
                 else if (alertCenterPath)
                 {
-                    await AlertCenterRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
+                    await AlertCenterRoutes.WriteErrorForPathAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
                 else if (DoctorUiRoutes.IsDoctorUiPath(context.Request.Path))
                 {
@@ -500,7 +517,7 @@ internal static class MonitorHost
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         HistoricalAnalysisRoutes.Map(app, historicalAnalysisCoordinator);
-        AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterEvaluationCoordinator, timeProvider);
+        AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterReadModelV2, alertCenterEvaluationCoordinator, timeProvider);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1936,6 +1953,10 @@ internal sealed class MonitorHostTestOptions
     public IAlertLifecycleStore? AlertLifecycleStore { get; set; }
 
     public IAlertCenterReadModel? AlertCenterReadModel { get; init; }
+
+    public IAlertCenterReadModelV2? AlertCenterReadModelV2 { get; init; }
+
+    public ICostAlertPresentationResolverV1? CostAlertPresentationResolver { get; init; }
 
     public IAlertCenterEvaluationCoordinator? AlertCenterEvaluationCoordinator { get; init; }
 

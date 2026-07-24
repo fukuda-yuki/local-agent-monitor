@@ -486,6 +486,9 @@ public sealed class AlertCenterRouteTests
     {
         using var temp = NewTemp();
         _ = AppendAlert(temp, "session-a", "trace-a", "span-a", 8);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(new ExactProjectionStore()));
         await using (var connection = new SqliteConnection(ConnectionString(temp)))
         {
             await connection.OpenAsync();
@@ -493,7 +496,6 @@ public sealed class AlertCenterRouteTests
             command.CommandText = "UPDATE alert_receipts SET canonical_json=json_set(canonical_json,'$.unexpected','not-a-contract-member');";
             await command.ExecuteNonQueryAsync();
         }
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new ExactProjectionStore()));
 
         using var response = await host.Client.GetAsync("/api/alert-center/v1/alerts");
 
