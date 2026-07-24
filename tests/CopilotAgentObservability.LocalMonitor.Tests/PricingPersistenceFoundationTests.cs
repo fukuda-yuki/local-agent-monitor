@@ -11,6 +11,136 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class PricingPersistenceFoundationTests
 {
     [Fact]
+    public void PricingApplicationCore_OwnsTheOnlyCombinedCompletionUnitOfWork()
+    {
+        var assembly = typeof(SqlitePricingStore).Assembly;
+        var unitOfWork = assembly.GetType(
+            "CopilotAgentObservability.Persistence.Sqlite.Pricing.SqliteCostRecalculationUnitOfWork");
+
+        Assert.NotNull(unitOfWork);
+        Assert.DoesNotContain(
+            typeof(SqlitePricingStore).GetMethods(
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic),
+            method => method.Name.EndsWith("Incomplete", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PricingSourcePartitionResolver_UsesEveryExactSessionObservationAndNeverChoosesLatest()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var sessionId = Guid.NewGuid().ToString("D");
+        using var connection = database.Open();
+        InsertSession(connection, sessionId);
+        Execute(
+            connection,
+            $"""
+            INSERT INTO session_runs(
+                run_id,session_id,source_surface,status)
+            VALUES('run-1','{sessionId}','vscode','completed');
+            INSERT INTO session_events(
+                event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                type,occurred_at,content_state,source_application_version)
+            VALUES(
+                'event-1','{sessionId}','run-1','vscode','synthetic','source-event-1',
+                'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+            """);
+        using var transaction = connection.BeginTransaction();
+
+        var resolved = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+
+        Assert.Equal(CostSessionSourcePartitionStateV1.Resolved, resolved.State);
+        Assert.Equal(2, resolved.ObservationCount);
+        Assert.Equal("github-copilot-vscode", resolved.SourceSurface);
+        Assert.Equal("1.2.3", resolved.SourceApplicationVersion);
+        Assert.Matches("^[0-9a-f]{64}$", resolved.Digest);
+
+        Execute(
+            connection,
+            transaction,
+            $"""
+            INSERT INTO session_events(
+                event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                type,occurred_at,content_state,source_application_version)
+            VALUES(
+                'event-2','{sessionId}','run-1','vscode','synthetic','source-event-2',
+                'turn','2026-07-24T01:00:01.0000000+00:00','not_captured','2.0.0');
+            """);
+
+        var mixed = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+
+        Assert.Equal(CostSessionSourcePartitionStateV1.Mixed, mixed.State);
+        Assert.Equal(3, mixed.ObservationCount);
+        Assert.Null(mixed.SourceSurface);
+        Assert.Null(mixed.SourceApplicationVersion);
+        Assert.NotEqual(resolved.Digest, mixed.Digest);
+        transaction.Rollback();
+    }
+
+    [Fact]
+    public void PricingApplicationCore_StartAcquiresSessionResolverHeadAndAttemptFromDurableOwners()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var preview = CreatePreview(catalog.CatalogSha256, createdAt, 1);
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(PricingStoreStatus.Success, AppendIncompleteConfigurationCommit(store, preview).Status);
+
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open())
+        {
+            InsertSession(connection, sessionId);
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES('run-1','{sessionId}','vscode','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES(
+                    'event-1','{sessionId}','run-1','vscode','synthetic','source-event-1',
+                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                """);
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            preview.Configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-application-start-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        var unitOfWork = new SqliteCostRecalculationUnitOfWork(database.Path, clock);
+
+        var result = unitOfWork.Start(runId, request, catalogBytes, createdAt.AddMinutes(2));
+
+        Assert.Equal(PricingStoreStatus.Success, result.Status);
+        Assert.Equal(runId, result.Value);
+        using var read = database.Open();
+        Assert.Equal("resolved", Scalar<string>(read, "SELECT source_partition_state FROM pricing_recalculation_targets;"));
+        Assert.Equal(2L, Scalar<long>(read, "SELECT source_partition_count FROM pricing_recalculation_targets;"));
+        Assert.Equal("github-copilot-vscode", Scalar<string>(read, "SELECT source_surface FROM pricing_recalculation_targets;"));
+        Assert.Equal("1.2.3", Scalar<string>(read, "SELECT source_application_version FROM pricing_recalculation_targets;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT base_attempt_revision FROM pricing_recalculation_targets;"));
+    }
+
+    [Fact]
     public void PricingSchemaV1_Ensure_CreatesExactComponentAfterRequiredDependencies()
     {
         using var database = new PricingDatabase();
@@ -764,7 +894,7 @@ public sealed class PricingPersistenceFoundationTests
         using (var before = database.Open())
             Assert.Equal(0L, Scalar<long>(before, "SELECT COUNT(*) FROM pricing_catalog_snapshots;"));
 
-        var wrongSelection = store.AppendConfigurationCommitIncomplete(
+        var wrongSelection = store.AppendConfigurationCommitApplication(
             preview,
             new PricingProviderCatalogWrite(catalog.CatalogSha256, catalogBytes),
             [CreateSelectionFact()]);
@@ -776,7 +906,7 @@ public sealed class PricingPersistenceFoundationTests
             Assert.Equal(0L, Scalar<long>(afterConflict, "SELECT COUNT(*) FROM pricing_configuration_heads;"));
         }
 
-        var result = store.AppendConfigurationCommitIncomplete(
+        var result = store.AppendConfigurationCommitApplication(
             preview,
             new PricingProviderCatalogWrite(catalog.CatalogSha256, catalogBytes),
             []);
@@ -836,7 +966,7 @@ public sealed class PricingPersistenceFoundationTests
             [sessionId],
             [],
             "pricing-stale-head-0001");
-        var target = new PricingRecalculationTargetWriteIncomplete(
+        var target = new PricingRecalculationTargetCapture(
             sessionId,
             "completed",
             createdAt,
@@ -851,7 +981,7 @@ public sealed class PricingPersistenceFoundationTests
             0);
         Assert.Equal(
             PricingStoreStatus.Success,
-            store.StartRecalculationIncomplete(
+            store.StartRecalculationApplication(
                 Guid.CreateVersion7().ToString("D"),
                 initialRequest,
                 [target],
@@ -888,12 +1018,12 @@ public sealed class PricingPersistenceFoundationTests
             [],
             "pricing-stale-head-0002");
 
-        var replay = store.StartRecalculationIncomplete(
+        var replay = store.StartRecalculationApplication(
             Guid.CreateVersion7().ToString("D"),
             initialRequest,
             [target],
             createdAt.AddMinutes(4));
-        var fresh = store.StartRecalculationIncomplete(
+        var fresh = store.StartRecalculationApplication(
             Guid.CreateVersion7().ToString("D"),
             historicalRequest,
             [target],
@@ -931,7 +1061,7 @@ public sealed class PricingPersistenceFoundationTests
             "pricing-recovery-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
         var calculationTime = new DateTimeOffset(2026, 7, 24, 2, 0, 0, TimeSpan.Zero);
-        var target = new PricingRecalculationTargetWriteIncomplete(
+        var target = new PricingRecalculationTargetCapture(
             sessionId,
             "completed",
             calculationTime.AddHours(-1),
@@ -945,8 +1075,8 @@ public sealed class PricingPersistenceFoundationTests
             null,
             0);
 
-        var started = store.StartRecalculationIncomplete(runId, request, [target], calculationTime);
-        var replayed = store.StartRecalculationIncomplete(
+        var started = store.StartRecalculationApplication(runId, request, [target], calculationTime);
+        var replayed = store.StartRecalculationApplication(
             Guid.CreateVersion7().ToString("D"),
             request,
             [target],
@@ -997,10 +1127,10 @@ public sealed class PricingPersistenceFoundationTests
         var request = CostRecalculationRequestCanonicalJsonV1.Create(
             configuration.ConfigurationId, 1, catalog.CatalogSha256, [sessionId], [], "pricing-estimate-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWriteIncomplete(
+        var target = new PricingRecalculationTargetCapture(
             sessionId, "completed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "resolved", 1, new string('d', 64), "github-copilot-vscode", "1.2.3", null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationApplication(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         var quantityProvenance = new PricingValueProvenance(
@@ -1036,7 +1166,7 @@ public sealed class PricingPersistenceFoundationTests
         };
         Assert.Equal(
             PricingStoreStatus.ContractRejected,
-            store.AppendEstimateSuccessIncomplete(
+            store.AppendEstimateSuccessApplication(
                 runId,
                 0,
                 0,
@@ -1058,7 +1188,7 @@ public sealed class PricingPersistenceFoundationTests
         clock.UtcNow = calculationTime.AddSeconds(2);
         Assert.Equal(
             PricingStoreStatus.Success,
-            store.AppendEstimateSuccessIncomplete(
+            store.AppendEstimateSuccessApplication(
                 runId,
                 0,
                 0,
@@ -1156,17 +1286,17 @@ public sealed class PricingPersistenceFoundationTests
             ],
             "pricing-budget-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWriteIncomplete(
+        var target = new PricingRecalculationTargetCapture(
             sessionId, "completed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "missing", 0, new string('d', 64), null, null, null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationApplication(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         clock.UtcNow = calculationTime.AddSeconds(2);
 
         var eligibilityDigest = new string('9', 64);
         var eligibleSessionIds = new[] { sessionId };
-        PricingBudgetResultWriteIncomplete[] budgetResults =
+        PricingBudgetResultWrite[] budgetResults =
         [
                 new(
                     0,
@@ -1228,20 +1358,20 @@ public sealed class PricingPersistenceFoundationTests
         var unavailable = new[] { PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable") };
         Assert.Equal(
             PricingStoreStatus.ContractRejected,
-            store.AppendRecalculationCompletionIncomplete(
+            store.AppendRecalculationCompletionApplication(
                 runId,
                 unavailable,
                 [.. budgetResults[..2], budgetResults[2] with { SuppressionCode = "scope_not_applicable" }],
                 failure: null).Status);
         Assert.Equal(
             PricingStoreStatus.ContractRejected,
-            store.AppendRecalculationCompletionIncomplete(
+            store.AppendRecalculationCompletionApplication(
                 runId,
                 unavailable,
                 [budgetResults[0] with { ScopeId = "cost-scope-" + new string('0', 64) }, .. budgetResults[1..]],
                 failure: null).Status);
 
-        var result = store.AppendRecalculationCompletionIncomplete(
+        var result = store.AppendRecalculationCompletionApplication(
             runId,
             unavailable,
             budgetResults,
@@ -1302,15 +1432,15 @@ public sealed class PricingPersistenceFoundationTests
             [],
             "pricing-failure-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWriteIncomplete(
+        var target = new PricingRecalculationTargetCapture(
             sessionId, "failed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "incomplete", 257, new string('d', 64), null, null, null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationApplication(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         clock.UtcNow = calculationTime.AddSeconds(2);
 
-        var result = store.AppendRecalculationCompletionIncomplete(
+        var result = store.AppendRecalculationCompletionApplication(
             runId,
             [PricingTargetCompletionWrite.Failed(0, "source_adapter_failed")],
             [],
@@ -1381,7 +1511,7 @@ public sealed class PricingPersistenceFoundationTests
         IReadOnlyList<PricingConfigurationSelectionFactWrite>? selection = null)
     {
         var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
-        return store.AppendConfigurationCommitIncomplete(
+        return store.AppendConfigurationCommitApplication(
             preview,
             providerCatalog ?? new(
                 catalog.CatalogSha256,

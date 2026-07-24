@@ -144,7 +144,7 @@ internal static class PricingConfigurationSelectionDigestV1
         && value.All(character => character is >= '!' and <= '~');
 }
 
-internal sealed record PricingRecalculationTargetWriteIncomplete(
+internal sealed record PricingRecalculationTargetCapture(
     string SessionId,
     string SessionStatus,
     DateTimeOffset SessionEffectiveAtUtc,
@@ -180,7 +180,7 @@ internal sealed record PricingTargetCompletionWrite(
         new(targetOrdinal, "failed", resultCode, null, null, ReadOnlyMemory<byte>.Empty);
 }
 
-internal sealed record PricingBudgetResultWriteIncomplete(
+internal sealed record PricingBudgetResultWrite(
     int ScopeOrdinal,
     string ScopeKind,
     string ScopeId,
@@ -246,7 +246,7 @@ internal sealed record PricingRunFailureWrite(
     int? FailureOrdinal,
     string FailureCode);
 
-public sealed class SqlitePricingStore
+public sealed partial class SqlitePricingStore
 {
     private readonly string databasePath;
     private readonly TimeProvider timeProvider;
@@ -460,7 +460,7 @@ public sealed class SqlitePricingStore
         }
     }
 
-    internal PricingStoreResult<CostConfigurationCommitResultV1> AppendConfigurationCommitIncomplete(
+    internal PricingStoreResult<CostConfigurationCommitResultV1> AppendConfigurationCommitApplication(
         CostConfigurationPreviewV1 preview,
         PricingProviderCatalogWrite providerCatalog,
         IReadOnlyList<PricingConfigurationSelectionFactWrite> recomputedSelection)
@@ -653,10 +653,10 @@ public sealed class SqlitePricingStore
         }
     }
 
-    internal PricingStoreResult<string> StartRecalculationIncomplete(
+    internal PricingStoreResult<string> StartRecalculationApplication(
         string runId,
         CostRecalculationRequestV1 request,
-        IReadOnlyList<PricingRecalculationTargetWriteIncomplete> targets,
+        IReadOnlyList<PricingRecalculationTargetCapture> targets,
         DateTimeOffset calculationTimeUtc)
     {
         ArgumentNullException.ThrowIfNull(targets);
@@ -921,13 +921,13 @@ public sealed class SqlitePricingStore
         }
     }
 
-    internal PricingStoreResult AppendEstimateSuccessIncomplete(
+    internal PricingStoreResult AppendEstimateSuccessApplication(
         string runId,
         int targetOrdinal,
         int sourceEntryOrdinal,
         PricingEstimateRequest expectedRequest,
         ReadOnlyMemory<byte> canonicalEstimateBytes) =>
-        AppendRecalculationCompletionIncomplete(
+        AppendRecalculationCompletionApplication(
             runId,
             [PricingTargetCompletionWrite.Estimate(
                 targetOrdinal,
@@ -937,16 +937,16 @@ public sealed class SqlitePricingStore
             [],
             failure: null);
 
-    internal PricingStoreResult AppendRecalculationCompletionIncomplete(
+    internal PricingStoreResult AppendRecalculationCompletionApplication(
         string runId,
         IReadOnlyList<PricingTargetCompletionWrite> targetResults,
-        IReadOnlyList<PricingBudgetResultWriteIncomplete> budgetResults,
+        IReadOnlyList<PricingBudgetResultWrite> budgetResults,
         PricingRunFailureWrite? failure)
     {
         ArgumentNullException.ThrowIfNull(targetResults);
         ArgumentNullException.ThrowIfNull(budgetResults);
         PricingTargetCompletionWrite[] frozenTargetResults;
-        PricingBudgetResultWriteIncomplete[] frozenBudgetResults;
+        PricingBudgetResultWrite[] frozenBudgetResults;
         try
         {
             frozenTargetResults = targetResults.Select(FreezeTargetCompletion).ToArray();
@@ -1356,8 +1356,8 @@ public sealed class SqlitePricingStore
         return value with { };
     }
 
-    private static PricingBudgetResultWriteIncomplete FreezeBudgetResult(
-        PricingBudgetResultWriteIncomplete value)
+    private static PricingBudgetResultWrite FreezeBudgetResult(
+        PricingBudgetResultWrite value)
     {
         ArgumentNullException.ThrowIfNull(value);
         ArgumentNullException.ThrowIfNull(value.EligibleSessionIds);
@@ -1428,7 +1428,7 @@ public sealed class SqlitePricingStore
             _ => false,
         };
 
-    private static bool IsRecalculationTargetShapeValid(PricingRecalculationTargetWriteIncomplete value)
+    private static bool IsRecalculationTargetShapeValid(PricingRecalculationTargetCapture value)
     {
         if (!IsCanonicalUuid(value.SessionId)
             || value.SessionStatus is not ("completed" or "failed")
@@ -1453,7 +1453,7 @@ public sealed class SqlitePricingStore
         };
     }
 
-    private static bool IsBudgetResultShapeValid(PricingBudgetResultWriteIncomplete value)
+    private static bool IsBudgetResultShapeValid(PricingBudgetResultWrite value)
     {
         var ruleMatchesScope = value.ScopeKind switch
         {
@@ -1531,7 +1531,7 @@ public sealed class SqlitePricingStore
     }
 
     private static bool BudgetMatchesRequest(
-        PricingBudgetResultWriteIncomplete value,
+        PricingBudgetResultWrite value,
         CostBudgetScopeV1 scope)
     {
         if (value.ScopeKind != scope.ScopeKind
@@ -1560,7 +1560,7 @@ public sealed class SqlitePricingStore
     private static bool BudgetParentsAreValid(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        PricingBudgetResultWriteIncomplete value)
+        PricingBudgetResultWrite value)
     {
         using (var evaluation = Command(
             connection,
