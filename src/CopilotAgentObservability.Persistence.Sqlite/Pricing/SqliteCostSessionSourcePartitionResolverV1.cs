@@ -54,7 +54,8 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
         var malformed = bounded.Any(item =>
             item.Surface is null
             || item.MappedSurface is null
-            || item.RequiresVersion && item.ApplicationVersion is null);
+            || item.RequiresVersion && item.ApplicationVersion is null
+            || item.AmbiguousOwnership);
         var versions = bounded
             .Select(item => item.ApplicationVersion)
             .Where(item => item is not null)
@@ -113,6 +114,7 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
                 surface,
                 MapSurface(surface),
                 null,
+                false,
                 false));
         }
     }
@@ -157,6 +159,7 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
                 surface,
                 MapSurface(surface),
                 version,
+                false,
                 false));
         }
     }
@@ -219,12 +222,12 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
                     Nullable(reader, 5),
                     Nullable(reader, 6),
                     reader.GetString(7),
-                    ambiguous ? "ambiguous" : "exact",
                 ],
-                ambiguous ? null : surface,
-                ambiguous ? null : surface,
+                surface,
+                surface,
                 version,
-                true));
+                true,
+                ambiguous));
         }
     }
 
@@ -232,7 +235,7 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
     {
         using var stream = new MemoryStream();
         Frame(stream, "cost-session-source-partition/v1");
-        foreach (var observation in observations.OrderBy(item => item.Rank).ThenBy(item => item.Identity[0], StringComparer.Ordinal))
+        foreach (var observation in observations)
         {
             Frame(stream, observation.Rank.ToString(CultureInfo.InvariantCulture));
             Frame(stream, observation.Kind);
@@ -291,5 +294,6 @@ internal static class SqliteCostSessionSourcePartitionResolverV1
         string? Surface,
         string? MappedSurface,
         string? ApplicationVersion,
-        bool RequiresVersion);
+        bool RequiresVersion,
+        bool AmbiguousOwnership);
 }

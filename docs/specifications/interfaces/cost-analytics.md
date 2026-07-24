@@ -1846,6 +1846,17 @@ Generation still prevents an older mutation response from rendering over newer
 state. Commit/recalculation success invalidates configuration, history,
 analytics, and Alert Center-derived cost context before refetch. A late or
 failed response cannot overwrite a newer loading/success/failure state.
+For one accepted `requested | running` recalculation, the local browser polls
+the exact run resource at a fixed 100 ms cadence for at most 40 successful GET
+observations; a generation-aborted fetch that yields no projection is not an
+observation. If the 40th observation is still nonterminal, the browser stops
+polling without cancelling, failing, succeeding, or otherwise mutating the
+server run, presents the exact local state
+`polling_stopped · retryable`, releases the serialized mutation, and re-enables
+its controls. That local state is neither a terminal run result nor a transport
+failure. The enabled controls permit an explicit retry, and a subsequent
+current-filter/history read permits explicit readback of the still-server-owned
+run; the browser performs neither action silently.
 
 ## Security and retention
 

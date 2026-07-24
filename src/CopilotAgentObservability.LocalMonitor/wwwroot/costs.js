@@ -4,6 +4,8 @@
   const root = document.getElementById("cost-root");
   if (!root) return;
 
+  const recalculationPollIntervalMilliseconds = 100;
+  const maxRecalculationPollObservations = 40;
   const byId = id => document.getElementById(id);
   const sessionId = root.dataset.sessionId || null;
   const estimateId = root.dataset.estimateId || null;
@@ -571,7 +573,7 @@
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
-          "x-monitor-csrf": "1",
+          "x-monitor-csrf": "local-monitor",
           Accept: "application/json",
         },
         body,
@@ -727,10 +729,13 @@
       }
       try {
         await postExact("/api/costs/v1/configurations", JSON.stringify(commit), true);
-        if (requestedGeneration !== state.generation) return;
         state.preview = null;
+        if (requestedGeneration !== state.generation) {
+          await refreshDerivedState();
+          return;
+        }
         byId("cost-preview-result").textContent = "committed · configuration/history/analytics を再読込します。";
-        await loadAll();
+        await refreshDerivedState();
         announce("configuration committed。最新状態を読み込みました。");
       } catch (failure) {
         if (requestedGeneration === state.generation) {
@@ -774,23 +779,35 @@
     await mutation(async () => {
       setMutationDisabled(true);
       const requestedGeneration = state.generation;
-      const readRequest = { generation: requestedGeneration, signal: state.controller.signal };
       const request = recalculationRequest();
       const body = JSON.stringify(request);
       try {
         let result = await postExact("/api/costs/v1/recalculations", body, true);
-        if (requestedGeneration !== state.generation) return;
-        renderRecalculation(result);
-        while (result.state === "requested" || result.state === "running") {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          if (requestedGeneration !== state.generation) return;
-          result = await getJson(
-            `/api/costs/v1/recalculations/${encodeURIComponent(result.run_id)}`,
-            readRequest);
-          renderRecalculation(result);
+        let pollObservations = 0;
+        if (requestedGeneration === state.generation) renderRecalculation(result);
+        while ((result.state === "requested" || result.state === "running")
+          && pollObservations < maxRecalculationPollObservations) {
+          await new Promise(resolve => setTimeout(resolve, recalculationPollIntervalMilliseconds));
+          const pollGeneration = state.generation;
+          try {
+            result = await getJson(
+              `/api/costs/v1/recalculations/${encodeURIComponent(result.run_id)}`,
+              { generation: pollGeneration, signal: state.controller.signal });
+          } catch (failure) {
+            if (failure?.name === "AbortError" && pollGeneration !== state.generation) continue;
+            throw failure;
+          }
+          pollObservations += 1;
+          if (requestedGeneration === state.generation) renderRecalculation(result);
         }
-        announce(`recalculation ${result.state}。history と analytics を更新します。`);
-        if (result.state === "succeeded") await loadAll();
+        if (result.state === "requested" || result.state === "running") {
+          byId("cost-recalculation").textContent = "polling_stopped · retryable";
+          return;
+        }
+        if (requestedGeneration === state.generation) {
+          announce(`recalculation ${result.state}。history と analytics を更新します。`);
+        }
+        if (result.state === "succeeded") await refreshDerivedState();
       } catch (failure) {
         if (failure?.name !== "AbortError" && requestedGeneration === state.generation) {
           byId("cost-recalculation").textContent = `recalculation failed · ${failure.message}`;
@@ -800,6 +817,17 @@
         setMutationDisabled(false);
       }
     });
+  }
+
+  async function refreshDerivedState() {
+    state.configuration = null;
+    state.catalog = null;
+    state.analytics = null;
+    state.estimateHistory = null;
+    state.attemptHistory = null;
+    state.exactEstimate = null;
+    state.hydratedConfigurationId = null;
+    await loadAll();
   }
 
   function renderRecalculation(value) {
