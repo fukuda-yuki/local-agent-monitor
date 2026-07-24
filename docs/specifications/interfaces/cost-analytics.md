@@ -1909,3 +1909,11 @@ mixed-registry states, append-only recalculation and retry history, fresh and
 supported-upgrade migrations, backup/restore round-trip, sanitized-export v1
 coexistence, API security/status mapping, Playwright/accessibility, full build
 and tests, repository-safe scans, and artifact checksums.
+
+The evidence-chain verifier must resolve `matrix_prep_sha` to an exact commit
+that is an ancestor of the frozen candidate. The committed live-validation
+record binds both SHAs, the required command results, actual RED/failure
+history, and OS-specific security coverage. Unsupported-OS tests are explicit
+not-applicable skips; failure to create a required symlink/reparse/FIFO
+prerequisite on the applicable OS is an explicit skip and prevents
+`91-S-095=passed`.

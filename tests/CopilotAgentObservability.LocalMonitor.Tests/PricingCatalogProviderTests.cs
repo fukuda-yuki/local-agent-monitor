@@ -102,9 +102,12 @@ public sealed class PricingCatalogProviderTests
         {
             File.CreateSymbolicLink(link, target);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException
+            or PlatformNotSupportedException or NotSupportedException)
         {
-            return;
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "security_prerequisite_unavailable:file_symlink");
         }
 
         var failure = Assert.Throws<PricingCatalogUnavailableException>(
@@ -126,9 +129,12 @@ public sealed class PricingCatalogProviderTests
         {
             Directory.CreateSymbolicLink(link, targetDirectory);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException
+            or PlatformNotSupportedException or NotSupportedException)
         {
-            return;
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "security_prerequisite_unavailable:directory_symlink");
         }
 
         var linkedTarget = Path.Combine(link, Path.GetFileName(target));
@@ -139,14 +145,9 @@ public sealed class PricingCatalogProviderTests
         Assert.DoesNotContain(link, failure.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Create_RejectsAWindowsTargetThatIsOpenForMutation()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         using var temp = new PricingCatalogProviderTempDirectory();
         var path = temp.WriteOverride("mutation-target");
         using var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
@@ -158,14 +159,9 @@ public sealed class PricingCatalogProviderTests
         Assert.DoesNotContain(path, failure.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Create_RejectsAWindowsPathWithAWin32NormalizedSegment()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         using var temp = new PricingCatalogProviderTempDirectory();
         var path = temp.WriteOverride("normalized-target");
         var alias = $"{path}.";
@@ -177,17 +173,14 @@ public sealed class PricingCatalogProviderTests
         Assert.DoesNotContain(path, failure.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [LinuxFact]
     public async Task Create_RejectsALinuxFifoWithoutWaitingForAWriter()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            return;
-        }
-
         using var temp = new PricingCatalogProviderTempDirectory();
         var path = Path.Combine(temp.Root, "private-pricing-fifo");
-        Assert.Equal(0, MakeFifo(path, 0x180));
+        if (MakeFifo(path, 0x180) != 0)
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "security_prerequisite_unavailable:linux_fifo");
         var loadTask = Task.Factory.StartNew(
             () => Record.Exception(() => DefaultPricingCatalogProvider.Create([path])),
             CancellationToken.None,
@@ -515,4 +508,22 @@ public sealed class PricingCatalogProviderTests
 
     [DllImport("libc", EntryPoint = "close", SetLastError = true)]
     private static extern int CloseFile(int descriptor);
+}
+
+public sealed class WindowsFactAttribute : FactAttribute
+{
+    public WindowsFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows())
+            Skip = "not_applicable:windows_only_security_contract";
+    }
+}
+
+public sealed class LinuxFactAttribute : FactAttribute
+{
+    public LinuxFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+            Skip = "not_applicable:linux_only_security_contract";
+    }
 }

@@ -56,6 +56,75 @@ public sealed class CostRouteTests
     }
 
     [Fact]
+    public async Task CatalogRoutePinsDefaultFiftyMaximumOneHundredAndRejectsOneHundredOne()
+    {
+        using var temp = NewTemp();
+        var provider = LargeCatalogProvider();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider));
+
+        using var defaultResponse = await host.Client.GetAsync("/api/costs/v1/catalog");
+        Assert.Equal(HttpStatusCode.OK, defaultResponse.StatusCode);
+        using var defaultJson = JsonDocument.Parse(
+            await defaultResponse.Content.ReadAsStringAsync());
+        Assert.Equal(
+            50,
+            defaultJson.RootElement.GetProperty("entries").GetArrayLength());
+        Assert.Equal(
+            JsonValueKind.String,
+            defaultJson.RootElement.GetProperty("next_after").ValueKind);
+
+        using var maximumResponse = await host.Client.GetAsync(
+            "/api/costs/v1/catalog?limit=100");
+        Assert.Equal(HttpStatusCode.OK, maximumResponse.StatusCode);
+        using var maximumJson = JsonDocument.Parse(
+            await maximumResponse.Content.ReadAsStringAsync());
+        Assert.Equal(
+            100,
+            maximumJson.RootElement.GetProperty("entries").GetArrayLength());
+        Assert.Equal(
+            JsonValueKind.String,
+            maximumJson.RootElement.GetProperty("next_after").ValueKind);
+
+        using var aboveMaximum = await host.Client.GetAsync(
+            "/api/costs/v1/catalog?limit=101");
+        await AssertError(
+            aboveMaximum,
+            HttpStatusCode.BadRequest,
+            "cost_invalid_cursor");
+    }
+
+    [Fact]
+    public async Task CatalogRouteRejectsCanonicalSameCatalogNonmemberCursor()
+    {
+        using var temp = NewTemp();
+        var provider = LargeCatalogProvider();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider));
+        var cursorBytes = JsonSerializer.SerializeToUtf8Bytes(
+            new Dictionary<string, string>
+            {
+                ["schema_version"] = "cost.catalog.cursor.v1",
+                ["catalog_sha256"] = provider.CatalogSha256,
+                ["entry_key"] = "official-reviewed:not-a-catalog-member@1",
+            });
+        var cursor = "cost-catalog-cursor-v1." + Convert.ToBase64String(cursorBytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+        using var response = await host.Client.GetAsync(
+            "/api/costs/v1/catalog?after=" + cursor);
+
+        await AssertError(
+            response,
+            HttpStatusCode.BadRequest,
+            "cost_invalid_cursor");
+    }
+
+    [Fact]
     public async Task CostRoutesEnforceHostOriginQueryAndFixedErrorBytes()
     {
         using var temp = NewTemp();
@@ -1056,6 +1125,24 @@ public sealed class CostRouteTests
             ],
         };
         return new FixedCatalogProvider(PricingCatalog.Create(bundled, [localOverride]));
+    }
+
+    private static IPricingCatalogProvider LargeCatalogProvider()
+    {
+        var bundled = BundledPricingRegistry.Load();
+        var source = bundled.Entries[0];
+        var entries = Enumerable.Range(0, 101)
+            .Select(index => source with
+            {
+                EntryId = $"catalog-boundary-{index:D3}",
+                Revision = 1,
+                SupersedesEntryKey = null,
+                CanonicalModelId = $"catalog-boundary-model-{index:D3}",
+                Aliases = [],
+            })
+            .ToArray();
+        return new FixedCatalogProvider(PricingCatalog.Create(
+            bundled with { Entries = entries }));
     }
 
     private sealed class FixedCatalogProvider(PricingCatalog catalog)
