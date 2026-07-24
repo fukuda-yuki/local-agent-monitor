@@ -25,6 +25,7 @@ public class MonitorOverviewPlaywrightTests
         {
             StartWriter = false,
             StartProjectionWorker = false,
+            StartSessionOtelEnrichment = false,
         });
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
