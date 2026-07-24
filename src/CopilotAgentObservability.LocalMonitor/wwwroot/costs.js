@@ -571,7 +571,7 @@
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
-          "x-monitor-csrf": "1",
+          "x-monitor-csrf": "local-monitor",
           Accept: "application/json",
         },
         body,
@@ -727,10 +727,13 @@
       }
       try {
         await postExact("/api/costs/v1/configurations", JSON.stringify(commit), true);
-        if (requestedGeneration !== state.generation) return;
         state.preview = null;
+        if (requestedGeneration !== state.generation) {
+          await refreshDerivedState();
+          return;
+        }
         byId("cost-preview-result").textContent = "committed · configuration/history/analytics を再読込します。";
-        await loadAll();
+        await refreshDerivedState();
         announce("configuration committed。最新状態を読み込みました。");
       } catch (failure) {
         if (requestedGeneration === state.generation) {
@@ -779,7 +782,10 @@
       const body = JSON.stringify(request);
       try {
         let result = await postExact("/api/costs/v1/recalculations", body, true);
-        if (requestedGeneration !== state.generation) return;
+        if (requestedGeneration !== state.generation) {
+          if (result.state === "succeeded") await refreshDerivedState();
+          return;
+        }
         renderRecalculation(result);
         while (result.state === "requested" || result.state === "running") {
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -790,7 +796,7 @@
           renderRecalculation(result);
         }
         announce(`recalculation ${result.state}。history と analytics を更新します。`);
-        if (result.state === "succeeded") await loadAll();
+        if (result.state === "succeeded") await refreshDerivedState();
       } catch (failure) {
         if (failure?.name !== "AbortError" && requestedGeneration === state.generation) {
           byId("cost-recalculation").textContent = `recalculation failed · ${failure.message}`;
@@ -800,6 +806,17 @@
         setMutationDisabled(false);
       }
     });
+  }
+
+  async function refreshDerivedState() {
+    state.configuration = null;
+    state.catalog = null;
+    state.analytics = null;
+    state.estimateHistory = null;
+    state.attemptHistory = null;
+    state.exactEstimate = null;
+    state.hydratedConfigurationId = null;
+    await loadAll();
   }
 
   function renderRecalculation(value) {

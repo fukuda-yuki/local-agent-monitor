@@ -1,4 +1,7 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Text;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
@@ -99,6 +102,108 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Null(mixed.SourceSurface);
         Assert.Null(mixed.SourceApplicationVersion);
         Assert.NotEqual(resolved.Digest, mixed.Digest);
+        transaction.Rollback();
+    }
+
+    [Fact]
+    public void PricingSourcePartitionResolver_SourceSchemaIdentityUsesFrozenFieldsAndNumericRawRecordOrder()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var sessionId = Guid.NewGuid().ToString("D");
+        using var connection = database.Open();
+        InsertSession(connection, sessionId);
+        InsertSourceObservationFixture(connection, sessionId);
+        using var transaction = connection.BeginTransaction();
+
+        var resolved = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+
+        Assert.Equal(CostSessionSourcePartitionStateV1.Resolved, resolved.State);
+        Assert.Equal(3, resolved.ObservationCount);
+        Assert.Equal(
+            ExpectedSourcePartitionDigest(
+                sessionId,
+                [
+                    new(
+                        "observation-z",
+                        2,
+                        "github-copilot-vscode",
+                        "1.2.3",
+                        "adapter-a",
+                        "adapter-v1",
+                        "schema-z",
+                        "2026-07-24T01:00:02.0000000+00:00"),
+                    new(
+                        "observation-a",
+                        10,
+                        "github-copilot-vscode",
+                        "1.2.3",
+                        "adapter-b",
+                        "adapter-v2",
+                        "schema-a",
+                        "2026-07-24T01:00:10.0000000+00:00"),
+                ]),
+            resolved.Digest);
+
+        Execute(
+            connection,
+            transaction,
+            """
+            UPDATE source_schema_observations
+            SET schema_fingerprint='schema-changed'
+            WHERE raw_record_id=10;
+            """);
+
+        var changed = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+
+        Assert.NotEqual(resolved.Digest, changed.Digest);
+        transaction.Rollback();
+    }
+
+    [Fact]
+    public void PricingSourcePartitionResolver_AmbiguousOwnershipPreservesIdentityDigestAndInvalidatesResolution()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var sessionId = Guid.NewGuid().ToString("D");
+        using var connection = database.Open();
+        InsertSession(connection, sessionId);
+        InsertSourceObservationFixture(connection, sessionId);
+        using var transaction = connection.BeginTransaction();
+        var exact = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+        var otherSessionId = Guid.NewGuid().ToString("D");
+        InsertSession(connection, transaction, otherSessionId);
+        Execute(
+            connection,
+            transaction,
+            $"""
+            INSERT INTO session_runs(
+                run_id,session_id,trace_id,source_surface,status)
+            VALUES('run-other','{otherSessionId}','trace-source','vscode','completed');
+            """);
+
+        var ambiguous = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+            connection,
+            transaction,
+            sessionId);
+
+        Assert.Equal(CostSessionSourcePartitionStateV1.Resolved, exact.State);
+        Assert.Equal(CostSessionSourcePartitionStateV1.Incomplete, ambiguous.State);
+        Assert.Equal(exact.ObservationCount, ambiguous.ObservationCount);
+        Assert.Equal(exact.Digest, ambiguous.Digest);
+        Assert.Null(ambiguous.SourceSurface);
+        Assert.Null(ambiguous.SourceApplicationVersion);
         transaction.Rollback();
     }
 
@@ -2484,6 +2589,140 @@ public sealed class PricingPersistenceFoundationTests
         command.Parameters.AddWithValue("$id", sessionId);
         command.ExecuteNonQuery();
     }
+
+    private static void InsertSession(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO sessions(
+                session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
+            VALUES($id,'completed','full','2026-07-24T01:00:00.0000000+00:00',
+                'not_captured','2026-07-24T01:00:00.0000000+00:00',
+                '2026-07-24T01:00:00.0000000+00:00');
+            """;
+        command.Parameters.AddWithValue("$id", sessionId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertSourceObservationFixture(
+        SqliteConnection connection,
+        string sessionId) =>
+        Execute(
+            connection,
+            $"""
+            INSERT INTO session_runs(
+                run_id,session_id,trace_id,source_surface,status)
+            VALUES('run-source','{sessionId}','trace-source','vscode','completed');
+            INSERT INTO raw_records(
+                id,source,received_at,payload_json,schema_version,retention_owner_token)
+            VALUES
+                (2,'raw-otlp','2026-07-24T01:00:02.0000000+00:00','[]',1,zeroblob(32)),
+                (10,'raw-otlp','2026-07-24T01:00:10.0000000+00:00','[]',1,zeroblob(32));
+            INSERT INTO monitor_spans(
+                raw_record_id,trace_id,span_ordinal,projected_at)
+            VALUES
+                (2,'trace-source',0,'2026-07-24T01:00:02.0000000+00:00'),
+                (10,'trace-source',0,'2026-07-24T01:00:10.0000000+00:00');
+            INSERT INTO source_schema_observations(
+                observation_id,raw_record_id,source_surface,source_application_version,
+                source_adapter,adapter_version,schema_fingerprint,compatibility_state,
+                next_action,capture_content_state,unknown_span_count,unknown_event_count,
+                unknown_attribute_count,overflow_distinct_count,overflow_occurrence_count,
+                observed_at)
+            VALUES
+                ('observation-z',2,'github-copilot-vscode','1.2.3',
+                 'adapter-a','adapter-v1','schema-z','supported',
+                 'none','not_captured',0,0,0,0,0,
+                 '2026-07-24T01:00:02.0000000+00:00'),
+                ('observation-a',10,'github-copilot-vscode','1.2.3',
+                 'adapter-b','adapter-v2','schema-a','supported',
+                 'none','not_captured',0,0,0,0,0,
+                 '2026-07-24T01:00:10.0000000+00:00');
+            """);
+
+    private static string ExpectedSourcePartitionDigest(
+        string sessionId,
+        IReadOnlyList<ExpectedSourceObservation> observations)
+    {
+        using var stream = new MemoryStream();
+        Frame(stream, "cost-session-source-partition/v1");
+        FrameObservation(
+            stream,
+            0,
+            "session_run",
+            ["run-source", sessionId, "trace-source", "vscode", "completed"],
+            "vscode",
+            "github-copilot-vscode",
+            null);
+        foreach (var observation in observations)
+        {
+            FrameObservation(
+                stream,
+                2,
+                "source_schema_observation",
+                [
+                    observation.ObservationId,
+                    observation.RawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    observation.SourceSurface,
+                    observation.SourceApplicationVersion,
+                    observation.SourceAdapter,
+                    observation.AdapterVersion,
+                    observation.SchemaFingerprint,
+                    observation.ObservedAt,
+                ],
+                observation.SourceSurface,
+                observation.SourceSurface,
+                observation.SourceApplicationVersion);
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
+    private static void FrameObservation(
+        Stream stream,
+        int rank,
+        string kind,
+        IReadOnlyList<string?> identity,
+        string? surface,
+        string? mappedSurface,
+        string? applicationVersion)
+    {
+        Frame(stream, rank.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Frame(stream, kind);
+        foreach (var value in identity) FrameNullable(stream, value);
+        FrameNullable(stream, surface);
+        FrameNullable(stream, mappedSurface);
+        FrameNullable(stream, applicationVersion);
+    }
+
+    private static void FrameNullable(Stream stream, string? value)
+    {
+        Frame(stream, value is null ? "0" : "1");
+        if (value is not null) Frame(stream, value);
+    }
+
+    private static void Frame(Stream stream, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        stream.Write(length);
+        stream.Write(bytes);
+    }
+
+    private sealed record ExpectedSourceObservation(
+        string ObservationId,
+        long RawRecordId,
+        string SourceSurface,
+        string SourceApplicationVersion,
+        string? SourceAdapter,
+        string? AdapterVersion,
+        string? SchemaFingerprint,
+        string ObservedAt);
 
     private static string RecalculationRunInsert(string runId, string idempotencyKey) =>
         $"""

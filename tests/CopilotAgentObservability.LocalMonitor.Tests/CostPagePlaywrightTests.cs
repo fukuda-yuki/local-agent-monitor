@@ -114,6 +114,31 @@ public sealed class CostPagePlaywrightTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task CostPage_PreviewUsesCanonicalCsrfAgainstRealHost()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+
+        await page.GotoAsync(
+            $"{host.Url}/costs",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#cost-root")).ToHaveAttributeAsync("data-read-state", "fresh");
+        await Expect(page.Locator("#cost-preview")).ToBeEnabledAsync();
+
+        var request = await page.RunAndWaitForRequestAsync(
+            () => page.Locator("#cost-preview").ClickAsync(),
+            "**/api/costs/v1/configuration/preview");
+
+        Assert.Equal("local-monitor", await request.HeaderValueAsync("x-monitor-csrf"));
+        await Expect(page.Locator("#cost-preview-result")).ToContainTextAsync("0 Sessions");
+        await Expect(page.Locator("#cost-commit")).ToBeEnabledAsync();
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task CostPage_SerializesPreviewCommitAndRecalculationPolling()
     {
         using var temp = new MonitorTempDirectory();
@@ -132,6 +157,7 @@ public sealed class CostPagePlaywrightTests
         string? recalculationBody = null;
         await page.RouteAsync("**/api/costs/v1/configuration/preview", async route =>
         {
+            await AssertCanonicalMutation(route.Request);
             previewPosts++;
             Assert.Contains("\"schema_version\":\"cost.configuration-preview-request.v1\"", route.Request.PostData);
             Assert.Contains("\"rule_id\":\"session-estimated-cost-threshold\"", route.Request.PostData);
@@ -144,6 +170,7 @@ public sealed class CostPagePlaywrightTests
         });
         await page.RouteAsync("**/api/costs/v1/configurations", async route =>
         {
+            await AssertCanonicalMutation(route.Request);
             commitPosts++;
             commitBody ??= route.Request.PostData;
             Assert.Equal(commitBody, route.Request.PostData);
@@ -165,6 +192,7 @@ public sealed class CostPagePlaywrightTests
         });
         await page.RouteAsync("**/api/costs/v1/recalculations", async route =>
         {
+            await AssertCanonicalMutation(route.Request);
             recalculationPosts++;
             recalculationBody ??= route.Request.PostData;
             Assert.Equal(recalculationBody, route.Request.PostData);
@@ -415,7 +443,8 @@ public sealed class CostPagePlaywrightTests
     [Theory(Timeout = 60_000)]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task CostPage_IgnoresLateCommitSuccessOrFailureAfterANewerRead(bool commitSucceeds)
+    public async Task CostPage_LateCommitSuccessRefreshesWhileLateFailureDoesNotOverwriteNewerRead(
+        bool commitSucceeds)
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
@@ -474,9 +503,77 @@ public sealed class CostPagePlaywrightTests
         releaseCommit.SetResult();
         await Expect(page.Locator("#cost-config-surface")).ToBeEnabledAsync();
 
-        Assert.Equal(2, analyticsReads);
+        Assert.Equal(commitSucceeds ? 3 : 2, analyticsReads);
         await Expect(page.Locator("#cost-live")).Not.ToContainTextAsync("committed");
         await Expect(page.Locator("#cost-live")).Not.ToContainTextAsync("結果を確認できません");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_LateRecalculationSuccessRefreshesEveryCurrentDerivedRead()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var configurationReads = 0;
+        var catalogReads = 0;
+        var analyticsReads = 0;
+        var estimateHistoryReads = 0;
+        var attemptHistoryReads = 0;
+        await page.RouteAsync("**/api/costs/v1/configuration", route =>
+        {
+            configurationReads++;
+            return route.FulfillAsync(Json(Configuration));
+        });
+        await page.RouteAsync("**/api/costs/v1/catalog?*", route =>
+        {
+            catalogReads++;
+            return route.FulfillAsync(Json(Catalog));
+        });
+        await page.RouteAsync("**/api/costs/v1/analytics?*", route =>
+        {
+            analyticsReads++;
+            return route.FulfillAsync(Json(CompleteAnalytics));
+        });
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/estimates?*", route =>
+        {
+            estimateHistoryReads++;
+            return route.FulfillAsync(Json(SessionHistory));
+        });
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/recalculations?*", route =>
+        {
+            attemptHistoryReads++;
+            return route.FulfillAsync(Json(SessionRecalculations));
+        });
+        var recalculationReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRecalculation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync("**/api/costs/v1/recalculations", async route =>
+        {
+            recalculationReached.SetResult();
+            await releaseRecalculation.Task;
+            await route.FulfillAsync(Json(RecalculationSucceeded, 202));
+        });
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
+        await page.Locator("#cost-recalculate").ClickAsync();
+        await recalculationReached.Task;
+        await page.Locator("#cost-filters button[type='submit']").ClickAsync();
+        await Expect(page.Locator("#cost-overall")).ToContainTextAsync("2 / 4");
+        Assert.Equal(
+            (2, 2, 2, 2, 2),
+            (configurationReads, catalogReads, analyticsReads, estimateHistoryReads, attemptHistoryReads));
+        releaseRecalculation.SetResult();
+        await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
+
+        Assert.Equal(
+            (3, 3, 3, 3, 3),
+            (configurationReads, catalogReads, analyticsReads, estimateHistoryReads, attemptHistoryReads));
+        await Expect(page.Locator("#cost-recalculation")).Not.ToContainTextAsync("succeeded");
     }
 
     [Fact(Timeout = 60_000)]
@@ -591,6 +688,9 @@ public sealed class CostPagePlaywrightTests
         await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/recalculations?*", route =>
             route.FulfillAsync(Json(SessionRecalculations)));
     }
+
+    private static async Task AssertCanonicalMutation(IRequest request) =>
+        Assert.Equal("local-monitor", await request.HeaderValueAsync("x-monitor-csrf"));
 
     private static async Task InstallStorageTripwires(IPage page) =>
         await page.AddInitScriptAsync(
