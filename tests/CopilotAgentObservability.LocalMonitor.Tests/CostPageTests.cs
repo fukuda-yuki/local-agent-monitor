@@ -5,6 +5,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class CostPageTests
 {
     private const string SessionId = "0198f5b8-0c00-7000-8000-000000000001";
+    private const string HistoricalSessionId = "11111111-2222-4333-8444-555555555555";
     private const string EstimateId = "pricing-estimate-" + SixtyFourA;
     private const string SixtyFourA =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -12,6 +13,7 @@ public sealed class CostPageTests
     [Theory]
     [InlineData("/costs")]
     [InlineData("/costs?session_id=" + SessionId)]
+    [InlineData("/costs?session_id=" + HistoricalSessionId)]
     [InlineData("/costs?session_id=" + SessionId + "&estimate_id=" + EstimateId)]
     public async Task Page_IsNoStoreAndAcceptsOnlyCanonicalContext(string target)
     {
@@ -34,6 +36,8 @@ public sealed class CostPageTests
     [InlineData("/costs?session_id=" + SessionId + "&session_id=" + SessionId)]
     [InlineData("/costs?unknown=value")]
     [InlineData("/costs?session_id=not-a-session")]
+    [InlineData("/costs?session_id=11111111-2222-4333-8444-55555555555")]
+    [InlineData("/costs?session_id=11111111-2222-4333-8444-55555555555A")]
     [InlineData("/costs?estimate_id=" + EstimateId + "&session_id=" + SessionId)]
     public async Task Page_RejectsInvalidOrNoncanonicalContext(string target)
     {

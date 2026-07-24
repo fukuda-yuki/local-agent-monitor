@@ -24,6 +24,7 @@ public sealed class CostRouteTests
         { "overlap", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_recalculation_in_progress" },
         { "missing", PricingStoreStatus.Conflict, HttpStatusCode.NotFound, "cost_session_not_found" },
         { "ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "budget-missing", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
         { "budget-ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
         { "capacity", PricingStoreStatus.CapacityReached, HttpStatusCode.RequestEntityTooLarge, "cost_request_too_large" },
     };
@@ -131,6 +132,53 @@ public sealed class CostRouteTests
         using var absentSession = await host.Client.GetAsync(
             $"/api/costs/v1/sessions/{absent}/estimates");
         await AssertError(absentSession, HttpStatusCode.NotFound, "cost_session_not_found");
+    }
+
+    [Fact]
+    public async Task SessionRoutesAcceptHistoricalCanonicalGuidAndRejectMalformedOrUppercaseIds()
+    {
+        using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+        const string sessionId = "11111111-2222-4333-8444-555555555555";
+        const string uppercaseSessionId = "11111111-2222-4333-8444-55555555555A";
+        const string malformedSessionId = "11111111-2222-4333-8444-55555555555";
+        var estimateId = "pricing-estimate-" + new string('a', 64);
+        InsertSession(temp.DatabasePath, sessionId);
+
+        using var recalculations = await host.Client.GetAsync(
+            $"/api/costs/v1/sessions/{sessionId}/recalculations");
+        Assert.Equal(HttpStatusCode.OK, recalculations.StatusCode);
+        using var estimates = await host.Client.GetAsync(
+            $"/api/costs/v1/sessions/{sessionId}/estimates");
+        Assert.Equal(HttpStatusCode.OK, estimates.StatusCode);
+        using var exactEstimate = await host.Client.GetAsync(
+            $"/api/costs/v1/sessions/{sessionId}/estimates/{estimateId}");
+        await AssertError(
+            exactEstimate,
+            HttpStatusCode.NotFound,
+            "cost_estimate_not_found");
+
+        foreach (var invalidSessionId in new[] { uppercaseSessionId, malformedSessionId })
+        {
+            using var invalidRecalculations = await host.Client.GetAsync(
+                $"/api/costs/v1/sessions/{invalidSessionId}/recalculations");
+            await AssertError(
+                invalidRecalculations,
+                HttpStatusCode.BadRequest,
+                "cost_invalid_id");
+            using var invalidEstimates = await host.Client.GetAsync(
+                $"/api/costs/v1/sessions/{invalidSessionId}/estimates");
+            await AssertError(
+                invalidEstimates,
+                HttpStatusCode.BadRequest,
+                "cost_invalid_id");
+            using var invalidExactEstimate = await host.Client.GetAsync(
+                $"/api/costs/v1/sessions/{invalidSessionId}/estimates/{estimateId}");
+            await AssertError(
+                invalidExactEstimate,
+                HttpStatusCode.BadRequest,
+                "cost_invalid_id");
+        }
     }
 
     [Fact]
@@ -280,6 +328,99 @@ public sealed class CostRouteTests
             Assert.False(target.GetProperty("result").TryGetProperty("status", out _));
             Assert.False(target.GetProperty("result").TryGetProperty("estimate_id", out _));
         }
+    }
+
+    [Theory]
+    [InlineData("store")]
+    [InlineData("application")]
+    [InlineData("http")]
+    public async Task RecalculationAdmissionAcceptsEligibleSessionBudgetScopeOutsideTargetsAcrossLayers(
+        string layer)
+    {
+        using var temp = NewTemp();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider));
+        var targetSessionId = Guid.CreateVersion7().ToString("D");
+        var budgetSessionId = Guid.NewGuid().ToString("D");
+        InsertResolvedSession(temp.DatabasePath, targetSessionId);
+        InsertResolvedSession(temp.DatabasePath, budgetSessionId);
+        var source = new CostSourceEntryV1(
+            "github-copilot-vscode",
+            "1.2.3",
+            "source-capability.v1",
+            PricingProviders.GitHubCopilot,
+            PricingBillingModes.PlanIncluded,
+            PricingRoutes.CodeCompletion);
+        var configuration = await CommitConfiguration(host.Client, [source]);
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            configuration.HeadRevision,
+            configuration.CatalogSha256,
+            [targetSessionId],
+            [new("session", budgetSessionId, null, null, null)],
+            "disjoint-session-budget-scope");
+        var requestBytes = CostRecalculationRequestCanonicalJsonV1.Serialize(request);
+        switch (layer)
+        {
+            case "store":
+            {
+                var coordinator = new SqliteCostRecalculationCoordinatorV1(
+                    temp.DatabasePath,
+                    timeProvider: temp.TimeProvider);
+                var result = coordinator.Start(
+                    Guid.CreateVersion7().ToString("D"),
+                    request,
+                    provider.CanonicalCatalogBytes,
+                    temp.TimeProvider.GetUtcNow());
+                Assert.Equal(PricingStoreStatus.Success, result.Status);
+                Assert.NotNull(result.Value);
+                break;
+            }
+            case "application":
+            {
+                using var application = new CostHttpApplication(
+                    temp.DatabasePath,
+                    new SqlitePricingStore(temp.DatabasePath, temp.TimeProvider),
+                    provider,
+                    temp.TimeProvider,
+                    alertParticipant: null);
+                var result = application.StartRecalculation(requestBytes);
+                Assert.Equal((int)HttpStatusCode.Accepted, result.Status);
+                Assert.NotNull(result.Location);
+                break;
+            }
+            case "http":
+            {
+                using var httpRequest = Post(
+                    "/api/costs/v1/recalculations",
+                    Encoding.UTF8.GetString(requestBytes),
+                    csrf: true);
+                using var result = await host.Client.SendAsync(httpRequest);
+                Assert.Equal(HttpStatusCode.Accepted, result.StatusCode);
+                Assert.NotNull(result.Headers.Location);
+                using var response = JsonDocument.Parse(
+                    await result.Content.ReadAsStreamAsync());
+                Assert.Equal(
+                    1,
+                    response.RootElement.GetProperty("target_count").GetInt32());
+                Assert.Equal(
+                    1,
+                    response.RootElement.GetProperty("scope_count").GetInt32());
+                break;
+            }
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(layer),
+                    layer,
+                    "Recalculation admission layer is unknown.");
+        }
+
+        AssertPersistedDisjointAdmission(
+            temp.DatabasePath,
+            targetSessionId,
+            budgetSessionId);
     }
 
     [Theory]
@@ -605,7 +746,7 @@ public sealed class CostRouteTests
                         configuration.ConfigurationId,
                         configuration.HeadRevision,
                         configuration.CatalogSha256,
-                        [budgetIneligibleSessionId],
+                        [firstSessionId],
                         [
                             new(
                                 "session",
@@ -615,6 +756,22 @@ public sealed class CostRouteTests
                                 null),
                         ],
                         "status-mapping-budget-ineligible");
+                    break;
+                case "budget-missing":
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [firstSessionId],
+                        [
+                            new(
+                                "session",
+                                missingSessionId,
+                                null,
+                                null,
+                                null),
+                        ],
+                        "status-mapping-budget-missing");
                     break;
                 case "capacity":
                     InsertResolvedSessions(temp.DatabasePath, 1_999);
@@ -732,6 +889,36 @@ public sealed class CostRouteTests
         Assert.Equal(1L, Convert.ToInt64(
             command.ExecuteScalar(),
             System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void AssertPersistedDisjointAdmission(
+        string databasePath,
+        string targetSessionId,
+        string budgetSessionId)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+                (SELECT COUNT(*) FROM pricing_recalculation_runs) || ':' ||
+                (SELECT COUNT(*) FROM pricing_recalculation_targets) || ':' ||
+                (SELECT session_id FROM pricing_recalculation_targets) || ':' ||
+                (SELECT scope_count FROM pricing_recalculation_runs) || ':' ||
+                (SELECT instr(CAST(canonical_request_blob AS TEXT),$budget) > 0
+                 FROM pricing_recalculation_runs);
+            """;
+        command.Parameters.AddWithValue("$budget", budgetSessionId);
+        Assert.Equal(
+            $"1:1:{targetSessionId}:1:1",
+            Convert.ToString(
+                command.ExecuteScalar(),
+                System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private static void InsertResolvedSessions(string databasePath, int count)

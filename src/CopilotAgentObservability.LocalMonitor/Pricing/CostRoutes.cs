@@ -64,7 +64,7 @@ internal static class CostRoutes
             HttpContext context) =>
             Read(context, ["after", "limit"], () =>
             {
-                if (!ValidUuid7(sessionId)) return CostHttpResult.InvalidId();
+                if (!ValidCanonicalGuid(sessionId)) return CostHttpResult.InvalidId();
                 if (!TryQuery(context, ["after", "limit"], out var query)
                     || !TryLimit(query, out var limit))
                     return CostHttpResult.InvalidQuery();
@@ -77,7 +77,7 @@ internal static class CostRoutes
             HttpContext context) =>
             Read(context, ["after", "limit"], () =>
             {
-                if (!ValidUuid7(sessionId)) return CostHttpResult.InvalidId();
+                if (!ValidCanonicalGuid(sessionId)) return CostHttpResult.InvalidId();
                 if (!TryQuery(context, ["after", "limit"], out var query)
                     || !TryLimit(query, out var limit))
                     return CostHttpResult.InvalidQuery();
@@ -91,7 +91,7 @@ internal static class CostRoutes
             Read(
                 context,
                 [],
-                () => ValidUuid7(sessionId) && ValidEstimateId(estimateId)
+                () => ValidCanonicalGuid(sessionId) && ValidEstimateId(estimateId)
                     ? application.ReadSessionEstimate(sessionId, estimateId)
                     : CostHttpResult.InvalidId()));
         app.MapGet("/api/costs/v1/analytics", context =>
@@ -405,6 +405,11 @@ internal static class CostRoutes
         && Guid.TryParseExact(value, "D", out _)
         && value[14] == '7'
         && value[19] is '8' or '9' or 'a' or 'b';
+
+    private static bool ValidCanonicalGuid(string value) =>
+        value.Length == 36
+        && Guid.TryParseExact(value, "D", out var parsed)
+        && value == parsed.ToString("D");
 
     private static bool ValidConfigurationId(string value) =>
         PrefixedSha(value, "cost-configuration-");

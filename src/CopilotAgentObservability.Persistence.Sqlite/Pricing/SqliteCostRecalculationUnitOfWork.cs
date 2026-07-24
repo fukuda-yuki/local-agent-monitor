@@ -955,18 +955,15 @@ public sealed partial class SqlitePricingStore
                     baseAttempt));
             }
 
-            foreach (var scope in request.BudgetScopes.Where(item => item.ScopeKind == "session"))
-            {
-                var target = targets.Single(item => item.SessionId == scope.SessionId);
-                if (target.SourcePartitionState != "resolved"
-                    || !configuration.SourceEntries.Any(entry =>
-                        entry.SourceSurface == target.SourceSurface
-                        && entry.ApplicationVersion == target.SourceApplicationVersion))
-                    return Rollback<string>(
-                        transaction,
-                        PricingStoreStatus.Conflict,
-                        "cost_session_not_eligible");
-            }
+            if (!SessionBudgetScopesEligible(
+                    connection,
+                    transaction,
+                    request,
+                    configuration))
+                return Rollback<string>(
+                    transaction,
+                    PricingStoreStatus.Conflict,
+                    "cost_session_not_eligible");
 
             var admission = ValidateBudgetAdmission(
                 connection,
@@ -1118,6 +1115,37 @@ public sealed partial class SqlitePricingStore
                 return BudgetAdmissionStatus.TooLarge;
         }
         return BudgetAdmissionStatus.Accepted;
+    }
+
+    private static bool SessionBudgetScopesEligible(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CostRecalculationRequestV1 request,
+        CostConfigurationV1 configuration)
+    {
+        foreach (var scope in request.BudgetScopes.Where(item =>
+                     item.ScopeKind == "session"))
+        {
+            using var status = Command(
+                connection,
+                transaction,
+                "SELECT status FROM sessions WHERE session_id=$session;",
+                ("$session", scope.SessionId!));
+            if (status.ExecuteScalar() is not string sessionStatus
+                || sessionStatus is not ("completed" or "failed"))
+                return false;
+
+            var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+                connection,
+                transaction,
+                scope.SessionId!);
+            if (source.State != CostSessionSourcePartitionStateV1.Resolved
+                || !configuration.SourceEntries.Any(entry =>
+                    entry.SourceSurface == source.SourceSurface
+                    && entry.ApplicationVersion == source.SourceApplicationVersion))
+                return false;
+        }
+        return true;
     }
 
     private static SqliteCommand BudgetAdmissionSessions(
