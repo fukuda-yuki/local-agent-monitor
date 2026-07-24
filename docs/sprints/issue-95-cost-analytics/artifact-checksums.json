@@ -1,0 +1,24 @@
+{
+  "schema_version": "issue-95-artifact-checksums.v1",
+  "candidate_base": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+  "algorithm": "SHA-256",
+  "verification_date": "2026-07-25",
+  "artifacts": [
+    {
+      "path": "docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json",
+      "sha256": "1b190c1a2e58be97f5f6d695d06988cd0a437f323bfab1a7c6d31f8b0212251f"
+    },
+    {
+      "path": "docs/sprints/issue-95-cost-analytics/README.md",
+      "sha256": "16a8148695765904a2260be900b7a5c3057678768242a3ebe91a530297c7f984"
+    },
+    {
+      "path": "docs/sprints/issue-95-cost-analytics/validation-matrix.json",
+      "sha256": "a6ab5ebb0def815aef242a2f9c030d1b1e22d043b0798879ee9955d20f1d0af7"
+    },
+    {
+      "path": "docs/sprints/issue-95-cost-analytics/live-validation.md",
+      "sha256": "687dec9687882c6a2d64170bd55e918bff321ca8e4c97d5099731b27b6caec90"
+    }
+  ]
+}

@@ -1,0 +1,154 @@
+{
+  "schema_version": "validation-matrix.v1",
+  "matrix_prep_sha": "98bfd62c5aad65961beefe42f51141c7e9f54169",
+  "final_validation_sha": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+  "inventory_date": "2026-07-25",
+  "environment_boundary": "Exact functional candidate on Windows x64 with synthetic bounded records, disposable SQLite databases, loopback-only test hosts, repository-local Playwright Chromium, committed repository-safe evidence, and no content-enabled live provider capture.",
+  "active_rows": [
+    {
+      "row_id": "91-A-095",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "cost-analytics-automated",
+      "operation": "pricing persistence, immutable recalculation, cost API and UI, alert receipt v2 evaluation, Alert Center presentation and lifecycle, migration, export, backup, accessibility, and Playwright",
+      "profiles": {
+        "collection": ["sqlite-production-store", "loopback-api", "playwright-ui"],
+        "content_access": ["raw-default", "sanitized-only"],
+        "compatibility": ["trusted-bundled-catalog", "source-mapping-unavailable"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-session-estimate"],
+        "restart": ["persisted-reload"],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+        "pricing_estimate": "pricing-estimate.v1",
+        "alert_receipt": "alert.receipt.v2",
+        "alert_lifecycle": "alert.lifecycle.v1"
+      },
+      "expected_invariant": "The production SQLite, API, UI, alert, lifecycle, migration, export, backup, accessibility, and browser surfaces preserve the exact bounded cost-analytics contracts on one immutable candidate.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-95-cost-analytics/live-validation.md#91-a-095",
+          "compatibility_basis": "Candidate-pinned full aggregate, canonical 20-filter handoff, Playwright, migration, export, backup, and focused dependency-owner gates used bounded synthetic fixtures and disposable local state."
+        }
+      ],
+      "actual_result": "The exact candidate passed build, Playwright bootstrap, the full aggregate with 8,976 passed / 1 OS-only skipped / 8,977 total, the canonical Issue #95 focused surface, dependency-owner focused suites, and explicit migration compatibility gates with no applicable failure.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #95 cost analytics and budget alert integration",
+      "validation_sha": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+      "validation_date": "2026-07-25",
+      "environment_boundary": "Windows x64, disposable SQLite state, loopback-only hosts, repository-local Chromium, synthetic bounded provider records, and no live positive provider mapping claim."
+    },
+    {
+      "row_id": "91-S-095",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "cost-analytics-security",
+      "operation": "strict identity and canonical bytes, API boundary, no-leak scanning, private override confinement, malformed and tampered input rejection, future-version rejection, and archive safety",
+      "profiles": {
+        "collection": ["loopback-api", "playwright-ui", "repository-artifacts"],
+        "content_access": ["raw-default", "sanitized-only"],
+        "compatibility": ["trusted-bundled-catalog", "private-local-override", "malformed", "tampered", "future-version"],
+        "hook": [],
+        "otel": [],
+        "binding": ["exact-identity", "canonical-bytes"],
+        "restart": [],
+        "retention": ["archive-safety"]
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+        "pricing_catalog": "pricing.catalog-snapshot.v1",
+        "secret_corpus": "validation-secret-corpus.v1"
+      },
+      "expected_invariant": "Canonical identity and bytes remain fail-closed across API, private override, archive, migration, malformed, tampered, future-version, and repository evidence boundaries without locator or captured-content leakage.",
+      "evidence": [
+        {
+          "kind": "automated",
+          "reference": "docs/sprints/issue-95-cost-analytics/live-validation.md#91-s-095",
+          "compatibility_basis": "Candidate-pinned provider, API, Playwright, export, backup, malicious-input, OS security, scanner self-test, and evidence-chain tests used synthetic or repository-safe inputs."
+        }
+      ],
+      "actual_result": "All applicable Windows provider security cases passed, the Linux-only FIFO case was classified not_applicable, applicable prerequisite skips were zero, scanner self-tests passed 118 transformations and five negatives, and the 31-case evidence-chain self-test passed inside the full aggregate and directly.",
+      "classification": "passed",
+      "severity": "none",
+      "blocker": null,
+      "retry_condition": null,
+      "unverified_capability": null,
+      "owner": "Issue #95 cost analytics security boundary",
+      "validation_sha": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+      "validation_date": "2026-07-25",
+      "environment_boundary": "Windows x64 native reparse, open-mutation, and normalized-segment coverage; Linux FIFO is explicitly not applicable on this host; no raw archive or captured provider content is committed."
+    },
+    {
+      "row_id": "91-L-095",
+      "matrix_schema_version": "validation-matrix.v1",
+      "surface": "cost-analytics-live-provider",
+      "operation": "genuine GitHub Copilot and Claude Code source/version mapping, positive estimate persistence, configured budget evaluation, and Alert Center cost receipt and lifecycle readback",
+      "profiles": {
+        "collection": ["genuine-github-copilot", "genuine-claude-code"],
+        "content_access": ["separately-authorized-live-capture"],
+        "compatibility": ["reviewed-positive-source-mapping"],
+        "hook": ["unverified"],
+        "otel": ["unverified"],
+        "binding": ["exact-session-estimate"],
+        "restart": [],
+        "retention": []
+      },
+      "requirement_level": "required",
+      "applicability": "applicable",
+      "applicability_reason": null,
+      "versions": {
+        "candidate": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+        "github_copilot_mapping": "not-available",
+        "claude_code_mapping": "not-available"
+      },
+      "expected_invariant": "Genuine positive estimates for both providers are persisted from reviewed source mappings, drive a configured budget evaluation, and are read back through the exact Alert Center cost receipt and lifecycle without promoting synthetic evidence.",
+      "evidence": [
+        {
+          "kind": "live",
+          "reference": "docs/sprints/issue-95-cost-analytics/live-validation.md#91-l-095",
+          "compatibility_basis": "No genuine positive provider mapping or separate live capture authorization was available; synthetic tests were not promoted to live evidence."
+        }
+      ],
+      "actual_result": "Positive estimate persistence, configured budget evaluation, and Alert Center receipt/lifecycle readback remain unverified for genuine GitHub Copilot and Claude Code sessions.",
+      "classification": "blocked_external",
+      "severity": "high",
+      "blocker": "Reviewed positive source/version-to-pricing mappings and separate live authorization are unavailable for both GitHub Copilot and Claude Code.",
+      "retry_condition": "Obtain reviewed positive source mappings for both GitHub Copilot and Claude Code plus separate live authorization; freeze a new candidate; persist a genuine positive estimate for each provider; evaluate a configured budget; read the resulting cost_receipt_v2 and lifecycle through Alert Center; then run repository-safe leak scanning.",
+      "unverified_capability": "Positive estimate persistence, configured budget evaluation, and Alert Center cost_receipt_v2/lifecycle readback for both GitHub Copilot and Claude Code.",
+      "owner": "Issue #95 live provider validation",
+      "validation_sha": "88e4c40dd7e76d6a80bb87a17c4e5acd88081bf8",
+      "validation_date": "2026-07-25",
+      "environment_boundary": "No reviewed positive mapping and no separately authorized genuine provider capture were available; the blocked live capability is not represented by synthetic fixtures."
+    }
+  ],
+  "future_registry_ref": "docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json",
+  "evidence_ledger_refs": [
+    "docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json",
+    "docs/sprints/issue-95-cost-analytics/live-validation.md",
+    "docs/sprints/issue-95-cost-analytics/README.md"
+  ],
+  "release_decision": {
+    "decision": "release_ready_with_external_blockers",
+    "external_blockers": [
+      {
+        "row_id": "91-L-095",
+        "severity": "high",
+        "blocker": "Reviewed positive source/version-to-pricing mappings and separate live authorization are unavailable for both GitHub Copilot and Claude Code.",
+        "retry_condition": "Obtain reviewed positive source mappings for both GitHub Copilot and Claude Code plus separate live authorization; freeze a new candidate; persist a genuine positive estimate for each provider; evaluate a configured budget; read the resulting cost_receipt_v2 and lifecycle through Alert Center; then run repository-safe leak scanning.",
+        "unverified_capability": "Positive estimate persistence, configured budget evaluation, and Alert Center cost_receipt_v2/lifecycle readback for both GitHub Copilot and Claude Code."
+      }
+    ]
+  }
+}
