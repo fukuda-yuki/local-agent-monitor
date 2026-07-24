@@ -9,17 +9,23 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(CostRouteSerialCollection.Name)]
 public sealed class CostRouteTests
 {
-    public static TheoryData<string, HttpStatusCode, string> RecalculationAdmissionFailures => new()
+    public static TheoryData<
+        string,
+        PricingStoreStatus,
+        HttpStatusCode,
+        string> RecalculationAdmissionFailures => new()
     {
-        { "idempotency", HttpStatusCode.Conflict, "cost_idempotency_conflict" },
-        { "stale-head", HttpStatusCode.Conflict, "cost_stale_head" },
-        { "catalog-changed", HttpStatusCode.Conflict, "cost_catalog_changed" },
-        { "overlap", HttpStatusCode.Conflict, "cost_recalculation_in_progress" },
-        { "missing", HttpStatusCode.NotFound, "cost_session_not_found" },
-        { "ineligible", HttpStatusCode.Conflict, "cost_session_not_eligible" },
-        { "budget-ineligible", HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "idempotency", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_idempotency_conflict" },
+        { "stale-head", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_stale_head" },
+        { "catalog-changed", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_catalog_changed" },
+        { "overlap", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_recalculation_in_progress" },
+        { "missing", PricingStoreStatus.Conflict, HttpStatusCode.NotFound, "cost_session_not_found" },
+        { "ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "budget-ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "capacity", PricingStoreStatus.CapacityReached, HttpStatusCode.RequestEntityTooLarge, "cost_request_too_large" },
     };
 
     [Fact]
@@ -280,6 +286,7 @@ public sealed class CostRouteTests
     [MemberData(nameof(RecalculationAdmissionFailures))]
     public async Task RecalculationAdmissionFailuresPreserveFixedStoreApplicationAndRouteOutcomes(
         string scenarioName,
+        PricingStoreStatus expectedStoreStatus,
         HttpStatusCode expectedStatus,
         string expectedCode)
     {
@@ -296,7 +303,7 @@ public sealed class CostRouteTests
             scenario.Provider.CanonicalCatalogBytes,
             scenario.Temp.TimeProvider.GetUtcNow());
 
-        Assert.Equal(PricingStoreStatus.Conflict, storeResult.Status);
+        Assert.Equal(expectedStoreStatus, storeResult.Status);
         Assert.Equal(expectedCode, storeResult.ErrorCode);
         mutation.AssertUnchanged();
 
@@ -402,12 +409,15 @@ public sealed class CostRouteTests
         string code)
     {
         Assert.Equal(status, response.StatusCode);
-        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(
+            "application/json",
+            response.Content.Headers.ContentType?.ToString());
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
         Assert.Equal(
-            $$"""{"schema_version":"cost.error.v1","error":"{{code}}"}""",
-            await response.Content.ReadAsStringAsync());
+            Encoding.UTF8.GetBytes(
+                $$"""{"schema_version":"cost.error.v1","error":"{{code}}"}"""),
+            await response.Content.ReadAsByteArrayAsync());
     }
 
     private static string CurrentCatalogSha()
@@ -559,13 +569,6 @@ public sealed class CostRouteTests
                     requestProvider = ChangedCatalogProvider();
                     break;
                 case "catalog-changed":
-                    StartSeedRun(
-                        temp,
-                        provider,
-                        RecalculationRequest(
-                            configuration,
-                            [firstSessionId],
-                            "status-mapping-catalog-seed"));
                     request = RecalculationRequest(
                         configuration,
                         [firstSessionId, missingSessionId],
@@ -613,6 +616,31 @@ public sealed class CostRouteTests
                         ],
                         "status-mapping-budget-ineligible");
                     break;
+                case "capacity":
+                    InsertResolvedSessions(temp.DatabasePath, 1_999);
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [firstSessionId],
+                        [
+                            new("utc_day", null, "2026-07-01", null, null),
+                            new(
+                                "rolling_period",
+                                null,
+                                null,
+                                new DateTimeOffset(
+                                    2026,
+                                    7,
+                                    2,
+                                    0,
+                                    0,
+                                    0,
+                                    TimeSpan.Zero),
+                                2),
+                        ],
+                        "status-mapping-capacity");
+                    break;
                 default:
                     throw new ArgumentOutOfRangeException(
                         nameof(scenarioName),
@@ -626,6 +654,18 @@ public sealed class CostRouteTests
                 host = await MonitorTestHost.StartAsync(
                     temp,
                     testOptions: Options(requestProvider));
+            }
+
+            if (scenarioName == "catalog-changed")
+            {
+                StartSeedRun(
+                    temp,
+                    provider,
+                    RecalculationRequest(
+                        configuration,
+                        [firstSessionId],
+                        "status-mapping-catalog-post-recovery-seed"));
+                AssertActiveRecalculationOverlap(temp.DatabasePath, firstSessionId);
             }
 
             return new(temp, host, requestProvider, request);
@@ -664,6 +704,103 @@ public sealed class CostRouteTests
                 temp.TimeProvider.GetUtcNow());
         Assert.Equal(PricingStoreStatus.Success, result.Status);
         Assert.Null(result.ErrorCode);
+    }
+
+    private static void AssertActiveRecalculationOverlap(
+        string databasePath,
+        string sessionId)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*)
+            FROM pricing_recalculation_targets t
+            WHERE t.session_id=$session
+              AND NOT EXISTS(
+                SELECT 1
+                FROM pricing_recalculation_events e
+                WHERE e.run_id=t.run_id
+                  AND e.event_kind IN ('succeeded','failed'));
+            """;
+        command.Parameters.AddWithValue("$session", sessionId);
+        Assert.Equal(1L, Convert.ToInt64(
+            command.ExecuteScalar(),
+            System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void InsertResolvedSessions(string databasePath, int count)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO sessions(
+                session_id,status,completeness,repository,workspace,last_seen_at,
+                raw_retention_state,created_at,updated_at)
+            SELECT
+                printf('00000000-0000-7000-8000-%012d', value),
+                'completed','full',NULL,NULL,
+                '2026-07-01T01:00:00.0000000+00:00','not_captured',
+                '2026-07-01T01:00:00.0000000+00:00',
+                '2026-07-01T01:00:00.0000000+00:00'
+            FROM ordinal;
+
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO session_runs(run_id,session_id,source_surface,status)
+            SELECT
+                printf('status-mapping-capacity-run-%04d', value),
+                printf('00000000-0000-7000-8000-%012d', value),
+                'vscode',
+                'completed'
+            FROM ordinal;
+
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO session_events(
+                event_id,session_id,run_id,source_surface,source_adapter,
+                source_event_id,type,occurred_at,content_state,
+                source_application_version)
+            SELECT
+                printf('status-mapping-capacity-event-%04d', value),
+                printf('00000000-0000-7000-8000-%012d', value),
+                printf('status-mapping-capacity-run-%04d', value),
+                'vscode',
+                'synthetic',
+                printf('status-mapping-capacity-source-%04d', value),
+                'turn',
+                '2026-07-01T01:00:00.0000000+00:00',
+                'not_captured',
+                '1.2.3'
+            FROM ordinal;
+            """;
+        command.Parameters.AddWithValue("$count", count);
+        command.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     private static IPricingCatalogProvider ChangedCatalogProvider()
@@ -785,4 +922,10 @@ public sealed class CostRouteTests
     }
 
     private static MonitorTempDirectory NewTemp() => new();
+}
+
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class CostRouteSerialCollection
+{
+    public const string Name = "Cost route status mapping";
 }
