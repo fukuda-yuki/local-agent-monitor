@@ -12,8 +12,10 @@ public enum PricingReadStatus
 {
     Success,
     NotFound,
+    InvalidQuery,
     InvalidCursor,
     CatalogChanged,
+    SnapshotChanged,
     ResponseTooLarge,
     Busy,
     Unavailable,
