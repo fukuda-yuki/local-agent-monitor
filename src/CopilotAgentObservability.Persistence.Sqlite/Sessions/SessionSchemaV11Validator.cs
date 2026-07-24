@@ -27,41 +27,51 @@ internal static class SessionSchemaV11Validator
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(createCanonicalSchema);
 
+        if (!IsValid(connection, null, createCanonicalSchema, expectedVersion))
+            Reject();
+    }
+
+    internal static bool IsValid(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Action<SqliteConnection> createCanonicalSchema,
+        int expectedVersion)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(createCanonicalSchema);
+
         try
         {
             var expected = GetExpectedSchemas(createCanonicalSchema, expectedVersion);
-            if (!HasExactOwnedObjectSet(connection, expected.TableNames)
-                || !HasExactSessionVersionRow(connection, expectedVersion))
+            if (!HasExactOwnedObjectSet(connection, transaction, expected.TableNames)
+                || !HasExactSessionVersionRow(connection, transaction, expectedVersion))
             {
-                Reject();
+                return false;
             }
 
-            var actual = ReadProfile(connection, expected.TableNames);
-            if (actual is null
-                || expected.Profiles.Count(profile => ProfileEquals(profile, actual)) != 1)
-            {
-                Reject();
-            }
+            var actual = ReadProfile(connection, transaction, expected.TableNames);
+            return actual is not null
+                && expected.Profiles.Count(profile => ProfileEquals(profile, actual)) == 1;
         }
         catch (SqliteException)
         {
-            Reject();
+            return false;
         }
         catch (InvalidOperationException)
         {
-            Reject();
+            return false;
         }
         catch (InvalidCastException)
         {
-            Reject();
+            return false;
         }
         catch (FormatException)
         {
-            Reject();
+            return false;
         }
         catch (OverflowException)
         {
-            Reject();
+            return false;
         }
     }
 
@@ -136,7 +146,7 @@ internal static class SessionSchemaV11Validator
             Execute(connection, sql);
         }
         Execute(connection, $"INSERT INTO schema_version(component,version) VALUES('session',{schemaVersion});");
-        return ReadProfile(connection, tableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
+        return ReadProfile(connection, null, tableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
     private static DatabaseProfile BuildDerivedProfile(
@@ -165,7 +175,7 @@ internal static class SessionSchemaV11Validator
         }
         Execute(connection, $"INSERT INTO schema_version(component,version) VALUES('session',{expectedVersion});");
 
-        return ReadProfile(connection, canonicalTableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase))
+        return ReadProfile(connection, null, canonicalTableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Unable to construct a supported Session schema profile.");
     }
 
@@ -381,9 +391,11 @@ internal static class SessionSchemaV11Validator
 
     private static bool HasExactOwnedObjectSet(
         SqliteConnection connection,
+        SqliteTransaction? transaction,
         IReadOnlySet<string> expectedTables)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%';";
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -415,9 +427,13 @@ internal static class SessionSchemaV11Validator
     private static bool IsReservedName(string name) => ReservedPrefixes.Any(prefix =>
         name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
 
-    private static bool HasExactSessionVersionRow(SqliteConnection connection, int expectedVersion)
+    private static bool HasExactSessionVersionRow(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        int expectedVersion)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT version,typeof(version) FROM schema_version WHERE component='session';";
         using var reader = command.ExecuteReader();
         if (!reader.Read()
@@ -431,12 +447,13 @@ internal static class SessionSchemaV11Validator
 
     private static DatabaseProfile? ReadProfile(
         SqliteConnection connection,
+        SqliteTransaction? transaction,
         IReadOnlySet<string> tableNames)
     {
         var tables = new Dictionary<string, TableShape>(StringComparer.OrdinalIgnoreCase);
         foreach (var table in tableNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
         {
-            var shape = ReadTable(connection, table);
+            var shape = ReadTable(connection, transaction, table);
             if (shape is null)
             {
                 return null;
@@ -446,11 +463,15 @@ internal static class SessionSchemaV11Validator
         return new(tables);
     }
 
-    private static TableShape? ReadTable(SqliteConnection connection, string table)
+    private static TableShape? ReadTable(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string table)
     {
         TableListShape tableList;
         using (var command = connection.CreateCommand())
         {
+            command.Transaction = transaction;
             command.CommandText = "SELECT type,ncol,wr,strict FROM pragma_table_list WHERE schema='main' AND name=$table;";
             command.Parameters.AddWithValue("$table", table);
             using var reader = command.ExecuteReader();
@@ -468,6 +489,7 @@ internal static class SessionSchemaV11Validator
         string sql;
         using (var command = connection.CreateCommand())
         {
+            command.Transaction = transaction;
             command.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$table;";
             command.Parameters.AddWithValue("$table", table);
             if (command.ExecuteScalar() is not string value)
@@ -480,6 +502,7 @@ internal static class SessionSchemaV11Validator
         var columns = new List<ColumnShape>();
         using (var command = connection.CreateCommand())
         {
+            command.Transaction = transaction;
             command.CommandText = "SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo($table) ORDER BY cid;";
             command.Parameters.AddWithValue("$table", table);
             using var reader = command.ExecuteReader();
@@ -500,16 +523,20 @@ internal static class SessionSchemaV11Validator
             tableList,
             columns,
             sql,
-            ReadIndexes(connection, table),
-            ReadForeignKeys(connection, table),
-            ReadTriggers(connection, table));
+            ReadIndexes(connection, transaction, table),
+            ReadForeignKeys(connection, transaction, table),
+            ReadTriggers(connection, transaction, table));
     }
 
-    private static IReadOnlyList<IndexShape> ReadIndexes(SqliteConnection connection, string table)
+    private static IReadOnlyList<IndexShape> ReadIndexes(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string table)
     {
         var headers = new List<IndexHeader>();
         using (var command = connection.CreateCommand())
         {
+            command.Transaction = transaction;
             command.CommandText = "SELECT name,\"unique\",origin,partial FROM pragma_index_list($table);";
             command.Parameters.AddWithValue("$table", table);
             using var reader = command.ExecuteReader();
@@ -525,6 +552,7 @@ internal static class SessionSchemaV11Validator
             string? sql;
             using (var command = connection.CreateCommand())
             {
+                command.Transaction = transaction;
                 command.CommandText = "SELECT sql FROM sqlite_schema WHERE type='index' AND name=$index;";
                 command.Parameters.AddWithValue("$index", header.Name);
                 var value = command.ExecuteScalar();
@@ -535,6 +563,7 @@ internal static class SessionSchemaV11Validator
             var terms = new List<IndexTermShape>();
             using (var command = connection.CreateCommand())
             {
+                command.Transaction = transaction;
                 command.CommandText = "SELECT seqno,cid,name,\"desc\",coll,\"key\" FROM pragma_index_xinfo($index) ORDER BY seqno;";
                 command.Parameters.AddWithValue("$index", header.Name);
                 using var reader = command.ExecuteReader();
@@ -561,10 +590,14 @@ internal static class SessionSchemaV11Validator
         return indexes;
     }
 
-    private static IReadOnlyList<ForeignKeyShape> ReadForeignKeys(SqliteConnection connection, string table)
+    private static IReadOnlyList<ForeignKeyShape> ReadForeignKeys(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string table)
     {
         var foreignKeys = new List<ForeignKeyShape>();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete,match FROM pragma_foreign_key_list($table) ORDER BY id,seq;";
         command.Parameters.AddWithValue("$table", table);
         using var reader = command.ExecuteReader();
@@ -583,10 +616,14 @@ internal static class SessionSchemaV11Validator
         return foreignKeys;
     }
 
-    private static IReadOnlyList<TriggerShape> ReadTriggers(SqliteConnection connection, string table)
+    private static IReadOnlyList<TriggerShape> ReadTriggers(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string table)
     {
         var triggers = new List<TriggerShape>();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=$table ORDER BY name;";
         command.Parameters.AddWithValue("$table", table);
         using var reader = command.ExecuteReader();

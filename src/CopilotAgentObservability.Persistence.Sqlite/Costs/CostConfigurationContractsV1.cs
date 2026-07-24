@@ -18,6 +18,16 @@ public enum CostConsumerStatus
 
 public sealed record CostConsumerResult<T>(CostConsumerStatus Status, T? Value);
 
+internal static class CostContractSchemaVersionV1
+{
+    internal static bool IsRecognizedFuture(string? schema, string prefix) =>
+        schema is not null
+        && Regex.IsMatch(
+            schema,
+            "^" + Regex.Escape(prefix) + "(?:[2-9]|[1-9][0-9]+)$",
+            RegexOptions.CultureInvariant);
+}
+
 public sealed record CostSourceEntryV1(
     string SourceSurface,
     string ApplicationVersion,
@@ -307,7 +317,9 @@ public static class CostConfigurationConsumerV1
                 ? schemaElement.GetString()
                 : null;
             if (schema != CostConfigurationCanonicalJsonV1.SchemaVersion)
-                return new(schema is not null && schema.StartsWith("cost.configuration.", StringComparison.Ordinal)
+                return new(CostContractSchemaVersionV1.IsRecognizedFuture(
+                    schema,
+                    "cost.configuration.v")
                     ? CostConsumerStatus.Unsupported
                     : CostConsumerStatus.Invalid, null);
             var value = JsonSerializer.Deserialize<CostConfigurationV1>(bytes, CostJsonV1.Options);
@@ -443,8 +455,17 @@ public static class CostConfigurationPreviewConsumerV1
         {
             var bytes = canonicalBytes.ToArray();
             using var document = CostJsonV1.Parse(bytes, 16);
-            if (document.RootElement.GetProperty("schema_version").GetString() != CostConfigurationPreviewCanonicalJsonV1.SchemaVersion)
-                return new(CostConsumerStatus.Unsupported, null);
+            var schema = document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("schema_version", out var schemaElement)
+                && schemaElement.ValueKind == JsonValueKind.String
+                    ? schemaElement.GetString()
+                    : null;
+            if (schema != CostConfigurationPreviewCanonicalJsonV1.SchemaVersion)
+                return new(CostContractSchemaVersionV1.IsRecognizedFuture(
+                    schema,
+                    "cost.configuration-preview.v")
+                    ? CostConsumerStatus.Unsupported
+                    : CostConsumerStatus.Invalid, null);
             var value = JsonSerializer.Deserialize<CostConfigurationPreviewV1>(bytes, CostJsonV1.Options);
             if (value is null) return new(CostConsumerStatus.Invalid, null);
             var frozen = CostConfigurationPreviewCanonicalJsonV1.Create(
@@ -501,7 +522,9 @@ public static class CostConfigurationCommitConsumerV1
                     ? schemaElement.GetString()
                     : null;
             if (schema != RequestSchema)
-                return new(IsRecognizedFuture(schema, "cost.configuration-commit.v")
+                return new(CostContractSchemaVersionV1.IsRecognizedFuture(
+                    schema,
+                    "cost.configuration-commit.v")
                     ? CostConsumerStatus.Unsupported
                     : CostConsumerStatus.Invalid, null);
             var text = Encoding.UTF8.GetString(bytes);
@@ -553,7 +576,9 @@ public static class CostConfigurationCommitConsumerV1
                     ? schemaElement.GetString()
                     : null;
             if (schema != ResultSchema)
-                return new(IsRecognizedFuture(schema, "cost.configuration-commit-result.v")
+                return new(CostContractSchemaVersionV1.IsRecognizedFuture(
+                    schema,
+                    "cost.configuration-commit-result.v")
                     ? CostConsumerStatus.Unsupported
                     : CostConsumerStatus.Invalid, null);
             var value = JsonSerializer.Deserialize<CostConfigurationCommitResultV1>(bytes, CostJsonV1.Options);
@@ -575,12 +600,6 @@ public static class CostConfigurationCommitConsumerV1
         string catalogSha256) =>
         new(ResultSchema, configurationId, headRevision, catalogSha256);
 
-    private static bool IsRecognizedFuture(string? schema, string prefix) =>
-        schema is not null
-        && Regex.IsMatch(
-            schema,
-            "^" + Regex.Escape(prefix) + "(?:[2-9]|[1-9][0-9]+)$",
-            RegexOptions.CultureInvariant);
 }
 
 internal static class CostIdentityV1

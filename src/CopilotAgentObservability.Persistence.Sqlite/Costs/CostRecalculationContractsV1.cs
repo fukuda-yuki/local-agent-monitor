@@ -111,8 +111,17 @@ public static class CostRecalculationRequestCanonicalJsonV1
         {
             var bytes = canonicalBytes.ToArray();
             using var document = CostJsonV1.Parse(bytes, 16);
-            if (document.RootElement.GetProperty("schema_version").GetString() != SchemaVersion)
-                return new(CostConsumerStatus.Unsupported, null);
+            var schema = document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("schema_version", out var schemaElement)
+                && schemaElement.ValueKind == JsonValueKind.String
+                    ? schemaElement.GetString()
+                    : null;
+            if (schema != SchemaVersion)
+                return new(CostContractSchemaVersionV1.IsRecognizedFuture(
+                    schema,
+                    "cost.recalculation-request.v")
+                    ? CostConsumerStatus.Unsupported
+                    : CostConsumerStatus.Invalid, null);
             var value = JsonSerializer.Deserialize<CostRecalculationRequestV1>(bytes, CostJsonV1.Options);
             if (value is null) return new(CostConsumerStatus.Invalid, null);
             var frozen = Create(

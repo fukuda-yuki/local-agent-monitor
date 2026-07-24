@@ -1,27 +1,12 @@
 using System.Globalization;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Pricing;
 
 internal static class PricingDependencySchemaV1
 {
-    private const string SessionsTableSql = """
-        CREATE TABLE sessions (
-            session_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL CHECK (status IN ('active','completed','failed','unknown')),
-            completeness TEXT NOT NULL CHECK (completeness IN ('unbound','partial','rich','full')),
-            repository TEXT NULL,
-            workspace TEXT NULL,
-            started_at TEXT NULL,
-            ended_at TEXT NULL,
-            last_seen_at TEXT NOT NULL,
-            raw_retention_state TEXT NOT NULL CHECK (raw_retention_state IN ('expiring','expired_pending_deletion','not_captured')),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        """;
-
     private static readonly IReadOnlyDictionary<string, string> AlertV2TableSql =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -66,10 +51,9 @@ internal static class PricingDependencySchemaV1
     internal static bool IsValid(SqliteConnection connection, SqliteTransaction? transaction)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (!HasVersion(connection, transaction, "session", 13)
+        if (!SqliteSessionStore.IsCurrentSchemaValid(connection, transaction)
             || !HasVersion(connection, transaction, "alert_engine", 2)
-            || !RuntimeBackupSchemaV1.IsValid(connection, transaction)
-            || !DefinitionMatches(connection, transaction, "sessions", SessionsTableSql))
+            || !RuntimeBackupSchemaV1.IsValid(connection, transaction))
             return false;
 
         foreach (var table in AlertV2TableSql)

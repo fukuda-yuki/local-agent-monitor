@@ -144,7 +144,7 @@ internal static class PricingConfigurationSelectionDigestV1
         && value.All(character => character is >= '!' and <= '~');
 }
 
-public sealed record PricingRecalculationTargetWrite(
+internal sealed record PricingRecalculationTargetWriteIncomplete(
     string SessionId,
     string SessionStatus,
     DateTimeOffset SessionEffectiveAtUtc,
@@ -268,10 +268,11 @@ public sealed class SqlitePricingStore
 
     public PricingStoreResult PutCatalogSnapshot(ReadOnlyMemory<byte> canonicalBytes)
     {
+        var frozenBytes = canonicalBytes.ToArray();
         PricingCatalog catalog;
         try
         {
-            catalog = PricingCatalogSnapshotConsumer.Deserialize(canonicalBytes.Span);
+            catalog = PricingCatalogSnapshotConsumer.Deserialize(frozenBytes);
         }
         catch (PricingRegistryValidationException)
         {
@@ -289,7 +290,7 @@ public sealed class SqlitePricingStore
             {
                 if (reader.Read())
                 {
-                    var same = ((byte[])reader[0]).AsSpan().SequenceEqual(canonicalBytes.Span)
+                    var same = ((byte[])reader[0]).AsSpan().SequenceEqual(frozenBytes)
                         && reader.GetInt32(1) == catalog.Documents.Count;
                     transaction.Rollback();
                     return new(same ? PricingStoreStatus.Success : PricingStoreStatus.Conflict);
@@ -306,7 +307,7 @@ public sealed class SqlitePricingStore
                 VALUES($sha,'pricing.catalog-snapshot.v1',$blob,$count,$time);
                 """,
                 ("$sha", catalog.CatalogSha256),
-                ("$blob", canonicalBytes.ToArray()),
+                ("$blob", frozenBytes),
                 ("$count", catalog.Documents.Count),
                 ("$time", Format(firstRecordedAtUtc)));
             insert.ExecuteNonQuery();
@@ -652,10 +653,10 @@ public sealed class SqlitePricingStore
         }
     }
 
-    public PricingStoreResult<string> StartRecalculation(
+    internal PricingStoreResult<string> StartRecalculationIncomplete(
         string runId,
         CostRecalculationRequestV1 request,
-        IReadOnlyList<PricingRecalculationTargetWrite> targets,
+        IReadOnlyList<PricingRecalculationTargetWriteIncomplete> targets,
         DateTimeOffset calculationTimeUtc)
     {
         ArgumentNullException.ThrowIfNull(targets);
@@ -702,8 +703,14 @@ public sealed class SqlitePricingStore
                         : new(PricingStoreStatus.Conflict, null);
                 }
             }
-            using (var head = Command(connection, transaction, "SELECT COUNT(*) FROM pricing_configuration_heads WHERE head_revision=$revision AND configuration_id=$configuration;", ("$revision", request.ExpectedHeadRevision), ("$configuration", request.ConfigurationId)))
-                if (Convert.ToInt64(head.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+            using (var head = Command(
+                connection,
+                transaction,
+                "SELECT head_revision,configuration_id FROM pricing_configuration_heads ORDER BY head_revision DESC LIMIT 1;"))
+            using (var reader = head.ExecuteReader())
+                if (!reader.Read()
+                    || reader.GetInt64(0) != request.ExpectedHeadRevision
+                    || reader.GetString(1) != request.ConfigurationId)
                     return Rollback<string>(transaction, PricingStoreStatus.Conflict);
             using (var overlap = Command(
                 connection,
@@ -1421,7 +1428,7 @@ public sealed class SqlitePricingStore
             _ => false,
         };
 
-    private static bool IsRecalculationTargetShapeValid(PricingRecalculationTargetWrite value)
+    private static bool IsRecalculationTargetShapeValid(PricingRecalculationTargetWriteIncomplete value)
     {
         if (!IsCanonicalUuid(value.SessionId)
             || value.SessionStatus is not ("completed" or "failed")

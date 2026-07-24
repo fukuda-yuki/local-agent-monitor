@@ -88,6 +88,46 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Empty(Names(connection, "SELECT name FROM sqlite_schema WHERE name GLOB 'pricing_*';"));
     }
 
+    [Fact]
+    public void PricingSchemaV1_Ensure_RejectsExactSessionsTableWithoutFullSessionV13Component()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        using var connection = database.Open();
+        Execute(connection, "PRAGMA foreign_keys=OFF;");
+        var missingTables = Names(
+            connection,
+            """
+            SELECT name
+            FROM sqlite_schema
+            WHERE type='table'
+              AND name NOT LIKE 'sqlite_%'
+              AND name NOT IN (
+                'schema_version',
+                'sessions',
+                'alert_evaluations',
+                'alert_receipts',
+                'alert_suppressions',
+                'runtime_backup_receipts')
+            ORDER BY name;
+            """);
+        Assert.NotEmpty(missingTables);
+        foreach (var table in missingTables)
+            Execute(connection, $"DROP TABLE \"{table}\";");
+        Assert.False(SqliteSessionStore.IsCurrentSchemaValid(connection, null));
+
+        using var transaction = connection.BeginTransaction(deferred: false);
+        Assert.Throws<InvalidOperationException>(() => PricingSchemaV1.Ensure(connection, transaction));
+        transaction.Rollback();
+
+        Assert.Empty(Names(connection, "SELECT name FROM sqlite_schema WHERE name GLOB 'pricing_*';"));
+        Assert.Equal(
+            1L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM schema_version WHERE component='session' AND version=13;"));
+    }
+
     [Theory]
     [InlineData("configuration_id")]
     [InlineData("uuid_v7_variant")]
@@ -347,7 +387,7 @@ public sealed class PricingPersistenceFoundationTests
     }
 
     [Fact]
-    public void PricingSchemaV1_Ensure_UpgradesRealDependenciesFromFreshDatabaseAndReopensIdempotently()
+    public void PricingSchemaV1_Ensure_AcceptsRealFullSessionV13AndReopensIdempotently()
     {
         using var database = new PricingDatabase();
         database.CreateDependencies();
@@ -356,6 +396,7 @@ public sealed class PricingPersistenceFoundationTests
         {
             InsertSession(connection, sessionId);
             using var transaction = connection.BeginTransaction(deferred: false);
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
             PricingSchemaV1.Ensure(connection, transaction);
             transaction.Commit();
         }
@@ -396,6 +437,29 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(canonical, loaded.CanonicalBytes);
         Assert.Equal(first, loaded.FirstRecordedAtUtc);
         Assert.Equal(1, loaded.DocumentCount);
+    }
+
+    [Fact]
+    public void SqlitePricingStore_PutCatalogSnapshot_FreezesCallerBytesBeforeConcurrentMutation()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var callerBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var expectedBytes = callerBytes.ToArray();
+        var recordedAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var clock = new CallbackTimeProvider(
+            recordedAt,
+            () => Task.Run(() => callerBytes[0] = (byte)'[').GetAwaiter().GetResult());
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+
+        var result = store.PutCatalogSnapshot(callerBytes);
+        var loaded = store.GetCatalogSnapshot(catalog.CatalogSha256);
+
+        Assert.Equal(PricingStoreStatus.Success, result.Status);
+        Assert.NotNull(loaded);
+        Assert.Equal(expectedBytes, loaded.CanonicalBytes);
     }
 
     [Fact]
@@ -499,6 +563,20 @@ public sealed class PricingPersistenceFoundationTests
             [sessionId],
             [scope, scope],
             "pricing-request-test-0001"));
+    }
+
+    [Fact]
+    public void CostV1Consumers_ClassifyOnlyExactRecognizedFutureFamiliesAsUnsupported()
+    {
+        AssertConsumerVersionClassification(
+            CostRecalculationRequestCanonicalJsonV1.Consume,
+            "cost.recalculation-request");
+        AssertConsumerVersionClassification(
+            CostConfigurationConsumerV1.Consume,
+            "cost.configuration");
+        AssertConsumerVersionClassification(
+            CostConfigurationPreviewConsumerV1.Consume,
+            "cost.configuration-preview");
     }
 
     [Fact]
@@ -721,6 +799,108 @@ public sealed class PricingPersistenceFoundationTests
         Assert.DoesNotContain("CommitConfiguration", publicNames);
         Assert.DoesNotContain("CompleteRecalculation", publicNames);
         Assert.DoesNotContain("AppendEstimateSuccess", publicNames);
+        Assert.DoesNotContain("StartRecalculation", publicNames);
+        Assert.DoesNotContain(
+            typeof(SqlitePricingStore).Assembly.GetExportedTypes(),
+            type => type.Name.Contains("PricingRecalculationTarget", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SqlitePricingStore_StartRecalculationIncomplete_RejectsHistoricalConfigurationHead()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.PutCatalogSnapshot(PricingCanonicalJson.SerializeCatalogSnapshot(catalog)).Status);
+
+        var firstPreview = CreatePreview(catalog.CatalogSha256, createdAt, 1);
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(firstPreview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, firstPreview).Status);
+
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open())
+            InsertSession(connection, sessionId);
+        var initialRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            firstPreview.Configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-stale-head-0001");
+        var target = new PricingRecalculationTargetWriteIncomplete(
+            sessionId,
+            "completed",
+            createdAt,
+            createdAt.AddMinutes(1),
+            "missing",
+            0,
+            new string('d', 64),
+            null,
+            null,
+            null,
+            null,
+            0);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationIncomplete(
+                Guid.CreateVersion7().ToString("D"),
+                initialRequest,
+                [target],
+                createdAt.AddMinutes(1)).Status);
+
+        var secondConfiguration = CostConfigurationCanonicalJsonV1.Create(
+            firstPreview.Configuration.ConfigurationId,
+            catalog.CatalogSha256,
+            [new("surface", "1.0.2", "capability.v1", "provider", "billing", "route")],
+            [],
+            createdAt.AddMinutes(2));
+        var secondPreview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            secondConfiguration,
+            1,
+            firstPreview.Configuration.ConfigurationId,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(secondPreview).Status);
+        clock.UtcNow = createdAt.AddMinutes(3);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, secondPreview).Status);
+
+        var historicalRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            firstPreview.Configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-stale-head-0002");
+
+        var replay = store.StartRecalculationIncomplete(
+            Guid.CreateVersion7().ToString("D"),
+            initialRequest,
+            [target],
+            createdAt.AddMinutes(4));
+        var fresh = store.StartRecalculationIncomplete(
+            Guid.CreateVersion7().ToString("D"),
+            historicalRequest,
+            [target],
+            createdAt.AddMinutes(4));
+
+        Assert.Equal(PricingStoreStatus.Success, replay.Status);
+        Assert.Equal(PricingStoreStatus.Conflict, fresh.Status);
     }
 
     [Fact]
@@ -751,7 +931,7 @@ public sealed class PricingPersistenceFoundationTests
             "pricing-recovery-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
         var calculationTime = new DateTimeOffset(2026, 7, 24, 2, 0, 0, TimeSpan.Zero);
-        var target = new PricingRecalculationTargetWrite(
+        var target = new PricingRecalculationTargetWriteIncomplete(
             sessionId,
             "completed",
             calculationTime.AddHours(-1),
@@ -765,8 +945,8 @@ public sealed class PricingPersistenceFoundationTests
             null,
             0);
 
-        var started = store.StartRecalculation(runId, request, [target], calculationTime);
-        var replayed = store.StartRecalculation(
+        var started = store.StartRecalculationIncomplete(runId, request, [target], calculationTime);
+        var replayed = store.StartRecalculationIncomplete(
             Guid.CreateVersion7().ToString("D"),
             request,
             [target],
@@ -817,10 +997,10 @@ public sealed class PricingPersistenceFoundationTests
         var request = CostRecalculationRequestCanonicalJsonV1.Create(
             configuration.ConfigurationId, 1, catalog.CatalogSha256, [sessionId], [], "pricing-estimate-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWrite(
+        var target = new PricingRecalculationTargetWriteIncomplete(
             sessionId, "completed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "resolved", 1, new string('d', 64), "github-copilot-vscode", "1.2.3", null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculation(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         var quantityProvenance = new PricingValueProvenance(
@@ -976,10 +1156,10 @@ public sealed class PricingPersistenceFoundationTests
             ],
             "pricing-budget-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWrite(
+        var target = new PricingRecalculationTargetWriteIncomplete(
             sessionId, "completed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "missing", 0, new string('d', 64), null, null, null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculation(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         clock.UtcNow = calculationTime.AddSeconds(2);
@@ -1122,10 +1302,10 @@ public sealed class PricingPersistenceFoundationTests
             [],
             "pricing-failure-test-0001");
         var runId = Guid.CreateVersion7().ToString("D");
-        var target = new PricingRecalculationTargetWrite(
+        var target = new PricingRecalculationTargetWriteIncomplete(
             sessionId, "failed", calculationTime.AddMinutes(-30), calculationTime.AddMinutes(-1),
             "incomplete", 257, new string('d', 64), null, null, null, null, 0);
-        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculation(runId, request, [target], calculationTime).Status);
+        Assert.Equal(PricingStoreStatus.Success, store.StartRecalculationIncomplete(runId, request, [target], calculationTime).Status);
         clock.UtcNow = calculationTime.AddSeconds(1);
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         clock.UtcNow = calculationTime.AddSeconds(2);
@@ -1167,6 +1347,31 @@ public sealed class PricingPersistenceFoundationTests
             currentMatchCountState: "exact",
             overlapCount: 0,
             overlapCountState: "exact");
+    }
+
+    private static void AssertConsumerVersionClassification<T>(
+        Func<ReadOnlyMemory<byte>, CostConsumerResult<T>> consume,
+        string family)
+    {
+        Assert.Equal(CostConsumerStatus.Invalid, consume("{}"u8.ToArray()).Status);
+        Assert.Equal(
+            CostConsumerStatus.Invalid,
+            consume("""{"schema_version":2}"""u8.ToArray()).Status);
+        Assert.Equal(
+            CostConsumerStatus.Invalid,
+            consume("""{"schema_version":"other.contract.v2"}"""u8.ToArray()).Status);
+        Assert.Equal(
+            CostConsumerStatus.Invalid,
+            consume(System.Text.Encoding.UTF8.GetBytes(
+                $$"""{"schema_version":"{{family}}.v02"}""")).Status);
+        Assert.Equal(
+            CostConsumerStatus.Unsupported,
+            consume(System.Text.Encoding.UTF8.GetBytes(
+                $$"""{"schema_version":"{{family}}.v2"}""")).Status);
+        Assert.Equal(
+            CostConsumerStatus.Unsupported,
+            consume(System.Text.Encoding.UTF8.GetBytes(
+                $$"""{"schema_version":"{{family}}.v10"}""")).Status);
     }
 
     private static PricingStoreResult<CostConfigurationCommitResultV1> AppendIncompleteConfigurationCommit(
@@ -1364,6 +1569,17 @@ public sealed class PricingPersistenceFoundationTests
         internal DateTimeOffset UtcNow { get; set; } = utcNow;
 
         public override DateTimeOffset GetUtcNow() => UtcNow;
+    }
+
+    private sealed class CallbackTimeProvider(
+        DateTimeOffset utcNow,
+        Action callback) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow()
+        {
+            callback();
+            return utcNow;
+        }
     }
 
     private sealed class MutatingReadOnlyList<T>(
