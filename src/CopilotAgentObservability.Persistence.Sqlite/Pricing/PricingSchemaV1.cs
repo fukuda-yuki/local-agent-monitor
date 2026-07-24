@@ -30,9 +30,9 @@ internal static class PricingSchemaV1
                 preview_digest TEXT NOT NULL PRIMARY KEY CHECK(length(preview_digest)=64 AND preview_digest=lower(preview_digest) AND preview_digest NOT GLOB '*[^0-9a-f]*'),
                 canonical_sha256 TEXT NOT NULL CHECK(length(canonical_sha256)=64 AND canonical_sha256=lower(canonical_sha256) AND canonical_sha256 NOT GLOB '*[^0-9a-f]*'),
                 canonical_blob BLOB NOT NULL CHECK(typeof(canonical_blob)='blob' AND length(canonical_blob) BETWEEN 1 AND 1048576),
-                configuration_id TEXT NOT NULL CHECK(configuration_id GLOB 'cost-configuration-????????????????????????????????????????????????????????????????'),
+                configuration_id TEXT NOT NULL CHECK(typeof(configuration_id)='text' AND length(configuration_id)=83 AND substr(configuration_id,1,19)='cost-configuration-' AND substr(configuration_id,20) NOT GLOB '*[^0-9a-f]*'),
                 expected_head_revision INTEGER NOT NULL CHECK(typeof(expected_head_revision)='integer' AND expected_head_revision>=0),
-                expected_configuration_id TEXT NULL CHECK(expected_configuration_id IS NULL OR (length(expected_configuration_id)=83 AND expected_configuration_id GLOB 'cost-configuration-*' AND substr(expected_configuration_id,20) NOT GLOB '*[^0-9a-f]*')),
+                expected_configuration_id TEXT NULL CHECK(expected_configuration_id IS NULL OR (typeof(expected_configuration_id)='text' AND length(expected_configuration_id)=83 AND substr(expected_configuration_id,1,19)='cost-configuration-' AND substr(expected_configuration_id,20) NOT GLOB '*[^0-9a-f]*')),
                 catalog_sha256 TEXT NOT NULL CHECK(length(catalog_sha256)=64 AND catalog_sha256=lower(catalog_sha256) AND catalog_sha256 NOT GLOB '*[^0-9a-f]*'),
                 selection_digest TEXT NOT NULL CHECK(length(selection_digest)=64 AND selection_digest=lower(selection_digest) AND selection_digest NOT GLOB '*[^0-9a-f]*'),
                 created_at_utc TEXT NOT NULL CHECK(length(created_at_utc)=33 AND created_at_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9]+00:00'),
@@ -42,8 +42,8 @@ internal static class PricingSchemaV1
             """),
         ("pricing_configurations", """
             CREATE TABLE pricing_configurations(
-                configuration_id TEXT NOT NULL PRIMARY KEY CHECK(length(configuration_id)=83 AND configuration_id GLOB 'cost-configuration-*' AND substr(configuration_id,20) NOT GLOB '*[^0-9a-f]*'),
-                predecessor_configuration_id TEXT NULL UNIQUE CHECK(predecessor_configuration_id IS NULL OR (length(predecessor_configuration_id)=83 AND predecessor_configuration_id GLOB 'cost-configuration-*' AND substr(predecessor_configuration_id,20) NOT GLOB '*[^0-9a-f]*')),
+                configuration_id TEXT NOT NULL PRIMARY KEY CHECK(typeof(configuration_id)='text' AND length(configuration_id)=83 AND substr(configuration_id,1,19)='cost-configuration-' AND substr(configuration_id,20) NOT GLOB '*[^0-9a-f]*'),
+                predecessor_configuration_id TEXT NULL UNIQUE CHECK(predecessor_configuration_id IS NULL OR (typeof(predecessor_configuration_id)='text' AND length(predecessor_configuration_id)=83 AND substr(predecessor_configuration_id,1,19)='cost-configuration-' AND substr(predecessor_configuration_id,20) NOT GLOB '*[^0-9a-f]*')),
                 schema_version TEXT NOT NULL CHECK(schema_version='cost.configuration.v1'),
                 catalog_sha256 TEXT NOT NULL,
                 canonical_sha256 TEXT NOT NULL CHECK(length(canonical_sha256)=64 AND canonical_sha256=lower(canonical_sha256) AND canonical_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -83,9 +83,9 @@ internal static class PricingSchemaV1
             """),
         ("pricing_recalculation_runs", """
             CREATE TABLE pricing_recalculation_runs(
-                run_id TEXT NOT NULL PRIMARY KEY CHECK(length(run_id)=36 AND run_id=lower(run_id) AND run_id NOT GLOB '*[^0-9a-f-]*' AND substr(run_id,9,1)='-' AND substr(run_id,14,1)='-' AND substr(run_id,15,1)='7' AND substr(run_id,19,1)='-' AND substr(run_id,24,1)='-'),
+                run_id TEXT NOT NULL PRIMARY KEY CHECK(typeof(run_id)='text' AND length(run_id)=36 AND run_id=lower(run_id) AND length(replace(run_id,'-',''))=32 AND replace(run_id,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(run_id,9,1)='-' AND substr(run_id,14,1)='-' AND substr(run_id,15,1)='7' AND substr(run_id,19,1)='-' AND substr(run_id,20,1) GLOB '[89ab]' AND substr(run_id,24,1)='-'),
                 request_schema_version TEXT NOT NULL CHECK(request_schema_version='cost.recalculation-request.v1'),
-                idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) BETWEEN 16 AND 128 AND idempotency_key NOT GLOB '*[^A-Za-z0-9._-]*'),
+                idempotency_key TEXT NOT NULL UNIQUE CHECK(typeof(idempotency_key)='text' AND length(idempotency_key) BETWEEN 16 AND 128 AND substr(idempotency_key,1,1) GLOB '[A-Za-z0-9]' AND idempotency_key NOT GLOB '*[^A-Za-z0-9._-]*'),
                 request_digest TEXT NOT NULL CHECK(length(request_digest)=64 AND request_digest=lower(request_digest) AND request_digest NOT GLOB '*[^0-9a-f]*'),
                 canonical_request_blob BLOB NOT NULL CHECK(typeof(canonical_request_blob)='blob' AND length(canonical_request_blob) BETWEEN 1 AND 1048576),
                 configuration_id TEXT NOT NULL,
@@ -167,7 +167,7 @@ internal static class PricingSchemaV1
                 outcome_kind TEXT NOT NULL CHECK(outcome_kind IN ('receipt','suppression','no_match')),
                 alert_id TEXT NULL CHECK(alert_id IS NULL OR (length(alert_id)=64 AND alert_id=lower(alert_id) AND alert_id NOT GLOB '*[^0-9a-f]*')),
                 suppression_ordinal INTEGER NULL CHECK(suppression_ordinal IS NULL OR suppression_ordinal>=0),
-                suppression_code TEXT NULL CHECK(suppression_code IS NULL OR suppression_code IN ('rule_disabled','scope_not_applicable','no_eligible_sessions','eligible_set_incomplete','no_covered_estimate','aggregate_amount_not_representable','insufficient_estimate_coverage')),
+                suppression_code TEXT NULL CHECK(suppression_code IS NULL OR suppression_code IN ('rule_disabled','no_eligible_sessions','eligible_set_incomplete','no_covered_estimate','aggregate_amount_not_representable','insufficient_estimate_coverage')),
                 PRIMARY KEY(run_id,scope_ordinal),
                 CHECK((scope_kind='session' AND rule_id='session-estimated-cost-threshold' AND scope_start_utc IS NULL AND scope_end_utc IS NULL) OR (scope_kind='utc_day' AND rule_id='daily-estimated-cost-threshold' AND scope_start_utc IS NOT NULL AND scope_end_utc IS NOT NULL) OR (scope_kind='rolling_period' AND rule_id='period-estimated-cost-threshold' AND scope_start_utc IS NOT NULL AND scope_end_utc IS NOT NULL)),
                 CHECK((outcome_kind='receipt' AND alert_id IS NOT NULL AND suppression_ordinal IS NULL AND suppression_code IS NULL) OR (outcome_kind='suppression' AND alert_id IS NULL AND suppression_ordinal IS NOT NULL AND suppression_code IS NOT NULL) OR (outcome_kind='no_match' AND alert_id IS NULL AND suppression_ordinal IS NULL AND suppression_code IS NULL)),
@@ -210,18 +210,19 @@ internal static class PricingSchemaV1
                 calculation_time_utc TEXT NOT NULL CHECK(length(calculation_time_utc)=33 AND calculation_time_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9]+00:00'),
                 session_effective_at_utc TEXT NOT NULL CHECK(length(session_effective_at_utc)=33 AND session_effective_at_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9]+00:00'),
                 status TEXT NOT NULL CHECK(status IN ('estimated','partial','not-estimable')),
-                source_surface TEXT NOT NULL,
-                source_application_version TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                billing_mode TEXT NOT NULL,
-                pricing_route TEXT NOT NULL,
-                registry_version TEXT NULL,
+                source_surface TEXT NOT NULL CHECK(typeof(source_surface)='text' AND length(source_surface) BETWEEN 1 AND 256 AND substr(source_surface,1,1) GLOB '[A-Za-z0-9]' AND source_surface NOT GLOB '*[^A-Za-z0-9._:-]*'),
+                source_application_version TEXT NOT NULL CHECK(typeof(source_application_version)='text' AND length(source_application_version) BETWEEN 1 AND 256 AND substr(source_application_version,1,1) GLOB '[A-Za-z0-9]' AND source_application_version NOT GLOB '*[^A-Za-z0-9._:-]*'),
+                provider TEXT NOT NULL CHECK(provider IN ('github_copilot','claude_code','codex_app','unknown')),
+                model TEXT NOT NULL CHECK(typeof(model)='text' AND length(model) BETWEEN 1 AND 256),
+                billing_mode TEXT NOT NULL CHECK(billing_mode IN ('github_ai_credits','github_legacy_requests','plan_included','anthropic_api_tokens','cloud_provider_api_tokens','subscription','custom_enterprise','unknown')),
+                pricing_route TEXT NOT NULL CHECK(pricing_route IN ('credit_consuming_interaction','legacy_request','code_completion','next_edit_suggestion','standard_global','us_only_inference','batch','cloud_provider_configured','subscription_or_contract','unknown')),
+                registry_version TEXT NULL CHECK(registry_version IS NULL OR (typeof(registry_version)='text' AND length(registry_version) BETWEEN 1 AND 128 AND substr(registry_version,1,1) GLOB '[a-z0-9]' AND registry_version NOT GLOB '*[^a-z0-9._-]*')),
                 registry_source_kind TEXT NULL CHECK(registry_source_kind IS NULL OR registry_source_kind IN ('bundled','local_override')),
                 currency TEXT NULL CHECK(currency IS NULL OR currency='USD'),
-                amount_text TEXT NULL,
+                amount_text TEXT NULL CHECK(amount_text IS NULL OR (typeof(amount_text)='text' AND length(amount_text) BETWEEN 1 AND 30 AND (amount_text='0' OR (amount_text NOT GLOB '*[^0-9]*' AND substr(amount_text,1,1) GLOB '[1-9]') OR (amount_text NOT GLOB '*[^0-9.]*' AND amount_text GLOB '*.*' AND amount_text NOT GLOB '*.*.*' AND instr(amount_text,'.')>1 AND (substr(amount_text,1,1) GLOB '[1-9]' OR instr(amount_text,'.')=2 AND substr(amount_text,1,1)='0') AND substr(amount_text,-1,1) GLOB '[1-9]')))),
                 canonical_sha256 TEXT NOT NULL CHECK(length(canonical_sha256)=64 AND canonical_sha256=lower(canonical_sha256) AND canonical_sha256 NOT GLOB '*[^0-9a-f]*'),
                 canonical_blob BLOB NOT NULL CHECK(typeof(canonical_blob)='blob' AND length(canonical_blob) BETWEEN 1 AND 1048576),
+                CHECK((status='not-estimable' AND currency IS NULL AND amount_text IS NULL) OR (status IN ('estimated','partial') AND currency='USD' AND amount_text IS NOT NULL)),
                 UNIQUE(session_id,estimate_id),
                 UNIQUE(run_id,target_ordinal),
                 FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT,
@@ -357,18 +358,8 @@ internal static class PricingSchemaV1
 
     private static void ValidateDependencies(SqliteConnection connection, SqliteTransaction transaction)
     {
-        foreach (var dependency in new[] { ("session", 13), ("alert_engine", 2), ("runtime_backup", 1) })
-        {
-            using var command = Command(connection, transaction, "SELECT version FROM schema_version WHERE component=$component;", ("$component", dependency.Item1));
-            if (command.ExecuteScalar() is not long value || value != dependency.Item2)
-                throw new InvalidOperationException("Pricing schema dependency is missing or unsupported.");
-        }
-        foreach (var table in new[] { "sessions", "alert_evaluations", "alert_receipts", "alert_suppressions" })
-        {
-            using var command = Command(connection, transaction, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=$name;", ("$name", table));
-            if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
-                throw new InvalidOperationException("Pricing schema dependency is missing or unsupported.");
-        }
+        if (!PricingDependencySchemaV1.IsValid(connection, transaction))
+            throw new InvalidOperationException("Pricing schema dependency is missing or unsupported.");
     }
 
     private static Dictionary<(string Type, string Name), (string TableName, string Sql)> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction)

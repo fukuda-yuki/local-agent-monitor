@@ -1,5 +1,7 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
 using CopilotAgentObservability.Pricing;
@@ -27,6 +29,121 @@ public sealed record PersistedPricingCatalogSnapshot(
     int DocumentCount,
     DateTimeOffset FirstRecordedAtUtc);
 
+internal sealed record PricingProviderCatalogWrite(
+    string CatalogSha256,
+    ReadOnlyMemory<byte> CanonicalBytes);
+
+internal sealed record PricingConfigurationSelectionFactWrite(
+    string SessionId,
+    string SessionStatus,
+    DateTimeOffset SessionLastSeenAtUtc,
+    DateTimeOffset SessionUpdatedAtUtc,
+    string SourcePartitionState,
+    int SourcePartitionCount,
+    string SourcePartitionDigest,
+    string SourceSurface,
+    string SourceApplicationVersion,
+    long? ActiveHeadRevision,
+    string? ActiveEstimateId,
+    long AttemptRevision);
+
+internal static class PricingConfigurationSelectionDigestV1
+{
+    internal static string Create(IReadOnlyList<PricingConfigurationSelectionFactWrite> selection)
+    {
+        ArgumentNullException.ThrowIfNull(selection);
+        if (selection.Count > 2_000
+            || selection.Select(item => item.SessionId).Distinct(StringComparer.Ordinal).Count() != selection.Count
+            || !selection.SequenceEqual(
+                selection
+                    .OrderBy(item => item.SessionLastSeenAtUtc)
+                    .ThenBy(item => item.SessionId, StringComparer.Ordinal)))
+            throw new ArgumentException("Pricing configuration selection is invalid.", nameof(selection));
+
+        using var stream = new MemoryStream();
+        Frame(stream, "cost-configuration-selection/v1");
+        Frame(stream, selection.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var item in selection)
+        {
+            if (!Guid.TryParseExact(item.SessionId, "D", out var sessionId)
+                || sessionId.ToString("D") != item.SessionId
+                || item.SessionStatus is not ("completed" or "failed")
+                || item.SessionLastSeenAtUtc.Offset != TimeSpan.Zero
+                || item.SessionUpdatedAtUtc.Offset != TimeSpan.Zero
+                || item.SessionUpdatedAtUtc < item.SessionLastSeenAtUtc
+                || item.SourcePartitionState != "resolved"
+                || item.SourcePartitionCount is < 1 or > 256
+                || !LowerSha(item.SourcePartitionDigest)
+                || !LowerToken(item.SourceSurface, 128)
+                || !Printable(item.SourceApplicationVersion, 64)
+                || (item.ActiveHeadRevision is null) != (item.ActiveEstimateId is null)
+                || item.ActiveHeadRevision is < 1
+                || item.ActiveEstimateId is not null
+                    && !PrefixedSha(item.ActiveEstimateId, "pricing-estimate-")
+                || item.AttemptRevision < 0)
+                throw new ArgumentException("Pricing configuration selection is invalid.", nameof(selection));
+
+            Frame(stream, item.SessionId);
+            Frame(stream, item.SessionStatus);
+            Frame(stream, Format(item.SessionLastSeenAtUtc));
+            Frame(stream, Format(item.SessionUpdatedAtUtc));
+            Frame(stream, item.SourcePartitionState);
+            Frame(stream, item.SourcePartitionCount.ToString(CultureInfo.InvariantCulture));
+            Frame(stream, item.SourcePartitionDigest);
+            Frame(stream, item.SourceSurface);
+            Frame(stream, item.SourceApplicationVersion);
+            FrameNullable(stream, item.ActiveHeadRevision?.ToString(CultureInfo.InvariantCulture));
+            FrameNullable(stream, item.ActiveEstimateId);
+            Frame(stream, item.AttemptRevision.ToString(CultureInfo.InvariantCulture));
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
+    private static void FrameNullable(Stream stream, string? value)
+    {
+        Frame(stream, value is null ? "0" : "1");
+        if (value is not null) Frame(stream, value);
+    }
+
+    private static void Frame(Stream stream, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        stream.Write(length);
+        stream.Write(bytes);
+    }
+
+    private static string Format(DateTimeOffset value) =>
+        value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture);
+
+    private static bool LowerSha(string? value) =>
+        value is { Length: 64 }
+        && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool PrefixedSha(string? value, string prefix) =>
+        value is not null
+        && value.StartsWith(prefix, StringComparison.Ordinal)
+        && LowerSha(value[prefix.Length..]);
+
+    private static bool LowerToken(string? value, int maximumLength) =>
+        value is not null
+        && value.Length is >= 1
+        && value.Length <= maximumLength
+        && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
+        && value.All(character => character is >= 'a' and <= 'z'
+            or >= '0' and <= '9'
+            or '.'
+            or '_'
+            or '-');
+
+    private static bool Printable(string? value, int maximumLength) =>
+        value is not null
+        && value.Length is >= 1
+        && value.Length <= maximumLength
+        && value.All(character => character is >= '!' and <= '~');
+}
+
 public sealed record PricingRecalculationTargetWrite(
     string SessionId,
     string SessionStatus,
@@ -41,30 +158,34 @@ public sealed record PricingRecalculationTargetWrite(
     string? BaseEstimateId,
     long BaseAttemptRevision);
 
-public sealed record PricingTargetCompletionWrite(
+internal sealed record PricingTargetCompletionWrite(
     int TargetOrdinal,
     string ResultKind,
     string? ResultCode,
     int? SourceEntryOrdinal,
+    PricingEstimateRequest? ExpectedRequest,
     ReadOnlyMemory<byte> CanonicalEstimateBytes)
 {
     public static PricingTargetCompletionWrite Estimate(
         int targetOrdinal,
         int sourceEntryOrdinal,
+        PricingEstimateRequest expectedRequest,
         ReadOnlyMemory<byte> canonicalEstimateBytes) =>
-        new(targetOrdinal, "estimate", null, sourceEntryOrdinal, canonicalEstimateBytes);
+        new(targetOrdinal, "estimate", null, sourceEntryOrdinal, expectedRequest, canonicalEstimateBytes);
 
     public static PricingTargetCompletionWrite Unavailable(int targetOrdinal, string resultCode) =>
-        new(targetOrdinal, "unavailable", resultCode, null, ReadOnlyMemory<byte>.Empty);
+        new(targetOrdinal, "unavailable", resultCode, null, null, ReadOnlyMemory<byte>.Empty);
 
     public static PricingTargetCompletionWrite Failed(int targetOrdinal, string resultCode) =>
-        new(targetOrdinal, "failed", resultCode, null, ReadOnlyMemory<byte>.Empty);
+        new(targetOrdinal, "failed", resultCode, null, null, ReadOnlyMemory<byte>.Empty);
 }
 
-public sealed record PricingBudgetResultWrite(
+internal sealed record PricingBudgetResultWriteIncomplete(
     int ScopeOrdinal,
     string ScopeKind,
     string ScopeId,
+    string EligibilityDigest,
+    IReadOnlyList<string> EligibleSessionIds,
     DateTimeOffset? ScopeStartUtc,
     DateTimeOffset? ScopeEndUtc,
     string RuleId,
@@ -75,7 +196,51 @@ public sealed record PricingBudgetResultWrite(
     int? SuppressionOrdinal,
     string? SuppressionCode);
 
-public sealed record PricingRunFailureWrite(
+internal static class PricingAlertCostScopeIdentityV2
+{
+    internal static string Create(
+        string scopeKind,
+        DateTimeOffset? windowStartUtc,
+        DateTimeOffset? windowEndUtc,
+        string eligibilityDigest,
+        IEnumerable<string> sessionIds)
+    {
+        ArgumentNullException.ThrowIfNull(scopeKind);
+        ArgumentNullException.ThrowIfNull(eligibilityDigest);
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        if (scopeKind is not ("session" or "utc_day" or "rolling_period"))
+            throw new ArgumentOutOfRangeException(nameof(scopeKind));
+
+        var values = new List<byte[]>
+        {
+            Encoding.UTF8.GetBytes("alert-cost-scope/v2"),
+            Encoding.UTF8.GetBytes(scopeKind),
+            Encoding.UTF8.GetBytes(NullableAlertTimestamp(windowStartUtc)),
+            Encoding.UTF8.GetBytes(NullableAlertTimestamp(windowEndUtc)),
+            Encoding.UTF8.GetBytes(eligibilityDigest),
+        };
+        values.AddRange(sessionIds.Select(Encoding.UTF8.GetBytes));
+        using var stream = new MemoryStream();
+        Span<byte> length = stackalloc byte[4];
+        foreach (var value in values)
+        {
+            BinaryPrimitives.WriteInt32BigEndian(length, value.Length);
+            stream.Write(length);
+            stream.Write(value);
+        }
+
+        return "cost-scope-" + Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
+    private static string NullableAlertTimestamp(DateTimeOffset? value) =>
+        value is null
+            ? "\0"
+            : value.Value.ToUniversalTime().ToString(
+                "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+                CultureInfo.InvariantCulture);
+}
+
+internal sealed record PricingRunFailureWrite(
     string FailurePhase,
     string? FailureOrdinalKind,
     int? FailureOrdinal,
@@ -294,10 +459,16 @@ public sealed class SqlitePricingStore
         }
     }
 
-    public PricingStoreResult<CostConfigurationCommitResultV1> CommitConfiguration(
-        CostConfigurationPreviewV1 preview)
+    internal PricingStoreResult<CostConfigurationCommitResultV1> AppendConfigurationCommitIncomplete(
+        CostConfigurationPreviewV1 preview,
+        PricingProviderCatalogWrite providerCatalog,
+        IReadOnlyList<PricingConfigurationSelectionFactWrite> recomputedSelection)
     {
+        ArgumentNullException.ThrowIfNull(providerCatalog);
+        ArgumentNullException.ThrowIfNull(recomputedSelection);
         byte[] requestBytes;
+        byte[] providerCatalogBytes;
+        PricingConfigurationSelectionFactWrite[] selection;
         CostConfigurationPreviewV1 strict;
         try
         {
@@ -306,6 +477,8 @@ public sealed class SqlitePricingStore
             if (consumed.Status != CostConsumerStatus.Success || consumed.Value is null)
                 return new(PricingStoreStatus.ContractRejected, null);
             strict = consumed.Value;
+            providerCatalogBytes = providerCatalog.CanonicalBytes.ToArray();
+            selection = recomputedSelection.Select(FreezeSelectionFact).ToArray();
         }
         catch (ArgumentException)
         {
@@ -359,6 +532,19 @@ public sealed class SqlitePricingStore
                     return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
             }
 
+            PricingCatalog currentCatalog;
+            try
+            {
+                currentCatalog = PricingCatalogSnapshotConsumer.Deserialize(providerCatalogBytes);
+            }
+            catch (PricingRegistryValidationException)
+            {
+                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Unavailable);
+            }
+            if (providerCatalog.CatalogSha256 != currentCatalog.CatalogSha256
+                || strict.CatalogSha256 != currentCatalog.CatalogSha256)
+                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+
             using (var head = Command(connection, transaction, "SELECT head_revision,configuration_id FROM pricing_configuration_heads ORDER BY head_revision DESC LIMIT 1;"))
             using (var reader = head.ExecuteReader())
             {
@@ -368,6 +554,28 @@ public sealed class SqlitePricingStore
                     || strict.Configuration.PredecessorConfigurationId != strict.ExpectedConfigurationId)
                     return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
             }
+
+            string selectionDigest;
+            try
+            {
+                selectionDigest = PricingConfigurationSelectionDigestV1.Create(selection);
+            }
+            catch (ArgumentException)
+            {
+                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.ContractRejected);
+            }
+            if (selection.Length != strict.ProposedMatchCount
+                || selectionDigest != strict.SelectionDigest)
+                return Rollback<CostConfigurationCommitResultV1>(transaction, PricingStoreStatus.Conflict);
+
+            var catalogInsertStatus = InsertCatalogSnapshot(
+                connection,
+                transaction,
+                currentCatalog,
+                providerCatalogBytes,
+                committedAtUtc);
+            if (catalogInsertStatus != PricingStoreStatus.Success)
+                return Rollback<CostConfigurationCommitResultV1>(transaction, catalogInsertStatus);
 
             var configurationBytes = CostConfigurationCanonicalJsonV1.Serialize(strict.Configuration);
             using (var configuration = Command(
@@ -451,9 +659,7 @@ public sealed class SqlitePricingStore
         DateTimeOffset calculationTimeUtc)
     {
         ArgumentNullException.ThrowIfNull(targets);
-        if (!Guid.TryParseExact(runId, "D", out var parsedRun)
-            || parsedRun.ToString("D") != runId
-            || runId[14] != '7'
+        if (!IsCanonicalUuidV7(runId)
             || calculationTimeUtc.Offset != TimeSpan.Zero)
             return new(PricingStoreStatus.ContractRejected, null);
         byte[] canonical;
@@ -708,33 +914,49 @@ public sealed class SqlitePricingStore
         }
     }
 
-    public PricingStoreResult AppendEstimateSuccess(
+    internal PricingStoreResult AppendEstimateSuccessIncomplete(
         string runId,
         int targetOrdinal,
         int sourceEntryOrdinal,
+        PricingEstimateRequest expectedRequest,
         ReadOnlyMemory<byte> canonicalEstimateBytes) =>
-        CompleteRecalculation(
+        AppendRecalculationCompletionIncomplete(
             runId,
-            [PricingTargetCompletionWrite.Estimate(targetOrdinal, sourceEntryOrdinal, canonicalEstimateBytes)],
+            [PricingTargetCompletionWrite.Estimate(
+                targetOrdinal,
+                sourceEntryOrdinal,
+                expectedRequest,
+                canonicalEstimateBytes)],
             [],
             failure: null);
 
-    public PricingStoreResult CompleteRecalculation(
+    internal PricingStoreResult AppendRecalculationCompletionIncomplete(
         string runId,
         IReadOnlyList<PricingTargetCompletionWrite> targetResults,
-        IReadOnlyList<PricingBudgetResultWrite> budgetResults,
+        IReadOnlyList<PricingBudgetResultWriteIncomplete> budgetResults,
         PricingRunFailureWrite? failure)
     {
         ArgumentNullException.ThrowIfNull(targetResults);
         ArgumentNullException.ThrowIfNull(budgetResults);
+        PricingTargetCompletionWrite[] frozenTargetResults;
+        PricingBudgetResultWriteIncomplete[] frozenBudgetResults;
+        try
+        {
+            frozenTargetResults = targetResults.Select(FreezeTargetCompletion).ToArray();
+            frozenBudgetResults = budgetResults.Select(FreezeBudgetResult).ToArray();
+        }
+        catch (ArgumentException)
+        {
+            return new(PricingStoreStatus.ContractRejected);
+        }
         if (!IsCanonicalUuidV7(runId)
-            || targetResults.Count is < 1 or > 100
-            || targetResults.Select(item => item.TargetOrdinal).Distinct().Count() != targetResults.Count
-            || !targetResults.Select(item => item.TargetOrdinal).SequenceEqual(Enumerable.Range(0, targetResults.Count))
-            || budgetResults.Select(item => item.ScopeOrdinal).Distinct().Count() != budgetResults.Count
-            || !budgetResults.Select(item => item.ScopeOrdinal).SequenceEqual(Enumerable.Range(0, budgetResults.Count))
-            || targetResults.Any(item => !IsTargetCompletionShapeValid(item))
-            || budgetResults.Any(item => !IsBudgetResultShapeValid(item))
+            || frozenTargetResults.Length is < 1 or > 100
+            || frozenTargetResults.Select(item => item.TargetOrdinal).Distinct().Count() != frozenTargetResults.Length
+            || !frozenTargetResults.Select(item => item.TargetOrdinal).SequenceEqual(Enumerable.Range(0, frozenTargetResults.Length))
+            || frozenBudgetResults.Select(item => item.ScopeOrdinal).Distinct().Count() != frozenBudgetResults.Length
+            || !frozenBudgetResults.Select(item => item.ScopeOrdinal).SequenceEqual(Enumerable.Range(0, frozenBudgetResults.Length))
+            || frozenTargetResults.Any(item => !IsTargetCompletionShapeValid(item))
+            || frozenBudgetResults.Any(item => !IsBudgetResultShapeValid(item))
             || !IsFailureShapeValid(failure))
             return new(PricingStoreStatus.ContractRejected);
         try
@@ -776,17 +998,17 @@ public sealed class SqlitePricingStore
             using (var reader = events.ExecuteReader())
                 while (reader.Read()) eventKinds.Add(reader.GetString(0));
             if (!eventKinds.SequenceEqual(["requested", "running"], StringComparer.Ordinal)
-                || targetResults.Count != targetCount
-                || budgetResults.Count != (failure is null ? scopeCount : 0)
+                || frozenTargetResults.Length != targetCount
+                || frozenBudgetResults.Length != (failure is null ? scopeCount : 0)
                 || failure?.FailureOrdinalKind == "target"
                     && failure.FailureOrdinal >= targetCount
                 || failure?.FailureOrdinalKind == "scope"
                     && failure.FailureOrdinal >= scopeCount
-                || (failure is null && targetResults.Any(item => item.ResultKind == "failed"))
+                || (failure is null && frozenTargetResults.Any(item => item.ResultKind == "failed"))
                 || (failure is not null
-                    && (targetResults.All(item => item.ResultKind != "failed")
-                        || targetResults.Any(item => item.ResultKind == "estimate")
-                        || targetResults.Where(item => item.ResultKind == "failed")
+                    && (frozenTargetResults.All(item => item.ResultKind != "failed")
+                        || frozenTargetResults.Any(item => item.ResultKind == "estimate")
+                        || frozenTargetResults.Where(item => item.ResultKind == "failed")
                             .Any(item => item.ResultCode != failure.FailureCode))))
                 return Rollback(transaction, PricingStoreStatus.ContractRejected);
 
@@ -818,7 +1040,7 @@ public sealed class SqlitePricingStore
                             reader.GetString(7),
                             reader.GetString(8)));
 
-            foreach (var write in targetResults)
+            foreach (var write in frozenTargetResults)
             {
                 if (!targets.TryGetValue(write.TargetOrdinal, out var target))
                     return Rollback(transaction, PricingStoreStatus.ContractRejected);
@@ -887,7 +1109,7 @@ public sealed class SqlitePricingStore
                 }
             }
 
-            foreach (var write in budgetResults)
+            foreach (var write in frozenBudgetResults)
             {
                 if (!BudgetMatchesRequest(write, request.BudgetScopes[write.ScopeOrdinal])
                     || !BudgetParentsAreValid(connection, transaction, write))
@@ -980,8 +1202,19 @@ public sealed class SqlitePricingStore
         try
         {
             estimate = PricingEstimateConsumer.Deserialize(write.CanonicalEstimateBytes.Span, catalog);
+            if (write.ExpectedRequest is null
+                || !PricingCanonicalJson.Serialize(
+                        new PricingEstimationEngine(catalog).Estimate(write.ExpectedRequest))
+                    .AsSpan()
+                    .SequenceEqual(write.CanonicalEstimateBytes.Span))
+                return null;
         }
-        catch (PricingEstimateValidationException)
+        catch (Exception exception) when (
+            exception is PricingEstimateValidationException
+                or PricingRegistryValidationException
+                or ArgumentException
+                or InvalidOperationException
+                or OverflowException)
         {
             return null;
         }
@@ -1056,21 +1289,134 @@ public sealed class SqlitePricingStore
         return estimate;
     }
 
+    private static PricingStoreStatus InsertCatalogSnapshot(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PricingCatalog catalog,
+        byte[] canonicalBytes,
+        DateTimeOffset firstRecordedAtUtc)
+    {
+        using (var read = Command(
+            connection,
+            transaction,
+            "SELECT canonical_blob,document_count FROM pricing_catalog_snapshots WHERE catalog_sha256=$sha;",
+            ("$sha", catalog.CatalogSha256)))
+        using (var reader = read.ExecuteReader())
+        {
+            if (reader.Read())
+            {
+                return ((byte[])reader[0]).AsSpan().SequenceEqual(canonicalBytes)
+                    && reader.GetInt32(1) == catalog.Documents.Count
+                        ? PricingStoreStatus.Success
+                        : PricingStoreStatus.Conflict;
+            }
+        }
+
+        using var insert = Command(
+            connection,
+            transaction,
+            """
+            INSERT INTO pricing_catalog_snapshots(
+                catalog_sha256,schema_version,canonical_blob,document_count,first_recorded_at_utc)
+            VALUES($sha,'pricing.catalog-snapshot.v1',$blob,$count,$time);
+            """,
+            ("$sha", catalog.CatalogSha256),
+            ("$blob", canonicalBytes),
+            ("$count", catalog.Documents.Count),
+            ("$time", Format(firstRecordedAtUtc)));
+        insert.ExecuteNonQuery();
+        return PricingStoreStatus.Success;
+    }
+
+    private static PricingTargetCompletionWrite FreezeTargetCompletion(
+        PricingTargetCompletionWrite value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        var estimateBytes = value.CanonicalEstimateBytes.ToArray();
+        return value with
+        {
+            ExpectedRequest = value.ExpectedRequest is null
+                ? null
+                : FreezeEstimateRequest(value.ExpectedRequest),
+            CanonicalEstimateBytes = estimateBytes,
+        };
+    }
+
+    private static PricingConfigurationSelectionFactWrite FreezeSelectionFact(
+        PricingConfigurationSelectionFactWrite value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return value with { };
+    }
+
+    private static PricingBudgetResultWriteIncomplete FreezeBudgetResult(
+        PricingBudgetResultWriteIncomplete value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(value.EligibleSessionIds);
+        return value with
+        {
+            EligibleSessionIds = Array.AsReadOnly(value.EligibleSessionIds.ToArray()),
+        };
+    }
+
+    private static PricingEstimateRequest FreezeEstimateRequest(PricingEstimateRequest value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(value.Source);
+        ArgumentNullException.ThrowIfNull(value.Usage);
+        ArgumentNullException.ThrowIfNull(value.Source.CompletenessReasons);
+        static PricingValueProvenance FreezeProvenance(PricingValueProvenance provenance) =>
+            (provenance ?? throw new ArgumentNullException(nameof(provenance))) with { };
+        static PricingQuantity? FreezeQuantity(PricingQuantity? quantity) =>
+            quantity is null
+                ? null
+                : quantity with { Provenance = FreezeProvenance(quantity.Provenance) };
+
+        return value with
+        {
+            Source = value.Source with
+            {
+                CompletenessReasons = Array.AsReadOnly(
+                    value.Source.CompletenessReasons.ToArray()),
+                SessionTimeProvenance = FreezeProvenance(value.Source.SessionTimeProvenance),
+                ProviderProvenance = FreezeProvenance(value.Source.ProviderProvenance),
+                ModelProvenance = FreezeProvenance(value.Source.ModelProvenance),
+                BillingModeProvenance = FreezeProvenance(value.Source.BillingModeProvenance),
+                PricingRouteProvenance = FreezeProvenance(value.Source.PricingRouteProvenance),
+            },
+            Usage = value.Usage with
+            {
+                InputTokens = FreezeQuantity(value.Usage.InputTokens),
+                OutputTokens = FreezeQuantity(value.Usage.OutputTokens),
+                CacheReadTokens = FreezeQuantity(value.Usage.CacheReadTokens),
+                CacheWrite5mTokens = FreezeQuantity(value.Usage.CacheWrite5mTokens),
+                CacheWrite1hTokens = FreezeQuantity(value.Usage.CacheWrite1hTokens),
+                ReasoningTokens = FreezeQuantity(value.Usage.ReasoningTokens),
+                RequestCount = FreezeQuantity(value.Usage.RequestCount),
+                CreditCount = FreezeQuantity(value.Usage.CreditCount),
+            },
+        };
+    }
+
     private static bool IsTargetCompletionShapeValid(PricingTargetCompletionWrite value) =>
         value.TargetOrdinal is >= 0 and <= 99
         && value.ResultKind switch
         {
             "estimate" => value.ResultCode is null
                 && value.SourceEntryOrdinal is >= 0 and <= 31
+                && value.ExpectedRequest is not null
                 && value.CanonicalEstimateBytes.Length is >= 1 and <= 1_048_576,
             "unavailable" => value.ResultCode is
                     "source_mapping_unavailable"
                     or "source_adapter_unavailable"
                     or "codex_adapter_unavailable"
                 && value.SourceEntryOrdinal is null
+                && value.ExpectedRequest is null
                 && value.CanonicalEstimateBytes.IsEmpty,
             "failed" => IsFailureCode(value.ResultCode)
                 && value.SourceEntryOrdinal is null
+                && value.ExpectedRequest is null
                 && value.CanonicalEstimateBytes.IsEmpty,
             _ => false,
         };
@@ -1100,7 +1446,7 @@ public sealed class SqlitePricingStore
         };
     }
 
-    private static bool IsBudgetResultShapeValid(PricingBudgetResultWrite value)
+    private static bool IsBudgetResultShapeValid(PricingBudgetResultWriteIncomplete value)
     {
         var ruleMatchesScope = value.ScopeKind switch
         {
@@ -1125,6 +1471,11 @@ public sealed class SqlitePricingStore
             || !ruleMatchesScope
             || value.RuleVersion != "1"
             || !IsPrefixedSha(value.ScopeId, "cost-scope-")
+            || !IsLowerSha(value.EligibilityDigest)
+            || value.EligibleSessionIds.Count > 2_000
+            || value.EligibleSessionIds.Distinct(StringComparer.Ordinal).Count()
+                != value.EligibleSessionIds.Count
+            || value.EligibleSessionIds.Any(sessionId => !IsCanonicalUuid(sessionId))
             || !IsLowerSha(value.EvaluationId))
             return false;
         return value.OutcomeKind switch
@@ -1172,12 +1523,24 @@ public sealed class SqlitePricingStore
         };
     }
 
-    private static bool BudgetMatchesRequest(PricingBudgetResultWrite value, CostBudgetScopeV1 scope)
+    private static bool BudgetMatchesRequest(
+        PricingBudgetResultWriteIncomplete value,
+        CostBudgetScopeV1 scope)
     {
-        if (value.ScopeKind != scope.ScopeKind) return false;
+        if (value.ScopeKind != scope.ScopeKind
+            || value.ScopeId != PricingAlertCostScopeIdentityV2.Create(
+                value.ScopeKind,
+                value.ScopeStartUtc,
+                value.ScopeEndUtc,
+                value.EligibilityDigest,
+                value.EligibleSessionIds))
+            return false;
         return scope.ScopeKind switch
         {
-            "session" => value.ScopeStartUtc is null && value.ScopeEndUtc is null,
+            "session" => value.ScopeStartUtc is null
+                && value.ScopeEndUtc is null
+                && value.EligibleSessionIds.Count == 1
+                && value.EligibleSessionIds[0] == scope.SessionId,
             "utc_day" => DateOnly.TryParseExact(scope.UtcDate, "yyyy-MM-dd", out var date)
                 && value.ScopeStartUtc == new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)
                 && value.ScopeEndUtc == new DateTimeOffset(date.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero),
@@ -1190,7 +1553,7 @@ public sealed class SqlitePricingStore
     private static bool BudgetParentsAreValid(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        PricingBudgetResultWrite value)
+        PricingBudgetResultWriteIncomplete value)
     {
         using (var evaluation = Command(
             connection,
@@ -1203,7 +1566,12 @@ public sealed class SqlitePricingStore
             using var receipt = Command(
                 connection,
                 transaction,
-                "SELECT COUNT(*) FROM alert_receipts WHERE alert_id=$alert AND evaluation_id=$evaluation;",
+                """
+                SELECT COUNT(*) FROM alert_receipts
+                WHERE alert_id=$alert
+                  AND evaluation_id=$evaluation
+                  AND schema_version='alert.receipt.v2';
+                """,
                 ("$alert", value.AlertId!),
                 ("$evaluation", value.EvaluationId));
             return Convert.ToInt64(receipt.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
@@ -1213,9 +1581,19 @@ public sealed class SqlitePricingStore
             using var suppression = Command(
                 connection,
                 transaction,
-                "SELECT COUNT(*) FROM alert_suppressions WHERE evaluation_id=$evaluation AND suppression_ordinal=$ordinal;",
+                """
+                SELECT COUNT(*) FROM alert_suppressions
+                WHERE evaluation_id=$evaluation
+                  AND suppression_ordinal=$ordinal
+                  AND rule_id=$rule
+                  AND rule_version=$version
+                  AND code=$code;
+                """,
                 ("$evaluation", value.EvaluationId),
-                ("$ordinal", value.SuppressionOrdinal!.Value));
+                ("$ordinal", value.SuppressionOrdinal!.Value),
+                ("$rule", value.RuleId),
+                ("$version", value.RuleVersion),
+                ("$code", value.SuppressionCode!));
             return Convert.ToInt64(suppression.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
         }
         return true;
@@ -1224,7 +1602,8 @@ public sealed class SqlitePricingStore
     private static bool IsCanonicalUuidV7(string value) =>
         Guid.TryParseExact(value, "D", out var parsed)
         && parsed.ToString("D") == value
-        && value[14] == '7';
+        && value[14] == '7'
+        && value[19] is '8' or '9' or 'a' or 'b';
 
     private static bool IsCanonicalUuid(string value) =>
         Guid.TryParseExact(value, "D", out var parsed)
@@ -1267,7 +1646,6 @@ public sealed class SqlitePricingStore
     private static bool IsSuppressionCode(string? value) =>
         value is
             "rule_disabled"
-            or "scope_not_applicable"
             or "no_eligible_sessions"
             or "eligible_set_incomplete"
             or "no_covered_estimate"

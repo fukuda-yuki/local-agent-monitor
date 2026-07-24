@@ -26,49 +26,30 @@ internal static class PricingRowValidatorV1
         }
     }
 
-    private static bool ValidateCore(SqliteConnection connection, SqliteTransaction? transaction)
-    {
-        if (!PricingSchemaV1.IsValid(connection, transaction)
-            || ScalarInt64(connection, transaction, "SELECT COUNT(*) FROM pricing_configuration_previews;") > 32
-            || HasRows(connection, transaction, "PRAGMA foreign_key_check;"))
-            return false;
+    private static bool ValidateCore(SqliteConnection connection, SqliteTransaction? transaction) =>
+        PricingSchemaV1.IsValid(connection, transaction)
+        && ScalarInt64(connection, transaction, "SELECT COUNT(*) FROM pricing_configuration_previews;") <= 32
+        && !HasRows(connection, transaction, "PRAGMA foreign_key_check;")
+        && ValidateCatalogs(connection, transaction)
+        && ValidatePreviews(connection, transaction)
+        && ValidateConfigurations(connection, transaction)
+        && ValidateConfigurationHeads(connection, transaction)
+        && ValidateConfigurationCommits(connection, transaction)
+        && ValidateRuns(connection, transaction)
+        && ValidateTargets(connection, transaction)
+        && ValidateEvents(connection, transaction)
+        && ValidateEstimates(connection, transaction)
+        && ValidateTargetResults(connection, transaction)
+        && ValidateAttempts(connection, transaction)
+        && ValidateEstimateHeads(connection, transaction)
+        && ValidateBaseReferences(connection, transaction)
+        && ValidateBudgetResults(connection, transaction)
+        && ValidateRunStates(connection, transaction);
 
-        var catalogs = ReadCatalogs(connection, transaction);
-        if (catalogs is null) return false;
-        if (!ValidatePreviews(connection, transaction)) return false;
-        var configurations = ReadConfigurations(connection, transaction, catalogs);
-        if (configurations is null) return false;
-        var configurationHeads = ReadConfigurationHeads(connection, transaction, configurations);
-        if (configurationHeads is null
-            || configurationHeads.Count != configurations.Count
-            || !ValidateConfigurationCommits(connection, transaction, configurations, configurationHeads))
-            return false;
-        var runs = ReadRuns(connection, transaction, configurations, configurationHeads);
-        if (runs is null) return false;
-        var targets = ReadTargets(connection, transaction, runs);
-        if (targets is null) return false;
-        var events = ReadEvents(connection, transaction, runs);
-        if (events is null) return false;
-        var estimates = ReadEstimates(connection, transaction, catalogs, configurations, runs, targets);
-        if (estimates is null) return false;
-        var results = ReadTargetResults(connection, transaction, targets, estimates);
-        if (results is null) return false;
-        var attempts = ReadAttempts(connection, transaction, targets, results);
-        if (attempts is null) return false;
-        var estimateHeads = ReadEstimateHeads(connection, transaction, estimates);
-        if (estimateHeads is null
-            || !ValidateTargetBasesAndEstimateHeads(targets, attempts, estimates, estimateHeads))
-            return false;
-        var budgetResults = ReadBudgetResults(connection, transaction, runs);
-        return budgetResults is not null
-            && ValidateRunStates(runs, targets, events, results, attempts, estimates, estimateHeads, budgetResults);
-    }
-
-    private static Dictionary<string, PricingCatalog>? ReadCatalogs(
+    private static bool ValidateCatalogs(
         SqliteConnection connection,
         SqliteTransaction? transaction)
     {
-        var values = new Dictionary<string, PricingCatalog>(StringComparer.Ordinal);
         using var command = Command(
             connection,
             transaction,
@@ -89,22 +70,24 @@ internal static class PricingRowValidatorV1
             }
             catch (PricingRegistryValidationException)
             {
-                return null;
+                return false;
             }
+
             if (!IsLowerSha(sha)
                 || reader.GetString(1) != PricingContractVersions.CatalogSnapshot
                 || bytes.Length is < 1 or > 4_194_304
                 || catalog.CatalogSha256 != sha
                 || catalog.Documents.Count != reader.GetInt32(3)
-                || !SHA256.HashData(bytes).AsSpan().SequenceEqual(Convert.FromHexString(sha))
-                || !IsTimestamp(reader.GetString(4))
-                || !values.TryAdd(sha, catalog))
-                return null;
+                || Sha256(bytes) != sha
+                || !IsTimestamp(reader.GetString(4)))
+                return false;
         }
-        return values;
+        return true;
     }
 
-    private static bool ValidatePreviews(SqliteConnection connection, SqliteTransaction? transaction)
+    private static bool ValidatePreviews(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
     {
         using var command = Command(
             connection,
@@ -137,20 +120,20 @@ internal static class PricingRowValidatorV1
         return true;
     }
 
-    private static Dictionary<string, CostConfigurationV1>? ReadConfigurations(
+    private static bool ValidateConfigurations(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, PricingCatalog> catalogs)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<string, CostConfigurationV1>(StringComparer.Ordinal);
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT configuration_id,predecessor_configuration_id,schema_version,catalog_sha256,
-                   canonical_sha256,canonical_blob,created_at_utc,source_count,budget_count
-            FROM pricing_configurations
-            ORDER BY configuration_id;
+            SELECT c.configuration_id,c.predecessor_configuration_id,c.schema_version,
+                   c.catalog_sha256,c.canonical_sha256,c.canonical_blob,c.created_at_utc,
+                   c.source_count,c.budget_count,s.catalog_sha256
+            FROM pricing_configurations c
+            LEFT JOIN pricing_catalog_snapshots s ON s.catalog_sha256=c.catalog_sha256
+            ORDER BY c.configuration_id;
             """);
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -163,121 +146,125 @@ internal static class PricingRowValidatorV1
                 || value.PredecessorConfigurationId != NullableString(reader, 1)
                 || reader.GetString(2) != "cost.configuration.v1"
                 || value.CatalogSha256 != reader.GetString(3)
-                || !catalogs.ContainsKey(value.CatalogSha256)
+                || reader.IsDBNull(9)
                 || Sha256(bytes) != reader.GetString(4)
                 || Format(value.CreatedAtUtc) != reader.GetString(6)
                 || value.SourceEntries.Count != reader.GetInt32(7)
-                || value.BudgetEntries.Count != reader.GetInt32(8)
-                || !values.TryAdd(value.ConfigurationId, value))
-                return null;
+                || value.BudgetEntries.Count != reader.GetInt32(8))
+                return false;
         }
-        return values;
+        return true;
     }
 
-    private static Dictionary<long, ConfigurationHeadRow>? ReadConfigurationHeads(
+    private static bool ValidateConfigurationHeads(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, CostConfigurationV1> configurations)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<long, ConfigurationHeadRow>();
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT head_revision,configuration_id,previous_head_revision,
-                   previous_configuration_id,committed_at_utc
-            FROM pricing_configuration_heads
-            ORDER BY head_revision;
+            SELECT h.head_revision,h.configuration_id,h.previous_head_revision,
+                   h.previous_configuration_id,h.committed_at_utc,c.canonical_blob
+            FROM pricing_configuration_heads h
+            LEFT JOIN pricing_configurations c ON c.configuration_id=h.configuration_id
+            ORDER BY h.head_revision;
             """);
         using var reader = command.ExecuteReader();
         long expectedRevision = 1;
         string? previousConfigurationId = null;
         while (reader.Read())
         {
+            if (reader.IsDBNull(5)) return false;
+            var consumed = CostConfigurationConsumerV1.Consume((byte[])reader[5]);
             var revision = reader.GetInt64(0);
             var configurationId = reader.GetString(1);
-            var previousRevision = NullableInt64(reader, 2);
-            var storedPreviousConfiguration = NullableString(reader, 3);
-            if (revision != expectedRevision
-                || !configurations.TryGetValue(configurationId, out var configuration)
-                || previousRevision != (revision == 1 ? null : revision - 1)
-                || storedPreviousConfiguration != previousConfigurationId
+            if (consumed.Status != CostConsumerStatus.Success
+                || consumed.Value is not { } configuration
+                || revision != expectedRevision
+                || configuration.ConfigurationId != configurationId
+                || NullableInt64(reader, 2) != (revision == 1 ? null : revision - 1)
+                || NullableString(reader, 3) != previousConfigurationId
                 || configuration.PredecessorConfigurationId != previousConfigurationId
                 || !IsTimestamp(reader.GetString(4)))
-                return null;
-            values.Add(
-                revision,
-                new(revision, configurationId, previousRevision, storedPreviousConfiguration));
+                return false;
             previousConfigurationId = configurationId;
             expectedRevision++;
         }
-        return values;
+        return expectedRevision - 1
+            == ScalarInt64(connection, transaction, "SELECT COUNT(*) FROM pricing_configurations;");
     }
 
     private static bool ValidateConfigurationCommits(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, CostConfigurationV1> configurations,
-        IReadOnlyDictionary<long, ConfigurationHeadRow> heads)
+        SqliteTransaction? transaction)
     {
-        var count = 0;
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT head_revision,configuration_id,preview_digest,request_sha256,
-                   canonical_request_blob,canonical_result_blob
-            FROM pricing_configuration_commits
-            ORDER BY head_revision;
+            SELECT m.head_revision,m.configuration_id,m.preview_digest,m.request_sha256,
+                   m.canonical_request_blob,m.canonical_result_blob,
+                   h.previous_configuration_id,c.canonical_blob,c.catalog_sha256
+            FROM pricing_configuration_commits m
+            LEFT JOIN pricing_configuration_heads h
+              ON h.head_revision=m.head_revision AND h.configuration_id=m.configuration_id
+            LEFT JOIN pricing_configurations c ON c.configuration_id=m.configuration_id
+            ORDER BY m.head_revision;
             """);
         using var reader = command.ExecuteReader();
+        long expectedRevision = 1;
         while (reader.Read())
         {
-            count++;
+            if (reader.IsDBNull(7)) return false;
             var revision = reader.GetInt64(0);
             var configurationId = reader.GetString(1);
             var requestBytes = (byte[])reader[4];
             var resultBytes = (byte[])reader[5];
             var request = CostConfigurationCommitConsumerV1.ConsumeRequest(requestBytes);
             var result = CostConfigurationCommitConsumerV1.ConsumeResult(resultBytes);
-            if (!heads.TryGetValue(revision, out var head)
-                || head.ConfigurationId != configurationId
-                || !configurations.TryGetValue(configurationId, out var configuration)
+            var configuration = CostConfigurationConsumerV1.Consume((byte[])reader[7]);
+            if (revision != expectedRevision
                 || request.Status != CostConsumerStatus.Success
                 || request.Value is not { } preview
                 || result.Status != CostConsumerStatus.Success
                 || result.Value is not { } committed
+                || configuration.Status != CostConsumerStatus.Success
+                || configuration.Value is not { } stored
                 || !CostConfigurationCanonicalJsonV1.Serialize(preview.Configuration)
-                    .AsSpan()
-                    .SequenceEqual(CostConfigurationCanonicalJsonV1.Serialize(configuration))
+                    .AsSpan().SequenceEqual(CostConfigurationCanonicalJsonV1.Serialize(stored))
                 || preview.ExpectedHeadRevision != revision - 1
-                || preview.ExpectedConfigurationId != head.PreviousConfigurationId
+                || preview.ExpectedConfigurationId != NullableString(reader, 6)
                 || preview.PreviewDigest != reader.GetString(2)
                 || Sha256(requestBytes) != reader.GetString(3)
                 || committed.ConfigurationId != configurationId
                 || committed.HeadRevision != revision
-                || committed.CatalogSha256 != configuration.CatalogSha256)
+                || committed.CatalogSha256 != reader.GetString(8))
                 return false;
+            expectedRevision++;
         }
-        return count == heads.Count;
+        return expectedRevision - 1
+            == ScalarInt64(connection, transaction, "SELECT COUNT(*) FROM pricing_configuration_heads;");
     }
 
-    private static Dictionary<string, RunRow>? ReadRuns(
+    private static bool ValidateRuns(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, CostConfigurationV1> configurations,
-        IReadOnlyDictionary<long, ConfigurationHeadRow> configurationHeads)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<string, RunRow>(StringComparer.Ordinal);
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT run_id,request_schema_version,idempotency_key,request_digest,
-                   canonical_request_blob,configuration_id,configuration_head_revision,
-                   catalog_sha256,calculation_time_utc,target_count,scope_count,created_at_utc
-            FROM pricing_recalculation_runs
-            ORDER BY calculation_time_utc,run_id;
+            SELECT r.run_id,r.request_schema_version,r.idempotency_key,r.request_digest,
+                   r.canonical_request_blob,r.configuration_id,r.configuration_head_revision,
+                   r.catalog_sha256,r.calculation_time_utc,r.target_count,r.scope_count,
+                   r.created_at_utc,c.catalog_sha256,h.configuration_id
+            FROM pricing_recalculation_runs r
+            LEFT JOIN pricing_configurations c ON c.configuration_id=r.configuration_id
+            LEFT JOIN pricing_configuration_heads h
+              ON h.head_revision=r.configuration_head_revision
+             AND h.configuration_id=r.configuration_id
+            ORDER BY r.calculation_time_utc,r.run_id;
             """);
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -285,120 +272,140 @@ internal static class PricingRowValidatorV1
             var runId = reader.GetString(0);
             var bytes = (byte[])reader[4];
             var consumed = CostRecalculationRequestCanonicalJsonV1.Consume(bytes);
-            var configurationId = reader.GetString(5);
-            var headRevision = reader.GetInt64(6);
             if (!IsCanonicalUuidV7(runId)
                 || reader.GetString(1) != CostRecalculationRequestCanonicalJsonV1.SchemaVersion
                 || consumed.Status != CostConsumerStatus.Success
                 || consumed.Value is not { } request
                 || request.IdempotencyKey != reader.GetString(2)
                 || CostIdentityV1.Hash("cost-recalculation-request/v1", bytes) != reader.GetString(3)
-                || request.ConfigurationId != configurationId
-                || request.ExpectedHeadRevision != headRevision
+                || request.ConfigurationId != reader.GetString(5)
+                || request.ExpectedHeadRevision != reader.GetInt64(6)
                 || request.CatalogSha256 != reader.GetString(7)
-                || !configurations.TryGetValue(configurationId, out var configuration)
-                || configuration.CatalogSha256 != request.CatalogSha256
-                || !configurationHeads.TryGetValue(headRevision, out var head)
-                || head.ConfigurationId != configurationId
+                || reader.IsDBNull(12)
+                || reader.GetString(12) != request.CatalogSha256
+                || reader.IsDBNull(13)
                 || request.SessionIds.Count != reader.GetInt32(9)
                 || request.BudgetScopes.Count != reader.GetInt32(10)
                 || !IsTimestamp(reader.GetString(8))
-                || reader.GetString(8) != reader.GetString(11)
-                || !values.TryAdd(
-                    runId,
-                    new(
-                        runId,
-                        request,
-                        reader.GetString(8),
-                        reader.GetInt32(9),
-                        reader.GetInt32(10))))
-                return null;
+                || reader.GetString(8) != reader.GetString(11))
+                return false;
         }
-        return values;
+        return true;
     }
 
-    private static Dictionary<(string RunId, int Ordinal), TargetRow>? ReadTargets(
+    private static bool ValidateTargets(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, RunRow> runs)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<(string RunId, int Ordinal), TargetRow>();
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT run_id,target_ordinal,session_id,session_status,session_effective_at_utc,
-                   session_updated_at_utc,source_partition_state,source_partition_count,
-                   source_partition_digest,source_surface,source_application_version,
-                   base_head_revision,base_estimate_id,base_attempt_revision
-            FROM pricing_recalculation_targets
-            ORDER BY run_id,target_ordinal;
+            SELECT t.run_id,t.target_ordinal,t.session_id,t.session_status,
+                   t.session_effective_at_utc,t.session_updated_at_utc,
+                   t.source_partition_state,t.source_partition_count,
+                   t.source_partition_digest,t.source_surface,t.source_application_version,
+                   t.base_head_revision,t.base_estimate_id,t.base_attempt_revision,
+                   r.target_count,r.canonical_request_blob
+            FROM pricing_recalculation_targets t
+            LEFT JOIN pricing_recalculation_runs r ON r.run_id=t.run_id
+            ORDER BY t.run_id,t.target_ordinal;
             """);
         using var reader = command.ExecuteReader();
+        string? previousRunId = null;
+        var expectedOrdinal = 0;
         while (reader.Read())
         {
             var runId = reader.GetString(0);
+            if (runId != previousRunId)
+            {
+                previousRunId = runId;
+                expectedOrdinal = 0;
+            }
+            if (reader.IsDBNull(15)) return false;
+            var consumed = CostRecalculationRequestCanonicalJsonV1.Consume((byte[])reader[15]);
             var ordinal = reader.GetInt32(1);
             var sessionId = reader.GetString(2);
-            var state = reader.GetString(6);
-            var count = reader.GetInt32(7);
-            var surface = NullableString(reader, 9);
-            var version = NullableString(reader, 10);
             var baseHead = NullableInt64(reader, 11);
             var baseEstimate = NullableString(reader, 12);
-            if (!runs.TryGetValue(runId, out var run)
-                || ordinal < 0
-                || ordinal >= run.TargetCount
-                || run.Request.SessionIds[ordinal] != sessionId
+            if (consumed.Status != CostConsumerStatus.Success
+                || consumed.Value is not { } request
+                || ordinal != expectedOrdinal
+                || ordinal >= reader.GetInt32(14)
+                || request.SessionIds[ordinal] != sessionId
                 || !IsCanonicalUuid(sessionId)
                 || reader.GetString(3) is not ("completed" or "failed")
                 || !IsTimestamp(reader.GetString(4))
                 || !IsTimestamp(reader.GetString(5))
-                || !IsPartitionShape(state, count, surface, version)
+                || !IsPartitionShape(
+                    reader.GetString(6),
+                    reader.GetInt32(7),
+                    NullableString(reader, 9),
+                    NullableString(reader, 10))
                 || !IsLowerSha(reader.GetString(8))
                 || (baseHead is null) != (baseEstimate is null)
                 || baseHead is < 1
                 || baseEstimate is not null && !IsPrefixedSha(baseEstimate, "pricing-estimate-")
-                || reader.GetInt64(13) < 0
-                || !values.TryAdd(
-                    (runId, ordinal),
-                    new(
-                        runId,
-                        ordinal,
-                        sessionId,
-                        reader.GetString(4),
-                        baseHead,
-                        baseEstimate,
-                        reader.GetInt64(13))))
-                return null;
+                || reader.GetInt64(13) < 0)
+                return false;
+            expectedOrdinal++;
         }
-        return runs.Values.All(run => values.Keys.Count(key => key.RunId == run.RunId) == run.TargetCount)
-            ? values
-            : null;
+        return !HasRows(
+            connection,
+            transaction,
+            """
+            SELECT 1 FROM pricing_recalculation_runs r
+            WHERE (SELECT COUNT(*) FROM pricing_recalculation_targets t WHERE t.run_id=r.run_id)
+                  <> r.target_count
+            LIMIT 1;
+            """);
     }
 
-    private static Dictionary<string, IReadOnlyList<EventRow>>? ReadEvents(
+    private static bool ValidateEvents(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, RunRow> runs)
+        SqliteTransaction? transaction)
     {
-        var mutable = runs.Keys.ToDictionary(key => key, _ => new List<EventRow>(), StringComparer.Ordinal);
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT run_id,event_sequence,event_kind,occurred_at_utc,failure_phase,
-                   failure_ordinal_kind,failure_ordinal,failure_code
-            FROM pricing_recalculation_events
-            ORDER BY run_id,event_sequence;
+            SELECT e.run_id,e.event_sequence,e.event_kind,e.occurred_at_utc,e.failure_phase,
+                   e.failure_ordinal_kind,e.failure_ordinal,e.failure_code,
+                   r.calculation_time_utc,r.target_count,r.scope_count
+            FROM pricing_recalculation_events e
+            LEFT JOIN pricing_recalculation_runs r ON r.run_id=e.run_id
+            ORDER BY e.run_id,e.event_sequence;
             """);
         using var reader = command.ExecuteReader();
+        string? previousRunId = null;
+        string? previousOccurredAt = null;
+        var expectedSequence = 0;
+        string? firstKind = null;
+        string? secondKind = null;
+        string? thirdKind = null;
+        string? secondFailurePhase = null;
         while (reader.Read())
         {
             var runId = reader.GetString(0);
-            if (!mutable.TryGetValue(runId, out var events)
-                || !runs.TryGetValue(runId, out var run))
-                return null;
+            if (runId != previousRunId)
+            {
+                if (previousRunId is not null
+                    && !IsEventSequenceValid(
+                        expectedSequence,
+                        firstKind!,
+                        secondKind,
+                        thirdKind,
+                        secondFailurePhase))
+                    return false;
+                previousRunId = runId;
+                previousOccurredAt = null;
+                expectedSequence = 0;
+                firstKind = null;
+                secondKind = null;
+                thirdKind = null;
+                secondFailurePhase = null;
+            }
+
             var value = new EventRow(
                 reader.GetInt32(1),
                 reader.GetString(2),
@@ -407,92 +414,118 @@ internal static class PricingRowValidatorV1
                 NullableString(reader, 5),
                 NullableInt32(reader, 6),
                 NullableString(reader, 7));
-            if (value.Sequence != events.Count
+            if (reader.IsDBNull(8)
+                || value.Sequence != expectedSequence
                 || !IsTimestamp(value.OccurredAtUtc)
-                || events.Count > 0
-                    && string.CompareOrdinal(value.OccurredAtUtc, events[^1].OccurredAtUtc) < 0
+                || previousOccurredAt is not null
+                    && string.CompareOrdinal(value.OccurredAtUtc, previousOccurredAt) < 0
+                || value.Sequence == 0 && value.OccurredAtUtc != reader.GetString(8)
                 || value.FailureOrdinalKind == "target"
-                    && value.FailureOrdinal is { } targetFailureOrdinal
-                    && targetFailureOrdinal >= run.TargetCount
+                    && value.FailureOrdinal is { } targetOrdinal
+                    && targetOrdinal >= reader.GetInt32(9)
                 || value.FailureOrdinalKind == "scope"
-                    && value.FailureOrdinal is { } scopeFailureOrdinal
-                    && scopeFailureOrdinal >= run.ScopeCount
+                    && value.FailureOrdinal is { } scopeOrdinal
+                    && scopeOrdinal >= reader.GetInt32(10)
                 || !IsEventShapeValid(value))
-                return null;
-            events.Add(value);
+                return false;
+
+            if (expectedSequence == 0) firstKind = value.Kind;
+            if (expectedSequence == 1)
+            {
+                secondKind = value.Kind;
+                secondFailurePhase = value.FailurePhase;
+            }
+            if (expectedSequence == 2) thirdKind = value.Kind;
+            previousOccurredAt = value.OccurredAtUtc;
+            expectedSequence++;
         }
-        foreach (var run in runs.Values)
-        {
-            var values = mutable[run.RunId];
-            if (values.Count is < 1 or > 3
-                || values[0].Kind != "requested"
-                || values[0].OccurredAtUtc != run.CalculationTimeUtc
-                || !IsEventSequenceValid(values))
-                return null;
-        }
-        return mutable.ToDictionary(
-            item => item.Key,
-            item => (IReadOnlyList<EventRow>)item.Value.AsReadOnly(),
-            StringComparer.Ordinal);
+        if (previousRunId is not null
+            && !IsEventSequenceValid(
+                expectedSequence,
+                firstKind!,
+                secondKind,
+                thirdKind,
+                secondFailurePhase))
+            return false;
+        return !HasRows(
+            connection,
+            transaction,
+            """
+            SELECT 1 FROM pricing_recalculation_runs r
+            WHERE NOT EXISTS(
+                SELECT 1 FROM pricing_recalculation_events e
+                WHERE e.run_id=r.run_id AND e.event_sequence=0 AND e.event_kind='requested')
+            LIMIT 1;
+            """);
     }
 
-    private static Dictionary<string, EstimateRow>? ReadEstimates(
+    private static bool ValidateEstimates(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, PricingCatalog> catalogs,
-        IReadOnlyDictionary<string, CostConfigurationV1> configurations,
-        IReadOnlyDictionary<string, RunRow> runs,
-        IReadOnlyDictionary<(string RunId, int Ordinal), TargetRow> targets)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<string, EstimateRow>(StringComparer.Ordinal);
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT estimate_id,supersedes_estimate_id,schema_version,session_id,catalog_sha256,
-                   configuration_id,source_entry_ordinal,run_id,target_ordinal,calculation_time_utc,
-                   session_effective_at_utc,status,source_surface,source_application_version,
-                   provider,model,billing_mode,pricing_route,registry_version,
-                   registry_source_kind,currency,amount_text,canonical_sha256,canonical_blob
-            FROM pricing_estimates
-            ORDER BY estimate_id;
+            SELECT e.estimate_id,e.supersedes_estimate_id,e.schema_version,e.session_id,
+                   e.catalog_sha256,e.configuration_id,e.source_entry_ordinal,e.run_id,
+                   e.target_ordinal,e.calculation_time_utc,e.session_effective_at_utc,
+                   e.status,e.source_surface,e.source_application_version,e.provider,e.model,
+                   e.billing_mode,e.pricing_route,e.registry_version,e.registry_source_kind,
+                   e.currency,e.amount_text,e.canonical_sha256,e.canonical_blob,
+                   s.canonical_blob,c.canonical_blob,r.canonical_request_blob,
+                   t.session_id,t.session_effective_at_utc,r.calculation_time_utc
+            FROM pricing_estimates e
+            LEFT JOIN pricing_catalog_snapshots s ON s.catalog_sha256=e.catalog_sha256
+            LEFT JOIN pricing_configurations c ON c.configuration_id=e.configuration_id
+            LEFT JOIN pricing_recalculation_runs r ON r.run_id=e.run_id
+            LEFT JOIN pricing_recalculation_targets t
+              ON t.run_id=e.run_id AND t.target_ordinal=e.target_ordinal
+            ORDER BY e.estimate_id;
             """);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            var bytes = (byte[])reader[23];
-            var catalogSha = reader.GetString(4);
-            if (!catalogs.TryGetValue(catalogSha, out var catalog)) return null;
+            if (reader.IsDBNull(24)
+                || reader.IsDBNull(25)
+                || reader.IsDBNull(26)
+                || reader.IsDBNull(27))
+                return false;
+            PricingCatalog catalog;
             PricingEstimateRecord estimate;
             try
             {
-                estimate = PricingEstimateConsumer.Deserialize(bytes, catalog);
+                catalog = PricingCatalogSnapshotConsumer.Deserialize((byte[])reader[24]);
+                estimate = PricingEstimateConsumer.Deserialize((byte[])reader[23], catalog);
             }
-            catch (PricingEstimateValidationException)
+            catch (Exception exception) when (exception is
+                PricingRegistryValidationException or PricingEstimateValidationException)
             {
-                return null;
+                return false;
             }
-            var runId = reader.GetString(7);
-            var targetOrdinal = reader.GetInt32(8);
-            var configurationId = reader.GetString(5);
+            var configurationResult = CostConfigurationConsumerV1.Consume((byte[])reader[25]);
+            var requestResult = CostRecalculationRequestCanonicalJsonV1.Consume((byte[])reader[26]);
             var sourceOrdinal = reader.GetInt32(6);
             if (reader.GetString(2) != PricingContractVersions.Estimate
-                || !runs.TryGetValue(runId, out var run)
-                || !targets.TryGetValue((runId, targetOrdinal), out var target)
-                || !configurations.TryGetValue(configurationId, out var configuration)
+                || configurationResult.Status != CostConsumerStatus.Success
+                || configurationResult.Value is not { } configuration
+                || requestResult.Status != CostConsumerStatus.Success
+                || requestResult.Value is not { } request
                 || sourceOrdinal < 0
                 || sourceOrdinal >= configuration.SourceEntries.Count
-                || run.Request.ConfigurationId != configurationId
-                || run.Request.CatalogSha256 != catalogSha
+                || configuration.ConfigurationId != reader.GetString(5)
+                || configuration.CatalogSha256 != reader.GetString(4)
+                || request.ConfigurationId != reader.GetString(5)
+                || request.CatalogSha256 != reader.GetString(4)
                 || estimate.EstimateId != reader.GetString(0)
                 || estimate.SupersedesEstimateId != NullableString(reader, 1)
                 || estimate.Source.SessionId != reader.GetString(3)
-                || target.SessionId != estimate.Source.SessionId
-                || estimate.CatalogSha256 != catalogSha
+                || reader.GetString(27) != estimate.Source.SessionId
+                || estimate.CatalogSha256 != reader.GetString(4)
                 || Format(estimate.CalculationTimeUtc) != reader.GetString(9)
-                || run.CalculationTimeUtc != reader.GetString(9)
+                || reader.GetString(29) != reader.GetString(9)
                 || Format(estimate.Source.SessionObservedAtUtc) != reader.GetString(10)
-                || target.SessionEffectiveAtUtc != reader.GetString(10)
+                || reader.GetString(28) != reader.GetString(10)
                 || estimate.Status != reader.GetString(11)
                 || estimate.Source.SourceSurface != reader.GetString(12)
                 || estimate.Source.SourceVersion != reader.GetString(13)
@@ -504,264 +537,295 @@ internal static class PricingRowValidatorV1
                 || estimate.Registry?.SourceKind != NullableString(reader, 19)
                 || estimate.Currency != NullableString(reader, 20)
                 || estimate.Amount?.ToString(CultureInfo.InvariantCulture) != NullableString(reader, 21)
-                || Sha256(bytes) != reader.GetString(22)
-                || !ConfigurationSourceMatches(configuration, sourceOrdinal, estimate)
-                || !values.TryAdd(
-                    estimate.EstimateId,
-                    new(
-                        estimate,
-                        runId,
-                        targetOrdinal,
-                        sourceOrdinal,
-                        configurationId)))
-                return null;
-        }
-        return values;
-    }
-
-    private static Dictionary<(string RunId, int Ordinal), ResultRow>? ReadTargetResults(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<(string RunId, int Ordinal), TargetRow> targets,
-        IReadOnlyDictionary<string, EstimateRow> estimates)
-    {
-        var values = new Dictionary<(string RunId, int Ordinal), ResultRow>();
-        using var command = Command(
-            connection,
-            transaction,
-            """
-            SELECT run_id,target_ordinal,result_kind,estimate_status,estimate_id,result_code
-            FROM pricing_recalculation_target_results
-            ORDER BY run_id,target_ordinal;
-            """);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            var runId = reader.GetString(0);
-            var ordinal = reader.GetInt32(1);
-            var value = new ResultRow(
-                reader.GetString(2),
-                NullableString(reader, 3),
-                NullableString(reader, 4),
-                NullableString(reader, 5));
-            if (!targets.ContainsKey((runId, ordinal))
-                || !IsResultShapeValid(value)
-                || value.Kind == "estimate"
-                    && (!estimates.TryGetValue(value.EstimateId!, out var estimate)
-                        || estimate.RunId != runId
-                        || estimate.TargetOrdinal != ordinal
-                        || estimate.Estimate.Status != value.EstimateStatus)
-                || !values.TryAdd((runId, ordinal), value))
-                return null;
-        }
-        return values;
-    }
-
-    private static Dictionary<(string SessionId, long Revision), AttemptRow>? ReadAttempts(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<(string RunId, int Ordinal), TargetRow> targets,
-        IReadOnlyDictionary<(string RunId, int Ordinal), ResultRow> results)
-    {
-        var values = new Dictionary<(string SessionId, long Revision), AttemptRow>();
-        var expectedBySession = new Dictionary<string, long>(StringComparer.Ordinal);
-        using var command = Command(
-            connection,
-            transaction,
-            """
-            SELECT session_id,attempt_revision,run_id,target_ordinal,result_kind,
-                   estimate_status,estimate_id,result_code
-            FROM pricing_session_attempts
-            ORDER BY session_id,attempt_revision;
-            """);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            var sessionId = reader.GetString(0);
-            var revision = reader.GetInt64(1);
-            var runId = reader.GetString(2);
-            var ordinal = reader.GetInt32(3);
-            var result = new ResultRow(
-                reader.GetString(4),
-                NullableString(reader, 5),
-                NullableString(reader, 6),
-                NullableString(reader, 7));
-            var expected = expectedBySession.GetValueOrDefault(sessionId) + 1;
-            if (revision != expected
-                || !targets.TryGetValue((runId, ordinal), out var target)
-                || target.SessionId != sessionId
-                || !results.TryGetValue((runId, ordinal), out var targetResult)
-                || targetResult != result
-                || target.BaseAttemptRevision + 1 != revision
-                || !values.TryAdd(
-                    (sessionId, revision),
-                    new(sessionId, revision, runId, ordinal, result)))
-                return null;
-            expectedBySession[sessionId] = revision;
-        }
-        return values;
-    }
-
-    private static Dictionary<(string SessionId, long Revision), EstimateHeadRow>? ReadEstimateHeads(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, EstimateRow> estimates)
-    {
-        var values = new Dictionary<(string SessionId, long Revision), EstimateHeadRow>();
-        var expectedBySession = new Dictionary<string, long>(StringComparer.Ordinal);
-        var previousBySession = new Dictionary<string, string?>(StringComparer.Ordinal);
-        using var command = Command(
-            connection,
-            transaction,
-            """
-            SELECT session_id,head_revision,estimate_id,previous_head_revision,previous_estimate_id
-            FROM pricing_estimate_heads
-            ORDER BY session_id,head_revision;
-            """);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            var sessionId = reader.GetString(0);
-            var revision = reader.GetInt64(1);
-            var estimateId = reader.GetString(2);
-            var previousRevision = NullableInt64(reader, 3);
-            var previousEstimate = NullableString(reader, 4);
-            var expected = expectedBySession.GetValueOrDefault(sessionId) + 1;
-            var expectedPrevious = previousBySession.GetValueOrDefault(sessionId);
-            if (revision != expected
-                || !estimates.TryGetValue(estimateId, out var estimate)
-                || estimate.Estimate.Source.SessionId != sessionId
-                || previousRevision != (revision == 1 ? null : revision - 1)
-                || previousEstimate != expectedPrevious
-                || estimate.Estimate.SupersedesEstimateId != previousEstimate
-                || !values.TryAdd(
-                    (sessionId, revision),
-                    new(sessionId, revision, estimateId, previousRevision, previousEstimate)))
-                return null;
-            expectedBySession[sessionId] = revision;
-            previousBySession[sessionId] = estimateId;
-        }
-        return values;
-    }
-
-    private static bool ValidateTargetBasesAndEstimateHeads(
-        IReadOnlyDictionary<(string RunId, int Ordinal), TargetRow> targets,
-        IReadOnlyDictionary<(string SessionId, long Revision), AttemptRow> attempts,
-        IReadOnlyDictionary<string, EstimateRow> estimates,
-        IReadOnlyDictionary<(string SessionId, long Revision), EstimateHeadRow> heads)
-    {
-        foreach (var target in targets.Values)
-        {
-            if (target.BaseHeadRevision is { } baseRevision
-                && (!heads.TryGetValue((target.SessionId, baseRevision), out var baseHead)
-                    || baseHead.EstimateId != target.BaseEstimateId))
-                return false;
-            if (target.BaseAttemptRevision > 0
-                && !attempts.ContainsKey((target.SessionId, target.BaseAttemptRevision)))
-                return false;
-        }
-        foreach (var estimate in estimates.Values)
-        {
-            var target = targets[(estimate.RunId, estimate.TargetOrdinal)];
-            var revision = (target.BaseHeadRevision ?? 0) + 1;
-            if (!heads.TryGetValue((target.SessionId, revision), out var head)
-                || head.EstimateId != estimate.Estimate.EstimateId)
+                || Sha256((byte[])reader[23]) != reader.GetString(22)
+                || !ConfigurationSourceMatches(configuration, sourceOrdinal, estimate))
                 return false;
         }
         return true;
     }
 
-    private static Dictionary<(string RunId, int Ordinal), BudgetRow>? ReadBudgetResults(
+    private static bool ValidateTargetResults(
         SqliteConnection connection,
-        SqliteTransaction? transaction,
-        IReadOnlyDictionary<string, RunRow> runs)
+        SqliteTransaction? transaction)
     {
-        var values = new Dictionary<(string RunId, int Ordinal), BudgetRow>();
         using var command = Command(
             connection,
             transaction,
             """
-            SELECT run_id,scope_ordinal,scope_kind,scope_id,scope_start_utc,scope_end_utc,
-                   rule_id,rule_version,evaluation_id,outcome_kind,alert_id,
-                   suppression_ordinal,suppression_code
-            FROM pricing_recalculation_budget_results
-            ORDER BY run_id,scope_ordinal;
+            SELECT x.result_kind,x.estimate_status,x.estimate_id,x.result_code,
+                   x.run_id,x.target_ordinal,e.run_id,e.target_ordinal,e.status,t.run_id
+            FROM pricing_recalculation_target_results x
+            LEFT JOIN pricing_recalculation_targets t
+              ON t.run_id=x.run_id AND t.target_ordinal=x.target_ordinal
+            LEFT JOIN pricing_estimates e ON e.estimate_id=x.estimate_id
+            ORDER BY x.run_id,x.target_ordinal;
             """);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            var runId = reader.GetString(0);
-            var ordinal = reader.GetInt32(1);
+            var value = new ResultRow(
+                reader.GetString(0),
+                NullableString(reader, 1),
+                NullableString(reader, 2),
+                NullableString(reader, 3));
+            if (reader.IsDBNull(9)
+                || !IsResultShapeValid(value)
+                || value.Kind == "estimate"
+                    && (reader.IsDBNull(6)
+                        || reader.GetString(6) != reader.GetString(4)
+                        || reader.GetInt32(7) != reader.GetInt32(5)
+                        || reader.GetString(8) != value.EstimateStatus))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool ValidateAttempts(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT a.session_id,a.attempt_revision,a.run_id,a.target_ordinal,
+                   a.result_kind,a.estimate_status,a.estimate_id,a.result_code,
+                   t.session_id,t.base_attempt_revision,
+                   x.result_kind,x.estimate_status,x.estimate_id,x.result_code
+            FROM pricing_session_attempts a
+            LEFT JOIN pricing_recalculation_targets t
+              ON t.run_id=a.run_id AND t.target_ordinal=a.target_ordinal
+            LEFT JOIN pricing_recalculation_target_results x
+              ON x.run_id=a.run_id AND x.target_ordinal=a.target_ordinal
+            ORDER BY a.session_id,a.attempt_revision;
+            """);
+        using var reader = command.ExecuteReader();
+        string? previousSessionId = null;
+        long previousRevision = 0;
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            if (sessionId != previousSessionId)
+            {
+                previousSessionId = sessionId;
+                previousRevision = 0;
+            }
+            var revision = reader.GetInt64(1);
+            if (reader.IsDBNull(8)
+                || reader.IsDBNull(10)
+                || revision != previousRevision + 1
+                || reader.GetString(8) != sessionId
+                || reader.GetInt64(9) + 1 != revision
+                || reader.GetString(4) != reader.GetString(10)
+                || NullableString(reader, 5) != NullableString(reader, 11)
+                || NullableString(reader, 6) != NullableString(reader, 12)
+                || NullableString(reader, 7) != NullableString(reader, 13))
+                return false;
+            previousRevision = revision;
+        }
+        return true;
+    }
+
+    private static bool ValidateEstimateHeads(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT h.session_id,h.head_revision,h.estimate_id,h.previous_head_revision,
+                   h.previous_estimate_id,e.session_id,e.supersedes_estimate_id
+            FROM pricing_estimate_heads h
+            LEFT JOIN pricing_estimates e ON e.estimate_id=h.estimate_id
+            ORDER BY h.session_id,h.head_revision;
+            """);
+        using var reader = command.ExecuteReader();
+        string? previousSessionId = null;
+        string? previousEstimateId = null;
+        long previousRevision = 0;
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            if (sessionId != previousSessionId)
+            {
+                previousSessionId = sessionId;
+                previousEstimateId = null;
+                previousRevision = 0;
+            }
+            var revision = reader.GetInt64(1);
+            var estimateId = reader.GetString(2);
+            if (reader.IsDBNull(5)
+                || revision != previousRevision + 1
+                || reader.GetString(5) != sessionId
+                || NullableInt64(reader, 3) != (revision == 1 ? null : revision - 1)
+                || NullableString(reader, 4) != previousEstimateId
+                || NullableString(reader, 6) != previousEstimateId)
+                return false;
+            previousRevision = revision;
+            previousEstimateId = estimateId;
+        }
+        return true;
+    }
+
+    private static bool ValidateBaseReferences(
+        SqliteConnection connection,
+        SqliteTransaction? transaction) =>
+        !HasRows(
+            connection,
+            transaction,
+            """
+            SELECT 1 FROM pricing_recalculation_targets t
+            WHERE t.base_attempt_revision>0
+              AND NOT EXISTS(
+                  SELECT 1 FROM pricing_session_attempts a
+                  WHERE a.session_id=t.session_id
+                    AND a.attempt_revision=t.base_attempt_revision)
+            LIMIT 1;
+            """)
+        && !HasRows(
+            connection,
+            transaction,
+            """
+            SELECT 1 FROM pricing_estimates e
+            JOIN pricing_recalculation_targets t
+              ON t.run_id=e.run_id AND t.target_ordinal=e.target_ordinal
+            WHERE NOT EXISTS(
+                SELECT 1 FROM pricing_estimate_heads h
+                WHERE h.session_id=t.session_id
+                  AND h.head_revision=COALESCE(t.base_head_revision,0)+1
+                  AND h.estimate_id=e.estimate_id)
+            LIMIT 1;
+            """);
+
+    private static bool ValidateBudgetResults(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT b.scope_ordinal,b.scope_kind,b.scope_id,b.scope_start_utc,b.scope_end_utc,
+                   b.rule_id,b.rule_version,b.evaluation_id,b.outcome_kind,b.alert_id,
+                   b.suppression_ordinal,b.suppression_code,r.scope_count,
+                   r.canonical_request_blob,e.schema_version,
+                   ar.alert_id,ar.evaluation_id,ar.schema_version,
+                   s.evaluation_id,s.suppression_ordinal,s.rule_id,s.rule_version,s.code
+            FROM pricing_recalculation_budget_results b
+            LEFT JOIN pricing_recalculation_runs r ON r.run_id=b.run_id
+            LEFT JOIN alert_evaluations e ON e.evaluation_id=b.evaluation_id
+            LEFT JOIN alert_receipts ar ON ar.alert_id=b.alert_id
+            LEFT JOIN alert_suppressions s
+              ON s.evaluation_id=b.evaluation_id
+             AND s.suppression_ordinal=b.suppression_ordinal
+            ORDER BY b.run_id,b.scope_ordinal;
+            """);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(13)) return false;
+            var requestResult = CostRecalculationRequestCanonicalJsonV1.Consume((byte[])reader[13]);
+            var ordinal = reader.GetInt32(0);
             var value = new BudgetRow(
+                reader.GetString(1),
                 reader.GetString(2),
-                reader.GetString(3),
+                NullableString(reader, 3),
                 NullableString(reader, 4),
-                NullableString(reader, 5),
+                reader.GetString(5),
                 reader.GetString(6),
                 reader.GetString(7),
                 reader.GetString(8),
-                reader.GetString(9),
-                NullableString(reader, 10),
-                NullableInt32(reader, 11),
-                NullableString(reader, 12));
-            if (!runs.TryGetValue(runId, out var run)
+                NullableString(reader, 9),
+                NullableInt32(reader, 10),
+                NullableString(reader, 11));
+            if (requestResult.Status != CostConsumerStatus.Success
+                || requestResult.Value is not { } request
                 || ordinal < 0
-                || ordinal >= run.ScopeCount
-                || !IsBudgetShapeValid(value, run.Request.BudgetScopes[ordinal])
-                || !BudgetParentsAreValid(connection, transaction, value)
-                || !values.TryAdd((runId, ordinal), value))
-                return null;
+                || ordinal >= reader.GetInt32(12)
+                || !IsBudgetShapeValid(value, request.BudgetScopes[ordinal])
+                || reader.IsDBNull(14)
+                || reader.GetString(14) != "alert.evaluation.v2")
+                return false;
+            if (value.OutcomeKind == "receipt"
+                && (reader.IsDBNull(15)
+                    || reader.GetString(16) != value.EvaluationId
+                    || reader.GetString(17) != "alert.receipt.v2"))
+                return false;
+            if (value.OutcomeKind == "suppression"
+                && (reader.IsDBNull(18)
+                    || reader.GetInt32(19) != value.SuppressionOrdinal
+                    || reader.GetString(20) != value.RuleId
+                    || reader.GetString(21) != value.RuleVersion
+                    || reader.GetString(22) != value.SuppressionCode))
+                return false;
         }
-        return values;
+        return true;
     }
 
     private static bool ValidateRunStates(
-        IReadOnlyDictionary<string, RunRow> runs,
-        IReadOnlyDictionary<(string RunId, int Ordinal), TargetRow> targets,
-        IReadOnlyDictionary<string, IReadOnlyList<EventRow>> events,
-        IReadOnlyDictionary<(string RunId, int Ordinal), ResultRow> results,
-        IReadOnlyDictionary<(string SessionId, long Revision), AttemptRow> attempts,
-        IReadOnlyDictionary<string, EstimateRow> estimates,
-        IReadOnlyDictionary<(string SessionId, long Revision), EstimateHeadRow> heads,
-        IReadOnlyDictionary<(string RunId, int Ordinal), BudgetRow> budgets)
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
     {
-        foreach (var run in runs.Values)
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT r.target_count,r.scope_count,
+                   (SELECT COUNT(*) FROM pricing_recalculation_events e WHERE e.run_id=r.run_id),
+                   (SELECT event_kind FROM pricing_recalculation_events e
+                    WHERE e.run_id=r.run_id ORDER BY event_sequence DESC LIMIT 1),
+                   (SELECT failure_code FROM pricing_recalculation_events e
+                    WHERE e.run_id=r.run_id ORDER BY event_sequence DESC LIMIT 1),
+                   (SELECT COUNT(*) FROM pricing_recalculation_target_results x WHERE x.run_id=r.run_id),
+                   (SELECT COUNT(*) FROM pricing_session_attempts a WHERE a.run_id=r.run_id),
+                   (SELECT COUNT(*) FROM pricing_estimates p WHERE p.run_id=r.run_id),
+                   (SELECT COUNT(*) FROM pricing_recalculation_budget_results b WHERE b.run_id=r.run_id),
+                   (SELECT COUNT(*) FROM pricing_recalculation_target_results x
+                    WHERE x.run_id=r.run_id AND x.result_kind='failed'),
+                   (SELECT COUNT(DISTINCT x.result_code) FROM pricing_recalculation_target_results x
+                    WHERE x.run_id=r.run_id AND x.result_kind='failed'),
+                   (SELECT MIN(x.result_code) FROM pricing_recalculation_target_results x
+                    WHERE x.run_id=r.run_id AND x.result_kind='failed')
+            FROM pricing_recalculation_runs r
+            ORDER BY r.run_id;
+            """);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
         {
-            var runEvents = events[run.RunId];
-            var terminal = runEvents[^1].Kind is "succeeded" or "failed";
-            var runResults = results.Where(item => item.Key.RunId == run.RunId).ToArray();
-            var runAttempts = attempts.Values.Where(item => item.RunId == run.RunId).ToArray();
-            var runEstimates = estimates.Values.Where(item => item.RunId == run.RunId).ToArray();
-            var runBudgets = budgets.Keys.Count(key => key.RunId == run.RunId);
+            var targetCount = reader.GetInt32(0);
+            var scopeCount = reader.GetInt32(1);
+            var eventCount = reader.GetInt64(2);
+            var terminalKind = reader.GetString(3);
+            var resultCount = reader.GetInt64(5);
+            var attemptCount = reader.GetInt64(6);
+            var estimateCount = reader.GetInt64(7);
+            var budgetCount = reader.GetInt64(8);
+            var failedCount = reader.GetInt64(9);
+            var terminal = terminalKind is "succeeded" or "failed";
             if (!terminal)
             {
-                if (runResults.Length != 0
-                    || runAttempts.Length != 0
-                    || runEstimates.Length != 0
-                    || runBudgets != 0)
+                if (eventCount is < 1 or > 2
+                    || resultCount != 0
+                    || attemptCount != 0
+                    || estimateCount != 0
+                    || budgetCount != 0)
                     return false;
                 continue;
             }
-            if (runResults.Length != run.TargetCount
-                || runAttempts.Length != run.TargetCount
-                || runResults.Any(item => !targets.ContainsKey(item.Key)))
+            if (resultCount != targetCount || attemptCount != targetCount)
                 return false;
-            if (runEvents[^1].Kind == "succeeded")
+            if (terminalKind == "succeeded")
             {
-                if (runResults.Any(item => item.Value.Kind == "failed")
-                    || runBudgets != run.ScopeCount)
+                if (failedCount != 0 || budgetCount != scopeCount)
                     return false;
             }
-            else
-            {
-                var failureCode = runEvents[^1].FailureCode;
-                if (runEstimates.Length != 0
-                    || runBudgets != 0
-                    || runResults.All(item => item.Value.Kind != "failed")
-                    || runResults.Where(item => item.Value.Kind == "failed")
-                        .Any(item => item.Value.ResultCode != failureCode))
-                    return false;
-            }
+            else if (estimateCount != 0
+                || budgetCount != 0
+                || failedCount == 0
+                || reader.GetInt64(10) != 1
+                || reader.GetString(11) != NullableString(reader, 4))
+                return false;
         }
         return true;
     }
@@ -805,13 +869,21 @@ internal static class PricingRowValidatorV1
         };
     }
 
-    private static bool IsEventSequenceValid(IReadOnlyList<EventRow> values) =>
-        values.Select(item => item.Kind).SequenceEqual(["requested"], StringComparer.Ordinal)
-        || values.Select(item => item.Kind).SequenceEqual(["requested", "running"], StringComparer.Ordinal)
-        || values.Select(item => item.Kind).SequenceEqual(["requested", "failed"], StringComparer.Ordinal)
-            && values[1].FailurePhase == "recovery"
-        || values.Select(item => item.Kind).SequenceEqual(["requested", "running", "succeeded"], StringComparer.Ordinal)
-        || values.Select(item => item.Kind).SequenceEqual(["requested", "running", "failed"], StringComparer.Ordinal);
+    private static bool IsEventSequenceValid(
+        int count,
+        string first,
+        string? second,
+        string? third,
+        string? secondFailurePhase) =>
+        count == 1 && first == "requested"
+        || count == 2
+            && first == "requested"
+            && (second == "running"
+                || second == "failed" && secondFailurePhase == "recovery")
+        || count == 3
+            && first == "requested"
+            && second == "running"
+            && third is "succeeded" or "failed";
 
     private static bool IsResultShapeValid(ResultRow value) =>
         value.Kind switch
@@ -876,40 +948,6 @@ internal static class PricingRowValidatorV1
         };
     }
 
-    private static bool BudgetParentsAreValid(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        BudgetRow value)
-    {
-        using (var evaluation = Command(
-            connection,
-            transaction,
-            "SELECT COUNT(*) FROM alert_evaluations WHERE evaluation_id=$id AND schema_version='alert.evaluation.v2';",
-            ("$id", value.EvaluationId)))
-            if (Convert.ToInt64(evaluation.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) return false;
-        if (value.OutcomeKind == "receipt")
-        {
-            using var receipt = Command(
-                connection,
-                transaction,
-                "SELECT COUNT(*) FROM alert_receipts WHERE alert_id=$alert AND evaluation_id=$evaluation;",
-                ("$alert", value.AlertId!),
-                ("$evaluation", value.EvaluationId));
-            return Convert.ToInt64(receipt.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
-        }
-        if (value.OutcomeKind == "suppression")
-        {
-            using var suppression = Command(
-                connection,
-                transaction,
-                "SELECT COUNT(*) FROM alert_suppressions WHERE evaluation_id=$evaluation AND suppression_ordinal=$ordinal;",
-                ("$evaluation", value.EvaluationId),
-                ("$ordinal", value.SuppressionOrdinal!.Value));
-            return Convert.ToInt64(suppression.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
-        }
-        return true;
-    }
-
     private static bool ConfigurationSourceMatches(
         CostConfigurationV1 configuration,
         int sourceOrdinal,
@@ -962,7 +1000,9 @@ internal static class PricingRowValidatorV1
         && parsed.ToString("D") == value;
 
     private static bool IsCanonicalUuidV7(string value) =>
-        IsCanonicalUuid(value) && value[14] == '7';
+        IsCanonicalUuid(value)
+        && value[14] == '7'
+        && value[19] is '8' or '9' or 'a' or 'b';
 
     private static bool IsLowerToken(string? value) =>
         value is { Length: >= 1 and <= 128 }
@@ -1002,7 +1042,6 @@ internal static class PricingRowValidatorV1
     private static bool IsSuppressionCode(string? value) =>
         value is
             "rule_disabled"
-            or "scope_not_applicable"
             or "no_eligible_sessions"
             or "eligible_set_incomplete"
             or "no_covered_estimate"
@@ -1048,38 +1087,13 @@ internal static class PricingRowValidatorV1
     private static SqliteCommand Command(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        string sql,
-        params (string Name, object Value)[] parameters)
+        string sql)
     {
         var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = sql;
-        foreach (var parameter in parameters)
-            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
         return command;
     }
-
-    private sealed record ConfigurationHeadRow(
-        long Revision,
-        string ConfigurationId,
-        long? PreviousRevision,
-        string? PreviousConfigurationId);
-
-    private sealed record RunRow(
-        string RunId,
-        CostRecalculationRequestV1 Request,
-        string CalculationTimeUtc,
-        int TargetCount,
-        int ScopeCount);
-
-    private sealed record TargetRow(
-        string RunId,
-        int Ordinal,
-        string SessionId,
-        string SessionEffectiveAtUtc,
-        long? BaseHeadRevision,
-        string? BaseEstimateId,
-        long BaseAttemptRevision);
 
     private sealed record EventRow(
         int Sequence,
@@ -1090,32 +1104,11 @@ internal static class PricingRowValidatorV1
         int? FailureOrdinal,
         string? FailureCode);
 
-    private sealed record EstimateRow(
-        PricingEstimateRecord Estimate,
-        string RunId,
-        int TargetOrdinal,
-        int SourceEntryOrdinal,
-        string ConfigurationId);
-
     private sealed record ResultRow(
         string Kind,
         string? EstimateStatus,
         string? EstimateId,
         string? ResultCode);
-
-    private sealed record AttemptRow(
-        string SessionId,
-        long Revision,
-        string RunId,
-        int TargetOrdinal,
-        ResultRow Result);
-
-    private sealed record EstimateHeadRow(
-        string SessionId,
-        long Revision,
-        string EstimateId,
-        long? PreviousRevision,
-        string? PreviousEstimateId);
 
     private sealed record BudgetRow(
         string ScopeKind,
