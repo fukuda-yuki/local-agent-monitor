@@ -63,6 +63,90 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
     }
 
     [Fact]
+    public void EngineV2Parent_MixedV1AndV2ReceiptsPreserveIndependentLifecycleAcrossRestart()
+    {
+        var engine = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertStoreStatus.Success, engine.Initialize().Status);
+        var evaluationV1 = ValidV1Evaluation();
+        Assert.Equal(AlertStoreStatus.Success, engine.Append(evaluationV1).Status);
+        var alertV1 = Assert.Single(evaluationV1.Receipts).AlertId;
+        Assert.Equal(AlertEngineStoreStatusV2.Success, engine.InitializeV2().Status);
+        var evaluationV2 = AlertEngineV2Tests.Evaluation();
+        Assert.Equal(AlertEngineStoreStatusV2.Success, engine.Append(evaluationV2).Status);
+        var alertV2 = Assert.Single(evaluationV2.Receipts).AlertId;
+        var receiptV1 = ReceiptJson(alertV1);
+        var receiptV2 = ReceiptJson(alertV2);
+        var store = Store();
+
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        Assert.Equal(
+            AlertLifecycleStoreStatus.Success,
+            store.Mutate(Command(alertV1, AlertLifecycleAction.Acknowledge, 0, 'a')).Status);
+        Assert.Equal(
+            AlertLifecycleStoreStatus.Success,
+            store.Mutate(Command(alertV2, AlertLifecycleAction.Dismiss, 0, 'b')).Status);
+
+        var restarted = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, restarted.Initialize().Status);
+        Assert.Equal(AlertLifecycleState.Acknowledged, restarted.Get(alertV1).Lifecycle!.State);
+        Assert.Equal(AlertLifecycleState.Dismissed, restarted.Get(alertV2).Lifecycle!.State);
+        Assert.Equal(1, restarted.Get(alertV1).Lifecycle!.Revision);
+        Assert.Equal(1, restarted.Get(alertV2).Lifecycle!.Revision);
+        Assert.Single(restarted.History(alertV1).Events);
+        Assert.Single(restarted.History(alertV2).Events);
+        Assert.Equal(receiptV1, ReceiptJson(alertV1));
+        Assert.Equal(receiptV2, ReceiptJson(alertV2));
+        using var connection = Open();
+        Assert.Equal(
+            ["alert_engine:2", "alert_lifecycle:1"],
+            Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component LIKE 'alert_%' ORDER BY component;"));
+        Assert.Equal(
+            ["alert_lifecycle_events"],
+            Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'alert_lifecycle_%' ORDER BY name;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    }
+
+    [Theory]
+    [InlineData("future_version")]
+    [InlineData("definition_mismatch")]
+    public void EngineV2Parent_TamperedOwnerSchemaFailsClosedWithoutLifecycleDataOrAppend(string corruption)
+    {
+        var engine = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, engine.InitializeV2().Status);
+        var evaluation = AlertEngineV2Tests.Evaluation();
+        Assert.Equal(AlertEngineStoreStatusV2.Success, engine.Append(evaluation).Status);
+        var alertId = Assert.Single(evaluation.Receipts).AlertId;
+        var store = Store();
+        Assert.Equal(AlertLifecycleStoreStatus.Success, store.Initialize().Status);
+        using (var connection = Open())
+        {
+            Execute(
+                connection,
+                corruption == "future_version"
+                    ? "UPDATE schema_version SET version=3 WHERE component='alert_engine';"
+                    : "DROP TABLE alert_suppressions;");
+        }
+
+        var read = store.Get(alertId);
+        var history = store.History(alertId);
+        var mutation = store.Mutate(Command(alertId, AlertLifecycleAction.Acknowledge, 0, 'a'));
+
+        Assert.Equal(
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"),
+            (read.Status, read.Code));
+        Assert.Null(read.Lifecycle);
+        Assert.Equal(
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"),
+            (history.Status, history.Code));
+        Assert.Empty(history.Events);
+        Assert.Equal(
+            (AlertLifecycleStoreStatus.Unavailable, "alert_lifecycle_store_unavailable"),
+            (mutation.Status, mutation.Code));
+        using var check = Open();
+        Assert.Equal(0L, Scalar<long>(check, "SELECT count(*) FROM alert_lifecycle_events;"));
+    }
+
+    [Fact]
     public void Get_ReceiptWithoutEvents_IsLazyOpenRevisionZeroWithoutWriting()
     {
         SeedReceipts();
@@ -639,6 +723,79 @@ public sealed class SqliteAlertLifecycleStoreTests : IDisposable
             AlertCompleteness.Partial, ["ingest_gap"], observed, observed, new string('d', 64), "Fixture summary");
         return new(AlertContractVersions.Evaluation, new string('e', 64), new string('d', 64), "fixture-v1", new string('c', 64),
             [Receipt(AlertA, "fixture-rule", "1"), Receipt(AlertB, "fixture-rule", "2")], [], []);
+    }
+
+    private AlertEvaluationResult ValidV1Evaluation()
+    {
+        var observed = time.GetUtcNow();
+        var evidence = new AlertEvidenceReference(
+            AlertEvidenceKind.Session,
+            "session-evidence",
+            "session-1",
+            null,
+            null,
+            null,
+            null,
+            null,
+            observed);
+        var snapshot = new AlertNormalizedSnapshot(
+            AlertContractVersions.Snapshot,
+            "github-copilot",
+            "1",
+            "session-1",
+            null,
+            AlertCompleteness.Full,
+            [],
+            observed,
+            observed,
+            [new("tool-events", AlertCapabilityAvailability.Available)],
+            [
+                new(
+                    "signal-1",
+                    AlertSignalKind.SessionEvent,
+                    0,
+                    observed,
+                    null,
+                    AlertSignalStatus.Success,
+                    [],
+                    [],
+                    evidence),
+            ]);
+        var descriptor = new AlertRuleDescriptor(
+            "lifecycle-v2-parent-fixture",
+            "1",
+            "Lifecycle parent fixture",
+            "Produces one strict v1 receipt for lifecycle compatibility.",
+            ["tool-events"],
+            AlertRuleScope.Session,
+            [],
+            "session",
+            [],
+            ["missing_required_capability", "rule_disabled", "source_not_applicable"],
+            ["github-copilot"]);
+        var rule = new FixedRule(
+            descriptor,
+            new(
+                [new(AlertSeverity.Warning, [new("count", "calls", 1)], [evidence], observed, observed)],
+                []));
+        return new AlertEvaluationEngine(
+            new AlertRuleRegistry([rule]),
+            new ExistingResolver()).Evaluate(
+                snapshot,
+                new(AlertContractVersions.Configuration, "lifecycle-v1", []));
+    }
+
+    private sealed class FixedRule(
+        AlertRuleDescriptor descriptor,
+        AlertRuleOutcome outcome) : IAlertRule
+    {
+        public AlertRuleDescriptor Descriptor { get; } = descriptor;
+        public AlertRuleOutcome Evaluate(AlertRuleContext context) => outcome;
+    }
+
+    private sealed class ExistingResolver : IAlertEvidenceResolver
+    {
+        public bool Exists(AlertEvidenceReference reference) => true;
     }
 
     private SqliteConnection Open() { var connection = new SqliteConnection(ConnectionString); connection.Open(); return connection; }
