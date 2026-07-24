@@ -1,0 +1,38 @@
+{
+  "schema_version": "cost-analytics-validation-handoff.v1",
+  "surface_id": "cost-analytics",
+  "owner_issue": 95,
+  "future_registry_state_at_kickoff": "not_registered",
+  "production_surface_state": "implemented_candidate",
+  "active_row_ids": [
+    "91-A-095",
+    "91-S-095",
+    "91-L-095"
+  ],
+  "required_profiles": [
+    "raw-default",
+    "sanitized-only",
+    "trusted-bundled-catalog",
+    "private-local-override",
+    "source-mapping-unavailable"
+  ],
+  "automated_test_filters": [
+    "FullyQualifiedName~Pricing",
+    "FullyQualifiedName~Cost",
+    "FullyQualifiedName~AlertCenter",
+    "FullyQualifiedName~AlertLifecycle",
+    "FullyQualifiedName~SanitizedExport",
+    "FullyQualifiedName~RuntimeBackup",
+    "FullyQualifiedName~LocalMonitorScriptTests"
+  ],
+  "expected_evidence_location": "docs/sprints/issue-95-cost-analytics/validation-matrix.json",
+  "canonical_transition": "Issue #95 was never a future-registry entry. The immutable functional candidate activates only these direct rows in its owner matrix; no active state is inherited and no pass was inherited from a future placeholder. Candidate execution may finalize the evidence binding in an evidence-only child commit without recording that commit's own SHA or a future attestation SHA.",
+  "evidence_binding": {
+    "state": "pending_candidate_execution",
+    "matrix_path": "docs/sprints/issue-95-cost-analytics/validation-matrix.json",
+    "checksum_manifest_path": "docs/sprints/issue-95-cost-analytics/artifact-checksums.json",
+    "attestation_path": "docs/sprints/issue-95-cost-analytics/evidence-attestation.json",
+    "matrix_prep_sha": null,
+    "final_validation_sha": null
+  }
+}
