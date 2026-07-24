@@ -39,6 +39,7 @@
     <div class="diagnostics-head">
         <h2 class="overview-title">診断</h2>
         <span class="status-pill @statusClass"><span class="trace-status-dot @statusClass" aria-hidden="true"></span>@statusLabel</span>
+        <a class="panel-link" id="diagnostics-cost-link" href="/costs">Estimated cost →</a>
         <a class="diagnostics-probe monitor-mono" href="/health/ready">GET /health/ready → @httpStatus</a>
     </div>
 
@@ -202,6 +203,7 @@
                 <h4 tabindex="-1" id="doctor-session-target-heading">Exact Session</h4>
                 <dl class="doctor-result-grid" id="doctor-session-target-summary"></dl>
                 <a class="panel-link" id="doctor-session-alert-link" href="/alerts">この Session の Alert →</a>
+                <a class="panel-link" id="doctor-session-cost-link" href="/costs">この Session の Cost →</a>
             </div>
             <div class="doctor-evidence" id="doctor-source-target" hidden>
                 <h4 tabindex="-1" id="doctor-source-target-heading">Exact source diagnostic</h4>

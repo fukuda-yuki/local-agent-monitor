@@ -16,7 +16,8 @@ internal static class CostRoutes
     private static readonly JsonSerializerOptions Json = CreateJsonOptions();
 
     internal static bool IsPath(PathString path) =>
-        path.StartsWithSegments("/api/costs/v1");
+        path.StartsWithSegments("/api/costs/v1")
+        || path.Equals("/costs");
 
     internal static void Map(WebApplication app, CostHttpApplication application)
     {

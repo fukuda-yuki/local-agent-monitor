@@ -1,0 +1,155 @@
+@page "/costs"
+@model CostsModel
+
+<section class="cost-page" id="cost-root"
+         data-session-id="@Model.SessionId"
+         data-estimate-id="@Model.EstimateId">
+    <div class="overview-head cost-head">
+        <div>
+            <nav class="breadcrumb" aria-label="パンくず"><a href="/">概要</a><span class="breadcrumb-sep">›</span><span>Cost</span></nav>
+            <h2 class="overview-title">Estimated cost</h2>
+            <p class="monitor-subtle">推定値です。invoice、chargeback、quality improvement ではありません。</p>
+        </div>
+        <span class="monitor-badge">metadata-only · no-store</span>
+    </div>
+
+    <form class="panel cost-filter-panel" id="cost-filters" aria-label="Cost analytics の絞り込み">
+        <div class="cost-filter-grid">
+            <label>開始（UTC）<input id="cost-filter-from" name="from" type="date" required /></label>
+            <label>終了（UTC、含まない）<input id="cost-filter-to" name="to" type="date" required /></label>
+            <label>ソース<input id="cost-filter-source" name="source_surface" type="text" maxlength="128" autocomplete="off" /></label>
+            <label>モデル<input id="cost-filter-model" name="model" type="text" maxlength="256" autocomplete="off" /></label>
+            <label>Billing mode
+                <select id="cost-filter-mode" name="billing_mode">
+                    <option value="">すべて</option>
+                    <option value="github_ai_credits">github_ai_credits</option>
+                    <option value="github_legacy_requests">github_legacy_requests</option>
+                    <option value="plan_included">plan_included</option>
+                    <option value="anthropic_api_tokens">anthropic_api_tokens</option>
+                    <option value="cloud_provider_api_tokens">cloud_provider_api_tokens</option>
+                    <option value="subscription">subscription</option>
+                    <option value="custom_enterprise">custom_enterprise</option>
+                    <option value="unknown">unknown</option>
+                </select>
+            </label>
+            <label>状態
+                <select id="cost-filter-status" name="status">
+                    <option value="">すべて</option><option value="estimated">estimated</option><option value="partial">partial</option><option value="not_estimable">not-estimable</option><option value="missing">missing</option><option value="failed">failed</option><option value="unavailable">unavailable</option><option value="stale">stale</option>
+                </select>
+            </label>
+            <label>Registry version<input id="cost-filter-registry" name="registry_version" type="text" maxlength="128" autocomplete="off" /></label>
+        </div>
+        <div class="alert-filter-actions">
+            <button type="submit" class="monitor-btn monitor-btn-primary">適用</button>
+            <button type="button" class="monitor-btn" id="cost-filter-reset">解除</button>
+        </div>
+    </form>
+
+    <div id="cost-error" class="error-strip" role="alert" hidden>Cost analytics を読み込めませんでした。再試行してください。</div>
+    <div id="cost-incomplete" class="panel cost-incomplete" role="note" hidden></div>
+    <p id="cost-status" class="monitor-subtle">Cost analytics を読み込んでいます。</p>
+
+    <div class="cost-summary-grid" aria-label="Cost analytics summary">
+        <section class="panel cost-overall-card" id="cost-overall" aria-labelledby="cost-overall-heading">
+            <div class="panel-head"><h3 class="panel-title" id="cost-overall-heading">Coverage</h3><span class="panel-meta">estimated / eligible Sessions</span></div>
+            <p class="empty-state">読み込んでいます。</p>
+        </section>
+        <section class="panel cost-totals-card" id="cost-range-totals" aria-labelledby="cost-range-heading">
+            <div class="panel-head"><h3 class="panel-title" id="cost-range-heading">Range totals</h3><span class="panel-meta">registry と currency ごと</span></div>
+            <div id="cost-range-total-list"></div>
+        </section>
+    </div>
+
+    <section class="panel" id="cost-daily-trend" aria-labelledby="cost-daily-heading">
+        <div class="panel-head"><h3 class="panel-title" id="cost-daily-heading">UTC daily trend</h3><span class="panel-meta">complete と provisional は分離</span></div>
+        <div id="cost-daily-list" class="cost-trend-list"></div>
+    </section>
+
+    <section class="panel" id="cost-groups" aria-labelledby="cost-groups-heading">
+        <div class="panel-head"><h3 class="panel-title" id="cost-groups-heading" tabindex="-1">Component breakdown</h3><span class="panel-meta">ページ内最大 100 groups</span></div>
+        <div class="monitor-table-wrapper">
+            <table class="monitor-table">
+                <thead><tr><th scope="col">UTC / source</th><th scope="col">provider / model / mode</th><th scope="col">registry / component</th><th scope="col">coverage</th><th scope="col">estimated</th><th scope="col">partial provisional</th></tr></thead>
+                <tbody id="cost-group-rows"></tbody>
+            </table>
+        </div>
+        <button type="button" class="monitor-btn" id="cost-groups-next" hidden>次の group ページ</button>
+    </section>
+
+    <section class="panel cost-context" id="cost-session" hidden aria-labelledby="cost-context-heading">
+        <div class="panel-head">
+            <h3 class="panel-title" id="cost-context-heading" tabindex="-1">Exact Session estimate</h3>
+            <span class="panel-meta monitor-mono" id="cost-context-id"></span>
+        </div>
+        <div id="cost-exact-estimate"></div>
+        <div class="cost-context-columns">
+            <div><h3 id="cost-estimate-history-heading" tabindex="-1">Immutable estimate history</h3><div id="cost-estimate-history"></div></div>
+            <div><h3 id="cost-attempt-history-heading" tabindex="-1">Recalculation attempts</h3><div id="cost-attempt-history"></div></div>
+        </div>
+        <div class="cost-action-row">
+            <button type="button" class="monitor-btn" id="cost-estimates-next" hidden>次の estimate history</button>
+            <button type="button" class="monitor-btn" id="cost-attempts-next" hidden>次の recalculation history</button>
+        </div>
+        <div class="cost-action-row">
+            <label><input type="checkbox" id="cost-scope-utc-day" /> Session effective UTC day budget</label>
+            <label><input type="checkbox" id="cost-scope-period" /> Rolling period budget</label>
+            <button type="button" class="monitor-btn monitor-btn-primary" id="cost-recalculate">この Session を再計算</button>
+            <a class="monitor-btn" id="cost-session-alerts" href="/alerts">Cost alert を確認</a>
+        </div>
+        <div id="cost-recalculation" aria-live="polite"></div>
+    </section>
+
+    <section class="panel cost-config" id="cost-configuration" aria-labelledby="cost-config-heading">
+        <div class="panel-head"><h3 class="panel-title" id="cost-config-heading" tabindex="-1">Billing configuration</h3><span class="panel-meta" id="cost-config-state">読み込んでいます。</span></div>
+        <p class="monitor-subtle">bundled / local override は reviewed metadata のみ表示します。path、registry bytes、credential は表示・送信しません。</p>
+        <div id="cost-budget-state"></div>
+        <div id="cost-catalog" class="cost-catalog-list"></div>
+        <button type="button" class="monitor-btn" id="cost-catalog-next" hidden>次の catalog page</button>
+        <form id="cost-config-form" aria-label="Billing configuration preview">
+            <div class="cost-filter-grid">
+                <label>Source surface<input id="cost-config-surface" maxlength="128" autocomplete="off" /></label>
+                <label>Application version<input id="cost-config-version" maxlength="64" autocomplete="off" /></label>
+                <label>Adapter capability<input id="cost-config-adapter" maxlength="64" autocomplete="off" /></label>
+                <label>Catalog entry<select id="cost-config-entry"><option value="">既存 mapping を維持</option></select></label>
+                <label>Provider<input id="cost-config-provider" readonly /></label>
+                <label>Billing mode<input id="cost-config-mode" readonly /></label>
+                <label>Pricing route<input id="cost-config-route" readonly /></label>
+            </div>
+            <label><input type="checkbox" id="cost-config-clear-sources" aria-describedby="cost-clear-sources-note" /> preview で既存 source mappings をすべて削除</label>
+            <p class="monitor-subtle" id="cost-clear-sources-note">選択中は source editor を無効化し、preview の source entries を空にします。</p>
+            <fieldset class="cost-budget-fieldset">
+                <legend>Session budget</legend>
+                <label><input type="checkbox" id="cost-budget-enabled" /> configure session-estimated-cost-threshold</label>
+                <label><input type="checkbox" id="cost-budget-active" checked /> enabled</label>
+                <label>Warning USD<input type="text" inputmode="decimal" id="cost-budget-warning" value="10" maxlength="32" /></label>
+                <label>Critical USD<input type="text" inputmode="decimal" id="cost-budget-critical" value="20" maxlength="32" /></label>
+                <label>Minimum coverage bps<input type="number" id="cost-budget-coverage" value="10000" min="0" max="10000" /></label>
+            </fieldset>
+            <fieldset class="cost-budget-fieldset">
+                <legend>UTC day budget</legend>
+                <label><input type="checkbox" id="cost-budget-daily-enabled" /> configure daily-estimated-cost-threshold</label>
+                <label><input type="checkbox" id="cost-budget-daily-active" checked /> enabled</label>
+                <label>Warning USD<input type="text" inputmode="decimal" id="cost-budget-daily-warning" value="50" maxlength="32" /></label>
+                <label>Critical USD<input type="text" inputmode="decimal" id="cost-budget-daily-critical" value="100" maxlength="32" /></label>
+                <label>Minimum coverage bps<input type="number" id="cost-budget-daily-coverage" value="10000" min="0" max="10000" /></label>
+            </fieldset>
+            <fieldset class="cost-budget-fieldset">
+                <legend>Rolling period budget</legend>
+                <label><input type="checkbox" id="cost-budget-period-enabled" /> configure period-estimated-cost-threshold</label>
+                <label><input type="checkbox" id="cost-budget-period-active" checked /> enabled</label>
+                <label>Warning USD<input type="text" inputmode="decimal" id="cost-budget-period-warning" value="200" maxlength="32" /></label>
+                <label>Critical USD<input type="text" inputmode="decimal" id="cost-budget-period-critical" value="400" maxlength="32" /></label>
+                <label>Minimum coverage bps<input type="number" id="cost-budget-period-coverage" value="10000" min="0" max="10000" /></label>
+                <label>Window days<input type="number" id="cost-budget-period-days" value="30" min="2" max="366" /></label>
+            </fieldset>
+            <div class="cost-action-row">
+                <button type="submit" class="monitor-btn" id="cost-preview">変更を preview</button>
+                <button type="button" class="monitor-btn monitor-btn-primary" id="cost-commit" disabled>preview を commit</button>
+            </div>
+        </form>
+        <div id="cost-preview-result" aria-live="polite"></div>
+    </section>
+    <p id="cost-live" class="doctor-live" role="status" aria-live="polite" aria-atomic="true"></p>
+</section>
+
+<script src="/costs.js" defer></script>
