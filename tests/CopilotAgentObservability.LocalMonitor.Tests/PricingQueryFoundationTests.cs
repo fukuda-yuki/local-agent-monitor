@@ -555,6 +555,349 @@ public sealed class PricingQueryFoundationTests
                     null).Value!.Attempts).Freshness);
     }
 
+    [Fact]
+    public void SessionEstimateHistory_ProjectsExactHeadsDeltaAndSafeFields()
+    {
+        using var database = new QueryDatabase();
+        var calculationTime = new DateTimeOffset(2026, 7, 25, 3, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddMinutes(-2));
+        var (store, catalog, configuration) =
+            database.CreateConfiguredPricingStore(clock, estimateCapable: true);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var sessionId = database.InsertResolvedSession();
+        var quantityProvenance = new PricingValueProvenance(
+            "synthetic-adapter",
+            "pricing-capability.v1",
+            "event-1",
+            "not_captured",
+            "pricing-normalization.v1");
+        var configurationProvenance = new PricingValueProvenance(
+            "local-monitor-cost-configuration",
+            "cost.configuration.v1",
+            configuration.ConfigurationId + ".source-entry-000",
+            "not_captured",
+            "cost-configuration-provenance.v1");
+        PricingEstimateRecord? predecessor = null;
+        for (var ordinal = 0; ordinal < 2; ordinal++)
+        {
+            var target = database.CaptureTarget(sessionId);
+            var runId = Guid.CreateVersion7().ToString("D");
+            var runTime = calculationTime.AddMinutes(ordinal);
+            var request = CostRecalculationRequestCanonicalJsonV1.Create(
+                configuration.ConfigurationId,
+                1,
+                catalog.CatalogSha256,
+                [sessionId],
+                [],
+                $"pricing-estimate-history-000{ordinal}");
+            Assert.Equal(
+                PricingStoreStatus.Success,
+                store.StartRecalculationApplication(runId, request, [target], runTime).Status);
+            clock.UtcNow = runTime.AddSeconds(1);
+            Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+            var estimateRequest = new PricingEstimateRequest(
+                PricingContractVersions.EstimateRequest,
+                runTime,
+                predecessor?.EstimateId,
+                new(
+                    "github-copilot-vscode",
+                    "1.2.3",
+                    sessionId,
+                    target.SessionEffectiveAtUtc,
+                    PricingProviders.GitHubCopilot,
+                    "GPT-5 mini",
+                    PricingBillingModes.PlanIncluded,
+                    PricingRoutes.CreditConsumingInteraction,
+                    PricingSourceCompleteness.Full,
+                    [],
+                    quantityProvenance,
+                    quantityProvenance,
+                    quantityProvenance,
+                    configurationProvenance,
+                    configurationProvenance),
+                PricingUsage.Empty);
+            predecessor = new PricingEstimationEngine(catalog).Estimate(estimateRequest);
+            clock.UtcNow = runTime.AddSeconds(2);
+            Assert.Equal(
+                PricingStoreStatus.Success,
+                store.AppendEstimateSuccessApplication(
+                    runId,
+                    0,
+                    0,
+                    estimateRequest,
+                    PricingCanonicalJson.Serialize(predecessor)).Status);
+        }
+
+        var queries = new SqlitePricingReadStore(database.Path);
+        var firstPage = queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1);
+
+        Assert.Equal(PricingReadStatus.Success, firstPage.Status);
+        Assert.Equal("estimated", firstPage.Value!.CalculationState);
+        Assert.Equal(2, firstPage.Value.ActiveHeadRevision);
+        Assert.Equal(2, firstPage.Value.LatestAttemptRevision);
+        var latest = Assert.Single(firstPage.Value.Items);
+        Assert.Equal("complete_total", latest.AmountKind);
+        Assert.Equal("available", latest.Delta.State);
+        Assert.Equal("both_fresh", latest.Delta.BasisFreshness);
+        Assert.Equal(0m, latest.Delta.Amount);
+        Assert.DoesNotContain(
+            latest.Components.SelectMany(component => new[]
+            {
+                component.Category,
+                component.State,
+                component.MissingReason,
+            }),
+            value => value?.Contains("event-1", StringComparison.Ordinal) == true);
+        Assert.NotNull(firstPage.Value.NextAfter);
+        var twoItemResponse = firstPage.Value with
+        {
+            Items = Array.AsReadOnly(new[] { latest, latest with { HeadRevision = 1 } }),
+            NextAfter = null,
+        };
+        var oneItemBytes = JsonSerializer.SerializeToUtf8Bytes(
+            firstPage.Value with { NextAfter = latest.EstimateId },
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })
+            .Length;
+        var fitted = SqlitePricingReadStore.ApplyEstimatePageByteLimit(
+            twoItemResponse,
+            sourceHasMore: false,
+            oneItemBytes);
+        Assert.Equal(PricingReadStatus.Success, fitted.Status);
+        Assert.Single(fitted.Value!.Items);
+        Assert.Equal(latest.EstimateId, fitted.Value.NextAfter);
+        var singleItemBytes = JsonSerializer.SerializeToUtf8Bytes(
+            firstPage.Value with { NextAfter = null },
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })
+            .Length;
+        Assert.Equal(
+            PricingReadStatus.ResponseTooLarge,
+            SqlitePricingReadStore.ApplyEstimatePageByteLimit(
+                firstPage.Value,
+                sourceHasMore: false,
+                singleItemBytes - 1).Status);
+
+        var secondPage = queries.ReadSessionEstimates(
+            sessionId,
+            catalogBytes,
+            firstPage.Value.NextAfter,
+            1);
+        Assert.Equal(1, Assert.Single(secondPage.Value!.Items).HeadRevision);
+        Assert.Null(secondPage.Value.NextAfter);
+        Assert.Equal(
+            PricingReadStatus.InvalidCursor,
+            queries.ReadSessionEstimates(
+                database.InsertResolvedSession(),
+                catalogBytes,
+                firstPage.Value.NextAfter,
+                1).Status);
+
+        var exact = queries.ReadSessionEstimate(
+            sessionId,
+            predecessor!.EstimateId,
+            catalogBytes);
+        Assert.Equal(PricingReadStatus.Success, exact.Status);
+        Assert.Equal(latest.EstimateId, exact.Value!.Item.EstimateId);
+        Assert.Equal(latest.HeadRevision, exact.Value.Item.HeadRevision);
+        Assert.Equal(latest.Delta.State, exact.Value.Item.Delta.State);
+        Assert.Equal(latest.Delta.Amount, exact.Value.Item.Delta.Amount);
+        Assert.Equal(latest.Delta.BasisFreshness, exact.Value.Item.Delta.BasisFreshness);
+        Assert.Equal(latest.Delta.ChangedFields, exact.Value.Item.Delta.ChangedFields);
+        Assert.Equal(latest.Components, exact.Value.Item.Components);
+        Assert.Equal(latest.Coverage.RequiredCategories, exact.Value.Item.Coverage.RequiredCategories);
+        Assert.Equal(latest.Reasons, exact.Value.Item.Reasons);
+        Assert.Equal(
+            PricingReadStatus.NotFound,
+            queries.ReadSessionEstimate(
+                database.InsertResolvedSession(),
+                predecessor.EstimateId,
+                catalogBytes).Status);
+
+        var failedRunId = Guid.CreateVersion7().ToString("D");
+        var failedRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-estimate-history-failure");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                failedRunId,
+                failedRequest,
+                [database.CaptureTarget(sessionId)],
+                calculationTime.AddMinutes(3)).Status);
+        clock.UtcNow = calculationTime.AddMinutes(3).AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.RecoverInterruptedRuns().Status);
+        var headWins = queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!;
+        Assert.Equal("estimated", headWins.CalculationState);
+        Assert.Equal("failed", headWins.LatestAttempt!.Kind);
+        Assert.Equal("recalculation_interrupted", headWins.LatestAttempt.Code);
+
+        var changedCatalog = CreateRelevantChangedCatalog(catalog);
+        var catalogStale = queries.ReadSessionEstimates(
+            sessionId,
+            PricingCanonicalJson.SerializeCatalogSnapshot(changedCatalog),
+            null,
+            1).Value!;
+        Assert.Equal("stale", catalogStale.CalculationState);
+        Assert.Equal("stale", Assert.Single(catalogStale.Items).Freshness);
+
+        clock.UtcNow = calculationTime.AddMinutes(4);
+        var budgetOnlyConfiguration = database.CommitConfiguration(
+            store,
+            catalog,
+            configuration,
+            configuration.SourceEntries,
+            [new(
+                "session-estimated-cost-threshold",
+                "1",
+                false,
+                "USD",
+                "1",
+                "2",
+                5000,
+                "session",
+                null)],
+            expectedHeadRevision: 1,
+            createdAtUtc: clock.UtcNow);
+        Assert.Equal(
+            "estimated",
+            queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!.CalculationState);
+
+        clock.UtcNow = calculationTime.AddMinutes(5);
+        var changedSelectionConfiguration = database.CommitConfiguration(
+            store,
+            catalog,
+            budgetOnlyConfiguration,
+            [configuration.SourceEntries[0] with { AdapterCapabilityVersion = "pricing-capability.v2" }],
+            budgetOnlyConfiguration.BudgetEntries,
+            expectedHeadRevision: 2,
+            createdAtUtc: clock.UtcNow);
+        Assert.Equal(
+            "stale",
+            queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!.CalculationState);
+
+        clock.UtcNow = calculationTime.AddMinutes(6);
+        _ = database.CommitConfiguration(
+            store,
+            catalog,
+            changedSelectionConfiguration,
+            configuration.SourceEntries,
+            changedSelectionConfiguration.BudgetEntries,
+            expectedHeadRevision: 3,
+            createdAtUtc: clock.UtcNow);
+        Assert.Equal(
+            "estimated",
+            queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!.CalculationState);
+
+        using (var connection = database.Open())
+            Execute(
+                connection,
+                $"""
+                UPDATE sessions SET updated_at='2026-07-25T04:00:00.0000000+00:00'
+                WHERE session_id='{sessionId}';
+                """);
+        var stale = queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!;
+        Assert.Equal("stale", stale.CalculationState);
+        var staleLatest = Assert.Single(stale.Items);
+        Assert.Equal("stale", staleLatest.Freshness);
+        Assert.Equal("not_applicable", staleLatest.AmountKind);
+        Assert.Null(staleLatest.Amount);
+        Assert.Equal("includes_stale", staleLatest.Delta.BasisFreshness);
+
+        var predecessorCorruptPath = database.Backup("predecessor-corrupt.db");
+        var canonicalCorruptPath = database.Backup("canonical-corrupt.db");
+        var scalarCorruptPath = database.Backup("scalar-corrupt.db");
+        using (var connection = QueryDatabase.OpenAt(predecessorCorruptPath, foreignKeys: false))
+        {
+            Execute(connection, "DROP TRIGGER pricing_estimate_heads_no_update;");
+            Execute(
+                connection,
+                "UPDATE pricing_estimate_heads SET previous_estimate_id='pricing-estimate-"
+                + new string('a', 64)
+                + "' WHERE head_revision=2;");
+        }
+        Assert.Equal(
+            PricingReadStatus.Unavailable,
+            new SqlitePricingReadStore(predecessorCorruptPath)
+                .ReadSessionEstimates(sessionId, catalogBytes, null, 1).Status);
+        using (var connection = QueryDatabase.OpenAt(canonicalCorruptPath))
+        {
+            Execute(connection, "DROP TRIGGER pricing_estimates_no_update;");
+            Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+            Execute(
+                connection,
+                "UPDATE pricing_estimates SET canonical_blob=X'7B7D',canonical_sha256='"
+                + new string('0', 64)
+                + "' WHERE estimate_id='"
+                + predecessor.EstimateId
+                + "';");
+        }
+        Assert.Equal(
+            PricingReadStatus.Unavailable,
+            new SqlitePricingReadStore(canonicalCorruptPath)
+                .ReadSessionEstimates(sessionId, catalogBytes, null, 1).Status);
+        using (var connection = QueryDatabase.OpenAt(scalarCorruptPath))
+        {
+            Execute(connection, "DROP TRIGGER pricing_estimates_no_update;");
+            Execute(
+                connection,
+                "UPDATE pricing_estimates SET amount_text='1' WHERE estimate_id='"
+                + predecessor.EstimateId
+                + "';");
+        }
+        Assert.Equal(
+            PricingReadStatus.Unavailable,
+            new SqlitePricingReadStore(scalarCorruptPath)
+                .ReadSessionEstimates(sessionId, catalogBytes, null, 1).Status);
+    }
+
+    [Fact]
+    public void SessionEstimateHistory_ProjectsNoHeadActiveAndTerminalStates()
+    {
+        using var database = new QueryDatabase();
+        var calculationTime = new DateTimeOffset(2026, 7, 25, 5, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddMinutes(-1));
+        var (store, catalog, configuration) = database.CreateConfiguredPricingStore(clock);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var sessionId = database.InsertResolvedSession();
+        var runId = Guid.CreateVersion7().ToString("D");
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-estimate-no-head-state");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                runId,
+                request,
+                [database.CaptureTarget(sessionId)],
+                calculationTime).Status);
+        var queries = new SqlitePricingReadStore(database.Path);
+
+        var requested = queries.ReadSessionEstimates(sessionId, catalogBytes, null);
+        Assert.Equal("requested", requested.Value!.CalculationState);
+        Assert.Equal("requested", requested.Value.LatestAttempt!.Kind);
+        Assert.Empty(requested.Value.Items);
+
+        clock.UtcNow = calculationTime.AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        Assert.Equal(
+            "running",
+            queries.ReadSessionEstimates(sessionId, catalogBytes, null).Value!.CalculationState);
+
+        clock.UtcNow = calculationTime.AddSeconds(2);
+        Assert.Equal(PricingStoreStatus.Success, store.RecoverInterruptedRuns().Status);
+        var failed = queries.ReadSessionEstimates(sessionId, catalogBytes, null);
+        Assert.Equal("failed", failed.Value!.CalculationState);
+        Assert.Equal("failed", failed.Value.LatestAttempt!.Kind);
+        Assert.Equal("recalculation_interrupted", failed.Value.LatestAttempt.Code);
+    }
+
     private static PricingCatalog CreateUnrelatedCatalog()
     {
         var bundled = BundledPricingRegistry.Load();
@@ -575,6 +918,34 @@ public sealed class PricingQueryFoundationTests
                         CanonicalModelId = "query-unrelated-model",
                         Aliases = [],
                         SupersedesEntryKey = null,
+                    },
+                ],
+            });
+    }
+
+    private static PricingCatalog CreateRelevantChangedCatalog(PricingCatalog catalog)
+    {
+        var bundled = BundledPricingRegistry.Load();
+        var selected = catalog.Select(
+            PricingProviders.GitHubCopilot,
+            "GPT-5 mini",
+            PricingBillingModes.PlanIncluded,
+            PricingRoutes.CreditConsumingInteraction,
+            new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero));
+        return PricingCatalog.Create(
+            bundled,
+            selected.Document with
+            {
+                RegistryVersion = "query-relevant-v1",
+                SourceKind = PricingRegistrySourceKinds.LocalOverride,
+                SourceId = "query-relevant",
+                SourceLabel = "Query relevant local override",
+                Entries =
+                [
+                    selected.Entry with
+                    {
+                        EntryId = "query-relevant-plan",
+                        SupersedesEntryKey = selected.EntryKey,
                     },
                 ],
             });
@@ -602,15 +973,27 @@ public sealed class PricingQueryFoundationTests
         internal string Path { get; }
 
         internal SqliteConnection Open()
+            => OpenAt(Path);
+
+        internal static SqliteConnection OpenAt(string path, bool foreignKeys = true)
         {
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = Path,
+                DataSource = path,
                 Pooling = false,
-                ForeignKeys = true,
+                ForeignKeys = foreignKeys,
             }.ToString());
             connection.Open();
             return connection;
+        }
+
+        internal string Backup(string fileName)
+        {
+            var path = System.IO.Path.Combine(root, fileName);
+            using var source = Open();
+            using var destination = OpenAt(path);
+            source.BackupDatabase(destination);
+            return path;
         }
 
         internal SqlitePricingStore CreatePricingStore(MutableTimeProvider clock)
@@ -679,6 +1062,44 @@ public sealed class PricingQueryFoundationTests
             return (store, catalog, configuration);
         }
 
+        internal CostConfigurationV1 CommitConfiguration(
+            SqlitePricingStore store,
+            PricingCatalog catalog,
+            CostConfigurationV1 predecessor,
+            IReadOnlyList<CostSourceEntryV1> sourceEntries,
+            IReadOnlyList<CostBudgetEntryV1> budgetEntries,
+            long expectedHeadRevision,
+            DateTimeOffset createdAtUtc)
+        {
+            var configuration = CostConfigurationCanonicalJsonV1.Create(
+                predecessor.ConfigurationId,
+                catalog.CatalogSha256,
+                sourceEntries,
+                budgetEntries,
+                createdAtUtc);
+            var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+                configuration,
+                expectedHeadRevision,
+                predecessor.ConfigurationId,
+                catalog.CatalogSha256,
+                PricingConfigurationSelectionDigestV1.Create([]),
+                0,
+                0,
+                "exact",
+                0,
+                "exact");
+            Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+            Assert.Equal(
+                PricingStoreStatus.Success,
+                store.AppendConfigurationCommitApplication(
+                    preview,
+                    new(
+                        catalog.CatalogSha256,
+                        PricingCanonicalJson.SerializeCatalogSnapshot(catalog)),
+                    []).Status);
+            return configuration;
+        }
+
         internal string InsertResolvedSession()
         {
             var sessionId = Guid.NewGuid().ToString("D");
@@ -723,6 +1144,31 @@ public sealed class PricingQueryFoundationTests
                 FROM pricing_session_attempts WHERE session_id=$session;
                 """,
                 sessionId);
+            long? baseHeadRevision;
+            string? baseEstimateId;
+            using (var head = connection.CreateCommand())
+            {
+                head.Transaction = transaction;
+                head.CommandText =
+                    """
+                    SELECT head_revision,estimate_id
+                    FROM pricing_estimate_heads
+                    WHERE session_id=$session
+                    ORDER BY head_revision DESC LIMIT 1;
+                    """;
+                head.Parameters.AddWithValue("$session", sessionId);
+                using var reader = head.ExecuteReader();
+                if (reader.Read())
+                {
+                    baseHeadRevision = reader.GetInt64(0);
+                    baseEstimateId = reader.GetString(1);
+                }
+                else
+                {
+                    baseHeadRevision = null;
+                    baseEstimateId = null;
+                }
+            }
             transaction.Rollback();
             return new(
                 sessionId,
@@ -734,8 +1180,8 @@ public sealed class PricingQueryFoundationTests
                 source.Digest,
                 source.SourceSurface,
                 source.SourceApplicationVersion,
-                null,
-                null,
+                baseHeadRevision,
+                baseEstimateId,
                 attemptRevision);
         }
 
