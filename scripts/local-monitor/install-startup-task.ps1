@@ -6,12 +6,18 @@ param(
     [ValidateSet('DotnetRun', 'Published')]
     [string] $Mode = 'DotnetRun',
     [switch] $SanitizedOnly,
+    [string[]] $PricingRegistryOverride = @(),
     [switch] $StartNow,
     [switch] $Force,
     [switch] $DryRun
 )
 
 . "$PSScriptRoot\common.ps1"
+
+if (-not (Test-LocalMonitorPricingRegistryOverrideCount -PricingRegistryOverride $PricingRegistryOverride)) {
+    Write-Error 'pricing_registry_override_count_invalid'
+    exit 1
+}
 
 if ([string]::IsNullOrWhiteSpace($DbPath)) {
     $DbPath = $script:DefaultDbPath
@@ -35,31 +41,20 @@ if ($null -ne $existing -and -not $Force) {
 $repoRoot = Get-LocalMonitorRepoRoot
 $startScript = Join-Path $PSScriptRoot 'start.ps1'
 $psPath = Get-LocalMonitorPowerShellPath
-$startArgs = @(
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    ('"{0}"' -f $startScript),
-    '-Url',
-    ('"{0}"' -f $Url),
-    '-DbPath',
-    ('"{0}"' -f $DbPath),
-    '-Mode',
-    $Mode,
-    '-InstallRoot',
-    ('"{0}"' -f $InstallRoot),
-    '-NoBrowser',
-    '-WaitReady'
-)
-if ($SanitizedOnly) {
-    $startArgs += '-SanitizedOnly'
-}
+$taskArgument = New-LocalMonitorStartupTaskArgument `
+    -StartScript $startScript `
+    -Url $Url `
+    -DbPath $DbPath `
+    -Mode $Mode `
+    -InstallRoot $InstallRoot `
+    -SanitizedOnly:$SanitizedOnly.IsPresent `
+    -PricingRegistryOverride $PricingRegistryOverride
 
 if ($DryRun) {
     Write-Output "task name: $TaskName"
     Write-Output "execute: $psPath"
-    Write-Output "arguments: $($startArgs -join ' ')"
+    Write-Output 'arguments: encoded'
+    Write-Output ("pricing registry overrides: {0} (count: {1})" -f $(if (@($PricingRegistryOverride).Count -gt 0) { 'present' } else { 'absent' }), @($PricingRegistryOverride).Count)
     Write-Output "working directory: $repoRoot"
     Write-Output "trigger: logon"
     Write-Output "multiple instances: IgnoreNew"
@@ -70,7 +65,7 @@ if ($null -ne $existing -and $Force) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-$action = New-ScheduledTaskAction -Execute $psPath -Argument ($startArgs -join ' ') -WorkingDirectory $repoRoot
+$action = New-ScheduledTaskAction -Execute $psPath -Argument $taskArgument -WorkingDirectory $repoRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
@@ -82,9 +77,21 @@ if ($null -eq $registered) {
     exit 1
 }
 
-Write-Output "installed"
+Write-Output ("installed (pricing registry overrides: {0} (count: {1}))" -f $(if (@($PricingRegistryOverride).Count -gt 0) { 'present' } else { 'absent' }), @($PricingRegistryOverride).Count)
 if ($StartNow) {
-    & $startScript -Url $Url -DbPath $DbPath -InstallRoot $InstallRoot -Mode $Mode -SanitizedOnly:$SanitizedOnly.IsPresent -NoBrowser -WaitReady
+    $startParameters = @{
+        Url = $Url
+        DbPath = $DbPath
+        InstallRoot = $InstallRoot
+        Mode = $Mode
+        SanitizedOnly = $SanitizedOnly.IsPresent
+        NoBrowser = $true
+        WaitReady = $true
+    }
+    if (@($PricingRegistryOverride).Count -gt 0) {
+        $startParameters.PricingRegistryOverride = $PricingRegistryOverride
+    }
+    & $startScript @startParameters
     exit $LASTEXITCODE
 }
 

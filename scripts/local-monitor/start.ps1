@@ -5,12 +5,18 @@ param(
     [ValidateSet('DotnetRun', 'Published')]
     [string] $Mode = 'DotnetRun',
     [switch] $SanitizedOnly,
+    [string[]] $PricingRegistryOverride = @(),
     [switch] $NoBrowser = $true,
     [switch] $WaitReady = $true,
     [int] $TimeoutSeconds = 30
 )
 
 . "$PSScriptRoot\common.ps1"
+
+if (-not (Test-LocalMonitorPricingRegistryOverrideCount -PricingRegistryOverride $PricingRegistryOverride)) {
+    Write-Error 'pricing_registry_override_count_invalid'
+    exit 1
+}
 
 if ([string]::IsNullOrWhiteSpace($DbPath)) {
     $DbPath = $script:DefaultDbPath
@@ -111,10 +117,12 @@ if ($Mode -eq 'DotnetRun') {
 if ($SanitizedOnly) {
     $arguments += '--sanitized-only'
 }
+foreach ($override in @($PricingRegistryOverride)) {
+    $arguments += '--pricing-registry-override'
+    $arguments += $override
+}
 
-$stdoutPath = Join-Path $script:LogDirectory 'local-monitor.stdout.log'
-$stderrPath = Join-Path $script:LogDirectory 'local-monitor.stderr.log'
-$process = Start-Process -FilePath $filePath -ArgumentList $arguments -WorkingDirectory $workingDirectory -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+$process = Start-LocalMonitorProcess -FilePath $filePath -WorkingDirectory $workingDirectory -ArgumentList $arguments
 Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
 Write-LocalMonitorLog "start process_id=$($process.Id) url=$Url mode=$stateMode sanitized_only=$($SanitizedOnly.IsPresent)"
 

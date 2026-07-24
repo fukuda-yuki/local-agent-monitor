@@ -82,6 +82,96 @@ function Write-LocalMonitorLog {
     Add-Content -Path $logPath -Value ("{0} {1}" -f $stamp, $Message)
 }
 
+function Test-LocalMonitorPricingRegistryOverrideCount {
+    param(
+        [string[]] $PricingRegistryOverride = @()
+    )
+
+    return @($PricingRegistryOverride).Count -le 8
+}
+
+function ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Value
+    )
+
+    return "'{0}'" -f $Value.Replace("'", "''")
+}
+
+function New-LocalMonitorStartupTaskArgument {
+    param(
+        [Parameter(Mandatory)]
+        [string] $StartScript,
+
+        [Parameter(Mandatory)]
+        [string] $Url,
+
+        [Parameter(Mandatory)]
+        [string] $DbPath,
+
+        [Parameter(Mandatory)]
+        [string] $Mode,
+
+        [Parameter(Mandatory)]
+        [string] $InstallRoot,
+
+        [switch] $SanitizedOnly,
+
+        [string[]] $PricingRegistryOverride = @()
+    )
+
+    $command = "& {0} -Url {1} -DbPath {2} -Mode {3} -InstallRoot {4} -NoBrowser -WaitReady" -f `
+        (ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $StartScript), `
+        (ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $Url), `
+        (ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $DbPath), `
+        (ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $Mode), `
+        (ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $InstallRoot)
+    if ($SanitizedOnly) {
+        $command += ' -SanitizedOnly'
+    }
+
+    $literals = @()
+    foreach ($override in @($PricingRegistryOverride)) {
+        $literals += ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $override
+    }
+    if ($literals.Count -gt 0) {
+        $command += ' -PricingRegistryOverride @(' + ($literals -join ',') + ')'
+    }
+
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    return '-NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encoded
+}
+
+function Start-LocalMonitorProcess {
+    param(
+        [Parameter(Mandatory)]
+        [string] $FilePath,
+
+        [Parameter(Mandatory)]
+        [string] $WorkingDirectory,
+
+        [Parameter(Mandatory)]
+        [string[]] $ArgumentList
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $ArgumentList) {
+        [void] $startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+    return $process
+}
+
 function Test-LocalMonitorLoopbackUrl {
     param(
         [Parameter(Mandatory)]

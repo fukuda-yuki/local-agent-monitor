@@ -651,6 +651,138 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void StartupWrappersExposeBoundedPricingRegistryOverrideArrays()
+    {
+        var start = File.ReadAllText(ScriptPath("start.ps1"));
+        var install = File.ReadAllText(ScriptPath("install-startup-task.ps1"));
+
+        Assert.Contains("[string[]] $PricingRegistryOverride", start, StringComparison.Ordinal);
+        Assert.Contains("[string[]] $PricingRegistryOverride", install, StringComparison.Ordinal);
+        Assert.Contains("pricing_registry_override_count_invalid", start, StringComparison.Ordinal);
+        Assert.Contains("pricing_registry_override_count_invalid", install, StringComparison.Ordinal);
+        Assert.Contains("ProcessStartInfo", File.ReadAllText(ScriptPath("common.ps1")), StringComparison.Ordinal);
+        Assert.Contains("ArgumentList.Add", File.ReadAllText(ScriptPath("common.ps1")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartWrapperForwardsEachPricingOverrideAsAnOrderedHostFlagValuePair()
+    {
+        var start = File.ReadAllText(ScriptPath("start.ps1"));
+
+        Assert.Contains("$arguments += '--pricing-registry-override'", start, StringComparison.Ordinal);
+        Assert.Contains("$arguments += $override", start, StringComparison.Ordinal);
+        Assert.DoesNotContain("Start-Process", start, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartupTaskUsesUtf16EncodedPricingOverrideLiteralsWithoutReflectingLocators()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-override-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var capturePath = Path.Combine(root, "task-action.txt");
+            var locatorOne = @"C:\private registry\one; $(not-a-command).json";
+            var locatorTwo = @"C:\private registry\two's value.json";
+            File.Copy(ScriptPath("install-startup-task.ps1"), Path.Combine(scripts, "install-startup-task.ps1"));
+            File.WriteAllText(Path.Combine(scripts, "start.ps1"), "param([string[]] $PricingRegistryOverride)\nexit 0\n");
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = 'C:\safe\raw-store.db'
+                $script:TaskWasRegistered = $false
+                function Get-LocalMonitorDefaultInstallRoot { 'C:\safe\app' }
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) $true }
+                function Get-LocalMonitorTask {
+                    param([string] $TaskName)
+                    if ($script:TaskWasRegistered) { [pscustomobject]@{ State = 'Ready' } }
+                }
+                function Get-LocalMonitorRepoRoot { 'C:\safe\repo' }
+                function Get-LocalMonitorPowerShellPath { 'C:\safe\pwsh.exe' }
+                function New-ScheduledTaskAction {
+                    param([string] $Execute, [string] $Argument, [string] $WorkingDirectory)
+                    [System.IO.File]::WriteAllText('{{capturePath.Replace("'", "''", StringComparison.Ordinal)}}', $Argument)
+                    [pscustomobject]@{}
+                }
+                function New-ScheduledTaskTrigger { [pscustomobject]@{} }
+                function New-ScheduledTaskPrincipal { [pscustomobject]@{} }
+                function New-ScheduledTaskSettingsSet { [pscustomobject]@{} }
+                function Register-ScheduledTask { $script:TaskWasRegistered = $true; [pscustomobject]@{} }
+                """);
+
+            var installScript = Path.Combine(scripts, "install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-Command", $"& '{installScript}' -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.True(result.ExitCode == 0, $"{result.StandardOutputText}{result.StandardErrorText}");
+            Assert.DoesNotContain(locatorOne, result.StandardOutputText, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorTwo, result.StandardOutputText, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorOne, result.StandardErrorText, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorTwo, result.StandardErrorText, StringComparison.Ordinal);
+
+            var action = File.ReadAllText(capturePath);
+            Assert.DoesNotContain(locatorOne, action, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorTwo, action, StringComparison.Ordinal);
+            var encoded = action.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
+            var command = Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
+            Assert.Contains("-PricingRegistryOverride", command, StringComparison.Ordinal);
+            Assert.Contains("@('C:\\private registry\\one; $(not-a-command).json','C:\\private registry\\two''s value.json')", command, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StartScriptRejectsMoreThanEightPricingOverridesWithoutReflectingLocators()
+    {
+        var locators = Enumerable.Range(1, 9)
+            .Select(index => $@"C:\private registry\locator-{index}.json")
+            .ToArray();
+
+        var startScript = ScriptPath("start.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var literals = string.Join(",", locators.Select(locator => $"'{locator.Replace("'", "''", StringComparison.Ordinal)}'"));
+        var result = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", $"& '{startScript}' -PricingRegistryOverride @({literals})"],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("pricing_registry_override_count_invalid", result.StandardErrorText, StringComparison.Ordinal);
+        foreach (var locator in locators)
+        {
+            Assert.DoesNotContain(locator, result.StandardOutputText, StringComparison.Ordinal);
+            Assert.DoesNotContain(locator, result.StandardErrorText, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void StartupTaskDryRunReportsOnlyPricingOverridePresenceAndCount()
+    {
+        var locatorOne = @"C:\private registry\dry-run one; $(not-a-command).json";
+        var locatorTwo = @"C:\private registry\dry-run two's value.json";
+        var installScript = ScriptPath("install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var result = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", $"& '{installScript}' -DryRun -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("pricing registry overrides: present (count: 2)", result.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(locatorOne, result.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(locatorTwo, result.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(locatorOne, result.StandardErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain(locatorTwo, result.StandardErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ScriptsExposeRequiredParameters()
     {
         AssertScriptContains("start.ps1", "ValidateSet('DotnetRun', 'Published')");
@@ -1170,6 +1302,7 @@ public class LocalMonitorScriptTests
                 $script:DefaultDbPath = '{{database.Replace("'", "''", StringComparison.Ordinal)}}'
                 $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
                 $script:LiveProbeCount = 0
+                function Test-LocalMonitorPricingRegistryOverrideCount { param([string[]] $PricingRegistryOverride) return $true }
                 function Test-LocalMonitorLoopbackUrl { param([string] $Url) return $true }
                 function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
                 function Test-LocalMonitorHealth {
@@ -1190,15 +1323,11 @@ public class LocalMonitorScriptTests
                 function Test-LocalMonitorPortInUse { param([string] $Url) return $false }
                 function Get-LocalMonitorDefaultInstallRoot { return '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
                 function Get-LocalMonitorPublishedExePath { param([string] $InstallRoot) return '{{executable.Replace("'", "''", StringComparison.Ordinal)}}' }
-                function Start-Process {
+                function Start-LocalMonitorProcess {
                     param(
                         [string] $FilePath,
                         [object[]] $ArgumentList,
-                        [string] $WorkingDirectory,
-                        [string] $WindowStyle,
-                        [string] $RedirectStandardOutput,
-                        [string] $RedirectStandardError,
-                        [switch] $PassThru)
+                        [string] $WorkingDirectory)
                     return [pscustomobject]@{ Id = 4242 }
                 }
                 function Save-LocalMonitorState {
