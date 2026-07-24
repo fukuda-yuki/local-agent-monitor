@@ -24,6 +24,11 @@ $validatorPath = 'scripts/validation/issue-91/validate-matrix.ps1'
 $evidencePaths = @($handoffPath, $readmePath, $matrixPath, $checksumsPath, 'docs/sprints/issue-95-cost-analytics/live-validation.md')
 $manifestPaths = @($handoffPath, $readmePath, $matrixPath, 'docs/sprints/issue-95-cost-analytics/live-validation.md')
 $attestationArtifactPaths = @($manifestPaths + $checksumsPath)
+$gitObjectCache = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+$gitBatchProcess = $null
+$gitBatchInput = $null
+$gitBatchOutput = $null
+$gitBatchErrorTask = $null
 
 function Invoke-GitText([string[]] $Arguments) {
     $output = & git -C $repositoryRoot @Arguments 2>&1
@@ -32,8 +37,13 @@ function Invoke-GitText([string[]] $Arguments) {
 }
 
 function Assert-ExactCommit([string] $Sha, [string] $Name) {
-    $output = & git -C $repositoryRoot rev-parse --verify ($Sha + '^{commit}') 2>&1
-    if ($LASTEXITCODE -ne 0 -or ($output | Out-String).Trim() -ne $Sha) {
+    try {
+        $object = Get-GitBatchObject ($Sha + '^{commit}')
+    }
+    catch {
+        throw ('{0}_not_exact_commit' -f $Name)
+    }
+    if ($object.Type -cne 'commit' -or $object.ObjectId -cne $Sha) {
         throw ('{0}_not_exact_commit' -f $Name)
     }
 }
@@ -43,24 +53,102 @@ function Assert-Ancestor([string] $Ancestor, [string] $Descendant, [string] $Nam
     if ($LASTEXITCODE -ne 0) { throw ('{0}_not_candidate_ancestor' -f $Name) }
 }
 
-function Get-GitBlobBytes([string] $Commit, [string] $Path) {
-    # git show streams the exact committed blob instead of a working-tree file.
+function Start-GitBatch {
+    if ($null -ne $script:gitBatchProcess) { return }
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = 'git'
     $startInfo.WorkingDirectory = $repositoryRoot
+    $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
-    [void]$startInfo.ArgumentList.Add('show')
-    [void]$startInfo.ArgumentList.Add(($Commit + ':' + $Path))
-    $process = [Diagnostics.Process]::Start($startInfo)
-    if ($null -eq $process) { throw 'git_show_start_failed' }
-    $buffer = [IO.MemoryStream]::new()
-    $process.StandardOutput.BaseStream.CopyTo($buffer)
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    if ($process.ExitCode -ne 0) { throw ('git_show_failed={0}' -f $Path) }
-    return $buffer.ToArray()
+    [void]$startInfo.ArgumentList.Add('cat-file')
+    [void]$startInfo.ArgumentList.Add('--batch')
+    $script:gitBatchProcess = [Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $script:gitBatchProcess) { throw 'git_batch_start_failed' }
+    $script:gitBatchInput = $script:gitBatchProcess.StandardInput
+    $script:gitBatchOutput = $script:gitBatchProcess.StandardOutput.BaseStream
+    $script:gitBatchErrorTask = $script:gitBatchProcess.StandardError.ReadToEndAsync()
+}
+
+function Read-GitBatchLine {
+    $bytes = [Collections.Generic.List[byte]]::new()
+    while ($true) {
+        $value = $script:gitBatchOutput.ReadByte()
+        if ($value -lt 0) { throw 'git_batch_unexpected_eof' }
+        if ($value -eq 10) { break }
+        $bytes.Add([byte]$value)
+    }
+    return [Text.Encoding]::UTF8.GetString($bytes.ToArray())
+}
+
+function Read-GitBatchBytes([int] $Length) {
+    $bytes = [byte[]]::new($Length)
+    $offset = 0
+    while ($offset -lt $Length) {
+        $read = $script:gitBatchOutput.Read($bytes, $offset, $Length - $offset)
+        if ($read -le 0) { throw 'git_batch_unexpected_eof' }
+        $offset += $read
+    }
+    if ($script:gitBatchOutput.ReadByte() -ne 10) { throw 'git_batch_delimiter_invalid' }
+    return $bytes
+}
+
+function Get-GitBatchObject([string] $Spec) {
+    if ($gitObjectCache.ContainsKey($Spec)) { return $gitObjectCache[$Spec] }
+    Start-GitBatch
+    $script:gitBatchInput.WriteLine($Spec)
+    $script:gitBatchInput.Flush()
+    $header = Read-GitBatchLine
+    if ($header.EndsWith(' missing', [StringComparison]::Ordinal)) {
+        throw ('git_object_missing={0}' -f $Spec)
+    }
+    $match = [Regex]::Match($header, '^(?<id>[0-9a-f]{40}) (?<type>\S+) (?<size>\d+)$')
+    if (-not $match.Success) { throw 'git_batch_header_invalid' }
+    $size = [int64]::Parse($match.Groups['size'].Value, [Globalization.CultureInfo]::InvariantCulture)
+    if ($size -gt 16MB) { throw 'git_batch_object_too_large' }
+    $object = [pscustomobject]@{
+        ObjectId = $match.Groups['id'].Value
+        Type = $match.Groups['type'].Value
+        Bytes = Read-GitBatchBytes ([int]$size)
+    }
+    $gitObjectCache.Add($Spec, $object)
+    return $object
+}
+
+function Stop-GitBatch {
+    if ($null -eq $script:gitBatchProcess) { return }
+    try {
+        try { $script:gitBatchInput.Dispose() } catch {}
+        try {
+            if (-not $script:gitBatchProcess.WaitForExit(5000)) {
+                $script:gitBatchProcess.Kill($true)
+                $script:gitBatchProcess.WaitForExit()
+            }
+        }
+        catch {
+            try { $script:gitBatchProcess.Kill($true) } catch {}
+        }
+        try { $null = $script:gitBatchErrorTask.GetAwaiter().GetResult() } catch {}
+    }
+    finally {
+        try { $script:gitBatchProcess.Dispose() } catch {}
+        $script:gitBatchProcess = $null
+        $script:gitBatchInput = $null
+        $script:gitBatchOutput = $null
+        $script:gitBatchErrorTask = $null
+    }
+}
+
+function Get-GitBlobBytes([string] $Commit, [string] $Path) {
+    try {
+        $object = Get-GitBatchObject ($Commit + ':' + $Path)
+    }
+    catch {
+        throw ('git_show_failed={0}' -f $Path)
+    }
+    if ($object.Type -cne 'blob') { throw ('git_show_failed={0}' -f $Path) }
+    return $object.Bytes
 }
 
 function Read-GitJson([string] $Commit, [string] $Path) {
@@ -79,7 +167,7 @@ function Assert-RunningVerifierPinned {
 }
 
 function Assert-Tracked([string] $Commit, [string] $Path) {
-    $null = Invoke-GitText @('cat-file', '-e', ($Commit + ':' + $Path))
+    $null = Get-GitBlobBytes $Commit $Path
 }
 
 function Assert-OrdinalSet([string[]] $Actual, [string[]] $Expected, [string] $Name) {
@@ -365,13 +453,14 @@ function Assert-LiveValidationContract([string] $MatrixPrepSha) {
     }
 }
 
+try {
 Assert-ExactCommit $CandidateSha 'candidate'
 Assert-ExactCommit $EvidenceSha 'evidence'
 Assert-ExactCommit $AttestationSha 'attestation'
 Assert-RunningVerifierPinned
-if ((Invoke-GitText @('rev-parse', 'HEAD')) -ne $AttestationSha) { throw 'current_head_not_attestation' }
-if ((Invoke-GitText @('rev-parse', ($EvidenceSha + '^'))) -ne $CandidateSha) { throw 'evidence_parent_not_candidate' }
-if ((Invoke-GitText @('rev-parse', ($AttestationSha + '^'))) -ne $EvidenceSha) { throw 'attestation_parent_not_evidence' }
+if ((Get-GitBatchObject 'HEAD').ObjectId -ne $AttestationSha) { throw 'current_head_not_attestation' }
+if ((Get-GitBatchObject ($EvidenceSha + '^')).ObjectId -ne $CandidateSha) { throw 'evidence_parent_not_candidate' }
+if ((Get-GitBatchObject ($AttestationSha + '^')).ObjectId -ne $EvidenceSha) { throw 'attestation_parent_not_evidence' }
 Assert-ExactPathSet ($CandidateSha + '..' + $EvidenceSha) $evidencePaths 'candidate_to_evidence'
 Assert-ExactPathSet ($EvidenceSha + '..' + $AttestationSha) @($attestationPath) 'evidence_to_attestation'
 Assert-CleanCommittedInputs
@@ -428,3 +517,7 @@ foreach ($artifact in $attested) {
 
 Invoke-PinnedMatrixValidator
 Write-Output 'evidence_chain=PASS'
+}
+finally {
+    Stop-GitBatch
+}

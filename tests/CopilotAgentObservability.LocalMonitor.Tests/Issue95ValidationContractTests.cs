@@ -236,7 +236,10 @@ public sealed class Issue95ValidationContractTests
         Assert.Contains("EvidenceSha", script, StringComparison.Ordinal);
         Assert.Contains("AttestationSha", script, StringComparison.Ordinal);
         Assert.Contains("validate-matrix.ps1", script, StringComparison.Ordinal);
-        Assert.Contains("git show", script, StringComparison.Ordinal);
+        Assert.Contains("Get-GitBatchObject", script, StringComparison.Ordinal);
+        Assert.Contains("ArgumentList.Add('--batch')", script, StringComparison.Ordinal);
+        Assert.Contains("$gitObjectCache", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("ArgumentList.Add('show')", script, StringComparison.Ordinal);
         Assert.Contains("working_tree_substitution_detected", script, StringComparison.Ordinal);
         Assert.Contains("matrix_prep_not_exact_commit", script, StringComparison.Ordinal);
         Assert.Contains("not_candidate_ancestor", script, StringComparison.Ordinal);
@@ -340,7 +343,16 @@ public sealed class Issue95ValidationContractTests
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        await process.WaitForExitAsync(timeout.Token);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            throw;
+        }
         Assert.True(process.ExitCode == 0, $"{await stdoutTask}{await stderrTask}");
         Assert.Equal(
             "evidence_chain_self_test=PASS cases=31 fixture_repositories=1",
