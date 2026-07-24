@@ -384,7 +384,7 @@ internal static class AlertValidationV2
             : scope.Kind == AlertCostScopeKindV2.RollingPeriod && days is >= 2 and <= 366 && days == Math.Truncate(days);
     }
 
-    private static bool ValidMember(AlertCostMemberV2 member)
+    internal static bool ValidMember(AlertCostMemberV2 member)
     {
         if (!SessionId(member.SessionId)
             || !Token(member.SourceSurface)
