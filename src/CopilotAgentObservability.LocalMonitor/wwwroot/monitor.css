@@ -12,6 +12,200 @@
     font-display: swap;
     src: url(/vendor/fonts/noto-sans-jp-japanese-400-normal.woff2) format('woff2');
 }
+
+/* Issue #95: contextual estimated-cost surface. */
+.cost-page {
+  display: grid;
+  gap: 16px;
+}
+
+.cost-head {
+  align-items: flex-start;
+}
+
+.cost-filter-panel,
+.cost-config {
+  display: grid;
+  gap: 14px;
+}
+
+.cost-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.cost-filter-grid label,
+.cost-budget-fieldset > label {
+  display: grid;
+  gap: 6px;
+  color: var(--monitor-ink-subtle);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cost-filter-grid input,
+.cost-filter-grid select,
+.cost-budget-fieldset input {
+  min-height: 36px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 6px;
+  background: var(--monitor-surface-input);
+  color: var(--monitor-ink);
+  padding: 6px 9px;
+  font: inherit;
+}
+
+.cost-filter-grid input:focus-visible,
+.cost-filter-grid select:focus-visible,
+.cost-page button:focus-visible,
+.cost-page a:focus-visible,
+#cost-context-heading:focus-visible {
+  outline: 2px solid var(--monitor-accent);
+  outline-offset: 2px;
+}
+
+.cost-summary-grid,
+.cost-context-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.cost-coverage-value {
+  margin: 8px 0 0;
+  color: var(--monitor-accent);
+  font-family: var(--monitor-font-mono);
+  font-size: clamp(24px, 4vw, 38px);
+  font-weight: 700;
+}
+
+.cost-definition-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.cost-definition-list > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1.3fr);
+  gap: 10px;
+  padding-block: 5px;
+  border-bottom: 1px solid var(--monitor-border-subtle);
+}
+
+.cost-definition-list dt {
+  color: var(--monitor-ink-subtle);
+}
+
+.cost-definition-list dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cost-total-row,
+.cost-trend-row,
+.cost-catalog-item,
+.cost-history-item {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--monitor-border-subtle);
+  border-radius: 7px;
+  background: var(--monitor-surface-panel);
+}
+
+.cost-total-row + .cost-total-row,
+.cost-trend-row + .cost-trend-row,
+.cost-catalog-item + .cost-catalog-item,
+.cost-history-item + .cost-history-item {
+  margin-top: 8px;
+}
+
+.cost-provisional {
+  color: var(--monitor-warning);
+}
+
+.cost-trend-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.cost-incomplete {
+  border-color: var(--monitor-warning);
+  color: var(--monitor-warning);
+}
+
+.cost-context,
+.cost-catalog-list {
+  display: grid;
+  gap: 12px;
+}
+
+.cost-context-columns h3,
+#cost-recalculation h3 {
+  margin: 4px 0 10px;
+  font-size: 14px;
+}
+
+.cost-component-list {
+  display: grid;
+  gap: 5px;
+  padding-left: 20px;
+}
+
+.cost-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.cost-page button:disabled,
+.cost-page input:disabled,
+.cost-page select:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.cost-budget-fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 7px;
+}
+
+.cost-budget-fieldset legend {
+  padding-inline: 6px;
+  color: var(--monitor-ink-subtle);
+  font-weight: 600;
+}
+
+#cost-group-rows td {
+  white-space: pre-line;
+}
+
+@media (max-width: 900px) {
+  .cost-summary-grid,
+  .cost-context-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cost-page *,
+  .cost-page *::before,
+  .cost-page *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
 @font-face {
     font-family: 'Noto Sans JP';
     font-style: normal;

@@ -357,6 +357,8 @@
     if (sessionId) {
       const alertLink = document.getElementById("doctor-session-alert-link");
       if (alertLink) alertLink.href = `/alerts?session_id=${encodeURIComponent(sessionId)}`;
+      const costLink = document.getElementById("doctor-session-cost-link");
+      if (costLink) costLink.href = `/costs?session_id=${encodeURIComponent(sessionId)}`;
       try {
         const payload = await requestDoctor(`/api/doctor/ui/v1/sessions/${encodeURIComponent(sessionId)}`);
         const session = payload?.session;
