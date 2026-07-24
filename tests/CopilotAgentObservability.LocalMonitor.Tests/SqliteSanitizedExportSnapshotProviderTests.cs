@@ -2,7 +2,10 @@ using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Pricing;
 using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.InstructionFindings;
@@ -251,12 +254,15 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     }
 
     [Fact]
-    public void Capture_V2OnlyReadPlanNeverSelectsV2PayloadsOrPricingOwnedTables()
+    public void Capture_MixedV2AndPricingStoreExportsExactV1WithoutPricingReads()
     {
         using var fixture = new Fixture();
         fixture.InitializeAlertEngineV2();
+        var receiptV1 = SanitizedExportAlertFixture.Bytes();
+        fixture.SeedAlert(receiptV1);
         fixture.SeedOpaqueV2Alert("semantically-invalid-v2");
         fixture.PoisonV2PayloadsBeyondV1CarrierLimit();
+        fixture.SeedExactPricingComponent();
         var statements = new List<string>();
         var reads = new List<(string Table, string Column)>();
 
@@ -267,22 +273,29 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             .Capture(new(ReceiptTypes: ["alert_receipt"]));
 
         Assert.True(result.Success, result.ErrorCode);
-        Assert.Empty(result.Snapshot!.Records);
-        Assert.Equal("missing", result.Snapshot.Capabilities.AlertReceipts);
+        var record = Assert.Single(result.Snapshot!.Records);
+        Assert.Equal(receiptV1, record.CanonicalBytes);
+        Assert.Equal("alert_receipt", record.RecordType);
+        Assert.Equal("available", result.Snapshot.Capabilities.AlertReceipts);
         Assert.Equal("2", result.Snapshot.ProcessingVersions!["alert_engine_schema"]);
         Assert.Contains(reads, read => read == ("alert_receipts", "canonical_json"));
         Assert.DoesNotContain(reads, read =>
             read is ("alert_evaluations", "canonical_json") or ("alert_suppressions", "canonical_json")
             || read.Table.StartsWith("pricing_", StringComparison.Ordinal));
         Assert.DoesNotContain(statements, statement => statement.Contains("pricing_", StringComparison.Ordinal));
-        Assert.All(
-            statements.Where(statement => statement.Contains("canonical_json", StringComparison.Ordinal)),
-            statement => Assert.Contains(
+        var payloadStatements = statements
+            .Where(statement => statement.Contains("canonical_json", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Contains(
+            payloadStatements,
+            statement => statement.Contains(
                 "FROM alert_receipts WHERE schema_version='alert.receipt.v1'",
-                statement,
                 StringComparison.Ordinal));
-
-        // Pending dependency: add the exact 13-table PricingSchemaV1 fixture after the accepted pricing branch is integrated.
+        Assert.Contains(
+            payloadStatements,
+            statement => statement.Contains(
+                "SELECT schema_version,evaluation_id,canonical_json FROM alert_receipts WHERE alert_id=",
+                StringComparison.Ordinal));
     }
 
     [Theory]
@@ -445,6 +458,39 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
         {
             var connectionString = new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString();
             Assert.Equal(AlertEngineStoreStatusV2.Success, new SqliteAlertEngineStore(connectionString).InitializeV2().Status);
+        }
+
+        internal void SeedExactPricingComponent()
+        {
+            using (var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False"))
+            {
+                connection.Open();
+                using var transaction = connection.BeginTransaction(deferred: false);
+                RuntimeBackupSchemaV1.Ensure(connection, transaction);
+                transaction.Commit();
+            }
+
+            var store = new SqlitePricingStore(DatabasePath);
+            store.CreateSchema();
+            var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+            Assert.Equal(
+                PricingStoreStatus.Success,
+                store.PutCatalogSnapshot(PricingCanonicalJson.SerializeCatalogSnapshot(catalog)).Status);
+
+            using var read = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+            read.Open();
+            Assert.True(PricingSchemaV1.IsValid(read, null));
+            Assert.True(PricingSchemaV1.ValidateRows(read, null));
+            Assert.Equal(13, PricingSchemaV1.OwnedObjects.Count(item => item.Type == "table"));
+            var expected = PricingSchemaV1.OwnedObjects
+                .Select(item => (item.Type, item.Name, item.TableName))
+                .ToArray();
+            using var command = read.CreateCommand();
+            command.CommandText = "SELECT type,name,tbl_name FROM sqlite_schema WHERE name GLOB 'pricing_*' ORDER BY type,name;";
+            using var reader = command.ExecuteReader();
+            var actual = new List<(string Type, string Name, string TableName)>();
+            while (reader.Read()) actual.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            Assert.Equal(expected, actual);
         }
 
         internal void SeedValidV2Alert()
