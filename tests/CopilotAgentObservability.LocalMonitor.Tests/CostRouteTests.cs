@@ -1,14 +1,33 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(CostRouteSerialCollection.Name)]
 public sealed class CostRouteTests
 {
+    public static TheoryData<
+        string,
+        PricingStoreStatus,
+        HttpStatusCode,
+        string> RecalculationAdmissionFailures => new()
+    {
+        { "idempotency", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_idempotency_conflict" },
+        { "stale-head", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_stale_head" },
+        { "catalog-changed", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_catalog_changed" },
+        { "overlap", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_recalculation_in_progress" },
+        { "missing", PricingStoreStatus.Conflict, HttpStatusCode.NotFound, "cost_session_not_found" },
+        { "ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "budget-ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "capacity", PricingStoreStatus.CapacityReached, HttpStatusCode.RequestEntityTooLarge, "cost_request_too_large" },
+    };
+
     [Fact]
     public async Task ConfigurationAndCatalogReadsExposeOnlySealedNoStoreProjections()
     {
@@ -226,6 +245,19 @@ public sealed class CostRouteTests
         Assert.Equal(JsonValueKind.Null, startedJson.RootElement
             .GetProperty("targets")[0].GetProperty("result").ValueKind);
 
+        using var replayRequest = Post(
+            "/api/costs/v1/recalculations",
+            Encoding.UTF8.GetString(CostRecalculationRequestCanonicalJsonV1.Serialize(request)),
+            csrf: true);
+        using var replayed = await host.Client.SendAsync(replayRequest);
+        Assert.Equal(HttpStatusCode.Accepted, replayed.StatusCode);
+        Assert.Equal(started.Headers.Location, replayed.Headers.Location);
+        using var replayedJson = JsonDocument.Parse(
+            await replayed.Content.ReadAsStreamAsync());
+        Assert.Equal(
+            startedJson.RootElement.GetProperty("run_id").GetString(),
+            replayedJson.RootElement.GetProperty("run_id").GetString());
+
         JsonDocument? completed = null;
         for (var attempt = 0; attempt < 100; attempt++)
         {
@@ -248,6 +280,55 @@ public sealed class CostRouteTests
             Assert.False(target.GetProperty("result").TryGetProperty("status", out _));
             Assert.False(target.GetProperty("result").TryGetProperty("estimate_id", out _));
         }
+    }
+
+    [Theory]
+    [MemberData(nameof(RecalculationAdmissionFailures))]
+    public async Task RecalculationAdmissionFailuresPreserveFixedStoreApplicationAndRouteOutcomes(
+        string scenarioName,
+        PricingStoreStatus expectedStoreStatus,
+        HttpStatusCode expectedStatus,
+        string expectedCode)
+    {
+        await using var scenario = await CreateRecalculationFailureScenario(scenarioName);
+        var requestBytes = CostRecalculationRequestCanonicalJsonV1.Serialize(scenario.Request);
+        using var mutation = new RecalculationMutationProbe(scenario.Temp.DatabasePath);
+
+        var coordinator = new SqliteCostRecalculationCoordinatorV1(
+            scenario.Temp.DatabasePath,
+            timeProvider: scenario.Temp.TimeProvider);
+        var storeResult = coordinator.Start(
+            Guid.CreateVersion7().ToString("D"),
+            scenario.Request,
+            scenario.Provider.CanonicalCatalogBytes,
+            scenario.Temp.TimeProvider.GetUtcNow());
+
+        Assert.Equal(expectedStoreStatus, storeResult.Status);
+        Assert.Equal(expectedCode, storeResult.ErrorCode);
+        mutation.AssertUnchanged();
+
+        using var application = new CostHttpApplication(
+            scenario.Temp.DatabasePath,
+            new SqlitePricingStore(
+                scenario.Temp.DatabasePath,
+                scenario.Temp.TimeProvider),
+            scenario.Provider,
+            scenario.Temp.TimeProvider,
+            alertParticipant: null);
+        var applicationResult = application.StartRecalculation(requestBytes);
+
+        Assert.Equal((int)expectedStatus, applicationResult.Status);
+        Assert.Equal(expectedCode, applicationResult.Error);
+        mutation.AssertUnchanged();
+
+        using var request = Post(
+            "/api/costs/v1/recalculations",
+            Encoding.UTF8.GetString(requestBytes),
+            csrf: true);
+        using var response = await scenario.Host.Client.SendAsync(request);
+
+        await AssertError(response, expectedStatus, expectedCode);
+        mutation.AssertUnchanged();
     }
 
     [Fact]
@@ -300,8 +381,10 @@ public sealed class CostRouteTests
             StringComparison.Ordinal);
     }
 
-    private static MonitorHostTestOptions Options() => new()
+    private static MonitorHostTestOptions Options(
+        IPricingCatalogProvider? pricingCatalogProvider = null) => new()
     {
+        PricingCatalogProvider = pricingCatalogProvider,
         StartWriter = false,
         StartProjectionWorker = false,
         StartSessionWriter = false,
@@ -326,11 +409,15 @@ public sealed class CostRouteTests
         string code)
     {
         Assert.Equal(status, response.StatusCode);
+        Assert.Equal(
+            "application/json",
+            response.Content.Headers.ContentType?.ToString());
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
         Assert.Equal(
-            $$"""{"schema_version":"cost.error.v1","error":"{{code}}"}""",
-            await response.Content.ReadAsStringAsync());
+            Encoding.UTF8.GetBytes(
+                $$"""{"schema_version":"cost.error.v1","error":"{{code}}"}"""),
+            await response.Content.ReadAsByteArrayAsync());
     }
 
     private static string CurrentCatalogSha()
@@ -339,7 +426,10 @@ public sealed class CostRouteTests
         return provider.CatalogSha256;
     }
 
-    private static void InsertSession(string databasePath, string sessionId)
+    private static void InsertSession(
+        string databasePath,
+        string sessionId,
+        string status = "completed")
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -353,12 +443,13 @@ public sealed class CostRouteTests
             INSERT INTO sessions(
                 session_id,status,completeness,repository,workspace,last_seen_at,
                 raw_retention_state,created_at,updated_at)
-            VALUES($id,'completed','full',NULL,NULL,
+            VALUES($id,$status,'full',NULL,NULL,
                 '2026-07-01T01:00:00.0000000+00:00','not_captured',
                 '2026-07-01T01:00:00.0000000+00:00',
                 '2026-07-01T01:00:00.0000000+00:00');
             """;
         command.Parameters.AddWithValue("$id", sessionId);
+        command.Parameters.AddWithValue("$status", status);
         command.ExecuteNonQuery();
     }
 
@@ -420,5 +511,421 @@ public sealed class CostRouteTests
             json.RootElement.GetProperty("catalog_sha256").GetString()!);
     }
 
+    private static async Task<RecalculationFailureScenario>
+        CreateRecalculationFailureScenario(string scenarioName)
+    {
+        var temp = NewTemp();
+        RunningMonitorHost? host = null;
+        try
+        {
+            var provider = DefaultPricingCatalogProvider.Create([]);
+            host = await MonitorTestHost.StartAsync(
+                temp,
+                testOptions: Options(provider));
+            var firstSessionId = Guid.CreateVersion7().ToString("D");
+            var secondSessionId = Guid.CreateVersion7().ToString("D");
+            var ineligibleSessionId = Guid.CreateVersion7().ToString("D");
+            var budgetIneligibleSessionId = Guid.CreateVersion7().ToString("D");
+            var missingSessionId = Guid.CreateVersion7().ToString("D");
+            InsertResolvedSession(temp.DatabasePath, firstSessionId);
+            InsertResolvedSession(temp.DatabasePath, secondSessionId);
+            InsertSession(temp.DatabasePath, ineligibleSessionId, "active");
+            InsertSession(temp.DatabasePath, budgetIneligibleSessionId);
+            var source = new CostSourceEntryV1(
+                "github-copilot-vscode",
+                "1.2.3",
+                "source-capability.v1",
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.PlanIncluded,
+                PricingRoutes.CodeCompletion);
+            var configuration = await CommitConfiguration(host.Client, [source]);
+            var requestProvider = (IPricingCatalogProvider)provider;
+            CostRecalculationRequestV1 request;
+
+            switch (scenarioName)
+            {
+                case "idempotency":
+                {
+                    var key = "status-mapping-idempotency";
+                    var initial = RecalculationRequest(
+                        configuration,
+                        [firstSessionId],
+                        key);
+                    StartSeedRun(temp, provider, initial);
+                    await CommitConfiguration(host.Client, [source]);
+                    request = RecalculationRequest(
+                        configuration,
+                        [firstSessionId, missingSessionId],
+                        key);
+                    requestProvider = ChangedCatalogProvider();
+                    break;
+                }
+                case "stale-head":
+                    request = RecalculationRequest(
+                        configuration,
+                        [missingSessionId],
+                        "status-mapping-stale-head");
+                    await CommitConfiguration(host.Client, [source]);
+                    requestProvider = ChangedCatalogProvider();
+                    break;
+                case "catalog-changed":
+                    request = RecalculationRequest(
+                        configuration,
+                        [firstSessionId, missingSessionId],
+                        "status-mapping-catalog");
+                    requestProvider = ChangedCatalogProvider();
+                    break;
+                case "overlap":
+                    StartSeedRun(
+                        temp,
+                        provider,
+                        RecalculationRequest(
+                            configuration,
+                            [firstSessionId],
+                            "status-mapping-overlap-seed"));
+                    request = RecalculationRequest(
+                        configuration,
+                        [firstSessionId, missingSessionId],
+                        "status-mapping-overlap");
+                    break;
+                case "missing":
+                    request = RecalculationRequest(
+                        configuration,
+                        [ineligibleSessionId, missingSessionId],
+                        "status-mapping-missing");
+                    break;
+                case "ineligible":
+                    request = RecalculationRequest(
+                        configuration,
+                        [ineligibleSessionId],
+                        "status-mapping-ineligible");
+                    break;
+                case "budget-ineligible":
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [budgetIneligibleSessionId],
+                        [
+                            new(
+                                "session",
+                                budgetIneligibleSessionId,
+                                null,
+                                null,
+                                null),
+                        ],
+                        "status-mapping-budget-ineligible");
+                    break;
+                case "capacity":
+                    InsertResolvedSessions(temp.DatabasePath, 1_999);
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [firstSessionId],
+                        [
+                            new("utc_day", null, "2026-07-01", null, null),
+                            new(
+                                "rolling_period",
+                                null,
+                                null,
+                                new DateTimeOffset(
+                                    2026,
+                                    7,
+                                    2,
+                                    0,
+                                    0,
+                                    0,
+                                    TimeSpan.Zero),
+                                2),
+                        ],
+                        "status-mapping-capacity");
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(scenarioName),
+                        scenarioName,
+                        "Recalculation failure scenario is unknown.");
+            }
+
+            if (!ReferenceEquals(requestProvider, provider))
+            {
+                await host.DisposeAsync();
+                host = await MonitorTestHost.StartAsync(
+                    temp,
+                    testOptions: Options(requestProvider));
+            }
+
+            if (scenarioName == "catalog-changed")
+            {
+                StartSeedRun(
+                    temp,
+                    provider,
+                    RecalculationRequest(
+                        configuration,
+                        [firstSessionId],
+                        "status-mapping-catalog-post-recovery-seed"));
+                AssertActiveRecalculationOverlap(temp.DatabasePath, firstSessionId);
+            }
+
+            return new(temp, host, requestProvider, request);
+        }
+        catch
+        {
+            if (host is not null) await host.DisposeAsync();
+            temp.Dispose();
+            throw;
+        }
+    }
+
+    private static CostRecalculationRequestV1 RecalculationRequest(
+        (string ConfigurationId, long HeadRevision, string CatalogSha256) configuration,
+        IReadOnlyList<string> sessionIds,
+        string idempotencyKey) =>
+        CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            configuration.HeadRevision,
+            configuration.CatalogSha256,
+            sessionIds,
+            [],
+            idempotencyKey);
+
+    private static void StartSeedRun(
+        MonitorTempDirectory temp,
+        IPricingCatalogProvider provider,
+        CostRecalculationRequestV1 request)
+    {
+        var result = new SqliteCostRecalculationCoordinatorV1(
+            temp.DatabasePath,
+            timeProvider: temp.TimeProvider).Start(
+                Guid.CreateVersion7().ToString("D"),
+                request,
+                provider.CanonicalCatalogBytes,
+                temp.TimeProvider.GetUtcNow());
+        Assert.Equal(PricingStoreStatus.Success, result.Status);
+        Assert.Null(result.ErrorCode);
+    }
+
+    private static void AssertActiveRecalculationOverlap(
+        string databasePath,
+        string sessionId)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*)
+            FROM pricing_recalculation_targets t
+            WHERE t.session_id=$session
+              AND NOT EXISTS(
+                SELECT 1
+                FROM pricing_recalculation_events e
+                WHERE e.run_id=t.run_id
+                  AND e.event_kind IN ('succeeded','failed'));
+            """;
+        command.Parameters.AddWithValue("$session", sessionId);
+        Assert.Equal(1L, Convert.ToInt64(
+            command.ExecuteScalar(),
+            System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void InsertResolvedSessions(string databasePath, int count)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO sessions(
+                session_id,status,completeness,repository,workspace,last_seen_at,
+                raw_retention_state,created_at,updated_at)
+            SELECT
+                printf('00000000-0000-7000-8000-%012d', value),
+                'completed','full',NULL,NULL,
+                '2026-07-01T01:00:00.0000000+00:00','not_captured',
+                '2026-07-01T01:00:00.0000000+00:00',
+                '2026-07-01T01:00:00.0000000+00:00'
+            FROM ordinal;
+
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO session_runs(run_id,session_id,source_surface,status)
+            SELECT
+                printf('status-mapping-capacity-run-%04d', value),
+                printf('00000000-0000-7000-8000-%012d', value),
+                'vscode',
+                'completed'
+            FROM ordinal;
+
+            WITH RECURSIVE ordinal(value) AS (
+                VALUES(1)
+                UNION ALL
+                SELECT value + 1 FROM ordinal WHERE value < $count
+            )
+            INSERT INTO session_events(
+                event_id,session_id,run_id,source_surface,source_adapter,
+                source_event_id,type,occurred_at,content_state,
+                source_application_version)
+            SELECT
+                printf('status-mapping-capacity-event-%04d', value),
+                printf('00000000-0000-7000-8000-%012d', value),
+                printf('status-mapping-capacity-run-%04d', value),
+                'vscode',
+                'synthetic',
+                printf('status-mapping-capacity-source-%04d', value),
+                'turn',
+                '2026-07-01T01:00:00.0000000+00:00',
+                'not_captured',
+                '1.2.3'
+            FROM ordinal;
+            """;
+        command.Parameters.AddWithValue("$count", count);
+        command.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    private static IPricingCatalogProvider ChangedCatalogProvider()
+    {
+        var bundled = BundledPricingRegistry.Load();
+        var source = bundled.Entries[0];
+        var localOverride = bundled with
+        {
+            RegistryVersion = "status-mapping-override-v1",
+            SourceKind = PricingRegistrySourceKinds.LocalOverride,
+            SourceId = "status-mapping-override",
+            SourceLabel = "status mapping reviewed source",
+            Entries =
+            [
+                source with
+                {
+                    EntryId = "status-mapping-override-entry",
+                    Revision = 1,
+                    SupersedesEntryKey = null,
+                    CanonicalModelId = "status-mapping-model",
+                    Aliases = [],
+                },
+            ],
+        };
+        return new FixedCatalogProvider(PricingCatalog.Create(bundled, [localOverride]));
+    }
+
+    private sealed class FixedCatalogProvider(PricingCatalog catalog)
+        : IPricingCatalogProvider
+    {
+        private readonly byte[] canonicalBytes =
+            PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+
+        public PricingCatalog Catalog { get; } = catalog;
+        public ReadOnlyMemory<byte> CanonicalCatalogBytes => canonicalBytes.ToArray();
+        public string CatalogSha256 => Catalog.CatalogSha256;
+    }
+
+    private sealed class RecalculationFailureScenario(
+        MonitorTempDirectory temp,
+        RunningMonitorHost host,
+        IPricingCatalogProvider provider,
+        CostRecalculationRequestV1 request) : IAsyncDisposable
+    {
+        internal MonitorTempDirectory Temp { get; } = temp;
+        internal RunningMonitorHost Host { get; } = host;
+        internal IPricingCatalogProvider Provider { get; } = provider;
+        internal CostRecalculationRequestV1 Request { get; } = request;
+
+        public async ValueTask DisposeAsync()
+        {
+            await Host.DisposeAsync();
+            Temp.Dispose();
+        }
+    }
+
+    private sealed class RecalculationMutationProbe : IDisposable
+    {
+        private readonly SqliteConnection connection;
+        private readonly long dataVersion;
+        private readonly string recalculationState;
+
+        internal RecalculationMutationProbe(string databasePath)
+        {
+            connection = new(new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Pooling = false,
+            }.ToString());
+            connection.Open();
+            dataVersion = Scalar<long>("PRAGMA data_version;");
+            recalculationState = Scalar<string>(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM pricing_recalculation_runs) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_recalculation_targets) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_recalculation_events) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_recalculation_target_results) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_session_attempts) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_recalculation_budget_results) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_estimates) || ':' ||
+                    (SELECT COUNT(*) FROM pricing_estimate_heads);
+                """);
+        }
+
+        internal void AssertUnchanged()
+        {
+            Assert.Equal(dataVersion, Scalar<long>("PRAGMA data_version;"));
+            Assert.Equal(
+                recalculationState,
+                Scalar<string>(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) FROM pricing_recalculation_runs) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_recalculation_targets) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_recalculation_events) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_recalculation_target_results) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_session_attempts) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_recalculation_budget_results) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_estimates) || ':' ||
+                        (SELECT COUNT(*) FROM pricing_estimate_heads);
+                    """));
+        }
+
+        public void Dispose() => connection.Dispose();
+
+        private T Scalar<T>(string sql)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            var value = command.ExecuteScalar()!;
+            return value is T typed
+                ? typed
+                : (T)Convert.ChangeType(
+                    value,
+                    typeof(T),
+                    System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
     private static MonitorTempDirectory NewTemp() => new();
+}
+
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class CostRouteSerialCollection
+{
+    public const string Name = "Cost route status mapping";
 }

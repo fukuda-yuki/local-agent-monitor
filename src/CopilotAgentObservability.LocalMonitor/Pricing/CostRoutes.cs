@@ -724,7 +724,8 @@ internal sealed class CostHttpApplication : BackgroundService
     private static CostHttpResult Error(string? code) =>
         code switch
         {
-            "cost_configuration_not_found" => new(404, Error: code),
+            "cost_configuration_not_found" or "cost_session_not_found" =>
+                new(404, Error: code),
             "cost_preview_capacity_reached" or "cost_stale_preview"
                 or "cost_stale_head" or "cost_catalog_changed"
                 or "cost_selection_changed" or "cost_idempotency_conflict"

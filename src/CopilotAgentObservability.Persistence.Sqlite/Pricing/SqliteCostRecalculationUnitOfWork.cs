@@ -806,7 +806,10 @@ public sealed partial class SqlitePricingStore
                     transaction.Rollback();
                     return equivalent
                         ? new(PricingStoreStatus.Success, replayRunId)
-                        : new(PricingStoreStatus.Conflict, null);
+                        : new(
+                            PricingStoreStatus.Conflict,
+                            null,
+                            "cost_idempotency_conflict");
                 }
             }
 
@@ -827,11 +830,17 @@ public sealed partial class SqlitePricingStore
                 if (!reader.Read()
                     || reader.GetInt64(0) != request.ExpectedHeadRevision
                     || reader.GetString(1) != request.ConfigurationId)
-                    return Rollback<string>(transaction, PricingStoreStatus.Conflict);
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_stale_head");
                 if (reader.GetString(2) != request.CatalogSha256
                     || providerCatalog.CatalogSha256 != request.CatalogSha256
                     || !((byte[])reader[3]).AsSpan().SequenceEqual(providerBytes))
-                    return Rollback<string>(transaction, PricingStoreStatus.Conflict);
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_catalog_changed");
                 var consumedConfiguration =
                     CostConfigurationConsumerV1.Consume((byte[])reader[4]);
                 if (consumedConfiguration.Status != CostConsumerStatus.Success
@@ -853,31 +862,46 @@ public sealed partial class SqlitePricingStore
                 ("$sessions", JsonSerializer.Serialize(request.SessionIds))))
             {
                 if (Convert.ToInt64(overlap.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                    return Rollback<string>(transaction, PricingStoreStatus.Conflict);
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_recalculation_in_progress");
             }
 
-            var targets = new List<PricingRecalculationTargetCapture>(request.SessionIds.Count);
+            var sessions = new Dictionary<
+                string,
+                (string Status, string Effective, string Updated)>(
+                StringComparer.Ordinal);
             foreach (var sessionId in request.SessionIds)
             {
-                string status;
-                string effective;
-                string updated;
-                using (var session = Command(
+                using var session = Command(
                     connection,
                     transaction,
                     """
                     SELECT status,last_seen_at,updated_at
                     FROM sessions WHERE session_id=$session;
                     """,
-                    ("$session", sessionId)))
-                using (var reader = session.ExecuteReader())
-                {
-                    if (!reader.Read() || reader.GetString(0) is not ("completed" or "failed"))
-                        return Rollback<string>(transaction, PricingStoreStatus.Conflict);
-                    status = reader.GetString(0);
-                    effective = reader.GetString(1);
-                    updated = reader.GetString(2);
-                }
+                    ("$session", sessionId));
+                using var reader = session.ExecuteReader();
+                if (!reader.Read())
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_session_not_found");
+                sessions.Add(
+                    sessionId,
+                    (reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+
+            var targets = new List<PricingRecalculationTargetCapture>(request.SessionIds.Count);
+            foreach (var sessionId in request.SessionIds)
+            {
+                var session = sessions[sessionId];
+                if (session.Status is not ("completed" or "failed"))
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_session_not_eligible");
 
                 var resolved = SqliteCostSessionSourcePartitionResolverV1.Resolve(
                     connection,
@@ -918,9 +942,9 @@ public sealed partial class SqlitePricingStore
 
                 targets.Add(new(
                     sessionId,
-                    status,
-                    ParseTimestamp(effective),
-                    ParseTimestamp(updated),
+                    session.Status,
+                    ParseTimestamp(session.Effective),
+                    ParseTimestamp(session.Updated),
                     Wire(resolved.State),
                     resolved.ObservationCount,
                     resolved.Digest,
@@ -929,6 +953,19 @@ public sealed partial class SqlitePricingStore
                     baseHead,
                     baseEstimate,
                     baseAttempt));
+            }
+
+            foreach (var scope in request.BudgetScopes.Where(item => item.ScopeKind == "session"))
+            {
+                var target = targets.Single(item => item.SessionId == scope.SessionId);
+                if (target.SourcePartitionState != "resolved"
+                    || !configuration.SourceEntries.Any(entry =>
+                        entry.SourceSurface == target.SourceSurface
+                        && entry.ApplicationVersion == target.SourceApplicationVersion))
+                    return Rollback<string>(
+                        transaction,
+                        PricingStoreStatus.Conflict,
+                        "cost_session_not_eligible");
             }
 
             var admission = ValidateBudgetAdmission(
@@ -945,17 +982,10 @@ public sealed partial class SqlitePricingStore
                     "cost_request_too_large");
             }
             if (admission == BudgetAdmissionStatus.SessionIneligible)
-                return Rollback<string>(transaction, PricingStoreStatus.Conflict);
-
-            foreach (var scope in request.BudgetScopes.Where(item => item.ScopeKind == "session"))
-            {
-                var target = targets.Single(item => item.SessionId == scope.SessionId);
-                if (target.SourcePartitionState != "resolved"
-                    || !configuration.SourceEntries.Any(entry =>
-                        entry.SourceSurface == target.SourceSurface
-                        && entry.ApplicationVersion == target.SourceApplicationVersion))
-                    return Rollback<string>(transaction, PricingStoreStatus.Conflict);
-            }
+                return Rollback<string>(
+                    transaction,
+                    PricingStoreStatus.Conflict,
+                    "cost_session_not_eligible");
 
             using (var root = Command(
                 connection,
