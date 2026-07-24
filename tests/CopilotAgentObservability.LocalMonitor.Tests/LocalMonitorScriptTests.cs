@@ -660,8 +660,10 @@ public class LocalMonitorScriptTests
         Assert.Contains("[string[]] $PricingRegistryOverride", install, StringComparison.Ordinal);
         Assert.Contains("pricing_registry_override_count_invalid", start, StringComparison.Ordinal);
         Assert.Contains("pricing_registry_override_count_invalid", install, StringComparison.Ordinal);
-        Assert.Contains("ProcessStartInfo", File.ReadAllText(ScriptPath("common.ps1")), StringComparison.Ordinal);
-        Assert.Contains("ArgumentList.Add", File.ReadAllText(ScriptPath("common.ps1")), StringComparison.Ordinal);
+        var common = File.ReadAllText(ScriptPath("common.ps1"));
+        Assert.Contains("ConvertTo-LocalMonitorWindowsCommandLine", common, StringComparison.Ordinal);
+        Assert.Contains("Start-Process", common, StringComparison.Ordinal);
+        Assert.Contains("RedirectStandardOutput", common, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -682,10 +684,17 @@ public class LocalMonitorScriptTests
         {
             var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
             var capturePath = Path.Combine(root, "task-action.txt");
+            var startCapturePath = Path.Combine(root, "start-overrides.json");
             var locatorOne = @"C:\private registry\one; $(not-a-command).json";
             var locatorTwo = @"C:\private registry\two's value.json";
             File.Copy(ScriptPath("install-startup-task.ps1"), Path.Combine(scripts, "install-startup-task.ps1"));
-            File.WriteAllText(Path.Combine(scripts, "start.ps1"), "param([string[]] $PricingRegistryOverride)\nexit 0\n");
+            File.WriteAllText(
+                Path.Combine(scripts, "start.ps1"),
+                $$"""
+                param([string[]] $PricingRegistryOverride)
+                [System.IO.File]::WriteAllText('{{startCapturePath.Replace("'", "''", StringComparison.Ordinal)}}', ($PricingRegistryOverride | ConvertTo-Json -Compress))
+                exit 0
+                """);
             File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
             File.AppendAllText(
                 Path.Combine(scripts, "common.ps1"),
@@ -714,7 +723,7 @@ public class LocalMonitorScriptTests
             var installScript = Path.Combine(scripts, "install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
             var result = RunBoundedProcess(
                 PowerShellExecutablePath(),
-                ["-NoProfile", "-Command", $"& '{installScript}' -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
+                ["-NoProfile", "-Command", $"& '{installScript}' -StartNow -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
                 environment: null,
                 timeout: TimeSpan.FromMinutes(1));
 
@@ -731,6 +740,15 @@ public class LocalMonitorScriptTests
             var command = Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
             Assert.Contains("-PricingRegistryOverride", command, StringComparison.Ordinal);
             Assert.Contains("@('C:\\private registry\\one; $(not-a-command).json','C:\\private registry\\two''s value.json')", command, StringComparison.Ordinal);
+
+            var decoded = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+            Assert.True(decoded.ExitCode == 0, $"{decoded.StandardOutputText}{decoded.StandardErrorText}");
+            using var startOverrides = JsonDocument.Parse(File.ReadAllText(startCapturePath));
+            Assert.Equal([locatorOne, locatorTwo], startOverrides.RootElement.EnumerateArray().Select(item => item.GetString()));
         }
         finally
         {
@@ -780,6 +798,118 @@ public class LocalMonitorScriptTests
         Assert.DoesNotContain(locatorTwo, result.StandardOutputText, StringComparison.Ordinal);
         Assert.DoesNotContain(locatorOne, result.StandardErrorText, StringComparison.Ordinal);
         Assert.DoesNotContain(locatorTwo, result.StandardErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShellFreeProcessLaunchPreservesExactOverrideArgumentsAndDurableRedirectsOnInstalledPowerShellHosts()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-argv-tests");
+        try
+        {
+            var captureScript = Path.Combine(root, "capture-argv.ps1");
+            File.WriteAllText(captureScript, "Write-Output ($args | ConvertTo-Json -Compress)\n");
+            var logicalArguments = new[]
+            {
+                "-NoProfile",
+                "-File",
+                captureScript,
+                "C:\\private registry\\space value; $(not-a-command).json",
+                "C:\\private registry\\single'quote and \\ trailing.json",
+                "C:\\private registry\\double\"quote & pipe|.json",
+            };
+
+            foreach (var hostPath in InstalledPowerShellHosts())
+            {
+                var outputPath = Path.Combine(root, $"{Path.GetFileNameWithoutExtension(hostPath)}.stdout.json");
+                var errorPath = Path.Combine(root, $"{Path.GetFileNameWithoutExtension(hostPath)}.stderr.log");
+                var commonPath = ScriptPath("common.ps1");
+                var command = $". {PowerShellLiteral(commonPath)}; $p = Start-LocalMonitorProcess -FilePath {PowerShellLiteral(hostPath)} -WorkingDirectory {PowerShellLiteral(root)} -ArgumentList @({string.Join(",", logicalArguments.Select(PowerShellLiteral))}) -StandardOutputPath {PowerShellLiteral(outputPath)} -StandardErrorPath {PowerShellLiteral(errorPath)}; $p.WaitForExit(); exit $p.ExitCode";
+                var result = RunBoundedProcess(hostPath, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], environment: null, timeout: TimeSpan.FromMinutes(1));
+
+                Assert.True(result.ExitCode == 0, $"{hostPath}: {result.StandardOutputText}{result.StandardErrorText}");
+                Assert.True(
+                    SpinWait.SpinUntil(() => File.Exists(outputPath) && File.Exists(errorPath), TimeSpan.FromSeconds(2)),
+                    $"{hostPath} did not preserve stdout/stderr redirection.");
+                using var document = JsonDocument.Parse(File.ReadAllText(outputPath));
+                Assert.Equal(logicalArguments.Skip(3), document.RootElement.EnumerateArray().Select(item => item.GetString()));
+                Assert.Empty(File.ReadAllText(errorPath));
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StatusReportsOnlyDecodedPricingOverrideStateAndCount()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-status-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var locatorOne = @"C:\private registry\status one; $(not-a-command).json";
+            var locatorTwo = @"C:\private registry\status two's value.json";
+            var command = $"& 'C:\\safe\\start.ps1' -Url 'http://127.0.0.1:4320' -DbPath 'C:\\safe\\raw-store.db' -Mode 'Published' -InstallRoot 'C:\\safe\\app' -NoBrowser -WaitReady -PricingRegistryOverride @('{locatorOne}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')";
+            var action = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+            File.Copy(ScriptPath("status.ps1"), Path.Combine(scripts, "status.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                function Get-LocalMonitorState { $null }
+                function Get-LocalMonitorTask { [pscustomobject]@{ State = 'Ready'; Actions = @([pscustomobject]@{ Arguments = '{{action}}' }) } }
+                function Test-LocalMonitorProcess { $false }
+                function Test-LocalMonitorHealth { $null }
+                function Get-LocalMonitorPublishedExePath { 'C:\safe\missing.exe' }
+                function Get-LocalMonitorAppVersion { '' }
+                """);
+
+            var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
+
+            Assert.Contains("pricing registry overrides: present (count: 2)", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorOne, result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorTwo, result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorOne, result.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain(locatorTwo, result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StatusReportsMalformedTaskActionAsUnknownWithoutReflectingLocators()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-status-malformed-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var locator = @"C:\private registry\malformed; $(not-a-command).json";
+            File.Copy(ScriptPath("status.ps1"), Path.Combine(scripts, "status.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                function Get-LocalMonitorState { $null }
+                function Get-LocalMonitorTask { [pscustomobject]@{ State = 'Ready'; Actions = @([pscustomobject]@{ Arguments = 'not-an-encoded-action {{locator.Replace("'", "''", StringComparison.Ordinal)}}' }) } }
+                function Test-LocalMonitorProcess { $false }
+                function Test-LocalMonitorHealth { $null }
+                function Get-LocalMonitorPublishedExePath { 'C:\safe\missing.exe' }
+                function Get-LocalMonitorAppVersion { '' }
+                """);
+
+            var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
+
+            Assert.Contains("pricing registry overrides: unknown", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locator, result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locator, result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -1327,7 +1457,9 @@ public class LocalMonitorScriptTests
                     param(
                         [string] $FilePath,
                         [object[]] $ArgumentList,
-                        [string] $WorkingDirectory)
+                        [string] $WorkingDirectory,
+                        [string] $StandardOutputPath,
+                        [string] $StandardErrorPath)
                     return [pscustomobject]@{ Id = 4242 }
                 }
                 function Save-LocalMonitorState {
@@ -1447,6 +1579,30 @@ public class LocalMonitorScriptTests
 
         throw new InvalidOperationException("pwsh.exe was not found on PATH.");
     }
+
+    private static IEnumerable<string> InstalledPowerShellHosts()
+    {
+        var hosts = new List<string>();
+        var windowsPowerShell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        if (File.Exists(windowsPowerShell))
+        {
+            hosts.Add(windowsPowerShell);
+        }
+
+        var powerShell = PowerShellExecutablePath();
+        if (!hosts.Contains(powerShell, StringComparer.OrdinalIgnoreCase))
+        {
+            hosts.Add(powerShell);
+        }
+
+        return hosts;
+    }
+
+    private static string PowerShellLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     private static PackageFileSnapshot[] SnapshotPackageTree(string packageRoot)
     {

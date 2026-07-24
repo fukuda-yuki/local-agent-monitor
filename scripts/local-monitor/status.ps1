@@ -16,6 +16,7 @@ $stateInstallRoot = [string] (Get-LocalMonitorStateValue -State $state -Name 'in
 $task = Get-LocalMonitorTask -TaskName $TaskName
 $taskInstalled = $null -ne $task
 $taskEnabled = $taskInstalled -and $task.State -ne 'Disabled'
+$pricingRegistryOverrideState = Get-LocalMonitorTaskPricingRegistryOverrideState -Task $task
 $processRunning = $false
 $processId = Get-LocalMonitorStateValue -State $state -Name 'process_id'
 if ($null -ne $processId) {
@@ -50,6 +51,7 @@ Write-Output ("installed: {0}" -f ($(if ($appInstalled) { 'yes' } else { 'no' })
 Write-Output ("running: {0}" -f ($(if ($processRunning) { 'yes' } else { 'no' })))
 Write-Output ("startup registered: {0}" -f ($(if ($taskInstalled) { 'yes' } else { 'no' })))
 Write-Output ("startup enabled: {0}" -f ($(if ($taskEnabled) { 'yes' } else { 'no' })))
+Write-Output ("pricing registry overrides: {0}{1}" -f $pricingRegistryOverrideState.State, $(if ($null -ne $pricingRegistryOverrideState.Count) { " (count: $($pricingRegistryOverrideState.Count))" } else { '' }))
 Write-Output ("task name: {0}" -f $TaskName)
 Write-Output ("URL: {0}" -f $url)
 Write-Output ("DB path: {0}" -f $dbPath)

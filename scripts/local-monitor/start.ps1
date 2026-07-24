@@ -122,7 +122,14 @@ foreach ($override in @($PricingRegistryOverride)) {
     $arguments += $override
 }
 
-$process = Start-LocalMonitorProcess -FilePath $filePath -WorkingDirectory $workingDirectory -ArgumentList $arguments
+$stdoutPath = Join-Path $script:LogDirectory 'local-monitor.stdout.log'
+$stderrPath = Join-Path $script:LogDirectory 'local-monitor.stderr.log'
+$process = Start-LocalMonitorProcess `
+    -FilePath $filePath `
+    -WorkingDirectory $workingDirectory `
+    -ArgumentList $arguments `
+    -StandardOutputPath $stdoutPath `
+    -StandardErrorPath $stderrPath
 Save-LocalMonitorState -ProcessId $process.Id -Url $Url -DbPath $DbPath -Mode $stateMode -RepoRoot $repoRoot -InstallRoot $InstallRoot -ExecutablePath $filePath -SanitizedOnly:$SanitizedOnly.IsPresent
 Write-LocalMonitorLog "start process_id=$($process.Id) url=$Url mode=$stateMode sanitized_only=$($SanitizedOnly.IsPresent)"
 

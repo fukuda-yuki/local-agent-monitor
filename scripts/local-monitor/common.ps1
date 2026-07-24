@@ -152,24 +152,161 @@ function Start-LocalMonitorProcess {
         [string] $WorkingDirectory,
 
         [Parameter(Mandatory)]
+        [string[]] $ArgumentList,
+
+        [Parameter(Mandatory)]
+        [string] $StandardOutputPath,
+
+        [Parameter(Mandatory)]
+        [string] $StandardErrorPath
+    )
+
+    $serializedArgumentList = ConvertTo-LocalMonitorWindowsCommandLine -ArgumentList $ArgumentList
+    return Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $serializedArgumentList `
+        -WorkingDirectory $WorkingDirectory `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $StandardOutputPath `
+        -RedirectStandardError $StandardErrorPath `
+        -PassThru
+}
+
+function ConvertTo-LocalMonitorWindowsCommandLine {
+    param(
+        [Parameter(Mandatory)]
         [string[]] $ArgumentList
     )
 
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $FilePath
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
+    $serialized = @()
     foreach ($argument in $ArgumentList) {
-        [void] $startInfo.ArgumentList.Add($argument)
+        $value = [string] $argument
+        if ($value.Length -eq 0) {
+            $serialized += '""'
+            continue
+        }
+        if ($value -notmatch '[\s"]') {
+            $serialized += $value
+            continue
+        }
+
+        $builder = New-Object System.Text.StringBuilder
+        [void] $builder.Append([char] 34)
+        $backslashCount = 0
+        foreach ($character in $value.ToCharArray()) {
+            if ($character -eq [char] 92) {
+                $backslashCount++
+                continue
+            }
+            if ($character -eq [char] 34) {
+                if ($backslashCount -gt 0) {
+                    [void] $builder.Append([char] 92, $backslashCount * 2)
+                }
+                [void] $builder.Append([char] 92)
+                [void] $builder.Append([char] 34)
+                $backslashCount = 0
+                continue
+            }
+            if ($backslashCount -gt 0) {
+                [void] $builder.Append([char] 92, $backslashCount)
+                $backslashCount = 0
+            }
+            [void] $builder.Append($character)
+        }
+        if ($backslashCount -gt 0) {
+            [void] $builder.Append([char] 92, $backslashCount * 2)
+        }
+        [void] $builder.Append([char] 34)
+        $serialized += $builder.ToString()
     }
 
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    return $process
+    return $serialized -join ' '
+}
+
+function Get-LocalMonitorTaskPricingRegistryOverrideState {
+    param(
+        $Task
+    )
+
+    if ($null -eq $Task) {
+        return [pscustomobject] @{ State = 'absent'; Count = $null }
+    }
+
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1 -or $null -eq $actions[0]) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    $argumentsProperty = $actions[0].PSObject.Properties['Arguments']
+    if ($null -eq $argumentsProperty -or [string]::IsNullOrWhiteSpace([string] $argumentsProperty.Value)) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    $match = [regex]::Match([string] $argumentsProperty.Value, '\A-NoProfile -ExecutionPolicy Bypass -EncodedCommand ([A-Za-z0-9+/]+={0,2})\z')
+    if (-not $match.Success) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    try {
+        $command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($match.Groups[1].Value))
+    }
+    catch {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    $prefix = [regex]::Match($command, "\A& '(?:[^']|'')*' -Url '(?:[^']|'')*' -DbPath '(?:[^']|'')*' -Mode '(?:[^']|'')*' -InstallRoot '(?:[^']|'')*' -NoBrowser -WaitReady")
+    if (-not $prefix.Success) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    $remaining = $command.Substring($prefix.Length)
+    if ($remaining.StartsWith(' -SanitizedOnly')) {
+        $remaining = $remaining.Substring(' -SanitizedOnly'.Length)
+    }
+    if ($remaining.Length -eq 0) {
+        return [pscustomobject] @{ State = 'absent'; Count = $null }
+    }
+
+    $marker = ' -PricingRegistryOverride @('
+    if (-not $remaining.StartsWith($marker) -or -not $remaining.EndsWith(')')) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    $members = $remaining.Substring($marker.Length, $remaining.Length - $marker.Length - 1)
+    $position = 0
+    $count = 0
+    while ($position -lt $members.Length) {
+        if ($members[$position] -ne [char] 39) {
+            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+        }
+        $count++
+        $position++
+        while ($position -lt $members.Length) {
+            if ($members[$position] -ne [char] 39) {
+                $position++
+                continue
+            }
+            if ($position + 1 -lt $members.Length -and $members[$position + 1] -eq [char] 39) {
+                $position += 2
+                continue
+            }
+            $position++
+            break
+        }
+        if ($position -eq $members.Length) {
+            break
+        }
+        if ($members[$position] -ne [char] 44) {
+            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+        }
+        $position++
+    }
+
+    if ($count -eq 0 -or $count -gt 8) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    return [pscustomobject] @{ State = 'present'; Count = $count }
 }
 
 function Test-LocalMonitorLoopbackUrl {
