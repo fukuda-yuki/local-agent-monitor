@@ -11,6 +11,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(HistoricalEvidencePerformanceCollection.Name)]
 public sealed class HistoricalEvidenceProductionTests
 {
     [Fact]
