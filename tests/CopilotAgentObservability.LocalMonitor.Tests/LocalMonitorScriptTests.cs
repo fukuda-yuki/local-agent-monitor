@@ -733,6 +733,12 @@ public class LocalMonitorScriptTests
             Assert.DoesNotContain(locatorOne, result.StandardErrorText, StringComparison.Ordinal);
             Assert.DoesNotContain(locatorTwo, result.StandardErrorText, StringComparison.Ordinal);
 
+            using (var startNowOverrides = JsonDocument.Parse(File.ReadAllText(startCapturePath)))
+            {
+                Assert.Equal([locatorOne, locatorTwo], startNowOverrides.RootElement.EnumerateArray().Select(item => item.GetString()));
+            }
+            File.Delete(startCapturePath);
+
             var action = File.ReadAllText(capturePath);
             Assert.DoesNotContain(locatorOne, action, StringComparison.Ordinal);
             Assert.DoesNotContain(locatorTwo, action, StringComparison.Ordinal);
@@ -747,8 +753,8 @@ public class LocalMonitorScriptTests
                 environment: null,
                 timeout: TimeSpan.FromMinutes(1));
             Assert.True(decoded.ExitCode == 0, $"{decoded.StandardOutputText}{decoded.StandardErrorText}");
-            using var startOverrides = JsonDocument.Parse(File.ReadAllText(startCapturePath));
-            Assert.Equal([locatorOne, locatorTwo], startOverrides.RootElement.EnumerateArray().Select(item => item.GetString()));
+            using var decodedOverrides = JsonDocument.Parse(File.ReadAllText(startCapturePath));
+            Assert.Equal([locatorOne, locatorTwo], decodedOverrides.RootElement.EnumerateArray().Select(item => item.GetString()));
         }
         finally
         {
@@ -842,6 +848,184 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void StartScriptLaunchesPublishedChildWithExactOverridesAndDurableDelayedLogs()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-end-to-end-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var childProject = Directory.CreateDirectory(Path.Combine(root, "child")).FullName;
+            var publishDirectory = Directory.CreateDirectory(Path.Combine(root, "published")).FullName;
+            var logDirectory = Directory.CreateDirectory(Path.Combine(root, "logs")).FullName;
+            var capturePath = Path.Combine(root, "child-argv.json");
+            var statePath = Path.Combine(root, "local-monitor.state.json");
+            var dbPath = Path.Combine(root, "raw store.db");
+            var locatorOne = "C:\\private registry\\space value; $(not-a-command).json";
+            var locatorTwo = "C:\\private registry\\quote's value.json";
+            var projectPath = Path.Combine(childProject, "Child.csproj");
+            File.WriteAllText(
+                projectPath,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net10.0</TargetFramework>
+                  </PropertyGroup>
+                </Project>
+                """);
+            File.WriteAllText(
+                Path.Combine(childProject, "Program.cs"),
+                """
+                using System;
+                using System.IO;
+                using System.Threading.Tasks;
+                using System.Text.Json;
+
+                await Task.Delay(1500);
+                await File.WriteAllTextAsync(Environment.GetEnvironmentVariable("CAO_CHILD_CAPTURE")!, JsonSerializer.Serialize(args));
+                Console.WriteLine("delayed stdout");
+                Console.Error.WriteLine("delayed stderr");
+                """);
+            var publish = RunBoundedProcess(
+                "dotnet",
+                ["publish", projectPath, "--configuration", "Release", "--output", publishDirectory, "--nologo"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(2));
+            Assert.True(publish.ExitCode == 0, $"{publish.StandardOutputText}{publish.StandardErrorText}");
+
+            File.Copy(ScriptPath("start.ps1"), Path.Combine(scripts, "start.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            var executablePath = Path.Combine(publishDirectory, "Child.exe");
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:LogDirectory = '{{logDirectory.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:StatePath = '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:HealthCalls = 0
+                function Initialize-LocalMonitorRuntime { }
+                function Get-LocalMonitorPublishedExePath { param([string] $InstallRoot) '{{executablePath.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Test-LocalMonitorPortInUse { param([string] $Url) $false }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    $script:HealthCalls++
+                    if ($script:HealthCalls -gt 1) { [pscustomobject]@{ StatusCode = 200; Content = '{"status":"ready"}' } }
+                }
+                """);
+
+            var startScript = Path.Combine(scripts, "start.ps1").Replace("'", "''", StringComparison.Ordinal);
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $"& '{startScript}' -Mode Published -InstallRoot '{root.Replace("'", "''", StringComparison.Ordinal)}' -DbPath '{dbPath.Replace("'", "''", StringComparison.Ordinal)}' -WaitReady:$false -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
+                environment: new Dictionary<string, string?> { ["CAO_CHILD_CAPTURE"] = capturePath },
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => File.Exists(capturePath)
+                        && File.Exists(Path.Combine(logDirectory, "local-monitor.stdout.log"))
+                        && File.Exists(Path.Combine(logDirectory, "local-monitor.stderr.log"))
+                        && File.Exists(statePath),
+                    TimeSpan.FromSeconds(5)),
+                "The child did not write captured arguments, logs, and state after the wrapper exited.");
+            using var arguments = JsonDocument.Parse(File.ReadAllText(capturePath));
+            Assert.Equal(
+                ["--db", dbPath, "--url", "http://127.0.0.1:4320", "--pricing-registry-override", locatorOne, "--pricing-registry-override", locatorTwo],
+                arguments.RootElement.EnumerateArray().Select(item => item.GetString()));
+            Assert.Contains("delayed stdout", File.ReadAllText(Path.Combine(logDirectory, "local-monitor.stdout.log")), StringComparison.Ordinal);
+            Assert.Contains("delayed stderr", File.ReadAllText(Path.Combine(logDirectory, "local-monitor.stderr.log")), StringComparison.Ordinal);
+            foreach (var path in Directory.EnumerateFiles(logDirectory).Append(statePath))
+            {
+                var text = File.ReadAllText(path);
+                Assert.DoesNotContain(locatorOne, text, StringComparison.Ordinal);
+                Assert.DoesNotContain(locatorTwo, text, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StartupTaskFailureAndEnableDisablePreserveEncodedOverrideActionWithoutLocatorLeakage()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-task-lifecycle-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var actionPath = Path.Combine(root, "task-action.txt");
+            var lifecyclePath = Path.Combine(root, "lifecycle-action.txt");
+            var locatorOne = "C:\\private registry\\failure one; $(not-a-command).json";
+            var locatorTwo = "C:\\private registry\\failure two's value.json";
+            File.Copy(ScriptPath("install-startup-task.ps1"), Path.Combine(scripts, "install-startup-task.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = 'C:\safe\raw-store.db'
+                function Get-LocalMonitorDefaultInstallRoot { 'C:\safe\app' }
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) $true }
+                function Get-LocalMonitorTask { param([string] $TaskName) $null }
+                function Get-LocalMonitorRepoRoot { 'C:\safe\repo' }
+                function Get-LocalMonitorPowerShellPath { 'C:\safe\pwsh.exe' }
+                function New-ScheduledTaskAction {
+                    param([string] $Execute, [string] $Argument, [string] $WorkingDirectory)
+                    [System.IO.File]::WriteAllText('{{actionPath.Replace("'", "''", StringComparison.Ordinal)}}', $Argument)
+                    [pscustomobject]@{}
+                }
+                function New-ScheduledTaskTrigger { [pscustomobject]@{} }
+                function New-ScheduledTaskPrincipal { [pscustomobject]@{} }
+                function New-ScheduledTaskSettingsSet { [pscustomobject]@{} }
+                function Register-ScheduledTask { [pscustomobject]@{} }
+                """);
+
+            var installScript = Path.Combine(scripts, "install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+            var install = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $"& '{installScript}' -PricingRegistryOverride @('{locatorOne.Replace("'", "''", StringComparison.Ordinal)}','{locatorTwo.Replace("'", "''", StringComparison.Ordinal)}')"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.NotEqual(0, install.ExitCode);
+            Assert.Contains("task_registration_failed", install.StandardErrorText, StringComparison.Ordinal);
+            foreach (var locator in new[] { locatorOne, locatorTwo })
+            {
+                Assert.DoesNotContain(locator, install.StandardOutputText, StringComparison.Ordinal);
+                Assert.DoesNotContain(locator, install.StandardErrorText, StringComparison.Ordinal);
+                Assert.DoesNotContain(locator, File.ReadAllText(actionPath), StringComparison.Ordinal);
+            }
+
+            var taskAction = File.ReadAllText(actionPath);
+            File.Copy(ScriptPath("set-startup-task.ps1"), Path.Combine(scripts, "set-startup-task.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "set-common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "set-common.ps1"),
+                $$"""
+                function Get-LocalMonitorTask { param([string] $TaskName) [pscustomobject]@{ State = 'Ready'; Actions = @([pscustomobject]@{ Arguments = '{{taskAction}}' }) } }
+                function Enable-ScheduledTask { param([string] $TaskName) [System.IO.File]::WriteAllText('{{lifecyclePath.Replace("'", "''", StringComparison.Ordinal)}}', (Get-LocalMonitorTask).Actions[0].Arguments) }
+                function Disable-ScheduledTask { param([string] $TaskName) [System.IO.File]::WriteAllText('{{lifecyclePath.Replace("'", "''", StringComparison.Ordinal)}}', (Get-LocalMonitorTask).Actions[0].Arguments) }
+                """);
+            File.Move(Path.Combine(scripts, "common.ps1"), Path.Combine(scripts, "install-common.ps1"));
+            File.Move(Path.Combine(scripts, "set-common.ps1"), Path.Combine(scripts, "common.ps1"));
+
+            var setScript = Path.Combine(scripts, "set-startup-task.ps1");
+            foreach (var operation in new[] { "Enable", "Disable" })
+            {
+                var result = RunPowerShellScript(setScript, "-Action", operation);
+                Assert.Equal(0, result.ExitCode);
+                Assert.Equal(taskAction, File.ReadAllText(lifecyclePath));
+                Assert.DoesNotContain(locatorOne, result.Output, StringComparison.Ordinal);
+                Assert.DoesNotContain(locatorTwo, result.Output, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void StatusReportsOnlyDecodedPricingOverrideStateAndCount()
     {
         var root = CreateTemporaryDirectory("cao-startup-status-tests");
@@ -899,6 +1083,57 @@ public class LocalMonitorScriptTests
                 function Get-LocalMonitorPublishedExePath { 'C:\safe\missing.exe' }
                 function Get-LocalMonitorAppVersion { '' }
                 """);
+
+            var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
+
+            Assert.Contains("pricing registry overrides: unknown", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locator, result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(locator, result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StatusReportsRecognizedAbsentActionWithZeroCount()
+    {
+        var root = CreateTemporaryDirectory("cao-startup-status-absent-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var command = "& 'C:\\safe\\start.ps1' -Url 'http://127.0.0.1:4320' -DbPath 'C:\\safe\\raw-store.db' -Mode 'Published' -InstallRoot 'C:\\safe\\app' -NoBrowser -WaitReady";
+            var action = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+            File.Copy(ScriptPath("status.ps1"), Path.Combine(scripts, "status.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(Path.Combine(scripts, "common.ps1"), StatusTestCommonOverrides(action));
+
+            var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
+
+            Assert.Contains("pricing registry overrides: absent (count: 0)", result.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("@('C:\\private registry\\unterminated.json)")]
+    [InlineData("@('C:\\private registry\\trailing.json',)")]
+    public void StatusRejectsMalformedEncodedOverrideArrayWithoutReflectingLocator(string arrayLiteral)
+    {
+        var root = CreateTemporaryDirectory("cao-startup-status-array-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var locator = "C:\\private registry\\";
+            var command = "& 'C:\\safe\\start.ps1' -Url 'http://127.0.0.1:4320' -DbPath 'C:\\safe\\raw-store.db' -Mode 'Published' -InstallRoot 'C:\\safe\\app' -NoBrowser -WaitReady -PricingRegistryOverride " + arrayLiteral;
+            var action = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+            File.Copy(ScriptPath("status.ps1"), Path.Combine(scripts, "status.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(Path.Combine(scripts, "common.ps1"), StatusTestCommonOverrides(action));
 
             var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
 
@@ -1603,6 +1838,18 @@ public class LocalMonitorScriptTests
     }
 
     private static string PowerShellLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    private static string StatusTestCommonOverrides(string action)
+    {
+        return $$"""
+            function Get-LocalMonitorState { $null }
+            function Get-LocalMonitorTask { [pscustomobject]@{ State = 'Ready'; Actions = @([pscustomobject]@{ Arguments = '{{action}}' }) } }
+            function Test-LocalMonitorProcess { $false }
+            function Test-LocalMonitorHealth { $null }
+            function Get-LocalMonitorPublishedExePath { 'C:\safe\missing.exe' }
+            function Get-LocalMonitorAppVersion { '' }
+            """;
+    }
 
     private static PackageFileSnapshot[] SnapshotPackageTree(string packageRoot)
     {

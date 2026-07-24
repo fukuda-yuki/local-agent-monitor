@@ -229,7 +229,7 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
     )
 
     if ($null -eq $Task) {
-        return [pscustomobject] @{ State = 'absent'; Count = $null }
+        return [pscustomobject] @{ State = 'absent'; Count = 0 }
     }
 
     $actions = @($Task.Actions)
@@ -264,7 +264,7 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
         $remaining = $remaining.Substring(' -SanitizedOnly'.Length)
     }
     if ($remaining.Length -eq 0) {
-        return [pscustomobject] @{ State = 'absent'; Count = $null }
+        return [pscustomobject] @{ State = 'absent'; Count = 0 }
     }
 
     $marker = ' -PricingRegistryOverride @('
@@ -281,6 +281,7 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
         }
         $count++
         $position++
+        $closed = $false
         while ($position -lt $members.Length) {
             if ($members[$position] -ne [char] 39) {
                 $position++
@@ -291,7 +292,11 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
                 continue
             }
             $position++
+            $closed = $true
             break
+        }
+        if (-not $closed) {
+            return [pscustomobject] @{ State = 'unknown'; Count = $null }
         }
         if ($position -eq $members.Length) {
             break
@@ -300,6 +305,9 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
             return [pscustomobject] @{ State = 'unknown'; Count = $null }
         }
         $position++
+        if ($position -eq $members.Length) {
+            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+        }
     }
 
     if ($count -eq 0 -or $count -gt 8) {
