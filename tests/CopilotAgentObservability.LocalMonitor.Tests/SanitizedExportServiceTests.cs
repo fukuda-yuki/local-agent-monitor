@@ -171,6 +171,7 @@ public sealed class SanitizedExportServiceTests
         var created = new SanitizedExportAuthorizedService(new Provider(snapshot)).Create(control);
 
         Assert.True(created.Success, created.ErrorCode);
+        Assert.Equal("cfa37600ed5973c295d8920679d9dd99de9c669b4cdb77140957b35548f23769", Convert.ToHexStringLower(SHA256.HashData(expected)));
         Assert.Equal(expected, created.ArchiveBytes);
         Assert.True(service.Inspect(expected).Success);
     }

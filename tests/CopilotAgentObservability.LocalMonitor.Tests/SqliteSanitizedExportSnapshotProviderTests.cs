@@ -176,6 +176,87 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     }
 
     [Fact]
+    public void Capture_V2OnlyAlertEngineDoesNotReadOrExportV2Payloads()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.SeedOpaqueV2Alert("pricing.estimate.v1 C:\\private\\must-not-read");
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Empty(result.Snapshot!.Records);
+        Assert.Equal("missing", result.Snapshot.Capabilities.AlertReceipts);
+        Assert.Equal("2", result.Snapshot.ProcessingVersions!["alert_engine_schema"]);
+    }
+
+    [Fact]
+    public void Capture_MixedV2AlertEngineExportsOnlyStrictV1Receipt()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        var receiptV1 = SanitizedExportAlertFixture.Bytes();
+        fixture.SeedAlert(receiptV1);
+        fixture.SeedOpaqueV2Alert("private-override-must-not-read");
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.True(result.Success, result.ErrorCode);
+        var record = Assert.Single(result.Snapshot!.Records);
+        Assert.Equal(receiptV1, record.CanonicalBytes);
+        Assert.Equal("alert_receipt", record.RecordType);
+        Assert.Equal("2", result.Snapshot.ProcessingVersions!["alert_engine_schema"]);
+        Assert.DoesNotContain("private-override-must-not-read", Encoding.UTF8.GetString(record.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("schema_version='alert.evaluation.v2'")]
+    [InlineData("input_hash='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'")]
+    [InlineData("configuration_version='tampered-v1'")]
+    [InlineData("configuration_hash='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'")]
+    public void Capture_V2AlertEngineRejectsSelectedV1ReceiptWithTamperedParentScalar(string assignment)
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.SeedAlert(SanitizedExportAlertFixture.Bytes());
+        fixture.Execute($"UPDATE alert_evaluations SET {assignment};");
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void Capture_RejectsCounterfeitV2AlertEngineStructure()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.Execute("CREATE TRIGGER counterfeit_alert_owner AFTER INSERT ON alert_receipts BEGIN SELECT 1; END;");
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath).Capture(new());
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void Capture_RejectsFutureAlertEngineVersion()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.Execute("UPDATE schema_version SET version=3 WHERE component='alert_engine';");
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath).Capture(new());
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
     public void Capture_FailsClosedWhenOpaqueAlertCandidateScanExceedsBoundEvenIfSelectorWouldExcludeRows()
     {
         using var fixture = new Fixture();
@@ -258,21 +339,59 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             using var document = JsonDocument.Parse(canonicalBytes);
             var alertId = document.RootElement.GetProperty("alert_id").GetString()!;
             var evaluationId = document.RootElement.GetProperty("evaluation_id").GetString()!;
+            var inputHash = document.RootElement.TryGetProperty("evaluation_input_hash", out var inputProperty)
+                ? inputProperty.GetString()!
+                : new string('b', 64);
+            var configurationVersion = document.RootElement.TryGetProperty("configuration_version", out var configurationVersionProperty)
+                ? configurationVersionProperty.GetString()!
+                : "fixture-v1";
+            var configurationHash = document.RootElement.TryGetProperty("configuration_hash", out var configurationHashProperty)
+                ? configurationHashProperty.GetString()!
+                : new string('c', 64);
             using var connection = new SqliteConnection(connectionString);
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO alert_evaluations(evaluation_id,schema_version,input_hash,configuration_version,configuration_hash,canonical_json)
-                VALUES($evaluation,'alert.evaluation.v1',$input,'fixture-v1',$configuration,$evaluation_json);
+                VALUES($evaluation,'alert.evaluation.v1',$input,$configuration_version,$configuration_hash,$evaluation_json);
                 INSERT INTO alert_receipts(alert_id,evaluation_id,receipt_ordinal,schema_version,canonical_json)
                 VALUES($alert,$evaluation,0,'alert.receipt.v1',$receipt);
                 """;
             command.Parameters.AddWithValue("$alert", alertId);
             command.Parameters.AddWithValue("$evaluation", evaluationId);
-            command.Parameters.AddWithValue("$input", new string('b', 64));
-            command.Parameters.AddWithValue("$configuration", new string('c', 64));
+            command.Parameters.AddWithValue("$input", inputHash);
+            command.Parameters.AddWithValue("$configuration_version", configurationVersion);
+            command.Parameters.AddWithValue("$configuration_hash", configurationHash);
             command.Parameters.AddWithValue("$evaluation_json", $"{{\"evaluation_id\":\"{evaluationId}\"}}");
             command.Parameters.AddWithValue("$receipt", Encoding.UTF8.GetString(canonicalBytes));
+            command.ExecuteNonQuery();
+        }
+
+        internal void InitializeAlertEngineV2()
+        {
+            var connectionString = new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString();
+            Assert.Equal(AlertEngineStoreStatusV2.Success, new SqliteAlertEngineStore(connectionString).InitializeV2().Status);
+        }
+
+        internal void SeedOpaqueV2Alert(string opaquePayload)
+        {
+            var evaluationId = new string('e', 64);
+            var alertId = new string('a', 64);
+            using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO alert_evaluations(evaluation_id,schema_version,input_hash,configuration_version,configuration_hash,canonical_json)
+                VALUES($evaluation,'alert.evaluation.v2',$input,'fixture-v2',$configuration,$evaluation_json);
+                INSERT INTO alert_receipts(alert_id,evaluation_id,receipt_ordinal,schema_version,canonical_json)
+                VALUES($alert,$evaluation,0,'alert.receipt.v2',$receipt);
+                """;
+            command.Parameters.AddWithValue("$alert", alertId);
+            command.Parameters.AddWithValue("$evaluation", evaluationId);
+            command.Parameters.AddWithValue("$input", new string('b', 64));
+            command.Parameters.AddWithValue("$configuration", new string('c', 64));
+            command.Parameters.AddWithValue("$evaluation_json", $"{{\"evaluation_id\":\"{evaluationId}\",\"opaque\":{JsonSerializer.Serialize(opaquePayload)}}}");
+            command.Parameters.AddWithValue("$receipt", $"{{\"alert_id\":\"{alertId}\",\"evaluation_id\":\"{evaluationId}\",\"opaque\":{JsonSerializer.Serialize(opaquePayload)}}}");
             command.ExecuteNonQuery();
         }
 
