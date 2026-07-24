@@ -9,7 +9,8 @@ internal sealed record MonitorOptions(
     int MaxRequestBodyBytes,
     int IngestionStallThresholdSeconds = MonitorOptions.DefaultIngestionStallThresholdSeconds,
     int ProjectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds,
-    IReadOnlyList<ConfiguredApplyRoot>? ApplyRoots = null)
+    IReadOnlyList<ConfiguredApplyRoot>? ApplyRoots = null,
+    IReadOnlyList<string>? PricingRegistryOverridePaths = null)
 {
     public const string MaxRequestBodyBytesEnvironmentVariable = "CAO_MONITOR_MAX_REQUEST_BODY_BYTES";
     public const int DefaultMaxRequestBodyBytes = 31_457_280;
@@ -34,6 +35,7 @@ internal sealed record MonitorOptions(
         int? ingestionStallThresholdSeconds = null;
         int? projectionLagThresholdSeconds = null;
         var applyRoots = new List<ConfiguredApplyRoot>();
+        var pricingRegistryOverridePaths = new List<string>();
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -188,6 +190,17 @@ internal sealed record MonitorOptions(
                     index++;
                     break;
 
+                case "--pricing-registry-override":
+                    if (!TryReadValue(args, index, out var pricingRegistryOverridePath)
+                        || pricingRegistryOverridePaths.Count == 8)
+                    {
+                        return Failure("pricing_catalog_unavailable");
+                    }
+
+                    pricingRegistryOverridePaths.Add(pricingRegistryOverridePath);
+                    index++;
+                    break;
+
                 default:
                     return Failure($"unknown local-monitor option '{args[index]}'.");
             }
@@ -243,7 +256,8 @@ internal sealed record MonitorOptions(
                 maxRequestBodyBytes ?? DefaultMaxRequestBodyBytes,
                 ingestionStallThresholdSeconds ?? DefaultIngestionStallThresholdSeconds,
                 projectionLagThresholdSeconds ?? DefaultProjectionLagThresholdSeconds,
-                applyRoots),
+                applyRoots,
+                pricingRegistryOverridePaths.AsReadOnly()),
             null);
     }
 

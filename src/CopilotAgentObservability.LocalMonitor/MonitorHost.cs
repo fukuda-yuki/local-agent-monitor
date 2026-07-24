@@ -47,6 +47,9 @@ internal static class MonitorHost
 
     internal static WebApplication Build(MonitorOptions options, MonitorHostTestOptions? testOptions)
     {
+        var pricingCatalogProvider = testOptions?.PricingCatalogProvider
+            ?? DefaultPricingCatalogProvider.Create(options.PricingRegistryOverridePaths ?? []);
+        var runtimeOptions = options with { PricingRegistryOverridePaths = [] };
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
         var runtimeBackupService = new SqliteRuntimeBackupService(timeProvider);
         var initialization = runtimeBackupService.InitializeForMonitor(options.DatabasePath);
@@ -54,7 +57,7 @@ internal static class MonitorHost
         var monitorLease = initialization.Lease!;
         try
         {
-            return BuildCore(options, testOptions, runtimeBackupService, monitorLease);
+            return BuildCore(runtimeOptions, testOptions, runtimeBackupService, monitorLease, pricingCatalogProvider);
         }
         catch
         {
@@ -67,7 +70,8 @@ internal static class MonitorHost
         MonitorOptions options,
         MonitorHostTestOptions? testOptions,
         SqliteRuntimeBackupService runtimeBackupService,
-        RuntimeBackupMonitorLease monitorLease)
+        RuntimeBackupMonitorLease monitorLease,
+        IPricingCatalogProvider pricingCatalogProvider)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -112,6 +116,7 @@ internal static class MonitorHost
         var eventBroker = new MonitorEventBroker();
         builder.Services.AddRazorPages();
         builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton<IPricingCatalogProvider>(pricingCatalogProvider);
         builder.Services.AddSingleton(health);
         builder.Services.AddSingleton<RuntimeBackupMonitorLease>(_ => monitorLease);
         var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(options.DatabasePath, timeProvider);
@@ -1484,35 +1489,48 @@ internal static class MonitorHost
 
     public static async Task<int> RunAsync(MonitorOptions options, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        await using var app = Build(options);
+        WebApplication app;
         try
         {
-            await app.StartAsync(cancellationToken);
+            app = Build(options);
         }
-        catch (IOException exception) when (IsAddressInUse(exception))
+        catch (PricingCatalogUnavailableException)
         {
-            error.WriteLine("error: failed to start local monitor: port is already in use.");
-            return 1;
-        }
-        catch (OperationCanceledException)
-        {
+            error.WriteLine("error: pricing_catalog_unavailable");
             return 1;
         }
 
-        output.WriteLine($"Local monitor listening on {options.Url}.");
-        output.WriteLine($"Raw store: {options.DatabasePath}");
-        output.WriteLine("Press Ctrl+C to stop.");
+        await using (app)
+        {
+            try
+            {
+                await app.StartAsync(cancellationToken);
+            }
+            catch (IOException exception) when (IsAddressInUse(exception))
+            {
+                error.WriteLine("error: failed to start local monitor: port is already in use.");
+                return 1;
+            }
+            catch (OperationCanceledException)
+            {
+                return 1;
+            }
 
-        try
-        {
-            await app.WaitForShutdownAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
+            output.WriteLine($"Local monitor listening on {options.Url}.");
+            output.WriteLine($"Raw store: {options.DatabasePath}");
+            output.WriteLine("Press Ctrl+C to stop.");
+
+            try
+            {
+                await app.WaitForShutdownAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return 0;
+            }
+
             return 0;
         }
-
-        return 0;
     }
 
     private static bool IsValidHostHeader(string? host)
@@ -1898,6 +1916,8 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
 
 internal sealed class MonitorHostTestOptions
 {
+    public IPricingCatalogProvider? PricingCatalogProvider { get; init; }
+
     public IHistoricalEvidenceSnapshotSourceV1? HistoricalEvidenceSource { get; init; }
 
     public IHistoricalInstructionAnalysisProviderV1? HistoricalInstructionProvider { get; init; }
