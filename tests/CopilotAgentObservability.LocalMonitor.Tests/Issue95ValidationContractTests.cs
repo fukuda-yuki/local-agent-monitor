@@ -4,6 +4,7 @@ using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
+[Collection(Issue95ValidationPerformanceCollection.Name)]
 public sealed class Issue95ValidationContractTests
 {
     private static readonly string RepositoryRoot = FindRepositoryRoot();
