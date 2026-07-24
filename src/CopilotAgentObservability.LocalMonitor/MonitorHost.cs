@@ -292,7 +292,11 @@ internal static class MonitorHost
                     alertLifecycleStore,
                     alertCenterReadModel,
                     testOptions?.CostAlertPresentationResolver
-                        ?? new UnavailableCostAlertPresentationResolverV1())
+                        ?? new CostAlertPresentationResolverV1(
+                            sessionStore,
+                            new SqliteCostAlertEstimateReadStoreV1(
+                                new SqlitePricingReadStore(options.DatabasePath)),
+                            pricingCatalogProvider.CanonicalCatalogBytes))
                 : new UnavailableAlertCenterReadModelV2());
         var alertCenterPolicy = AlertCenterEvaluationPolicy.Create();
         var alertCenterEvaluationCoordinator = testOptions?.AlertCenterEvaluationCoordinator ?? new AlertCenterEvaluationCoordinator(

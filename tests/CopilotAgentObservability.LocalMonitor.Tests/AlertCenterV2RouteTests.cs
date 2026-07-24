@@ -3,11 +3,140 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.LocalMonitor.Alerts;
+using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Pricing;
+using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class AlertCenterV2RouteTests
 {
+    [Fact]
+    public async Task ReadRoute_ProductionHostComposesCostPresentationResolver()
+    {
+        using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: new()
+            {
+                StartWriter = false,
+                StartProjectionWorker = false,
+                StartSessionWriter = false,
+                StartSessionOtelEnrichment = false,
+                StartRetentionCleanupWorker = false,
+                UseUserSecrets = false,
+            });
+        var store = new SqliteAlertEngineStore(new SqliteConnectionStringBuilder
+        {
+            DataSource = temp.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        var evaluation = CostEvaluation();
+        Assert.Equal(AlertEngineStoreStatusV2.Success, store.Append(evaluation).Status);
+
+        using var response = await host.Client.GetAsync(
+            "/api/alert-center/v2/alerts?receipt_kind=cost_receipt_v2&period=30d");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var receipt = Assert.Single(json.RootElement.GetProperty("items").EnumerateArray())
+            .GetProperty("cost_receipt_v2");
+        var member = Assert.Single(receipt.GetProperty("members").EnumerateArray());
+        Assert.Equal("missing", member.GetProperty("session_evidence_state").GetString());
+        Assert.Equal("unavailable", member.GetProperty("scope_state").GetString());
+        Assert.Equal("missing", member.GetProperty("estimate_evidence_state").GetString());
+        Assert.Equal(JsonValueKind.Null, member.GetProperty("estimate_href").ValueKind);
+    }
+
+    [Fact]
+    public async Task ReadRoute_ProductionHostResolvesPersistedSessionAndEstimate()
+    {
+        using var temp = new MonitorTempDirectory
+        {
+            TimeProvider = new MutableTimeProvider(
+                new DateTimeOffset(2026, 7, 25, 12, 0, 0, TimeSpan.Zero)),
+        };
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: new()
+            {
+                StartWriter = false,
+                StartProjectionWorker = false,
+                StartSessionWriter = false,
+                StartSessionOtelEnrichment = false,
+                StartRetentionCleanupWorker = false,
+                UseUserSecrets = false,
+            });
+        var member = PersistCostEvidence(temp);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(
+            PricingCatalog.Create(BundledPricingRegistry.Load()));
+        var persistedEstimate = new SqlitePricingReadStore(temp.DatabasePath)
+            .ReadSessionEstimate(member.SessionId, member.EstimateId!, catalogBytes);
+        Assert.Equal(PricingReadStatus.Success, persistedEstimate.Status);
+        var persisted = Assert.IsType<CostSessionEstimateReadV1>(persistedEstimate.Value);
+        Assert.Equal(member.SessionId, persisted.SessionId);
+        Assert.Equal(member.EstimateId, persisted.Item.EstimateId);
+        Assert.Equal(member.HeadRevision, persisted.Item.HeadRevision);
+        Assert.Equal(member.EstimateCalculationTimeUtc, persisted.Item.CalculationTimeUtc);
+        Assert.Equal(member.SessionEffectiveAtUtc, persisted.Item.SessionEffectiveAtUtc);
+        Assert.Equal(member.CatalogSha256, persisted.Item.CatalogSha256);
+        Assert.Equal(member.RegistryVersion, persisted.Item.Registry?.RegistryVersion);
+        Assert.Equal(member.Provider, persisted.Item.Provider);
+        Assert.Equal(member.Model, persisted.Item.Model);
+        Assert.Equal(member.BillingMode, persisted.Item.BillingMode);
+        Assert.Equal("estimated", persisted.Item.EstimateStatus);
+        var persistedSession = new SqliteSessionStore(temp.DatabasePath)
+            .GetDetail(Guid.ParseExact(member.SessionId, "D"));
+        Assert.NotNull(persistedSession);
+        Assert.Equal(member.SessionEffectiveAtUtc, persistedSession.Session.LastSeenAt);
+        var resolution = new CostAlertPresentationResolverV1(
+            new SqliteSessionStore(temp.DatabasePath),
+            new SqliteCostAlertEstimateReadStoreV1(
+                new SqlitePricingReadStore(temp.DatabasePath)),
+            catalogBytes).Resolve(
+                [member],
+                [
+                    new(
+                        AlertEvidenceKindV2.Session,
+                        member.SessionId,
+                        member.SessionId,
+                        member.SessionEffectiveAtUtc),
+                    new(
+                        AlertEvidenceKindV2.PricingEstimate,
+                        member.EstimateId!,
+                        member.SessionId,
+                        member.EstimateCalculationTimeUtc!.Value),
+                ]);
+        Assert.Equal("success", resolution.State);
+        var store = new SqliteAlertEngineStore(new SqliteConnectionStringBuilder
+        {
+            DataSource = temp.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        Assert.Equal(
+            AlertEngineStoreStatusV2.Success,
+            store.Append(CostEvaluation(member)).Status);
+
+        using var response = await host.Client.GetAsync(
+            "/api/alert-center/v2/alerts?receipt_kind=cost_receipt_v2&period=30d");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        var receipt = Assert.Single(json.RootElement.GetProperty("items").EnumerateArray())
+            .GetProperty("cost_receipt_v2");
+        var projected = Assert.Single(receipt.GetProperty("members").EnumerateArray());
+        Assert.Equal("available", projected.GetProperty("session_evidence_state").GetString());
+        Assert.Equal("repo-safe", projected.GetProperty("repository").GetString());
+        Assert.Equal("workspace-safe", projected.GetProperty("workspace").GetString());
+        Assert.Equal("available", projected.GetProperty("estimate_evidence_state").GetString());
+        Assert.Equal(
+            $"/costs?session_id={member.SessionId}&estimate_id={member.EstimateId}",
+            projected.GetProperty("estimate_href").GetString());
+    }
+
     [Fact]
     public async Task ReadRoute_UsesAdditiveV2ErrorEnvelopeWithoutChangingV1()
     {
@@ -301,6 +430,286 @@ public sealed class AlertCenterV2RouteTests
                 .TrimEnd('=')
                 .Replace('+', '-')
                 .Replace('/', '_');
+    }
+
+    private static AlertCostMemberV2 PersistCostEvidence(MonitorTempDirectory temp)
+    {
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var sessionId = Guid.CreateVersion7().ToString("D");
+        var sessionEffectiveAt = clock.GetUtcNow().AddMinutes(-5);
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = temp.DatabasePath,
+            Pooling = false,
+        }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                INSERT INTO sessions(
+                    session_id,status,completeness,repository,workspace,last_seen_at,
+                    raw_retention_state,created_at,updated_at)
+                VALUES($id,'completed','full','repo-safe','workspace-safe',$time,
+                    'not_captured',$time,$time);
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES($run,$id,'vscode','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES($event,$id,$run,'vscode','synthetic',$source,'turn',$time,
+                    'not_captured','1.2.3');
+                """;
+            command.Parameters.AddWithValue("$id", sessionId);
+            command.Parameters.AddWithValue("$time", sessionEffectiveAt.ToString("O"));
+            command.Parameters.AddWithValue("$run", Guid.CreateVersion7().ToString("D"));
+            command.Parameters.AddWithValue("$event", Guid.CreateVersion7().ToString("D"));
+            command.Parameters.AddWithValue("$source", "source-" + sessionId);
+            command.ExecuteNonQuery();
+        }
+
+        var pricingStore = new SqlitePricingStore(temp.DatabasePath, clock);
+        pricingStore.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, pricingStore.PutCatalogSnapshot(catalogBytes).Status);
+        var configuration = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            catalog.CatalogSha256,
+            [new(
+                "github-copilot-vscode",
+                "1.2.3",
+                "pricing-capability.v1",
+                PricingProviders.GitHubCopilot,
+                PricingBillingModes.GitHubAiCredits,
+                PricingRoutes.CreditConsumingInteraction)],
+            [],
+            clock.GetUtcNow());
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            configuration,
+            0,
+            null,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, pricingStore.PutConfigurationPreview(preview).Status);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            pricingStore.AppendConfigurationCommitApplication(
+                preview,
+                new(catalog.CatalogSha256, catalogBytes),
+                []).Status);
+
+        CostSessionSourcePartitionResultV1 source;
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = temp.DatabasePath,
+            Pooling = false,
+        }.ToString()))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+                connection,
+                transaction,
+                sessionId);
+            transaction.Rollback();
+        }
+        var target = new PricingRecalculationTargetCapture(
+            sessionId,
+            "completed",
+            sessionEffectiveAt,
+            sessionEffectiveAt,
+            "resolved",
+            source.ObservationCount,
+            source.Digest,
+            source.SourceSurface,
+            source.SourceApplicationVersion,
+            null,
+            null,
+            0);
+        var calculationTime = clock.GetUtcNow();
+        var recalculation = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-estimate-alert-center-production");
+        var runId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            pricingStore.StartRecalculationApplication(
+                runId,
+                recalculation,
+                [target],
+                calculationTime).Status);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            pricingStore.MarkRecalculationRunning(runId).Status);
+        var provenance = new PricingValueProvenance(
+            "synthetic-adapter",
+            "pricing-capability.v1",
+            "event-1",
+            "not_captured",
+            "pricing-normalization.v1");
+        var configurationProvenance = new PricingValueProvenance(
+            "local-monitor-cost-configuration",
+            "cost.configuration.v1",
+            configuration.ConfigurationId + ".source-entry-000",
+            "not_captured",
+            "cost-configuration-provenance.v1");
+        var estimateRequest = new PricingEstimateRequest(
+            PricingContractVersions.EstimateRequest,
+            calculationTime,
+            null,
+            new(
+                "github-copilot-vscode",
+                "1.2.3",
+                sessionId,
+                sessionEffectiveAt,
+                PricingProviders.GitHubCopilot,
+                "GPT-5 mini",
+                PricingBillingModes.GitHubAiCredits,
+                PricingRoutes.CreditConsumingInteraction,
+                PricingSourceCompleteness.Full,
+                [],
+                provenance,
+                provenance,
+                provenance,
+                configurationProvenance,
+                configurationProvenance),
+            new PricingUsage(
+                new(1_000, provenance),
+                new(2_000, provenance),
+                new(500, provenance),
+                null,
+                null,
+                null,
+                null,
+                null));
+        var estimate = new PricingEstimationEngine(catalog).Estimate(estimateRequest);
+        Assert.Equal("estimated", estimate.Status);
+        Assert.NotNull(estimate.Amount);
+        Assert.Equal("USD", estimate.Currency);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            pricingStore.AppendEstimateSuccessApplication(
+                runId,
+                0,
+                0,
+                estimateRequest,
+                PricingCanonicalJson.Serialize(estimate)).Status);
+
+        return new(
+            sessionId,
+            sessionEffectiveAt,
+            sessionEffectiveAt,
+            "github-copilot-vscode",
+            "1.2.3",
+            AlertCostMemberStateV2.Estimated,
+            1,
+            AlertCostAttemptResultKindV2.Estimate,
+            null,
+            1,
+            estimate.EstimateId,
+            estimate.CalculationTimeUtc,
+            estimate.CatalogSha256,
+            estimate.Registry!.RegistryVersion,
+            estimate.Source.Provider,
+            estimate.Source.ModelId,
+            estimate.Source.BillingMode,
+            estimate.Amount,
+            estimate.Currency);
+    }
+
+    private static AlertEvaluationResultV2 CostEvaluation(AlertCostMemberV2 member)
+    {
+        var eligibilityDigest = new string('a', 64);
+        var scope = new AlertCostScopeV2(
+            AlertCostScopeIdentityV2.Create(
+                AlertCostScopeKindV2.Session,
+                null,
+                null,
+                eligibilityDigest,
+                [member.SessionId]),
+            AlertCostScopeKindV2.Session,
+            null,
+            null,
+            [member.SessionId]);
+        var snapshot = new AlertNormalizedSnapshotV2(
+            AlertContractVersionsV2.Snapshot,
+            "estimated_cost",
+            "local-monitor-cost-analytics",
+            "1",
+            AlertCostAcquisitionStateV2.Complete,
+            [],
+            AlertCostAggregateStateV2.Available,
+            eligibilityDigest,
+            1,
+            null,
+            scope,
+            "USD",
+            member.Amount,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            10_000,
+            [member],
+            [
+                new(
+                    AlertEvidenceKindV2.Session,
+                    member.SessionId,
+                    member.SessionId,
+                    member.SessionEffectiveAtUtc),
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    member.EstimateId!,
+                    member.SessionId,
+                    member.EstimateCalculationTimeUtc!.Value),
+            ],
+            AlertCostCompletenessV2.Full,
+            [],
+            member.SessionEffectiveAtUtc,
+            member.SessionEffectiveAtUtc);
+        var configuration = new AlertEngineConfigurationV2(
+            AlertContractVersionsV2.Configuration,
+            "cost.configuration.v1",
+            "cost-configuration-" + new string('d', 64),
+            1,
+            new string('e', 64),
+            [
+                new(
+                    "session-estimated-cost-threshold",
+                    "1",
+                    true,
+                    "USD",
+                    0m,
+                    0m,
+                    10_000,
+                    AlertCostScopeKindV2.Session,
+                    null),
+            ]);
+        var result = new AlertEvaluationEngine(
+            new AlertRuleRegistryV2(),
+            new ResolvedEvidenceV2()).Evaluate(
+                new("session-estimated-cost-threshold", "1"),
+                snapshot,
+                configuration,
+                new(AlertEvidenceReadViewV2.Instance, []));
+        return Assert.IsType<AlertEvaluationResultV2>(result.Evaluation);
     }
 
     private static AlertEvaluationResultV2 CostEvaluation(int index = 1)
