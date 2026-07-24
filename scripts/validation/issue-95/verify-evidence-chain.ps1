@@ -440,7 +440,7 @@ function Assert-LiveValidationContract([string] $MatrixPrepSha) {
         Assert-ExactCommit $correctionSha 'red_failure_correction'
         Assert-Ancestor $MatrixPrepSha $correctionSha 'red_failure_correction'
         Assert-Ancestor $correctionSha $CandidateSha 'red_failure_correction'
-        $correctionPaths = @(Invoke-GitText @('diff-tree', '--no-commit-id', '--name-only', '-r', $correctionSha) -split "`r?`n")
+        $correctionPaths = @((Invoke-GitText @('diff-tree', '--no-commit-id', '--name-only', '-r', $correctionSha)) -split "`r?`n")
         if ($correctionPaths -notcontains 'scripts/validation/issue-95/test-evidence-chain.ps1') {
             throw 'red_failure_correction_not_executable'
         }

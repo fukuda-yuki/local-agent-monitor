@@ -58,7 +58,8 @@ function New-FixtureRoot {
         & git -C $script:fixtureRoot add .
         & git -C $script:fixtureRoot commit -q -m matrix-prep
         Write-FixtureFile $script:fixtureRoot 'scripts/validation/issue-95/test-evidence-chain.ps1' ([IO.File]::ReadAllText($selfTestSourcePath))
-        & git -C $script:fixtureRoot add scripts/validation/issue-95/test-evidence-chain.ps1
+        Write-FixtureFile $script:fixtureRoot 'candidate-marker.txt' 'multi-path executable correction fixture'
+        & git -C $script:fixtureRoot add scripts/validation/issue-95/test-evidence-chain.ps1 candidate-marker.txt
         & git -C $script:fixtureRoot commit -q -m candidate
         $script:fixtureCandidate = (& git -C $script:fixtureRoot rev-parse HEAD).Trim()
         $script:fixtureRepositoryCount++
