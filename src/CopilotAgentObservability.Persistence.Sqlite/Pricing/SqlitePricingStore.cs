@@ -941,7 +941,24 @@ public sealed partial class SqlitePricingStore
         string runId,
         IReadOnlyList<PricingTargetCompletionWrite> targetResults,
         IReadOnlyList<PricingBudgetResultWrite> budgetResults,
-        PricingRunFailureWrite? failure)
+        PricingRunFailureWrite? failure) =>
+        AppendRecalculationCompletionCore(
+            runId,
+            targetResults,
+            budgetResults,
+            failure,
+            sharedConnection: null,
+            sharedTransaction: null,
+            appendAlertGraphs: null);
+
+    internal PricingStoreResult AppendRecalculationCompletionCore(
+        string runId,
+        IReadOnlyList<PricingTargetCompletionWrite> targetResults,
+        IReadOnlyList<PricingBudgetResultWrite> budgetResults,
+        PricingRunFailureWrite? failure,
+        SqliteConnection? sharedConnection,
+        SqliteTransaction? sharedTransaction,
+        Func<SqliteConnection, SqliteTransaction, PricingStoreStatus>? appendAlertGraphs)
     {
         ArgumentNullException.ThrowIfNull(targetResults);
         ArgumentNullException.ThrowIfNull(budgetResults);
@@ -968,10 +985,20 @@ public sealed partial class SqlitePricingStore
             return new(PricingStoreStatus.ContractRejected);
         try
         {
-            using var connection = Open(SqliteOpenMode.ReadWrite);
-            using var transaction = connection.BeginTransaction(deferred: false);
+            var ownsTransaction = sharedConnection is null && sharedTransaction is null;
+            if (!ownsTransaction
+                && (sharedConnection is null
+                    || sharedTransaction is null
+                    || sharedTransaction.Connection != sharedConnection))
+                return new(PricingStoreStatus.ContractRejected);
+            using var ownedConnection = ownsTransaction ? Open(SqliteOpenMode.ReadWrite) : null;
+            var connection = sharedConnection ?? ownedConnection!;
+            using var ownedTransaction = ownsTransaction
+                ? connection.BeginTransaction(deferred: false)
+                : null;
+            var transaction = sharedTransaction ?? ownedTransaction!;
             if (!PricingSchemaV1.ValidateRows(connection, transaction))
-                return Rollback(transaction, PricingStoreStatus.Unavailable);
+                return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.Unavailable);
 
             CostRecalculationRequestV1 request;
             var targetCount = 0;
@@ -987,10 +1014,10 @@ public sealed partial class SqlitePricingStore
                 ("$run", runId)))
             using (var reader = root.ExecuteReader())
             {
-                if (!reader.Read()) return Rollback(transaction, PricingStoreStatus.Conflict);
+                if (!reader.Read()) return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.Conflict);
                 var consumed = CostRecalculationRequestCanonicalJsonV1.Consume((byte[])reader[0]);
                 if (consumed.Status != CostConsumerStatus.Success || consumed.Value is null)
-                    return Rollback(transaction, PricingStoreStatus.Unavailable);
+                    return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.Unavailable);
                 request = consumed.Value;
                 targetCount = reader.GetInt32(1);
                 scopeCount = reader.GetInt32(2);
@@ -1013,11 +1040,15 @@ public sealed partial class SqlitePricingStore
                     && failure.FailureOrdinal >= scopeCount
                 || (failure is null && frozenTargetResults.Any(item => item.ResultKind == "failed"))
                 || (failure is not null
-                    && (frozenTargetResults.All(item => item.ResultKind != "failed")
-                        || frozenTargetResults.Any(item => item.ResultKind == "estimate")
+                    && (frozenTargetResults.Any(item => item.ResultKind == "estimate")
                         || frozenTargetResults.Where(item => item.ResultKind == "failed")
-                            .Any(item => item.ResultCode != failure.FailureCode))))
-                return Rollback(transaction, PricingStoreStatus.ContractRejected);
+                            .Any(item => item.ResultCode != failure.FailureCode)
+                        || ((failure.FailurePhase is "head_input" or "recovery")
+                            && frozenTargetResults.Any(item => item.ResultKind != "failed"))
+                        || (failure.FailurePhase is
+                                "adapter" or "estimate_validation" or "pricing_store"
+                            && frozenTargetResults[failure.FailureOrdinal!.Value].ResultKind != "failed"))))
+                return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.ContractRejected);
 
             var targets = new Dictionary<int, TargetFacts>();
             using (var targetCommand = Command(
@@ -1050,7 +1081,7 @@ public sealed partial class SqlitePricingStore
             foreach (var write in frozenTargetResults)
             {
                 if (!targets.TryGetValue(write.TargetOrdinal, out var target))
-                    return Rollback(transaction, PricingStoreStatus.ContractRejected);
+                    return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.ContractRejected);
                 PricingEstimateRecord? estimate = null;
                 if (write.ResultKind == "estimate")
                 {
@@ -1061,7 +1092,7 @@ public sealed partial class SqlitePricingStore
                         write,
                         target);
                     if (estimate is null)
-                        return Rollback(transaction, PricingStoreStatus.ContractRejected);
+                        return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.ContractRejected);
                 }
 
                 using (var result = Command(
@@ -1116,11 +1147,18 @@ public sealed partial class SqlitePricingStore
                 }
             }
 
+            if (appendAlertGraphs is not null)
+            {
+                var alertStatus = appendAlertGraphs(connection, transaction);
+                if (alertStatus != PricingStoreStatus.Success)
+                    return AbortCompletion(transaction, ownsTransaction, alertStatus);
+            }
+
             foreach (var write in frozenBudgetResults)
             {
                 if (!BudgetMatchesRequest(write, request.BudgetScopes[write.ScopeOrdinal])
                     || !BudgetParentsAreValid(connection, transaction, write))
-                    return Rollback(transaction, PricingStoreStatus.ContractRejected);
+                    return AbortCompletion(transaction, ownsTransaction, PricingStoreStatus.ContractRejected);
                 using var insert = Command(
                     connection,
                     transaction,
@@ -1166,7 +1204,7 @@ public sealed partial class SqlitePricingStore
                 ("$ordinal", (object?)failure?.FailureOrdinal ?? DBNull.Value),
                 ("$code", (object?)failure?.FailureCode ?? DBNull.Value)))
                 terminal.ExecuteNonQuery();
-            transaction.Commit();
+            if (ownsTransaction) transaction.Commit();
             return new(PricingStoreStatus.Success);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
@@ -1177,6 +1215,15 @@ public sealed partial class SqlitePricingStore
         {
             return new(PricingStoreStatus.Unavailable);
         }
+    }
+
+    private static PricingStoreResult AbortCompletion(
+        SqliteTransaction transaction,
+        bool ownsTransaction,
+        PricingStoreStatus status)
+    {
+        if (ownsTransaction) transaction.Rollback();
+        return new(status);
     }
 
     private PricingEstimateRecord? ValidateAndInsertEstimate(

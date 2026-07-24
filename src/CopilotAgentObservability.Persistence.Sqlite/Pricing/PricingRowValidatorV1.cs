@@ -786,7 +786,16 @@ internal static class PricingRowValidatorV1
                    (SELECT COUNT(DISTINCT x.result_code) FROM pricing_recalculation_target_results x
                     WHERE x.run_id=r.run_id AND x.result_kind='failed'),
                    (SELECT MIN(x.result_code) FROM pricing_recalculation_target_results x
-                    WHERE x.run_id=r.run_id AND x.result_kind='failed')
+                    WHERE x.run_id=r.run_id AND x.result_kind='failed'),
+                   (SELECT failure_phase FROM pricing_recalculation_events e
+                    WHERE e.run_id=r.run_id ORDER BY event_sequence DESC LIMIT 1),
+                   (SELECT failure_ordinal FROM pricing_recalculation_events e
+                    WHERE e.run_id=r.run_id ORDER BY event_sequence DESC LIMIT 1),
+                   (SELECT COUNT(*) FROM pricing_recalculation_target_results x
+                    WHERE x.run_id=r.run_id AND x.result_kind='failed'
+                      AND x.target_ordinal=(
+                        SELECT failure_ordinal FROM pricing_recalculation_events e
+                        WHERE e.run_id=r.run_id ORDER BY event_sequence DESC LIMIT 1))
             FROM pricing_recalculation_runs r
             ORDER BY r.run_id;
             """);
@@ -802,6 +811,7 @@ internal static class PricingRowValidatorV1
             var estimateCount = reader.GetInt64(7);
             var budgetCount = reader.GetInt64(8);
             var failedCount = reader.GetInt64(9);
+            var failurePhase = NullableString(reader, 12);
             var terminal = terminalKind is "succeeded" or "failed";
             if (!terminal)
             {
@@ -822,9 +832,13 @@ internal static class PricingRowValidatorV1
             }
             else if (estimateCount != 0
                 || budgetCount != 0
-                || failedCount == 0
-                || reader.GetInt64(10) != 1
-                || reader.GetString(11) != NullableString(reader, 4))
+                || (failedCount > 0
+                    && (reader.GetInt64(10) != 1
+                        || reader.GetString(11) != NullableString(reader, 4)))
+                || ((failurePhase is "head_input" or "recovery")
+                    && failedCount != targetCount)
+                || ((failurePhase is "adapter" or "estimate_validation" or "pricing_store")
+                    && reader.GetInt64(14) != 1))
                 return false;
         }
         return true;

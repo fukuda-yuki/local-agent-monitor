@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
@@ -138,6 +139,352 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal("github-copilot-vscode", Scalar<string>(read, "SELECT source_surface FROM pricing_recalculation_targets;"));
         Assert.Equal("1.2.3", Scalar<string>(read, "SELECT source_application_version FROM pricing_recalculation_targets;"));
         Assert.Equal(0L, Scalar<long>(read, "SELECT base_attempt_revision FROM pricing_recalculation_targets;"));
+    }
+
+    [Fact]
+    public async Task PricingApplicationCore_AlertFailureRollsBackThenPersistsSeparateFailureLedger()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var calculationTime = new DateTimeOffset(2026, 7, 25, 2, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddHours(-1));
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.PutCatalogSnapshot(PricingCanonicalJson.SerializeCatalogSnapshot(catalog)).Status);
+        var configuration = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            catalog.CatalogSha256,
+            [],
+            [new("session-estimated-cost-threshold", "1", true, "USD", "1", "2", 5000, "session", null)],
+            calculationTime.AddHours(-1));
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            configuration,
+            0,
+            null,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = calculationTime.AddMinutes(-59);
+        Assert.Equal(PricingStoreStatus.Success, AppendIncompleteConfigurationCommit(store, preview).Status);
+        var sessionId = Guid.NewGuid().ToString("D");
+        PricingRecalculationTargetCapture target;
+        using (var connection = database.Open())
+        {
+            InsertSession(connection, sessionId);
+            using var transaction = connection.BeginTransaction();
+            var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
+                connection,
+                transaction,
+                sessionId);
+            target = new(
+                sessionId,
+                "completed",
+                new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero),
+                new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero),
+                "missing",
+                source.ObservationCount,
+                source.Digest,
+                source.SourceSurface,
+                source.SourceApplicationVersion,
+                null,
+                null,
+                0);
+            transaction.Rollback();
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [new("session", sessionId, null, null, null)],
+            "pricing-atomic-alert-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(runId, request, [target], calculationTime).Status);
+        clock.UtcNow = calculationTime.AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        using (var before = database.Open())
+            Assert.True(PricingSchemaV1.ValidateRows(before, null));
+        var alertStore = new SqliteAlertEngineStore(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path,
+            Pooling = false,
+        }.ToString());
+        var participant = new AppendThenFailAlertParticipant(alertStore);
+        var unitOfWork = new SqliteCostRecalculationUnitOfWork(database.Path, participant, clock);
+        var eligibilityDigest = new string('9', 64);
+        var evaluation = CreateAlertEvaluation(sessionId, eligibilityDigest);
+        var receipt = Assert.Single(evaluation.Receipts);
+        var budget = new PricingBudgetResultWrite(
+            0,
+            "session",
+            PricingAlertCostScopeIdentityV2.Create(
+                "session",
+                null,
+                null,
+                eligibilityDigest,
+                [sessionId]),
+            eligibilityDigest,
+            [sessionId],
+            null,
+            null,
+            "session-estimated-cost-threshold",
+            "1",
+            evaluation.EvaluationId,
+            "receipt",
+            receipt.AlertId,
+            null,
+            null);
+
+        var result = unitOfWork.Complete(
+            runId,
+            [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+            [evaluation],
+            [budget]);
+
+        Assert.Equal(1, participant.CallCount);
+        Assert.Equal(
+            AlertEngineTransactionAppendStatusV2.Success,
+            participant.InnerStatus);
+        Assert.Equal(PricingCompletionStatus.AlertStoreFailed, result.Status);
+        Assert.Equal("alert_store_failed", result.FailureCode);
+        var replay = unitOfWork.Complete(
+            runId,
+            [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+            [evaluation],
+            [budget]);
+        Assert.Equal(PricingCompletionStatus.ContractRejected, replay.Status);
+        Assert.Equal(1, participant.CallCount);
+        using (var read = database.Open())
+        {
+            Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_evaluations;"));
+            Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_recalculation_budget_results;"));
+            Assert.Equal("failed", Scalar<string>(read, "SELECT event_kind FROM pricing_recalculation_events WHERE event_sequence=2;"));
+            Assert.Equal("alert_store_failed", Scalar<string>(read, "SELECT failure_code FROM pricing_recalculation_events WHERE event_sequence=2;"));
+            Assert.Equal("unavailable", Scalar<string>(read, "SELECT result_kind FROM pricing_recalculation_target_results;"));
+            Assert.Equal("source_mapping_unavailable", Scalar<string>(read, "SELECT result_code FROM pricing_recalculation_target_results;"));
+            Assert.True(PricingSchemaV1.ValidateRows(read, null));
+        }
+
+        var successfulRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [new("session", sessionId, null, null, null)],
+            "pricing-atomic-alert-0002");
+        var successfulRunId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                successfulRunId,
+                successfulRequest,
+                [target with { BaseAttemptRevision = 1 }],
+                calculationTime.AddSeconds(3)).Status);
+        clock.UtcNow = calculationTime.AddSeconds(4);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.MarkRecalculationRunning(successfulRunId).Status);
+        clock.UtcNow = calculationTime.AddSeconds(5);
+        var completionTasks = Enumerable.Range(0, 2)
+            .Select(_ => Task.Run(() =>
+                new SqliteCostRecalculationUnitOfWork(
+                    database.Path,
+                    alertStore,
+                    clock).Complete(
+                        successfulRunId,
+                        [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+                        [evaluation],
+                        [budget])))
+            .ToArray();
+        var concurrentResults = await Task.WhenAll(completionTasks);
+
+        Assert.Equal(
+            [PricingCompletionStatus.Success, PricingCompletionStatus.ContractRejected],
+            concurrentResults.Select(item => item.Status).Order().ToArray());
+        using (var afterSuccess = database.Open())
+        {
+            Assert.Equal(1L, Scalar<long>(afterSuccess, "SELECT COUNT(*) FROM alert_evaluations;"));
+            Assert.Equal(1L, Scalar<long>(afterSuccess, "SELECT COUNT(*) FROM alert_receipts;"));
+            Assert.Equal(1L, Scalar<long>(afterSuccess, "SELECT COUNT(*) FROM pricing_recalculation_budget_results;"));
+            Assert.Equal(
+                "succeeded",
+                Scalar<string>(
+                    afterSuccess,
+                    $"SELECT event_kind FROM pricing_recalculation_events WHERE run_id='{successfulRunId}' AND event_sequence=2;"));
+            Assert.True(PricingSchemaV1.ValidateRows(afterSuccess, null));
+        }
+
+        var invalidEvaluationRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [new("session", sessionId, null, null, null)],
+            "pricing-atomic-alert-0003");
+        var invalidEvaluationRunId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                invalidEvaluationRunId,
+                invalidEvaluationRequest,
+                [target with { BaseAttemptRevision = 2 }],
+                calculationTime.AddSeconds(6)).Status);
+        clock.UtcNow = calculationTime.AddSeconds(7);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.MarkRecalculationRunning(invalidEvaluationRunId).Status);
+        clock.UtcNow = calculationTime.AddSeconds(8);
+
+        var invalidEvaluation = new SqliteCostRecalculationUnitOfWork(
+            database.Path,
+            alertStore,
+            clock).Complete(
+                invalidEvaluationRunId,
+                [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+                [evaluation with { EvaluationId = "invalid" }],
+                [budget]);
+
+        Assert.Equal(PricingCompletionStatus.AlertEvaluationFailed, invalidEvaluation.Status);
+        using (var afterInvalid = database.Open())
+        {
+            Assert.Equal(1L, Scalar<long>(afterInvalid, "SELECT COUNT(*) FROM alert_evaluations;"));
+            Assert.Equal(
+                "alert_evaluation_failed",
+                Scalar<string>(
+                    afterInvalid,
+                    $"SELECT failure_code FROM pricing_recalculation_events WHERE run_id='{invalidEvaluationRunId}' AND event_sequence=2;"));
+            Assert.True(PricingSchemaV1.ValidateRows(afterInvalid, null));
+        }
+
+        var mismatchedScopeRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-atomic-alert-0004");
+        var mismatchedScopeRunId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                mismatchedScopeRunId,
+                mismatchedScopeRequest,
+                [target with { BaseAttemptRevision = 3 }],
+                calculationTime.AddSeconds(9)).Status);
+        clock.UtcNow = calculationTime.AddSeconds(10);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.MarkRecalculationRunning(mismatchedScopeRunId).Status);
+        clock.UtcNow = calculationTime.AddSeconds(11);
+
+        var mismatchedScope = new SqliteCostRecalculationUnitOfWork(
+            database.Path,
+            alertStore,
+            clock).Complete(
+                mismatchedScopeRunId,
+                [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+                [evaluation],
+                []);
+
+        Assert.Equal(PricingCompletionStatus.PricingStoreFailed, mismatchedScope.Status);
+        using var afterMismatch = database.Open();
+        Assert.Equal(
+            "failed",
+            Scalar<string>(
+                afterMismatch,
+                $"SELECT result_kind FROM pricing_recalculation_target_results WHERE run_id='{mismatchedScopeRunId}';"));
+        Assert.Equal(
+            "pricing_store_failed",
+            Scalar<string>(
+                afterMismatch,
+                $"SELECT failure_code FROM pricing_recalculation_events WHERE run_id='{mismatchedScopeRunId}' AND event_sequence=2;"));
+        Assert.True(PricingSchemaV1.ValidateRows(afterMismatch, null));
+    }
+
+    [Fact]
+    public void PricingApplicationCore_ChangedSessionSnapshotFailsBeforeAlertAppend()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var calculationTime = new DateTimeOffset(2026, 7, 25, 3, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddHours(-1));
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var preview = CreatePreview(catalog.CatalogSha256, calculationTime.AddHours(-1), 1);
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = calculationTime.AddMinutes(-59);
+        Assert.Equal(PricingStoreStatus.Success, AppendIncompleteConfigurationCommit(store, preview).Status);
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open())
+        {
+            InsertSession(connection, sessionId);
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES('run-1','{sessionId}','vscode','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES(
+                    'event-1','{sessionId}','run-1','vscode','synthetic','source-event-1',
+                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                """);
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            preview.Configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-stale-session-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        var participant = new FailingAlertParticipant();
+        var unitOfWork = new SqliteCostRecalculationUnitOfWork(database.Path, participant, clock);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            unitOfWork.Start(runId, request, catalogBytes, calculationTime).Status);
+        clock.UtcNow = calculationTime.AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        using (var connection = database.Open())
+        {
+            Execute(
+                connection,
+                """
+                UPDATE sessions
+                SET updated_at='2026-07-24T01:00:01.0000000+00:00';
+                """);
+        }
+        clock.UtcNow = calculationTime.AddSeconds(2);
+
+        var result = unitOfWork.Complete(
+            runId,
+            [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+            [null!],
+            []);
+
+        Assert.Equal(0, participant.CallCount);
+        Assert.Equal(PricingCompletionStatus.StaleRecalculationInput, result.Status);
+        Assert.Equal("stale_recalculation_input", result.FailureCode);
+        using var read = database.Open();
+        Assert.Equal("failed", Scalar<string>(read, "SELECT event_kind FROM pricing_recalculation_events WHERE event_sequence=2;"));
+        Assert.Equal("head_input", Scalar<string>(read, "SELECT failure_phase FROM pricing_recalculation_events WHERE event_sequence=2;"));
+        Assert.Equal("stale_recalculation_input", Scalar<string>(read, "SELECT result_code FROM pricing_recalculation_target_results;"));
+        Assert.Equal("failed", Scalar<string>(read, "SELECT result_kind FROM pricing_session_attempts;"));
+        Assert.True(PricingSchemaV1.ValidateRows(read, null));
     }
 
     [Fact]
@@ -1440,6 +1787,17 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         clock.UtcNow = calculationTime.AddSeconds(2);
 
+        Assert.Equal(
+            PricingStoreStatus.ContractRejected,
+            store.AppendRecalculationCompletionApplication(
+                runId,
+                [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+                [],
+                new PricingRunFailureWrite(
+                    "head_input",
+                    "target",
+                    0,
+                    "stale_recalculation_input")).Status);
         var result = store.AppendRecalculationCompletionApplication(
             runId,
             [PricingTargetCompletionWrite.Failed(0, "source_adapter_failed")],
@@ -1617,6 +1975,151 @@ public sealed class PricingPersistenceFoundationTests
             'cloud_provider_configured','2026.07','bundled','USD','{amountText}',
             '{new string('d', 64)}',X'01');
         """;
+
+    private static AlertEvaluationResultV2 CreateAlertEvaluation(
+        string sessionId,
+        string eligibilityDigest)
+    {
+        var observedAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var estimateId = "pricing-estimate-" + new string('a', 64);
+        var scope = new AlertCostScopeV2(
+            AlertCostScopeIdentityV2.Create(
+                AlertCostScopeKindV2.Session,
+                null,
+                null,
+                eligibilityDigest,
+                [sessionId]),
+            AlertCostScopeKindV2.Session,
+            null,
+            null,
+            [sessionId]);
+        var snapshot = new AlertNormalizedSnapshotV2(
+            AlertContractVersionsV2.Snapshot,
+            "estimated_cost",
+            "local-monitor-cost-analytics",
+            "1",
+            AlertCostAcquisitionStateV2.Complete,
+            [],
+            AlertCostAggregateStateV2.Available,
+            eligibilityDigest,
+            1,
+            null,
+            scope,
+            "USD",
+            2m,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            10_000,
+            [
+                new(
+                    sessionId,
+                    observedAt,
+                    observedAt.AddSeconds(1),
+                    "github-copilot",
+                    "1.2.3",
+                    AlertCostMemberStateV2.Estimated,
+                    1,
+                    AlertCostAttemptResultKindV2.Estimate,
+                    null,
+                    1,
+                    estimateId,
+                    observedAt.AddSeconds(2),
+                    new string('c', 64),
+                    "pricing-registry-v1",
+                    "github",
+                    "gpt-5",
+                    "api",
+                    2m,
+                    "USD"),
+            ],
+            [
+                new(AlertEvidenceKindV2.Session, sessionId, sessionId, observedAt),
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    estimateId,
+                    sessionId,
+                    observedAt.AddSeconds(2)),
+            ],
+            AlertCostCompletenessV2.Full,
+            [],
+            observedAt,
+            observedAt);
+        var configuration = new AlertEngineConfigurationV2(
+            AlertContractVersionsV2.Configuration,
+            "cost.configuration.v1",
+            "cost-configuration-" + new string('d', 64),
+            1,
+            new string('e', 64),
+            [
+                new(
+                    "session-estimated-cost-threshold",
+                    "1",
+                    true,
+                    "USD",
+                    1m,
+                    2m,
+                    10_000,
+                    AlertCostScopeKindV2.Session,
+                    null),
+            ]);
+        var result = new AlertEvaluationEngine(
+            new AlertRuleRegistryV2(),
+            new ResolvedAlertEvidenceResolver()).Evaluate(
+                new("session-estimated-cost-threshold", "1"),
+                snapshot,
+                configuration,
+                new(AlertEvidenceReadViewV2.Instance, []));
+        Assert.Equal(AlertEvaluationEngineStatusV2.Success, result.Status);
+        return Assert.IsType<AlertEvaluationResultV2>(result.Evaluation);
+    }
+
+    private sealed class AppendThenFailAlertParticipant(
+        ISqliteAlertEngineTransactionParticipantV2 inner)
+        : ISqliteAlertEngineTransactionParticipantV2
+    {
+        internal int CallCount { get; private set; }
+        internal AlertEngineTransactionAppendStatusV2? InnerStatus { get; private set; }
+
+        public AlertEngineTransactionAppendResultV2 AppendEvaluation(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            AlertEvaluationResultV2 evaluation)
+        {
+            CallCount++;
+            var appended = inner.AppendEvaluation(connection, transaction, evaluation);
+            InnerStatus = appended.Status;
+            return new(AlertEngineTransactionAppendStatusV2.Unavailable);
+        }
+    }
+
+    private sealed class ResolvedAlertEvidenceResolver : IAlertEvidenceResolverV2
+    {
+        public AlertEvidenceResolutionStatusV2 Resolve(
+            AlertEvidenceReferenceV2 reference,
+            AlertEvidenceResolutionScopeV2 scope) =>
+            AlertEvidenceResolutionStatusV2.Resolved;
+    }
+
+    private sealed class FailingAlertParticipant : ISqliteAlertEngineTransactionParticipantV2
+    {
+        internal int CallCount { get; private set; }
+
+        public AlertEngineTransactionAppendResultV2 AppendEvaluation(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            AlertEvaluationResultV2 evaluation)
+        {
+            CallCount++;
+            return new(AlertEngineTransactionAppendStatusV2.Unavailable);
+        }
+    }
 
     private sealed class PricingDatabase : IDisposable
     {
