@@ -1228,6 +1228,32 @@ public sealed class PricingPersistenceFoundationTests
     }
 
     [Fact]
+    public void SqlitePricingStore_InitializeForMonitorStartup_DeletesOnlyExpiredPreviews()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.PutConfigurationPreview(CreatePreview(catalog.CatalogSha256, createdAt, 1)).Status);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.PutConfigurationPreview(CreatePreview(catalog.CatalogSha256, createdAt.AddMinutes(10), 2)).Status);
+
+        clock.UtcNow = createdAt.AddMinutes(16);
+        var initialized = store.InitializeForMonitorStartup(catalogBytes, catalog.CatalogSha256);
+
+        Assert.Equal(PricingStoreStatus.Success, initialized.Status);
+        Assert.Equal(1, store.CountConfigurationPreviews());
+    }
+
+    [Fact]
     public void SqlitePricingStore_CommitConfiguration_AppendsImmutableHeadReceiptAndConsumesPreviewAtomically()
     {
         using var database = new PricingDatabase();
@@ -1427,8 +1453,11 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(PricingStoreStatus.Conflict, fresh.Status);
     }
 
-    [Fact]
-    public void SqlitePricingStore_RecoverInterruptedRuns_AppendsFailedResultEventAndAttempt()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SqlitePricingStore_InitializeForMonitorStartup_AppendsInterruptedFailureAndAttempt(
+        bool markRunning)
     {
         using var database = new PricingDatabase();
         database.CreateDependencies();
@@ -1479,17 +1508,103 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(runId, started.Value);
         Assert.Equal(PricingStoreStatus.Success, replayed.Status);
         Assert.Equal(runId, replayed.Value);
+        if (markRunning)
+        {
+            clock.UtcNow = calculationTime.AddMinutes(1);
+            Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        }
         clock.UtcNow = calculationTime.AddMinutes(5);
-        Assert.Equal(PricingStoreStatus.Success, store.RecoverInterruptedRuns().Status);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.InitializeForMonitorStartup(
+                PricingCanonicalJson.SerializeCatalogSnapshot(catalog),
+                catalog.CatalogSha256).Status);
 
         using var read = database.Open();
         Assert.Equal(
-            ["requested", "failed"],
+            markRunning ? ["requested", "running", "failed"] : ["requested", "failed"],
             Names(read, "SELECT event_kind FROM pricing_recalculation_events ORDER BY event_sequence;"));
         Assert.Equal("recalculation_interrupted", Scalar<string>(read, "SELECT failure_code FROM pricing_recalculation_events WHERE event_kind='failed';"));
         Assert.Equal("failed", Scalar<string>(read, "SELECT result_kind FROM pricing_recalculation_target_results;"));
         Assert.Equal(1L, Scalar<long>(read, "SELECT attempt_revision FROM pricing_session_attempts;"));
         Assert.Equal("recalculation_interrupted", Scalar<string>(read, "SELECT result_code FROM pricing_session_attempts;"));
+    }
+
+    [Fact]
+    public void SqlitePricingStore_InitializeForMonitorStartup_CorruptRowsLeaveCatalogAndPreviewsUnchanged()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var committedPreview = CreatePreview(catalog.CatalogSha256, createdAt, 1);
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(committedPreview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, committedPreview).Status);
+        var expiredPreview = CreatePreview(catalog.CatalogSha256, createdAt.AddMinutes(2), 2);
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(expiredPreview).Status);
+
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open()) InsertSession(connection, sessionId);
+        var runId = Guid.CreateVersion7().ToString("D");
+        var calculationTime = createdAt.AddHours(1);
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            committedPreview.Configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-recovery-rollback-0001");
+        var target = new PricingRecalculationTargetCapture(
+            sessionId,
+            "completed",
+            calculationTime.AddHours(-1),
+            calculationTime.AddMinutes(-1),
+            "resolved",
+            1,
+            new string('b', 64),
+            "github-copilot-vscode",
+            "1.2.3",
+            null,
+            null,
+            0);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(runId, request, [target], calculationTime).Status);
+        using (var connection = database.Open())
+        using (var artifact = connection.CreateCommand())
+        {
+            artifact.CommandText =
+                "INSERT INTO pricing_recalculation_target_results(run_id,target_ordinal,result_kind,result_code) VALUES($run,0,'failed','pricing_store_failed');";
+            artifact.Parameters.AddWithValue("$run", runId);
+            artifact.ExecuteNonQuery();
+        }
+
+        var alternateCatalog = PricingCatalog.Create(
+            BundledPricingRegistry.Load() with { SourceId = "alternate-bundled" });
+        clock.UtcNow = createdAt.AddMinutes(20);
+        var initialized = store.InitializeForMonitorStartup(
+            PricingCanonicalJson.SerializeCatalogSnapshot(alternateCatalog),
+            alternateCatalog.CatalogSha256);
+
+        Assert.Equal(PricingStoreStatus.Unavailable, initialized.Status);
+        using var read = database.Open();
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_configuration_previews;"));
+        Assert.Equal(
+            0L,
+            Scalar<long>(
+                read,
+                $"SELECT COUNT(*) FROM pricing_catalog_snapshots WHERE catalog_sha256='{alternateCatalog.CatalogSha256}';"));
+        Assert.Equal(
+            ["requested"],
+            Names(read, "SELECT event_kind FROM pricing_recalculation_events ORDER BY event_sequence;"));
     }
 
     [Fact]

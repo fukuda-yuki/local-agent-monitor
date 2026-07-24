@@ -80,6 +80,20 @@ later file changes have no effect until restart. No file watcher, network
 fetch, environment-secret interpolation, credential field, or permissive
 fallback exists.
 
+After the Issue #88 monitor initialization has atomically ensured
+`runtime_backup` v1 followed by `pricing` v1, the Local Monitor keeps that same
+non-waiting restore lease and runs one pricing-owner immediate transaction
+before host construction/readiness. That transaction strict-reloads and
+insert-or-identical persists the provider's exact canonical catalog snapshot
+only after its `Catalog`, canonical bytes, and SHA-256 identity agree,
+deletes only expired configuration previews, closes every nonterminal
+recalculation as `recalculation_interrupted` in the required keyset order, and
+strictly validates the resulting pricing rows before its sole commit. Catalog
+identity mismatch, row corruption, busy/unavailable storage, or failed
+recovery rolls back the complete pricing-owner transaction and fails startup
+with fixed path-free `pricing_store_unavailable`. The existing provider/input
+failure remains the separate fixed `pricing_catalog_unavailable`.
+
 No public HTTP route accepts a catalog, registry document, local-override
 bytes, estimate bytes, catalog path, provider credential, invoice, or private
 contract value. The private path and source file bytes never enter an API,

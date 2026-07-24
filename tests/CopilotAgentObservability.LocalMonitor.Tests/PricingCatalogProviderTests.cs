@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -278,6 +279,162 @@ public sealed class PricingCatalogProviderTests
         var provider = app.Services.GetRequiredService<IPricingCatalogProvider>();
         Assert.Equal("host-override", provider.Catalog.Documents[1].SourceId);
         Assert.Empty(app.Services.GetRequiredService<MonitorOptions>().PricingRegistryOverridePaths!);
+    }
+
+    [Fact]
+    public async Task Build_RestartReacquiresLeaseAndReloadsTheStrictStartupCatalog()
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        var options = new MonitorOptions(
+            temp.DatabasePath,
+            "http://127.0.0.1:0",
+            false,
+            MonitorOptions.DefaultMaxRequestBodyBytes);
+        var testOptions = new MonitorHostTestOptions
+        {
+            PricingCatalogProvider = provider,
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartRetentionCleanupWorker = false,
+            UseUserSecrets = false
+        };
+
+        DateTimeOffset firstRecordedAtUtc;
+        await using (var first = MonitorHost.Build(options, testOptions))
+        {
+            await first.StartAsync();
+            var store = first.Services.GetRequiredService<SqlitePricingStore>();
+            var persisted = Assert.IsType<PersistedPricingCatalogSnapshot>(
+                store.GetCatalogSnapshot(provider.CatalogSha256));
+            Assert.Equal(provider.CanonicalCatalogBytes.ToArray(), persisted.CanonicalBytes);
+            Assert.Equal(provider.Catalog.Documents.Count, persisted.DocumentCount);
+            firstRecordedAtUtc = persisted.FirstRecordedAtUtc;
+            await first.StopAsync();
+        }
+        CompleteSimulatedProcessExit(temp.DatabasePath);
+
+        await using (var restarted = MonitorHost.Build(options, testOptions))
+        {
+            var store = restarted.Services.GetRequiredService<SqlitePricingStore>();
+            var reloaded = Assert.IsType<PersistedPricingCatalogSnapshot>(
+                store.GetCatalogSnapshot(provider.CatalogSha256));
+
+            Assert.Equal(firstRecordedAtUtc, reloaded.FirstRecordedAtUtc);
+            Assert.Equal(provider.CanonicalCatalogBytes.ToArray(), reloaded.CanonicalBytes);
+        }
+    }
+
+    private static void CompleteSimulatedProcessExit(string databasePath)
+    {
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWrite,
+                Pooling = false
+            }.ToString()))
+        {
+            connection.Open();
+            using var checkpoint = connection.CreateCommand();
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            using var result = checkpoint.ExecuteReader();
+            Assert.True(result.Read());
+            Assert.Equal(0, result.GetInt32(0));
+            Assert.False(result.Read());
+        }
+
+        foreach (var sidecar in new[] { databasePath + "-shm", databasePath + "-wal" })
+            if (File.Exists(sidecar)) File.Delete(sidecar);
+    }
+
+    [Fact]
+    public void Build_WithMismatchedCatalogProviderIdentity_FailsWithPathFreeStoreCode()
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        var privatePathMarker = Path.Combine(temp.Path, "private-pricing-registry.json");
+        var mismatched = new MismatchedCatalogProvider(provider, privatePathMarker);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            MonitorHost.Build(
+                new MonitorOptions(
+                    temp.DatabasePath,
+                    "http://127.0.0.1:0",
+                    false,
+                    MonitorOptions.DefaultMaxRequestBodyBytes),
+                new MonitorHostTestOptions
+                {
+                    PricingCatalogProvider = mismatched,
+                    StartWriter = false,
+                    StartProjectionWorker = false,
+                    StartSessionWriter = false,
+                    StartSessionOtelEnrichment = false,
+                    StartRetentionCleanupWorker = false,
+                    UseUserSecrets = false
+                }));
+
+        Assert.Equal("pricing_store_unavailable", exception.Message);
+        Assert.DoesNotContain(temp.DatabasePath, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(privatePathMarker, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Build_WithCatalogDifferentFromCanonicalProviderBytes_FailsWithPathFreeStoreCode()
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        var alternateCatalog = PricingCatalog.Create(
+            BundledPricingRegistry.Load() with { SourceId = "alternate-bundled" });
+        var mismatched = new SplitCatalogProvider(
+            alternateCatalog,
+            provider.CanonicalCatalogBytes,
+            provider.CatalogSha256);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            MonitorHost.Build(
+                new MonitorOptions(
+                    temp.DatabasePath,
+                    "http://127.0.0.1:0",
+                    false,
+                    MonitorOptions.DefaultMaxRequestBodyBytes),
+                new MonitorHostTestOptions
+                {
+                    PricingCatalogProvider = mismatched,
+                    StartWriter = false,
+                    StartProjectionWorker = false,
+                    StartSessionWriter = false,
+                    StartSessionOtelEnrichment = false,
+                    StartRetentionCleanupWorker = false,
+                    UseUserSecrets = false
+                }));
+
+        Assert.Equal("pricing_store_unavailable", exception.Message);
+        Assert.DoesNotContain(temp.DatabasePath, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class MismatchedCatalogProvider(
+        IPricingCatalogProvider inner,
+        string privatePathMarker) : IPricingCatalogProvider
+    {
+        public PricingCatalog Catalog => inner.Catalog;
+        public ReadOnlyMemory<byte> CanonicalCatalogBytes => inner.CanonicalCatalogBytes;
+        public string CatalogSha256 => Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(privatePathMarker))).ToLowerInvariant();
+    }
+
+    private sealed class SplitCatalogProvider(
+        PricingCatalog catalog,
+        ReadOnlyMemory<byte> canonicalCatalogBytes,
+        string catalogSha256) : IPricingCatalogProvider
+    {
+        public PricingCatalog Catalog { get; } = catalog;
+        public ReadOnlyMemory<byte> CanonicalCatalogBytes { get; } =
+            canonicalCatalogBytes.ToArray();
+        public string CatalogSha256 { get; } = catalogSha256;
     }
 
     private sealed class PricingCatalogProviderTempDirectory : IDisposable

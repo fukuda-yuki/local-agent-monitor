@@ -18,9 +18,11 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
+using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.Pricing;
 using CopilotAgentObservability.SanitizedExport;
 using CopilotAgentObservability.RawReplay;
 using CopilotAgentObservability.Telemetry.Sessions;
@@ -35,6 +37,7 @@ namespace CopilotAgentObservability.LocalMonitor;
 internal static class MonitorHost
 {
     private const string JsonContentType = "application/json";
+    private const string PricingStoreUnavailable = "pricing_store_unavailable";
     private const string TracePath = "/v1/traces";
 
     private static readonly TimeSpan DefaultCommitTimeout = TimeSpan.FromSeconds(5);
@@ -301,6 +304,24 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
+        var pricingStore = new SqlitePricingStore(options.DatabasePath, timeProvider);
+        var providerCatalog = pricingCatalogProvider.Catalog;
+        var providerCatalogBytes = pricingCatalogProvider.CanonicalCatalogBytes.ToArray();
+        var providerCatalogSha256 = pricingCatalogProvider.CatalogSha256;
+        if (!string.Equals(
+                providerCatalog.CatalogSha256,
+                providerCatalogSha256,
+                StringComparison.Ordinal)
+            || !PricingCanonicalJson.SerializeCatalogSnapshot(providerCatalog)
+                .AsSpan()
+                .SequenceEqual(providerCatalogBytes))
+            throw new InvalidOperationException(PricingStoreUnavailable);
+        var pricingInitialization = pricingStore.InitializeForMonitorStartup(
+            providerCatalogBytes,
+            providerCatalogSha256);
+        if (pricingInitialization.Status != PricingStoreStatus.Success)
+            throw new InvalidOperationException(PricingStoreUnavailable);
+        builder.Services.AddSingleton(pricingStore);
 
         var app = builder.Build();
         var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
@@ -1514,6 +1535,12 @@ internal static class MonitorHost
         catch (PricingCatalogUnavailableException)
         {
             error.WriteLine("error: pricing_catalog_unavailable");
+            return 1;
+        }
+        catch (InvalidOperationException exception)
+            when (string.Equals(exception.Message, PricingStoreUnavailable, StringComparison.Ordinal))
+        {
+            error.WriteLine($"error: {PricingStoreUnavailable}");
             return 1;
         }
 
