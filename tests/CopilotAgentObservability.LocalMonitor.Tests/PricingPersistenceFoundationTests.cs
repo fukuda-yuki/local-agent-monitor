@@ -2266,6 +2266,7 @@ public sealed class PricingPersistenceFoundationTests
         var sessions = Enumerable.Range(0, 2_001)
             .Select(_ => Guid.NewGuid().ToString("D"))
             .ToArray();
+        var budgetIneligibleSessionId = Guid.NewGuid().ToString("D");
         using (var connection = database.Open())
         using (var transaction = connection.BeginTransaction())
         {
@@ -2321,8 +2322,26 @@ public sealed class PricingPersistenceFoundationTests
                 sourceEventId.Value = sourceEvent;
                 eventCommand.ExecuteNonQuery();
             }
+            sessionId.Value = budgetIneligibleSessionId;
+            session.ExecuteNonQuery();
             transaction.Commit();
         }
+        var precedenceRequest = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessions[0], budgetIneligibleSessionId],
+            [
+                new("utc_day", null, "2026-07-24", null, null),
+                new(
+                    "rolling_period",
+                    null,
+                    null,
+                    new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero),
+                    2),
+                new("session", budgetIneligibleSessionId, null, null, null),
+            ],
+            "pricing-budget-cardinality-precedence-0001");
         var request = CostRecalculationRequestCanonicalJsonV1.Create(
             configuration.ConfigurationId,
             1,
@@ -2341,6 +2360,14 @@ public sealed class PricingPersistenceFoundationTests
         var coordinator = new SqliteCostRecalculationCoordinatorV1(
             database.Path,
             timeProvider: clock);
+
+        var precedence = coordinator.Start(
+            Guid.CreateVersion7().ToString("D"),
+            precedenceRequest,
+            catalogBytes,
+            createdAt.AddMinutes(2));
+        Assert.Equal(PricingStoreStatus.Conflict, precedence.Status);
+        Assert.Equal("cost_session_not_eligible", precedence.ErrorCode);
 
         var started = coordinator.Start(
             Guid.CreateVersion7().ToString("D"),
