@@ -190,10 +190,64 @@ public sealed class Issue95ValidationContractTests
         Assert.Contains("validate-matrix.ps1", script, StringComparison.Ordinal);
         Assert.Contains("git show", script, StringComparison.Ordinal);
         Assert.Contains("working_tree_substitution_detected", script, StringComparison.Ordinal);
+        Assert.Contains("matrix_prep_not_exact_commit", script, StringComparison.Ordinal);
+        Assert.Contains("not_candidate_ancestor", script, StringComparison.Ordinal);
+        Assert.Contains("live_validation_contract_invalid", script, StringComparison.Ordinal);
+        Assert.Contains("applicable_security_prerequisite_skips", script, StringComparison.Ordinal);
+        Assert.Contains("not_applicable_os_security_tests", script, StringComparison.Ordinal);
+        Assert.Contains("validation_os", script, StringComparison.Ordinal);
         Assert.Contains("StringComparer]::Ordinal", script, StringComparison.Ordinal);
         Assert.DoesNotContain("git checkout", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git reset", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git clean", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DirectCatalogAndBrowserRetentionBoundariesRemainExecutable()
+    {
+        var routes = File.ReadAllText(RepositoryPath(
+            "tests/CopilotAgentObservability.LocalMonitor.Tests/CostRouteTests.cs"));
+        Assert.Contains(
+            "CatalogRoutePinsDefaultFiftyMaximumOneHundredAndRejectsOneHundredOne",
+            routes,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CatalogRouteRejectsCanonicalSameCatalogNonmemberCursor",
+            routes,
+            StringComparison.Ordinal);
+
+        var browser = File.ReadAllText(RepositoryPath(
+            "tests/CopilotAgentObservability.LocalMonitor.Tests/CostPagePlaywrightTests.cs"));
+        Assert.Contains(
+            "CostPage_RetainsAtMostSixtyFourSourcesAndOneHundredCatalogEntries",
+            browser,
+            StringComparison.Ordinal);
+        Assert.Contains("ToHaveCountAsync(164)", browser, StringComparison.Ordinal);
+        Assert.Contains("ToHaveCountAsync(101)", browser, StringComparison.Ordinal);
+        Assert.Contains("Assert.InRange(polls, 1, 40)", browser, StringComparison.Ordinal);
+        Assert.DoesNotContain("Task.Delay(300)", browser, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlatformSecurityTestsNeverReturnAsSilentSuccess()
+    {
+        var providerTests = File.ReadAllText(RepositoryPath(
+            "tests/CopilotAgentObservability.LocalMonitor.Tests/PricingCatalogProviderTests.cs"));
+        Assert.Contains("WindowsFact", providerTests, StringComparison.Ordinal);
+        Assert.Contains("LinuxFact", providerTests, StringComparison.Ordinal);
+        Assert.Contains("SkipException.ForSkip", providerTests, StringComparison.Ordinal);
+        Assert.Contains(
+            "security_prerequisite_unavailable:linux_fifo",
+            providerTests,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "if (!OperatingSystem.IsWindows())\n        {\n            return;",
+            providerTests,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "if (!OperatingSystem.IsLinux())\n        {\n            return;",
+            providerTests,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -225,7 +279,7 @@ public sealed class Issue95ValidationContractTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await process.WaitForExitAsync(timeout.Token);
         Assert.True(process.ExitCode == 0, $"{await stdoutTask}{await stderrTask}");
-        Assert.Contains("evidence_chain_self_test=PASS cases=6", await stdoutTask, StringComparison.Ordinal);
+        Assert.Contains("evidence_chain_self_test=PASS cases=17", await stdoutTask, StringComparison.Ordinal);
         Assert.Equal(string.Empty, await stderrTask);
     }
 

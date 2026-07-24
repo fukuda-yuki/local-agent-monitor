@@ -31,9 +31,15 @@ function Invoke-GitText([string[]] $Arguments) {
 }
 
 function Assert-ExactCommit([string] $Sha, [string] $Name) {
-    if ((Invoke-GitText @('rev-parse', '--verify', ($Sha + '^{commit}'))) -ne $Sha) {
+    $output = & git -C $repositoryRoot rev-parse --verify ($Sha + '^{commit}') 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($output | Out-String).Trim() -ne $Sha) {
         throw ('{0}_not_exact_commit' -f $Name)
     }
+}
+
+function Assert-Ancestor([string] $Ancestor, [string] $Descendant, [string] $Name) {
+    & git -C $repositoryRoot merge-base --is-ancestor $Ancestor $Descendant
+    if ($LASTEXITCODE -ne 0) { throw ('{0}_not_candidate_ancestor' -f $Name) }
 }
 
 function Get-GitBlobBytes([string] $Commit, [string] $Path) {
@@ -112,6 +118,97 @@ function Invoke-PinnedMatrixValidator {
     }
 }
 
+function Assert-LiveValidationContract([string] $MatrixPrepSha) {
+    $path = 'docs/sprints/issue-95-cost-analytics/live-validation.md'
+    $text = [Text.Encoding]::UTF8.GetString((Get-GitBlobBytes $EvidenceSha $path))
+    function Get-SingleLineMatch([string] $Pattern) {
+        $matches = @([Regex]::Matches($text, $Pattern))
+        if ($matches.Count -ne 1) { throw 'live_validation_contract_invalid' }
+        return $matches[0]
+    }
+    $requiredSections = @(
+        '# Issue #95 Live Validation',
+        '## Candidate binding',
+        '## Required commands and results',
+        '## RED and failure history',
+        '## OS-specific security coverage',
+        '## Live validation')
+    foreach ($section in $requiredSections) {
+        $null = Get-SingleLineMatch (
+            '(?m)^' + [Regex]::Escape($section) + '$')
+    }
+    $matrixPrepLine = Get-SingleLineMatch '(?m)^matrix_prep_sha: (?<value>\S+)$'
+    $candidateLine = Get-SingleLineMatch '(?m)^final_validation_sha: (?<value>\S+)$'
+    $commandCount = Get-SingleLineMatch '(?m)^required_command_count: (?<count>\S+)$'
+    $commandFailures = Get-SingleLineMatch '(?m)^required_command_failures: (?<count>\S+)$'
+    $redFailureCount = Get-SingleLineMatch '(?m)^red_failure_count: (?<count>\S+)$'
+    $validationOs = Get-SingleLineMatch '(?m)^validation_os: (?<os>\S+)$'
+    $applicableOs = Get-SingleLineMatch '(?m)^applicable_os_security_tests: (?<value>.+)$'
+    $notApplicableOs = Get-SingleLineMatch '(?m)^not_applicable_os_security_tests: (?<value>.+)$'
+    $prerequisiteSkips = Get-SingleLineMatch '(?m)^applicable_security_prerequisite_skips: (?<count>\S+)$'
+    $liveClassification = Get-SingleLineMatch '(?m)^91-L-095: (?<value>\S+)$'
+    $unverifiedCapability = Get-SingleLineMatch '(?m)^unverified_capability: (?<value>\S.+)$'
+    $osCoverageValid = $false
+    if ($prerequisiteSkips.Groups['count'].Value -eq '0') {
+        if ($validationOs.Groups['os'].Value -eq 'windows') {
+            $osCoverageValid =
+                $applicableOs.Groups['value'].Value -eq 'file_symlink=passed,directory_symlink=passed,windows_open_mutation=passed,windows_normalized_segment=passed' -and
+                $notApplicableOs.Groups['value'].Value -eq 'linux_fifo=not_applicable'
+        }
+        elseif ($validationOs.Groups['os'].Value -eq 'linux') {
+            $osCoverageValid =
+                $applicableOs.Groups['value'].Value -eq 'file_symlink=passed,directory_symlink=passed,linux_fifo=passed' -and
+                $notApplicableOs.Groups['value'].Value -eq 'windows_open_mutation=not_applicable,windows_normalized_segment=not_applicable'
+        }
+    }
+    $checks = @(
+        $matrixPrepLine.Groups['value'].Value -eq $MatrixPrepSha
+        $candidateLine.Groups['value'].Value -eq $CandidateSha
+        $commandCount.Groups['count'].Value -match '^[1-9][0-9]*$'
+        $commandFailures.Groups['count'].Value -eq '0'
+        $osCoverageValid
+        $redFailureCount.Groups['count'].Value -match '^[1-9][0-9]*$'
+        $liveClassification.Groups['value'].Value -eq 'blocked_external'
+        -not [string]::IsNullOrWhiteSpace($unverifiedCapability.Groups['value'].Value))
+    if ($checks -contains $false) {
+        throw 'live_validation_contract_invalid'
+    }
+    $commandResults = @([Regex]::Matches(
+        $text,
+        '(?m)^command_result: \S.+ \| exit=0 \| result=passed$'))
+    $allCommandResults = @([Regex]::Matches(
+        $text,
+        '(?m)^command_result: .+$'))
+    if ($commandResults.Count -lt 4) { throw 'live_validation_contract_invalid' }
+    if ($commandResults.Count -ne $allCommandResults.Count) {
+        throw 'live_validation_contract_invalid'
+    }
+    if ($commandResults.Count -ne [int]$commandCount.Groups['count'].Value) {
+        throw 'live_validation_contract_invalid'
+    }
+    foreach ($commandPattern in @(
+        'dotnet build CopilotAgentObservability\.slnx',
+        'pwsh scripts\\test\\install-playwright-chromium\.ps1',
+        'dotnet test CopilotAgentObservability\.slnx',
+        'pwsh scripts\\validation\\issue-95\\test-evidence-chain\.ps1 -VerifierPath \S.+ -MatrixValidatorPath \S.+ -MatrixFixturePath \S+')) {
+        if ($text -notmatch ('(?m)^command_result: ' + $commandPattern + ' \| exit=0 \| result=passed$')) {
+            throw 'live_validation_contract_invalid'
+        }
+    }
+    $redFailures = @([Regex]::Matches(
+        $text,
+        '(?m)^red_failure: (?<code>[a-z0-9._-]+) \| command=(?<command>\S.+) \| observed=failed:(?<observed>\S.+) \| corrected_by=(?<sha>[0-9a-f]{40})$'))
+    if ($redFailures.Count -ne [int]$redFailureCount.Groups['count'].Value) {
+        throw 'live_validation_contract_invalid'
+    }
+    foreach ($failure in $redFailures) {
+        $correctionSha = $failure.Groups['sha'].Value
+        Assert-ExactCommit $correctionSha 'red_failure_correction'
+        Assert-Ancestor $MatrixPrepSha $correctionSha 'red_failure_correction'
+        Assert-Ancestor $correctionSha $CandidateSha 'red_failure_correction'
+    }
+}
+
 Assert-ExactCommit $CandidateSha 'candidate'
 Assert-ExactCommit $EvidenceSha 'evidence'
 Assert-ExactCommit $AttestationSha 'attestation'
@@ -126,6 +223,10 @@ Assert-Tracked $AttestationSha $attestationPath
 
 $matrix = Read-GitJson $EvidenceSha $matrixPath
 if ($matrix.final_validation_sha -ne $CandidateSha) { throw 'matrix_candidate_sha_mismatch' }
+$matrixPrepSha = [string]$matrix.matrix_prep_sha
+if ($matrixPrepSha -notmatch '^[0-9a-f]{40}$') { throw 'matrix_prep_not_exact_commit' }
+Assert-ExactCommit $matrixPrepSha 'matrix_prep'
+Assert-Ancestor $matrixPrepSha $CandidateSha 'matrix_prep'
 $rows = @($matrix.active_rows)
 Assert-OrdinalSet @($rows | ForEach-Object { [string]$_.row_id }) @('91-A-095', '91-S-095', '91-L-095') 'matrix_rows'
 foreach ($row in $rows) {
@@ -140,6 +241,7 @@ $handoff = Read-GitJson $EvidenceSha $handoffPath
 if ($handoff.evidence_binding.state -ne 'finalized' -or $handoff.evidence_binding.matrix_prep_sha -ne $matrix.matrix_prep_sha -or $handoff.evidence_binding.final_validation_sha -ne $CandidateSha) {
     throw 'handoff_evidence_binding_mismatch'
 }
+Assert-LiveValidationContract $matrixPrepSha
 
 $checksums = Read-GitJson $EvidenceSha $checksumsPath
 $manifestProperties = @($checksums.PSObject.Properties.Name)

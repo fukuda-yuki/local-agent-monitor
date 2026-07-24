@@ -18,6 +18,10 @@ candidate may be frozen only after every declared dependency satisfies its own
 close/acceptance condition and the accepted dependency revisions are ancestors
 of the candidate. Evidence and classifications use the exact
 `final_validation_sha`, never a branch name or moving `main`.
+The executable evidence verifier resolves `matrix_prep_sha` as an exact Git
+commit and proves it is an ancestor of `final_validation_sha`; a syntactically
+valid hash from another repository, a missing object, or a non-ancestor commit
+is rejected.
 
 The final inventory is derived from that immutable tree. The validator
 re-inventories every route, reader, writer, store, adapter, UI/action response,
@@ -188,6 +192,18 @@ content/source execution is still unavailable, `91-L-095` is
 `blocked_external/high` with the exact retry condition and genuine positive
 capability for each affected provider named as unverified. Synthetic execution
 cannot promote that row.
+
+The committed #95 `live-validation.md` is structured evidence, not a free-form
+placeholder. It binds the exact matrix-prep and candidate commits; records at
+least the build, Playwright bootstrap, full-test, and evidence-chain commands
+with exit/result; preserves at least one actual RED/failure observation and its
+candidate correction; distinguishes OS-not-applicable security tests from
+applicable security-prerequisite skips using the fixed validation-OS inventory
+(file and directory symlink plus Windows mutation/normalization or Linux FIFO);
+and names the live row classification and unverified capability. If any
+applicable symlink/reparse/FIFO prerequisite was skipped, `91-S-095` cannot be
+`passed`. The checksum manifest hashes this document; the document does not
+contain its own digest.
 
 The repository-safe scanner covers cost DTOs, Alert Center/lifecycle/sanitized
 export projections, fixed errors/logs, receipts/ledgers, matrix evidence, and

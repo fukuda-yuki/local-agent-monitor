@@ -632,13 +632,12 @@ public sealed class CostPagePlaywrightTests
             return route.FulfillAsync(Json(RecalculationRunning, 202));
         });
         var polls = 0;
-        var fortyFirstPoll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await page.RouteAsync(
             "**/api/costs/v1/recalculations/0198f5b8-0c00-7000-8000-000000000099",
             route =>
             {
                 polls++;
-                if (polls == 41) fortyFirstPoll.SetResult();
+                Assert.InRange(polls, 1, 40);
                 return route.FulfillAsync(Json(RecalculationRunning));
             });
 
@@ -653,10 +652,6 @@ public sealed class CostPagePlaywrightTests
             new LocatorAssertionsToContainTextOptions { Timeout = 8_000 });
         Assert.Equal(1, recalculationPosts);
         Assert.Equal(40, polls);
-        Assert.NotSame(
-            fortyFirstPoll.Task,
-            await Task.WhenAny(fortyFirstPoll.Task, Task.Delay(300)));
-        Assert.False(fortyFirstPoll.Task.IsCompleted);
         await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
         await Expect(page.Locator("#cost-recalculation")).Not.ToContainTextAsync("succeeded");
         await Expect(page.Locator("#cost-recalculation")).Not.ToContainTextAsync("failed");
