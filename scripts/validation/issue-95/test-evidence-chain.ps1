@@ -1,12 +1,33 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string] $VerifierPath,
-    [Parameter(Mandatory)][string] $MatrixValidatorPath,
-    [Parameter(Mandatory)][string] $MatrixFixturePath
+    [Parameter()][string] $VerifierPath,
+    [Parameter()][string] $MatrixValidatorPath,
+    [Parameter()][string] $MatrixFixturePath,
+    [Parameter()][string] $DescribeFixture
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Get-AuthenticatedRedFixtures {
+    return @(
+        [ordered]@{
+            name = 'wrong_surface'
+            expected_code = 'row_contract_mismatch'
+        })
+}
+
+if (-not [string]::IsNullOrWhiteSpace($DescribeFixture)) {
+    $fixture = @(Get-AuthenticatedRedFixtures | Where-Object { $_.name -ceq $DescribeFixture })
+    if ($fixture.Count -ne 1) { throw 'red_fixture_not_registered' }
+    Write-Output ($fixture[0] | ConvertTo-Json -Compress)
+    return
+}
+if ([string]::IsNullOrWhiteSpace($VerifierPath) -or
+    [string]::IsNullOrWhiteSpace($MatrixValidatorPath) -or
+    [string]::IsNullOrWhiteSpace($MatrixFixturePath)) {
+    throw 'full_self_test_paths_required'
+}
 
 $evidencePaths = @(
     'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json',
@@ -15,6 +36,10 @@ $evidencePaths = @(
     'docs/sprints/issue-95-cost-analytics/artifact-checksums.json',
     'docs/sprints/issue-95-cost-analytics/live-validation.md')
 $manifestPaths = @($evidencePaths[0], $evidencePaths[1], $evidencePaths[2], $evidencePaths[4])
+$rowContractSourcePath = [IO.Path]::GetFullPath($MatrixFixturePath)
+$handoffSourcePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\docs\specifications\contracts\cost-analytics\v1\issue-91-validation-handoff.json'))
+$verifierSourcePath = [IO.Path]::GetFullPath($VerifierPath)
+$selfTestSourcePath = [IO.Path]::GetFullPath($PSCommandPath)
 
 function New-FixtureRoot {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('issue-95-evidence-chain-' + [Guid]::NewGuid().ToString('N'))
@@ -24,9 +49,13 @@ function New-FixtureRoot {
     & git -C $root config user.name 'Issue95Fixture'
     & git -C $root config core.autocrlf false
     Write-FixtureFile $root 'scripts/validation/issue-91/validate-matrix.ps1' ([IO.File]::ReadAllText($MatrixValidatorPath))
+    Write-FixtureFile $root 'scripts/validation/issue-95/verify-evidence-chain.ps1' ([IO.File]::ReadAllText($verifierSourcePath))
+    Write-FixtureFile $root 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json' ([IO.File]::ReadAllText($rowContractSourcePath))
     & git -C $root add .
     & git -C $root commit -q -m matrix-prep
-    & git -C $root commit --allow-empty -q -m candidate
+    Write-FixtureFile $root 'scripts/validation/issue-95/test-evidence-chain.ps1' ([IO.File]::ReadAllText($selfTestSourcePath))
+    & git -C $root add scripts/validation/issue-95/test-evidence-chain.ps1
+    & git -C $root commit -q -m candidate
     return $root
 }
 
@@ -50,23 +79,86 @@ function Get-Sha256([string] $Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-FixtureRow($Rows, [string] $RowId) {
+    $match = @($Rows | Where-Object { $_.row_id -eq $RowId })
+    if ($match.Count -ne 1) { throw ('fixture_row_invalid={0}' -f $RowId) }
+    return $match[0]
+}
+
 function Write-PositiveEvidence([string] $Root, [string] $Candidate) {
-    $matrix = Get-Content -LiteralPath $MatrixFixturePath -Raw | ConvertFrom-Json -Depth 50
+    $contract = Get-Content -LiteralPath $rowContractSourcePath -Raw | ConvertFrom-Json -Depth 50
+    $handoff = Get-Content -LiteralPath $handoffSourcePath -Raw | ConvertFrom-Json -Depth 50
     $matrixPrep = (& git -C $Root rev-parse ($Candidate + '^')).Trim()
-    $matrix.matrix_prep_sha = $matrixPrep
-    $matrix.final_validation_sha = $Candidate
-    foreach ($index in 0..2) {
-        $matrix.active_rows[$index].row_id = @('91-A-095', '91-S-095', '91-L-095')[$index]
-        $matrix.active_rows[$index].validation_sha = $Candidate
-        $matrix.active_rows[$index].versions.candidate = $Candidate
+    $rows = foreach ($contractRow in @($contract.active_rows)) {
+        $versions = [ordered]@{}
+        foreach ($property in @($contractRow.versions.PSObject.Properties)) {
+            $versions[$property.Name] = if ([string]$property.Value -eq '$candidate') { $Candidate } else { [string]$property.Value }
+        }
+        $live = $contractRow.row_id -eq '91-L-095'
+        $block = $contractRow.blocked_external_contract
+        [ordered]@{
+            row_id = $contractRow.row_id
+            matrix_schema_version = 'validation-matrix.v1'
+            surface = $contractRow.surface
+            operation = $contractRow.operation
+            profiles = [ordered]@{
+                collection = @($contractRow.required_profiles.collection)
+                content_access = @($contractRow.required_profiles.content_access)
+                compatibility = @($contractRow.required_profiles.compatibility)
+                hook = @($contractRow.required_profiles.hook)
+                otel = @($contractRow.required_profiles.otel)
+                binding = @($contractRow.required_profiles.binding)
+                restart = @($contractRow.required_profiles.restart)
+                retention = @($contractRow.required_profiles.retention)
+            }
+            requirement_level = 'required'
+            applicability = 'applicable'
+            applicability_reason = $null
+            versions = $versions
+            expected_invariant = if ($live) { $block.unverified_capability } else { 'The exact Issue #95 row contract is satisfied.' }
+            evidence = @([ordered]@{
+                kind = if ($live) { 'live' } else { 'automated' }
+                reference = @($contractRow.evidence_references)[0]
+                compatibility_basis = if ($live) { 'The live prerequisite stopped before provider execution.' } else { 'Candidate-pinned automated execution.' }
+            })
+            actual_result = if ($live) { 'The canonical external prerequisites remain unavailable.' } else { 'The candidate-pinned row passed.' }
+            classification = if ($live) { 'blocked_external' } else { 'passed' }
+            severity = if ($live) { $block.severity } else { 'none' }
+            blocker = if ($live) { $block.blocker } else { $null }
+            retry_condition = if ($live) { $block.retry_condition } else { $null }
+            unverified_capability = if ($live) { $block.unverified_capability } else { $null }
+            owner = 'Issue #95 cost analytics'
+            validation_sha = $Candidate
+            validation_date = '2026-07-24'
+            environment_boundary = 'Synthetic repository-safe self-test fixture.'
+        }
     }
-    $matrix.active_rows[0].classification = 'passed'
-    $matrix.active_rows[1].classification = 'passed'
-    $matrix.active_rows[2].classification = 'blocked_external'
-    $matrix.active_rows[2].severity = 'high'
-    $matrix.release_decision.external_blockers[0].row_id = '91-L-095'
+    $liveBlock = (Get-FixtureRow $contract.active_rows '91-L-095').blocked_external_contract
+    $matrix = [ordered]@{
+        schema_version = 'validation-matrix.v1'
+        matrix_prep_sha = $matrixPrep
+        final_validation_sha = $Candidate
+        inventory_date = '2026-07-24'
+        environment_boundary = 'Synthetic repository-safe Issue #95 evidence-chain self-test.'
+        active_rows = @($rows)
+        future_registry_ref = 'docs/specifications/contracts/validation-matrix/v1/future-surface-registry.json'
+        evidence_ledger_refs = @($evidencePaths[0], $evidencePaths[1], $evidencePaths[4])
+        release_decision = [ordered]@{
+            decision = 'release_ready_with_external_blockers'
+            external_blockers = @([ordered]@{
+                row_id = '91-L-095'
+                severity = $liveBlock.severity
+                blocker = $liveBlock.blocker
+                retry_condition = $liveBlock.retry_condition
+                unverified_capability = $liveBlock.unverified_capability
+            })
+        }
+    }
     Write-FixtureFile $Root $evidencePaths[2] ($matrix | ConvertTo-Json -Depth 50)
-    Write-FixtureFile $Root $evidencePaths[0] ('{"evidence_binding":{"state":"finalized","matrix_prep_sha":"' + $matrix.matrix_prep_sha + '","final_validation_sha":"' + $Candidate + '"}}')
+    $handoff.evidence_binding.state = 'finalized'
+    $handoff.evidence_binding.matrix_prep_sha = $matrixPrep
+    $handoff.evidence_binding.final_validation_sha = $Candidate
+    Write-FixtureFile $Root $evidencePaths[0] ($handoff | ConvertTo-Json -Depth 50)
     Write-FixtureFile $Root $evidencePaths[1] '# Issue #95 evidence fixture'
     $liveValidation = @"
 # Issue #95 Live Validation
@@ -81,11 +173,11 @@ required_command_failures: 0
 command_result: dotnet build CopilotAgentObservability.slnx | exit=0 | result=passed
 command_result: pwsh scripts\test\install-playwright-chromium.ps1 | exit=0 | result=passed
 command_result: dotnet test CopilotAgentObservability.slnx | exit=0 | result=passed
-command_result: pwsh scripts\validation\issue-95\test-evidence-chain.ps1 -VerifierPath scripts\validation\issue-95\verify-evidence-chain.ps1 -MatrixValidatorPath scripts\validation\issue-91\validate-matrix.ps1 -MatrixFixturePath docs\sprints\issue-75-historical-analysis\validation-matrix.json | exit=0 | result=passed
+command_result: pwsh scripts\validation\issue-95\test-evidence-chain.ps1 -VerifierPath scripts\validation\issue-95\verify-evidence-chain.ps1 -MatrixValidatorPath scripts\validation\issue-91\validate-matrix.ps1 -MatrixFixturePath docs\specifications\contracts\cost-analytics\v1\issue-91-validation-row-contract.json | exit=0 | result=passed
 
 ## RED and failure history
 red_failure_count: 1
-red_failure: matrix_prep_false_positive | command=pwsh scripts\validation\issue-95\test-evidence-chain.ps1 | observed=failed:unrelated prep SHA accepted | corrected_by=$Candidate
+red_failure: wrong_surface | command=pwsh scripts\validation\issue-95\test-evidence-chain.ps1 | observed=failed:wrong surface accepted | expected_code=row_contract_mismatch | executable_fixture=wrong_surface | corrected_by=$Candidate
 
 ## OS-specific security coverage
 validation_os: windows
@@ -94,9 +186,20 @@ applicable_security_prerequisite_skips: 0
 not_applicable_os_security_tests: linux_fifo=not_applicable
 
 ## Live validation
+## 91-A-095
+91-A-095: passed
+
+## 91-S-095
+91-S-095: passed
+
+## 91-L-095
 91-L-095: blocked_external
-unverified_capability: genuine provider mapping and budget readback
+unverified_capability: $($liveBlock.unverified_capability)
 "@
+    foreach ($filter in @($handoff.automated_test_filters)) {
+        $liveValidation += "`nautomated_filter: $filter"
+    }
+    $liveValidation += "`n"
     Write-FixtureFile $Root $evidencePaths[4] $liveValidation
     $artifacts = foreach ($path in $manifestPaths) {
         [ordered]@{ path = $path; sha256 = Get-Sha256 (Join-Path $Root $path) }
@@ -130,10 +233,16 @@ function Write-Attestation([string] $Root, [string] $Candidate, [string] $Eviden
     Write-FixtureFile $Root 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' ($attestation | ConvertTo-Json -Depth 10)
 }
 
-function Assert-Rejected([string] $Root, [string] $Candidate, [string] $Evidence, [string] $Attestation, [string] $ExpectedCode) {
+function Assert-Rejected(
+    [string] $Root,
+    [string] $Candidate,
+    [string] $Evidence,
+    [string] $Attestation,
+    [string] $ExpectedCode,
+    [string] $Verifier = $VerifierPath) {
     $failed = $false
     try {
-        $output = & $VerifierPath -CandidateSha $Candidate -EvidenceSha $Evidence -AttestationSha $Attestation -RepositoryRoot $Root 2>&1 | Out-String
+        $output = & $Verifier -CandidateSha $Candidate -EvidenceSha $Evidence -AttestationSha $Attestation -RepositoryRoot $Root 2>&1 | Out-String
         $failed = $LASTEXITCODE -ne 0
     }
     catch {
@@ -234,6 +343,35 @@ try {
     $attestation = Commit-Fixture $oneLineRoot 'attestation'
     Assert-Rejected $oneLineRoot $candidate $evidence $attestation 'live_validation_contract_invalid'
 
+    $missingAnchorRoot = New-FixtureRoot
+    Write-Verbose 'case=missing_evidence_anchor'
+    $roots.Add($missingAnchorRoot)
+    $candidate = (& git -C $missingAnchorRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $missingAnchorRoot $candidate
+    $livePath = Join-Path $missingAnchorRoot $evidencePaths[4]
+    $live = [Regex]::Replace(
+        [IO.File]::ReadAllText($livePath),
+        '(?m)^## 91-A-095\r?\n',
+        '')
+    Write-FixtureFile $missingAnchorRoot $evidencePaths[4] $live
+    $evidence = Commit-Fixture $missingAnchorRoot 'evidence'
+    Write-FixtureFile $missingAnchorRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $missingAnchorRoot 'attestation'
+    Assert-Rejected $missingAnchorRoot $candidate $evidence $attestation 'live_evidence_anchor_91-A-095_invalid'
+
+    $duplicateAnchorRoot = New-FixtureRoot
+    Write-Verbose 'case=duplicate_evidence_anchor'
+    $roots.Add($duplicateAnchorRoot)
+    $candidate = (& git -C $duplicateAnchorRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $duplicateAnchorRoot $candidate
+    $livePath = Join-Path $duplicateAnchorRoot $evidencePaths[4]
+    $live = [IO.File]::ReadAllText($livePath) + "`n## 91-S-095`n"
+    Write-FixtureFile $duplicateAnchorRoot $evidencePaths[4] $live
+    $evidence = Commit-Fixture $duplicateAnchorRoot 'evidence'
+    Write-FixtureFile $duplicateAnchorRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $duplicateAnchorRoot 'attestation'
+    Assert-Rejected $duplicateAnchorRoot $candidate $evidence $attestation 'live_evidence_anchor_91-S-095_invalid'
+
     $securitySkipRoot = New-FixtureRoot
     $roots.Add($securitySkipRoot)
     $candidate = (& git -C $securitySkipRoot rev-parse HEAD).Trim()
@@ -332,14 +470,66 @@ try {
     Write-PositiveEvidence $falseRedRoot $candidate
     $livePath = Join-Path $falseRedRoot $evidencePaths[4]
     $live = [IO.File]::ReadAllText($livePath).Replace(
-        'observed=failed:unrelated prep SHA accepted',
-        'observed=passed:unrelated prep SHA accepted',
+        'observed=failed:wrong surface accepted',
+        'observed=passed:wrong surface accepted',
         [StringComparison]::Ordinal)
     Write-FixtureFile $falseRedRoot $evidencePaths[4] $live
     $evidence = Commit-Fixture $falseRedRoot 'evidence'
     Write-FixtureFile $falseRedRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
     $attestation = Commit-Fixture $falseRedRoot 'attestation'
     Assert-Rejected $falseRedRoot $candidate $evidence $attestation 'live_validation_contract_invalid'
+
+    $forgedRedRoot = New-FixtureRoot
+    Write-Verbose 'case=forged_red_fixture'
+    $roots.Add($forgedRedRoot)
+    $candidate = (& git -C $forgedRedRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $forgedRedRoot $candidate
+    $livePath = Join-Path $forgedRedRoot $evidencePaths[4]
+    $live = [IO.File]::ReadAllText($livePath).Replace(
+        'executable_fixture=wrong_surface',
+        'executable_fixture=forged_missing_fixture',
+        [StringComparison]::Ordinal)
+    Write-FixtureFile $forgedRedRoot $evidencePaths[4] $live
+    $evidence = Commit-Fixture $forgedRedRoot 'evidence'
+    Write-FixtureFile $forgedRedRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $forgedRedRoot 'attestation'
+    Assert-Rejected $forgedRedRoot $candidate $evidence $attestation 'red_failure_fixture_not_authenticated'
+
+    $mismatchedRedRoot = New-FixtureRoot
+    Write-Verbose 'case=mismatched_red_fixture_code'
+    $roots.Add($mismatchedRedRoot)
+    $candidate = (& git -C $mismatchedRedRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $mismatchedRedRoot $candidate
+    $livePath = Join-Path $mismatchedRedRoot $evidencePaths[4]
+    $live = [IO.File]::ReadAllText($livePath).Replace(
+        'expected_code=row_contract_mismatch',
+        'expected_code=live_blocker_providers_invalid',
+        [StringComparison]::Ordinal)
+    Write-FixtureFile $mismatchedRedRoot $evidencePaths[4] $live
+    $evidence = Commit-Fixture $mismatchedRedRoot 'evidence'
+    Write-FixtureFile $mismatchedRedRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $mismatchedRedRoot 'attestation'
+    Assert-Rejected $mismatchedRedRoot $candidate $evidence $attestation 'red_failure_fixture_not_authenticated'
+
+    $commentOnlyRedRoot = New-FixtureRoot
+    Write-Verbose 'case=comment_only_red_fixture'
+    $roots.Add($commentOnlyRedRoot)
+    $selfTestPath = Join-Path $commentOnlyRedRoot 'scripts/validation/issue-95/test-evidence-chain.ps1'
+    Add-Content -LiteralPath $selfTestPath "`n# name='comment_only' expected_code='row_contract_mismatch'`n"
+    & git -C $commentOnlyRedRoot add scripts/validation/issue-95/test-evidence-chain.ps1
+    & git -C $commentOnlyRedRoot commit --amend --no-edit -q
+    $candidate = (& git -C $commentOnlyRedRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $commentOnlyRedRoot $candidate
+    $livePath = Join-Path $commentOnlyRedRoot $evidencePaths[4]
+    $live = [IO.File]::ReadAllText($livePath).Replace(
+        'executable_fixture=wrong_surface',
+        'executable_fixture=comment_only',
+        [StringComparison]::Ordinal)
+    Write-FixtureFile $commentOnlyRedRoot $evidencePaths[4] $live
+    $evidence = Commit-Fixture $commentOnlyRedRoot 'evidence'
+    Write-FixtureFile $commentOnlyRedRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $commentOnlyRedRoot 'attestation'
+    Assert-Rejected $commentOnlyRedRoot $candidate $evidence $attestation 'red_failure_fixture_not_authenticated'
 
     $contradictoryCommandRoot = New-FixtureRoot
     Write-Verbose 'case=contradictory_command'
@@ -355,6 +545,142 @@ try {
     $attestation = Commit-Fixture $contradictoryCommandRoot 'attestation'
     Assert-Rejected $contradictoryCommandRoot $candidate $evidence $attestation 'live_validation_contract_invalid'
 
+    $duplicateContractRoot = New-FixtureRoot
+    Write-Verbose 'case=duplicate_contract_evidence'
+    $roots.Add($duplicateContractRoot)
+    $candidateContractPath = Join-Path $duplicateContractRoot 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json'
+    $duplicateContract = Get-Content -LiteralPath $candidateContractPath -Raw | ConvertFrom-Json -Depth 50
+    $duplicateRow = Get-FixtureRow $duplicateContract.active_rows '91-A-095'
+    $duplicateRow.evidence_references = @($duplicateRow.evidence_references) + @($duplicateRow.evidence_references[0])
+    Write-FixtureFile $duplicateContractRoot 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json' ($duplicateContract | ConvertTo-Json -Depth 50)
+    & git -C $duplicateContractRoot add docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json
+    & git -C $duplicateContractRoot commit --amend --no-edit -q
+    $candidate = (& git -C $duplicateContractRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $duplicateContractRoot $candidate
+    $evidence = Commit-Fixture $duplicateContractRoot 'evidence'
+    Write-FixtureFile $duplicateContractRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $duplicateContractRoot 'attestation'
+    Assert-Rejected $duplicateContractRoot $candidate $evidence $attestation 'row_contract_handoff_evidence_91-A-095_expected_duplicate'
+
+    $staleProfileLedgerRoot = New-FixtureRoot
+    Write-Verbose 'case=stale_profile_ledger'
+    $roots.Add($staleProfileLedgerRoot)
+    $candidate = (& git -C $staleProfileLedgerRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $staleProfileLedgerRoot $candidate
+    $handoffPath = Join-Path $staleProfileLedgerRoot $evidencePaths[0]
+    $handoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json -Depth 50
+    $handoff.required_profiles.collection = @($handoff.required_profiles.collection | Select-Object -Skip 1)
+    Write-FixtureFile $staleProfileLedgerRoot $evidencePaths[0] ($handoff | ConvertTo-Json -Depth 50)
+    $evidence = Commit-Fixture $staleProfileLedgerRoot 'evidence'
+    Write-FixtureFile $staleProfileLedgerRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $staleProfileLedgerRoot 'attestation'
+    Assert-Rejected $staleProfileLedgerRoot $candidate $evidence $attestation 'row_contract_profile_ledger_collection_invalid'
+
+    $authenticatedRed = @(Get-AuthenticatedRedFixtures)[0]
+    $semanticCases = @(
+        @{
+            name = $authenticatedRed.name
+            expected = $authenticatedRed.expected_code
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[2]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                (Get-FixtureRow $value.active_rows '91-A-095').surface = 'another-surface'
+                Write-FixtureFile $Root $evidencePaths[2] ($value | ConvertTo-Json -Depth 50)
+            }
+        },
+        @{
+            name = 'wrong_profile_axis'
+            expected = 'row_contract_matrix_profiles_91-A-095_collection_invalid'
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[2]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                $row = Get-FixtureRow $value.active_rows '91-A-095'
+                $moved = $row.profiles.collection[0]
+                $row.profiles.collection = @($row.profiles.collection | Select-Object -Skip 1)
+                $row.profiles.compatibility = @($row.profiles.compatibility) + $moved
+                Write-FixtureFile $Root $evidencePaths[2] ($value | ConvertTo-Json -Depth 50)
+            }
+        },
+        @{
+            name = 'wrong_evidence_reference'
+            expected = 'row_contract_matrix_evidence_91-A-095_invalid'
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[2]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                (Get-FixtureRow $value.active_rows '91-A-095').evidence[0].reference = 'docs/sprints/another-surface.md'
+                Write-FixtureFile $Root $evidencePaths[2] ($value | ConvertTo-Json -Depth 50)
+            }
+        },
+        @{
+            name = 'wrong_provider'
+            expected = 'live_blocker_providers_invalid'
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[0]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                (Get-FixtureRow $value.active_rows '91-L-095').blocked_external_contract.required_providers[0] = 'another-provider'
+                Write-FixtureFile $Root $evidencePaths[0] ($value | ConvertTo-Json -Depth 50)
+            }
+        },
+        @{
+            name = 'wrong_capability'
+            expected = 'live_blocker_capabilities_invalid'
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[0]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                (Get-FixtureRow $value.active_rows '91-L-095').blocked_external_contract.unverified_capabilities[0] = 'another-capability'
+                Write-FixtureFile $Root $evidencePaths[0] ($value | ConvertTo-Json -Depth 50)
+            }
+        },
+        @{
+            name = 'wrong_filter'
+            expected = 'row_contract_filters_91-A-095_invalid'
+            mutate = {
+                param($Root)
+                $path = Join-Path $Root $evidencePaths[0]
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50
+                (Get-FixtureRow $value.active_rows '91-A-095').automated_test_filters[0] = 'FullyQualifiedName~AnotherSurfaceTests'
+                Write-FixtureFile $Root $evidencePaths[0] ($value | ConvertTo-Json -Depth 50)
+            }
+        })
+    foreach ($case in $semanticCases) {
+        Write-Verbose ('case={0}' -f $case.name)
+        $root = New-FixtureRoot
+        $roots.Add($root)
+        $candidate = (& git -C $root rev-parse HEAD).Trim()
+        Write-PositiveEvidence $root $candidate
+        & $case.mutate $root
+        $evidence = Commit-Fixture $root 'evidence'
+        Write-FixtureFile $root 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+        $attestation = Commit-Fixture $root 'attestation'
+        Assert-Rejected $root $candidate $evidence $attestation $case.expected
+    }
+
+    $tamperedVerifierRoot = New-FixtureRoot
+    Write-Verbose 'case=tampered_running_verifier'
+    $roots.Add($tamperedVerifierRoot)
+    $candidate = (& git -C $tamperedVerifierRoot rev-parse HEAD).Trim()
+    Write-PositiveEvidence $tamperedVerifierRoot $candidate
+    $evidence = Commit-Fixture $tamperedVerifierRoot 'evidence'
+    Write-FixtureFile $tamperedVerifierRoot 'docs/sprints/issue-95-cost-analytics/evidence-attestation.json' '{}'
+    $attestation = Commit-Fixture $tamperedVerifierRoot 'attestation'
+    $tamperedVerifier = Join-Path ([IO.Path]::GetTempPath()) (
+        'issue-95-tampered-verifier-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        [IO.File]::WriteAllText(
+            $tamperedVerifier,
+            [IO.File]::ReadAllText($verifierSourcePath) + "`n# tampered working verifier`n",
+            [Text.UTF8Encoding]::new($false))
+        Assert-Rejected $tamperedVerifierRoot $candidate $evidence $attestation 'verifier_working_copy_mismatch' $tamperedVerifier
+    }
+    finally {
+        Remove-Item -LiteralPath $tamperedVerifier -Force
+    }
+
     $positiveRoot = New-FixtureRoot
     $roots.Add($positiveRoot)
     $candidate = (& git -C $positiveRoot rev-parse HEAD).Trim()
@@ -367,7 +693,7 @@ try {
     Add-Content -LiteralPath (Join-Path $positiveRoot $evidencePaths[2]) 'working-tree substitution'
     Assert-Rejected $positiveRoot $candidate $evidence $attestation 'working_tree_substitution_detected'
 
-    Write-Output 'evidence_chain_self_test=PASS cases=17'
+    Write-Output 'evidence_chain_self_test=PASS cases=31'
 }
 finally {
     foreach ($root in $roots) {

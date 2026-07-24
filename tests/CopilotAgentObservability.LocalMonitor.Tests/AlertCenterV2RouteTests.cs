@@ -712,7 +712,14 @@ public sealed class AlertCenterV2RouteTests
         return Assert.IsType<AlertEvaluationResultV2>(result.Evaluation);
     }
 
-    private static AlertEvaluationResultV2 CostEvaluation(int index = 1)
+    private static AlertEvaluationResultV2 CostEvaluation(int index = 1) =>
+        CostEvaluationWithThresholds(index, 2m, 1m, 2m);
+
+    internal static AlertEvaluationResultV2 CostEvaluationWithThresholds(
+        int index,
+        decimal observedAmount,
+        decimal warningThreshold,
+        decimal criticalThreshold)
     {
         var observedAt = new DateTimeOffset(2026, 7, 23, 1, 2, 3, TimeSpan.Zero)
             .AddMinutes(index - 1);
@@ -748,7 +755,7 @@ public sealed class AlertCenterV2RouteTests
             "github",
             "gpt-5",
             "api",
-            2m,
+            observedAmount,
             "USD");
         var snapshot = new AlertNormalizedSnapshotV2(
             AlertContractVersionsV2.Snapshot,
@@ -763,7 +770,7 @@ public sealed class AlertCenterV2RouteTests
             null,
             scope,
             "USD",
-            2m,
+            observedAmount,
             1,
             0,
             0,
@@ -795,8 +802,8 @@ public sealed class AlertCenterV2RouteTests
                     "1",
                     true,
                     "USD",
-                    1m,
-                    2m,
+                    warningThreshold,
+                    criticalThreshold,
                     10_000,
                     AlertCostScopeKindV2.Session,
                     null),

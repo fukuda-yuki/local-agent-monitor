@@ -15,6 +15,7 @@ $repositoryRoot = if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     [IO.Path]::GetFullPath($RepositoryRoot)
 }
 $handoffPath = 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json'
+$rowContractPath = 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json'
 $readmePath = 'docs/sprints/issue-95-cost-analytics/README.md'
 $matrixPath = 'docs/sprints/issue-95-cost-analytics/validation-matrix.json'
 $checksumsPath = 'docs/sprints/issue-95-cost-analytics/artifact-checksums.json'
@@ -67,6 +68,16 @@ function Read-GitJson([string] $Commit, [string] $Path) {
     catch { throw ('invalid_json={0}' -f $Path) }
 }
 
+function Assert-RunningVerifierPinned {
+    $committed = Get-GitBlobBytes $CandidateSha 'scripts/validation/issue-95/verify-evidence-chain.ps1'
+    $running = [IO.File]::ReadAllBytes($PSCommandPath)
+    $committedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($committed))
+    $runningHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($running))
+    if ($committedHash -cne $runningHash) {
+        throw 'verifier_working_copy_mismatch'
+    }
+}
+
 function Assert-Tracked([string] $Commit, [string] $Path) {
     $null = Invoke-GitText @('cat-file', '-e', ($Commit + ':' + $Path))
 }
@@ -75,9 +86,95 @@ function Assert-OrdinalSet([string[]] $Actual, [string[]] $Expected, [string] $N
     $actualSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $expectedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($item in $Actual) { if (-not $actualSet.Add($item)) { throw ('{0}_duplicate' -f $Name) } }
-    foreach ($item in $Expected) { [void]$expectedSet.Add($item) }
+    foreach ($item in $Expected) { if (-not $expectedSet.Add($item)) { throw ('{0}_expected_duplicate' -f $Name) } }
     if ($actualSet.Count -ne $expectedSet.Count) { throw ('{0}_invalid' -f $Name) }
     foreach ($item in $actualSet) { if (-not $expectedSet.Contains($item)) { throw ('{0}_invalid' -f $Name) } }
+}
+
+function Assert-ExactObjectValues($Actual, $Expected, [string] $Name, [string] $Candidate) {
+    Assert-OrdinalSet @($Actual.PSObject.Properties.Name) @($Expected.PSObject.Properties.Name) ($Name + '_properties')
+    foreach ($property in @($Expected.PSObject.Properties)) {
+        $expectedValue = if ([string]$property.Value -eq '$candidate') { $Candidate } else { [string]$property.Value }
+        if ([string]$Actual.($property.Name) -cne $expectedValue) {
+            throw ('{0}_invalid' -f $Name)
+        }
+    }
+}
+
+function Assert-RowContract($Contract, $Handoff, $Matrix) {
+    if ($Contract.schema_version -ne 'cost-analytics-validation-row-contract.v1' -or
+        $Contract.surface_id -ne 'cost-analytics' -or
+        $Handoff.surface_id -cne $Contract.surface_id -or
+        $Handoff.row_contract_path -cne $rowContractPath) {
+        throw 'row_contract_mismatch'
+    }
+    $contractRows = @($Contract.active_rows)
+    $handoffRows = @($Handoff.active_rows)
+    $matrixRows = @($Matrix.active_rows)
+    Assert-OrdinalSet @($Handoff.active_row_ids) @($contractRows | ForEach-Object { [string]$_.row_id }) 'row_contract_ids'
+    Assert-OrdinalSet @($handoffRows | ForEach-Object { [string]$_.row_id }) @($contractRows | ForEach-Object { [string]$_.row_id }) 'row_contract_handoff_ids'
+    Assert-OrdinalSet @($matrixRows | ForEach-Object { [string]$_.row_id }) @($contractRows | ForEach-Object { [string]$_.row_id }) 'row_contract_matrix_ids'
+    $contractFilters = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $profileAxes = @('collection', 'content_access', 'compatibility', 'hook', 'otel', 'binding', 'restart', 'retention')
+    $contractProfileUnion = [ordered]@{}
+    foreach ($axis in $profileAxes) {
+        $contractProfileUnion[$axis] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    }
+    foreach ($contractRow in $contractRows) {
+        $rowId = [string]$contractRow.row_id
+        $handoffRow = @($handoffRows | Where-Object { $_.row_id -ceq $rowId })
+        $matrixRow = @($matrixRows | Where-Object { $_.row_id -ceq $rowId })
+        if ($handoffRow.Count -ne 1 -or $matrixRow.Count -ne 1 -or
+            [string]$handoffRow[0].surface -cne [string]$contractRow.surface -or
+            [string]$matrixRow[0].surface -cne [string]$contractRow.surface -or
+            [string]$handoffRow[0].operation -cne [string]$contractRow.operation -or
+            [string]$matrixRow[0].operation -cne [string]$contractRow.operation) {
+            throw 'row_contract_mismatch'
+        }
+        Assert-OrdinalSet @($handoffRow[0].required_profiles.PSObject.Properties.Name) $profileAxes ('row_contract_handoff_profile_axes_' + $rowId)
+        Assert-OrdinalSet @($contractRow.required_profiles.PSObject.Properties.Name) $profileAxes ('row_contract_profile_axes_' + $rowId)
+        Assert-OrdinalSet @($matrixRow[0].profiles.PSObject.Properties.Name) $profileAxes ('row_contract_matrix_profile_axes_' + $rowId)
+        foreach ($axis in $profileAxes) {
+            Assert-OrdinalSet @($handoffRow[0].required_profiles.$axis) @($contractRow.required_profiles.$axis) ('row_contract_profiles_' + $rowId + '_' + $axis)
+            Assert-OrdinalSet @($matrixRow[0].profiles.$axis) @($contractRow.required_profiles.$axis) ('row_contract_matrix_profiles_' + $rowId + '_' + $axis)
+            foreach ($profile in @($contractRow.required_profiles.$axis)) {
+                [void]$contractProfileUnion[$axis].Add([string]$profile)
+            }
+        }
+        Assert-ExactObjectValues $handoffRow[0].versions $contractRow.versions ('row_contract_handoff_versions_' + $rowId) '$candidate'
+        Assert-ExactObjectValues $matrixRow[0].versions $contractRow.versions ('row_contract_matrix_versions_' + $rowId) $CandidateSha
+        Assert-OrdinalSet @($handoffRow[0].evidence_references) @($contractRow.evidence_references) ('row_contract_handoff_evidence_' + $rowId)
+        Assert-OrdinalSet @($matrixRow[0].evidence | ForEach-Object { [string]$_.reference }) @($contractRow.evidence_references) ('row_contract_matrix_evidence_' + $rowId)
+        Assert-OrdinalSet @($handoffRow[0].automated_test_filters) @($contractRow.automated_test_filters) ('row_contract_filters_' + $rowId)
+        foreach ($filter in @($contractRow.automated_test_filters)) { [void]$contractFilters.Add([string]$filter) }
+        if ($rowId -eq '91-L-095') {
+            $expectedBlock = $contractRow.blocked_external_contract
+            $actualBlock = $handoffRow[0].blocked_external_contract
+            if ($null -eq $actualBlock -or
+                [string]$actualBlock.severity -cne [string]$expectedBlock.severity -or
+                [string]$actualBlock.blocker -cne [string]$expectedBlock.blocker -or
+                [string]$actualBlock.retry_condition -cne [string]$expectedBlock.retry_condition -or
+                [string]$actualBlock.unverified_capability -cne [string]$expectedBlock.unverified_capability) {
+                throw 'live_blocker_contract_mismatch'
+            }
+            Assert-OrdinalSet @($actualBlock.required_providers) @($expectedBlock.required_providers) 'live_blocker_providers'
+            Assert-OrdinalSet @($actualBlock.unverified_capabilities) @($expectedBlock.unverified_capabilities) 'live_blocker_capabilities'
+            if ([string]$matrixRow[0].severity -cne [string]$expectedBlock.severity -or
+                [string]$matrixRow[0].blocker -cne [string]$expectedBlock.blocker -or
+                [string]$matrixRow[0].retry_condition -cne [string]$expectedBlock.retry_condition -or
+                [string]$matrixRow[0].unverified_capability -cne [string]$expectedBlock.unverified_capability) {
+                throw 'live_blocker_contract_mismatch'
+            }
+        }
+        elseif ($null -ne $contractRow.blocked_external_contract -or $null -ne $handoffRow[0].blocked_external_contract) {
+            throw 'row_contract_mismatch'
+        }
+    }
+    Assert-OrdinalSet @($Handoff.required_profiles.PSObject.Properties.Name) $profileAxes 'row_contract_profile_ledger_axes'
+    foreach ($axis in $profileAxes) {
+        Assert-OrdinalSet @($Handoff.required_profiles.$axis) @($contractProfileUnion[$axis]) ('row_contract_profile_ledger_' + $axis)
+    }
+    Assert-OrdinalSet @($Handoff.automated_test_filters) @($contractFilters) 'row_contract_filter_ledger'
 }
 
 function Assert-ExactPathSet([string] $Range, [string[]] $Expected, [string] $Name) {
@@ -115,6 +212,33 @@ function Invoke-PinnedMatrixValidator {
     }
     finally {
         if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
+    }
+}
+
+function Read-AuthenticatedRedFixture(
+    [string] $CorrectionSha,
+    [string] $FixtureName) {
+    $temporaryScript = Join-Path ([IO.Path]::GetTempPath()) (
+        'issue-95-red-fixture-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        [IO.File]::WriteAllBytes(
+            $temporaryScript,
+            (Get-GitBlobBytes $CorrectionSha 'scripts/validation/issue-95/test-evidence-chain.ps1'))
+        $output = & pwsh -NoLogo -NoProfile -File $temporaryScript -DescribeFixture $FixtureName 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'red_failure_fixture_not_authenticated' }
+        try {
+            $fixture = (($output | Out-String).Trim() | ConvertFrom-Json)
+        }
+        catch {
+            throw 'red_failure_fixture_not_authenticated'
+        }
+        Assert-OrdinalSet @($fixture.PSObject.Properties.Name) @('name', 'expected_code') 'red_failure_fixture_registry_fields'
+        return $fixture
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryScript) {
+            Remove-Item -LiteralPath $temporaryScript -Force
+        }
     }
 }
 
@@ -173,6 +297,27 @@ function Assert-LiveValidationContract([string] $MatrixPrepSha) {
     if ($checks -contains $false) {
         throw 'live_validation_contract_invalid'
     }
+    $filterLines = @([Regex]::Matches(
+        $text,
+        '(?m)^automated_filter: (?<value>FullyQualifiedName~\S+)$') |
+        ForEach-Object { $_.Groups['value'].Value })
+    $contract = Read-GitJson $CandidateSha $rowContractPath
+    foreach ($contractRow in @($contract.active_rows)) {
+        $rowId = [string]$contractRow.row_id
+        $expectedReference = $path + '#' + $rowId.ToLowerInvariant()
+        Assert-OrdinalSet @($contractRow.evidence_references) @($expectedReference) ('live_evidence_reference_' + $rowId)
+        $anchorMatches = @([Regex]::Matches(
+            $text,
+            '(?m)^## ' + [Regex]::Escape($rowId) + '$'))
+        if ($anchorMatches.Count -ne 1) {
+            throw ('live_evidence_anchor_{0}_invalid' -f $rowId)
+        }
+    }
+    $expectedFilters = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($filter in @($contract.active_rows | ForEach-Object { @($_.automated_test_filters) })) {
+        [void]$expectedFilters.Add([string]$filter)
+    }
+    Assert-OrdinalSet $filterLines @($expectedFilters) 'live_automated_filters'
     $commandResults = @([Regex]::Matches(
         $text,
         '(?m)^command_result: \S.+ \| exit=0 \| result=passed$'))
@@ -197,21 +342,33 @@ function Assert-LiveValidationContract([string] $MatrixPrepSha) {
     }
     $redFailures = @([Regex]::Matches(
         $text,
-        '(?m)^red_failure: (?<code>[a-z0-9._-]+) \| command=(?<command>\S.+) \| observed=failed:(?<observed>\S.+) \| corrected_by=(?<sha>[0-9a-f]{40})$'))
+        '(?m)^red_failure: (?<code>[a-z0-9._-]+) \| command=(?<command>\S.+) \| observed=failed:(?<observed>[^|]+) \| expected_code=(?<expected>[a-z0-9._=-]+) \| executable_fixture=(?<fixture>[a-z0-9._-]+) \| corrected_by=(?<sha>[0-9a-f]{40})$'))
     if ($redFailures.Count -ne [int]$redFailureCount.Groups['count'].Value) {
         throw 'live_validation_contract_invalid'
     }
     foreach ($failure in $redFailures) {
         $correctionSha = $failure.Groups['sha'].Value
+        $fixtureName = $failure.Groups['fixture'].Value
+        $expectedCode = $failure.Groups['expected'].Value
         Assert-ExactCommit $correctionSha 'red_failure_correction'
         Assert-Ancestor $MatrixPrepSha $correctionSha 'red_failure_correction'
         Assert-Ancestor $correctionSha $CandidateSha 'red_failure_correction'
+        $correctionPaths = @(Invoke-GitText @('diff-tree', '--no-commit-id', '--name-only', '-r', $correctionSha) -split "`r?`n")
+        if ($correctionPaths -notcontains 'scripts/validation/issue-95/test-evidence-chain.ps1') {
+            throw 'red_failure_correction_not_executable'
+        }
+        $registeredFixture = Read-AuthenticatedRedFixture $correctionSha $fixtureName
+        if ([string]$registeredFixture.name -cne $fixtureName -or
+            [string]$registeredFixture.expected_code -cne $expectedCode) {
+            throw 'red_failure_fixture_not_authenticated'
+        }
     }
 }
 
 Assert-ExactCommit $CandidateSha 'candidate'
 Assert-ExactCommit $EvidenceSha 'evidence'
 Assert-ExactCommit $AttestationSha 'attestation'
+Assert-RunningVerifierPinned
 if ((Invoke-GitText @('rev-parse', 'HEAD')) -ne $AttestationSha) { throw 'current_head_not_attestation' }
 if ((Invoke-GitText @('rev-parse', ($EvidenceSha + '^'))) -ne $CandidateSha) { throw 'evidence_parent_not_candidate' }
 if ((Invoke-GitText @('rev-parse', ($AttestationSha + '^'))) -ne $EvidenceSha) { throw 'attestation_parent_not_evidence' }
@@ -241,6 +398,8 @@ $handoff = Read-GitJson $EvidenceSha $handoffPath
 if ($handoff.evidence_binding.state -ne 'finalized' -or $handoff.evidence_binding.matrix_prep_sha -ne $matrix.matrix_prep_sha -or $handoff.evidence_binding.final_validation_sha -ne $CandidateSha) {
     throw 'handoff_evidence_binding_mismatch'
 }
+$rowContract = Read-GitJson $CandidateSha $rowContractPath
+Assert-RowContract $rowContract $handoff $matrix
 Assert-LiveValidationContract $matrixPrepSha
 
 $checksums = Read-GitJson $EvidenceSha $checksumsPath
