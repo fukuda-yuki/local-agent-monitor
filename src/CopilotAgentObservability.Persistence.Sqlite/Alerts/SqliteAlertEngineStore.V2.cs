@@ -179,7 +179,8 @@ public sealed partial class SqliteAlertEngineStore
         if (connection is null
             || transaction is null
             || connection.State != ConnectionState.Open
-            || transaction.Connection != connection)
+            || transaction.Connection != connection
+            || SQLitePCL.raw.sqlite3_get_autocommit(connection.Handle) != 0)
         {
             return new(AlertEngineTransactionAppendStatusV2.InvalidTransaction);
         }

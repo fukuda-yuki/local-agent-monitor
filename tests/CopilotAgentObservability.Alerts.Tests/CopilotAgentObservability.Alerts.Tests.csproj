@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <None Include="TestData\alert-receipt-v1.golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\alert-receipt-v2.golden.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

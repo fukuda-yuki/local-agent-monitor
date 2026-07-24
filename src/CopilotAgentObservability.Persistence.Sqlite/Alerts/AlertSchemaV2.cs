@@ -86,6 +86,7 @@ internal static class AlertSchemaV2
         SqliteTransaction transaction)
     {
         if (!AlertSchemaV1.IsValid(connection, transaction)
+            || !ExactOwnedInventory(connection, transaction)
             || TemporaryObjectsExist(connection, transaction))
         {
             throw new InvalidOperationException();

@@ -29,10 +29,17 @@ public sealed partial class SqliteAlertEngineStore
                 connection,
                 null,
                 """
-                SELECT alert_id,evaluation_id,schema_version,canonical_json
-                FROM alert_receipts
-                WHERE ($after IS NULL OR alert_id>$after)
-                ORDER BY alert_id COLLATE BINARY
+                SELECT r.alert_id,r.evaluation_id,r.schema_version,r.canonical_json,
+                       e.schema_version,e.canonical_json,
+                       (SELECT count(*) FROM alert_receipts owned WHERE owned.evaluation_id=e.evaluation_id),
+                       (SELECT count(*) FROM alert_receipts owned
+                        WHERE owned.evaluation_id=e.evaluation_id
+                          AND ((e.schema_version='alert.evaluation.v1' AND owned.schema_version='alert.receipt.v1')
+                            OR (e.schema_version='alert.evaluation.v2' AND owned.schema_version='alert.receipt.v2')))
+                FROM alert_receipts r
+                JOIN alert_evaluations e ON e.evaluation_id=r.evaluation_id
+                WHERE ($after IS NULL OR r.alert_id>$after)
+                ORDER BY r.alert_id COLLATE BINARY
                 LIMIT $take;
                 """,
                 ("$after", afterAlertId is null ? DBNull.Value : afterAlertId),
@@ -47,6 +54,10 @@ public sealed partial class SqliteAlertEngineStore
                 var evaluationId = reader.GetString(1);
                 var schema = reader.GetString(2);
                 var bytes = Encoding.UTF8.GetBytes(reader.GetString(3));
+                var parentSchema = reader.GetString(4);
+                var parentBytes = Encoding.UTF8.GetBytes(reader.GetString(5));
+                var totalReceiptCount = reader.GetInt64(6);
+                var pairedReceiptCount = reader.GetInt64(7);
                 if (bytes.Length > AlertEngineQueryLimits.MaximumPageBytes)
                 {
                     return VersionedReceiptsUnavailable();
@@ -55,9 +66,17 @@ public sealed partial class SqliteAlertEngineStore
                 AlertVersionedReceiptQueryItem item;
                 if (schema == AlertContractVersions.Receipt)
                 {
+                    if (parentSchema != AlertContractVersions.Evaluation)
+                    {
+                        return VersionedReceiptsUnavailable();
+                    }
+                    var parent = AlertEvaluationConsumerV1.Validate(parentBytes);
                     var projection = AlertCenterReceiptConsumerV1.Validate(bytes);
                     if (projection.AlertId != alertId
-                        || projection.EvaluationId != evaluationId)
+                        || projection.EvaluationId != evaluationId
+                        || parent.EvaluationId != evaluationId
+                        || parent.ReceiptCount != totalReceiptCount
+                        || totalReceiptCount != pairedReceiptCount)
                     {
                         return VersionedReceiptsUnavailable();
                     }
@@ -65,9 +84,19 @@ public sealed partial class SqliteAlertEngineStore
                 }
                 else if (schema == AlertContractVersionsV2.Receipt)
                 {
-                    var projection = AlertCenterReceiptConsumerV2.Validate(bytes);
+                    if (parentSchema != AlertContractVersionsV2.Evaluation)
+                    {
+                        return VersionedReceiptsUnavailable();
+                    }
+                    var parent = AlertEvaluationConsumerV2.Validate(parentBytes);
+                    var projection = AlertCenterReceiptConsumerV2.Validate(
+                        bytes,
+                        parent.EligibilityDigest);
                     if (projection.AlertId != alertId
-                        || projection.EvaluationId != evaluationId)
+                        || projection.EvaluationId != evaluationId
+                        || parent.EvaluationId != evaluationId
+                        || parent.ReceiptCount != totalReceiptCount
+                        || totalReceiptCount != pairedReceiptCount)
                     {
                         return VersionedReceiptsUnavailable();
                     }
@@ -134,8 +163,12 @@ public sealed partial class SqliteAlertEngineStore
                 """
                 SELECT evaluation_id,schema_version,input_hash,configuration_version,
                        configuration_hash,canonical_json,
-                       (SELECT count(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id),
-                       (SELECT count(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id)
+                       (SELECT count(*) FROM alert_receipts r
+                        WHERE r.evaluation_id=e.evaluation_id
+                          AND ((e.schema_version='alert.evaluation.v1' AND r.schema_version='alert.receipt.v1')
+                            OR (e.schema_version='alert.evaluation.v2' AND r.schema_version='alert.receipt.v2'))),
+                       (SELECT count(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id),
+                       (SELECT count(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id)
                 FROM alert_evaluations e
                 WHERE ($after IS NULL OR evaluation_id>$after)
                 ORDER BY evaluation_id COLLATE BINARY
@@ -157,6 +190,11 @@ public sealed partial class SqliteAlertEngineStore
                 var bytes = Encoding.UTF8.GetBytes(reader.GetString(5));
                 var receiptCount = reader.GetInt64(6);
                 var suppressionCount = reader.GetInt64(7);
+                var totalReceiptCount = reader.GetInt64(8);
+                if (receiptCount != totalReceiptCount)
+                {
+                    return VersionedEvaluationsUnavailable();
+                }
                 if (bytes.Length > AlertEngineQueryLimits.MaximumPageBytes)
                 {
                     return VersionedEvaluationsUnavailable();
