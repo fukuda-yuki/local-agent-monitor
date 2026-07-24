@@ -77,3 +77,10 @@
 ## Worker constraint
 
 The available `spawn_agent` interface does not expose model or reasoning selectors. Task briefs request GPT-5.6 Luna xhigh as the preferred runtime, but orchestration cannot verify or enforce that selection.
+
+## Issue #95 P2 recovery map
+
+- Final-review corrections: complete (`72a0ed1..9524e3f`, independent review
+  clean C0/I0/M0).
+- Validation activation: implementation commit `98bfd62` rejected by independent
+  review; correction pending before integration.
