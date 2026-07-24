@@ -63,7 +63,11 @@ public sealed class AlertLifecycleRouteTests
         using var updated = await host.Client.SendAsync(mutation);
         Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
         Assert.Equal("no-store", updated.Headers.CacheControl?.ToString());
-        using (var json = JsonDocument.Parse(await updated.Content.ReadAsStreamAsync()))
+        var updatedBytes = await updated.Content.ReadAsStringAsync();
+        Assert.Equal(
+            """{"schema_version":"alert.lifecycle.v1","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"acknowledged","revision":1,"last_occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","event":{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"},"idempotent_replay":false}""",
+            updatedBytes);
+        using (var json = JsonDocument.Parse(updatedBytes))
         {
             Assert.Equal(["schema_version", "alert_id", "state", "revision", "last_occurred_at", "event", "idempotent_replay"], json.RootElement.EnumerateObject().Select(item => item.Name));
             Assert.Equal("acknowledged", json.RootElement.GetProperty("state").GetString());
@@ -73,7 +77,11 @@ public sealed class AlertLifecycleRouteTests
         using var history = await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle/history?limit=1");
         Assert.Equal(HttpStatusCode.OK, history.StatusCode);
         Assert.Equal("no-store", history.Headers.CacheControl?.ToString());
-        using var historyJson = JsonDocument.Parse(await history.Content.ReadAsStreamAsync());
+        var historyBytes = await history.Content.ReadAsStringAsync();
+        Assert.Equal(
+            """{"schema_version":"alert.lifecycle.v1","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","events":[{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"}]}""",
+            historyBytes);
+        using var historyJson = JsonDocument.Parse(historyBytes);
         Assert.Equal(["schema_version", "alert_id", "events"], historyJson.RootElement.EnumerateObject().Select(item => item.Name));
         Assert.Equal(1, historyJson.RootElement.GetProperty("events").GetArrayLength());
         var historyEvent = historyJson.RootElement.GetProperty("events")[0];

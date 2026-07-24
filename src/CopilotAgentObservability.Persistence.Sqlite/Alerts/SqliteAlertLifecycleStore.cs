@@ -23,7 +23,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            if (!AlertSchemaV1.IsValid(connection, transaction)) return Unavailable();
+            if (!AlertSchemaV2.IsRecognized(connection, transaction)) return Unavailable();
             var version = AlertLifecycleSchemaV1.ReadVersion(connection, transaction);
             if (version is null)
             {
@@ -239,7 +239,7 @@ public sealed class SqliteAlertLifecycleStore : IAlertLifecycleStore
     }
 
     private static bool SchemasValid(SqliteConnection connection, SqliteTransaction? transaction) =>
-        AlertSchemaV1.IsValid(connection, transaction) && AlertLifecycleSchemaV1.IsValid(connection, transaction);
+        AlertSchemaV2.IsRecognized(connection, transaction) && AlertLifecycleSchemaV1.IsValid(connection, transaction);
 
     private static long Integer(SqliteDataReader reader, int ordinal) =>
         reader.GetValue(ordinal) is long value ? value : throw new FormatException();
