@@ -1,5 +1,8 @@
 using System.Text.Json;
+using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.LocalMonitor.Alerts;
+using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Data.Sqlite;
 using Microsoft.Playwright;
 using static Microsoft.Playwright.Assertions;
 
@@ -12,6 +15,140 @@ public sealed class AlertCenterPlaywrightTests
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
     };
+
+    [Fact(Timeout = 60_000)]
+    public async Task AlertCenter_CostReceiptV2WarningAndCriticalPreserveExactLinksAndLifecycle()
+    {
+        using var temp = NewTemp();
+        var criticalEvaluation = AlertCenterV2RouteTests.CostEvaluationWithThresholds(1, 25m, 10m, 20m);
+        var warningEvaluation = AlertCenterV2RouteTests.CostEvaluationWithThresholds(2, 15m, 10m, 20m);
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = temp.DatabasePath,
+            Pooling = false,
+        }.ToString();
+        var owner = new SqliteAlertEngineStore(connectionString);
+        Assert.Equal(AlertStoreStatus.Success, owner.Initialize().Status);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, owner.InitializeV2().Status);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, owner.Append(criticalEvaluation).Status);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, owner.Append(warningEvaluation).Status);
+        var lifecycle = new SqliteAlertLifecycleStore(connectionString, temp.TimeProvider);
+        Assert.Equal(AlertLifecycleStoreStatus.Success, lifecycle.Initialize().Status);
+        var readModel = new SqliteAlertCenterReadModelV2(
+            owner,
+            lifecycle,
+            new EmptyAlertCenterReadModel(),
+            new CanonicalCostPresentationResolver());
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new()
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartRetentionCleanupWorker = false,
+            UseUserSecrets = false,
+            AlertEngineStore = owner,
+            AlertLifecycleStore = lifecycle,
+            AlertCenterReadModelV2 = readModel,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        var criticalAlertId = criticalEvaluation.Receipts[0].AlertId;
+        var warningAlertId = warningEvaluation.Receipts[0].AlertId;
+        await page.RouteAsync("**/api/alerts/v1/*/lifecycle/actions", async route =>
+        {
+            Assert.Equal("local-monitor", await route.Request.HeaderValueAsync("x-monitor-csrf"));
+            using var body = JsonDocument.Parse(route.Request.PostData!);
+            Assert.Equal("acknowledge", body.RootElement.GetProperty("action").GetString());
+            Assert.Equal(0, body.RootElement.GetProperty("expected_revision").GetInt64());
+            var alertId = new Uri(route.Request.Url).Segments[^3].Trim('/');
+            var result = lifecycle.Mutate(new(
+                alertId,
+                AlertLifecycleAction.Acknowledge,
+                0,
+                "user_reviewed",
+                null,
+                "aid1_" + new string(alertId[0], 43)));
+            Assert.Equal(AlertLifecycleStoreStatus.Success, result.Status);
+            await route.FulfillAsync(new RouteFulfillOptions
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = $$"""{"schema_version":"alert.lifecycle.v1","alert_id":"{{alertId}}","state":"acknowledged","revision":1,"last_occurred_at":"2026-07-23T12:00:00.0000000Z","event":{},"idempotent_replay":false}""",
+            });
+        });
+
+        var alertsUrl = $"{host.Url}/alerts?receipt_kind=cost_receipt_v2&period=30d";
+        await page.GotoAsync(
+            alertsUrl,
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        var critical = page.Locator($"[data-alert-id='{criticalAlertId}']");
+        var warning = page.Locator($"[data-alert-id='{warningAlertId}']");
+        await Expect(critical.Locator(".alert-severity")).ToHaveTextAsync("critical");
+        await Expect(critical.Locator(".alert-severity")).ToHaveClassAsync(
+            new System.Text.RegularExpressions.Regex(@"\bcritical\b"));
+        await Expect(critical).ToContainTextAsync("estimated_cost 25 USD");
+        await Expect(critical).ToContainTextAsync("warning 10 USD");
+        await Expect(critical).ToContainTextAsync("critical 20 USD");
+        await Expect(warning.Locator(".alert-severity")).ToHaveTextAsync("warning");
+        await Expect(warning.Locator(".alert-severity")).ToHaveClassAsync(
+            new System.Text.RegularExpressions.Regex(@"\bwarning\b"));
+        await Expect(warning).ToContainTextAsync("estimated_cost 15 USD");
+        await Expect(warning).ToContainTextAsync("warning 10 USD");
+        await Expect(warning).ToContainTextAsync("critical 20 USD");
+
+        await warning.Locator("[data-alert-select]").EvaluateAsync("button => button.click()");
+        await Expect(page.Locator("#alert-detail .alert-detail-badges .alert-severity")).ToHaveTextAsync("warning");
+        var warningMemberLinks = page.Locator("#alert-detail section:has(h4:text-is('Cost scope / estimates')) .alert-evidence-link");
+        await Expect(warningMemberLinks.Nth(0))
+            .ToHaveAttributeAsync("href", "/costs?session_id=01984045-9d80-7000-8000-000000000002");
+        await Expect(warningMemberLinks.Nth(1))
+            .ToHaveAttributeAsync(
+                "href",
+                "/costs?session_id=01984045-9d80-7000-8000-000000000002&estimate_id=pricing-estimate-0000000000000000000000000000000000000000000000000000000000000002");
+        var warningEvidenceLinks = page.Locator("#alert-detail section:has(h4:text-is('Evidence (2)')) .alert-evidence-link");
+        await Expect(warningEvidenceLinks.Nth(0))
+            .ToHaveAttributeAsync("href", "/costs?session_id=01984045-9d80-7000-8000-000000000002");
+        await Expect(warningEvidenceLinks.Nth(1))
+            .ToHaveAttributeAsync(
+                "href",
+                "/costs?session_id=01984045-9d80-7000-8000-000000000002&estimate_id=pricing-estimate-0000000000000000000000000000000000000000000000000000000000000002");
+        await page.Locator("[data-alert-action='acknowledge']")
+            .EvaluateAsync("button => button.click()");
+        await Expect(page.Locator("#alert-live")).ToContainTextAsync("acknowledge で更新しました");
+        await Expect(page.Locator("#alert-detail")).ToContainTextAsync("acknowledged");
+        await Expect(page.Locator("#alert-detail")).ToContainTextAsync("acknowledge");
+
+        await page.GotoAsync(
+            alertsUrl,
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator($"[data-alert-id='{criticalAlertId}'] [data-alert-select]")
+            .EvaluateAsync("button => button.click()");
+        await Expect(page.Locator("#alert-detail .alert-detail-badges .alert-severity")).ToHaveTextAsync("critical");
+        var criticalMemberLinks = page.Locator("#alert-detail section:has(h4:text-is('Cost scope / estimates')) .alert-evidence-link");
+        await Expect(criticalMemberLinks.Nth(0))
+            .ToHaveAttributeAsync("href", "/costs?session_id=01984045-9d80-7000-8000-000000000001");
+        await Expect(criticalMemberLinks.Nth(1))
+            .ToHaveAttributeAsync(
+                "href",
+                "/costs?session_id=01984045-9d80-7000-8000-000000000001&estimate_id=pricing-estimate-0000000000000000000000000000000000000000000000000000000000000001");
+        var criticalEvidenceLinks = page.Locator("#alert-detail section:has(h4:text-is('Evidence (2)')) .alert-evidence-link");
+        await Expect(criticalEvidenceLinks.Nth(0))
+            .ToHaveAttributeAsync("href", "/costs?session_id=01984045-9d80-7000-8000-000000000001");
+        await Expect(criticalEvidenceLinks.Nth(1))
+            .ToHaveAttributeAsync(
+                "href",
+                "/costs?session_id=01984045-9d80-7000-8000-000000000001&estimate_id=pricing-estimate-0000000000000000000000000000000000000000000000000000000000000001");
+        await page.Locator("[data-alert-action='acknowledge']")
+            .EvaluateAsync("button => button.click()");
+        await Expect(page.Locator("#alert-live")).ToContainTextAsync("acknowledge で更新しました");
+        await Expect(page.Locator("#alert-detail")).ToContainTextAsync("acknowledged");
+        Assert.Equal(AlertLifecycleState.Acknowledged, lifecycle.Get(criticalAlertId).Lifecycle!.State);
+        Assert.Equal(AlertLifecycleState.Acknowledged, lifecycle.Get(warningAlertId).Lifecycle!.State);
+    }
 
     [Fact(Timeout = 60_000)]
     public async Task AlertCenter_CriticalEvidenceRecurringAndKeyboardFlowStaySanitizedAndAccessible()
@@ -876,6 +1013,35 @@ public sealed class AlertCenterPlaywrightTests
                 ? new(Status, Snapshot)
                 : new(Status);
         }
+    }
+
+    private sealed class EmptyAlertCenterReadModel : IAlertCenterReadModel
+    {
+        public AlertCenterReadResult Read(AlertCenterQuery query) =>
+            new(AlertCenterReadStatus.Success, Snapshot([], [], []));
+    }
+
+    private sealed class CanonicalCostPresentationResolver : ICostAlertPresentationResolverV1
+    {
+        public CostAlertPresentationResolutionV1 Resolve(
+            IReadOnlyList<AlertCostMemberV2> members,
+            IReadOnlyList<AlertEvidenceReferenceV2> evidence) =>
+            new(
+                "success",
+                members.Select(member => new CostAlertPresentationMemberV1(
+                    member.SessionId,
+                    member.SessionEffectiveAtUtc,
+                    "available",
+                    "repo-safe",
+                    "workspace-safe",
+                    "available",
+                    $"/costs?session_id={Uri.EscapeDataString(member.SessionId)}",
+                    member.EstimateId,
+                    member.EstimateId is null ? null : "available",
+                    member.EstimateId is null
+                        ? null
+                        : $"/costs?session_id={Uri.EscapeDataString(member.SessionId)}&estimate_id={Uri.EscapeDataString(member.EstimateId)}"))
+                    .ToArray());
     }
 
     private sealed class FilteringFixtureReadModel(

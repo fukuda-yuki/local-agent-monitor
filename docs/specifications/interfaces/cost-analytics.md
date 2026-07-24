@@ -1902,6 +1902,22 @@ correct but reviewed positive source mappings remain unavailable,
 capability, yielding `release_ready_with_external_blockers`. Synthetic
 execution never promotes that live row.
 
+The machine-readable
+`contracts/cost-analytics/v1/issue-91-validation-row-contract.json` is the
+exact #95 row template. The evidence verifier compares it with the handoff and
+the materialized owner matrix for every row ID, surface, operation, required
+profile, version, and evidence reference. Automated test filters are exact-set
+compared with the handoff ledger and committed live-validation ledger because
+the owner matrix schema does not carry test filters. Every evidence reference
+must resolve to one unique row anchor in the committed live-validation ledger,
+and the handoff's axis-aware profile ledger is the exact deduplicated union of
+all row profiles. The live row additionally fixes both required providers
+(GitHub Copilot and Claude Code),
+positive estimate persistence, configured budget evaluation, Alert Center
+receipt/lifecycle readback, and the exact blocker, retry condition, and
+unverified capability. A generic or rewritten matrix from another surface is
+not #95 evidence.
+
 Required automated proof includes exact v1 alert golden compatibility, v2
 canonical/store/read behavior, disabled/configured budget rules, insufficient
 coverage suppression, estimated zero, partial/unknown/subscription/Codex/stale/
@@ -1913,7 +1929,11 @@ and tests, repository-safe scans, and artifact checksums.
 The evidence-chain verifier must resolve `matrix_prep_sha` to an exact commit
 that is an ancestor of the frozen candidate. The committed live-validation
 record binds both SHAs, the required command results, actual RED/failure
-history, and OS-specific security coverage. Unsupported-OS tests are explicit
+history, and OS-specific security coverage. The running verifier bytes must
+equal the verifier blob at the frozen candidate. Every RED item names an
+executable negative fixture and expected rejection code in the correction
+commit; that commit must be non-empty, must change the self-test, and must be
+bounded between matrix preparation and the candidate. Unsupported-OS tests are explicit
 not-applicable skips; failure to create a required symlink/reparse/FIFO
 prerequisite on the applicable OS is an explicit skip and prevents
 `91-S-095=passed`.

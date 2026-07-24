@@ -8,6 +8,7 @@ public sealed class Issue95ValidationContractTests
 {
     private static readonly string RepositoryRoot = FindRepositoryRoot();
     private const string HandoffRelativePath = "docs/specifications/contracts/cost-analytics/v1/issue-91-validation-handoff.json";
+    private const string RowContractRelativePath = "docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json";
     private const string ReadmeRelativePath = "docs/sprints/issue-95-cost-analytics/README.md";
     private const string MatrixRelativePath = "docs/sprints/issue-95-cost-analytics/validation-matrix.json";
     private const string ChecksumRelativePath = "docs/sprints/issue-95-cost-analytics/artifact-checksums.json";
@@ -26,7 +27,7 @@ public sealed class Issue95ValidationContractTests
         var root = handoff.RootElement;
         AssertObjectProperties(root,
             "schema_version", "surface_id", "owner_issue", "future_registry_state_at_kickoff",
-            "production_surface_state", "active_row_ids", "required_profiles",
+            "production_surface_state", "active_row_ids", "row_contract_path", "active_rows", "required_profiles",
             "automated_test_filters", "expected_evidence_location", "canonical_transition", "evidence_binding");
         Assert.Equal("cost-analytics-validation-handoff.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal("cost-analytics", root.GetProperty("surface_id").GetString());
@@ -35,9 +36,33 @@ public sealed class Issue95ValidationContractTests
         Assert.Equal("implemented_candidate", root.GetProperty("production_surface_state").GetString());
         Assert.Equal(["91-A-095", "91-S-095", "91-L-095"],
             root.GetProperty("active_row_ids").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(RowContractRelativePath, root.GetProperty("row_contract_path").GetString());
+        using var rowContract = JsonDocument.Parse(File.ReadAllText(RepositoryPath(RowContractRelativePath)));
+        Assert.Equal("cost-analytics-validation-row-contract.v1",
+            rowContract.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal("cost-analytics", rowContract.RootElement.GetProperty("surface_id").GetString());
+        Assert.True(JsonElement.DeepEquals(
+            rowContract.RootElement.GetProperty("active_rows"),
+            root.GetProperty("active_rows")));
+        var profileLedger = root.GetProperty("required_profiles");
+        AssertObjectProperties(profileLedger,
+            "collection", "content_access", "compatibility", "hook", "otel", "binding", "restart", "retention");
         Assert.Equal(
-            ["raw-default", "sanitized-only", "trusted-bundled-catalog", "private-local-override", "source-mapping-unavailable"],
-            root.GetProperty("required_profiles").EnumerateArray().Select(item => item.GetString()));
+            ["sqlite-production-store", "loopback-api", "playwright-ui", "repository-artifacts", "genuine-github-copilot", "genuine-claude-code"],
+            profileLedger.GetProperty("collection").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(
+            ["raw-default", "sanitized-only", "separately-authorized-live-capture"],
+            profileLedger.GetProperty("content_access").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(
+            ["trusted-bundled-catalog", "source-mapping-unavailable", "private-local-override", "malformed", "tampered", "future-version", "reviewed-positive-source-mapping"],
+            profileLedger.GetProperty("compatibility").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(["unverified"], profileLedger.GetProperty("hook").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(["unverified"], profileLedger.GetProperty("otel").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(
+            ["exact-session-estimate", "exact-identity", "canonical-bytes"],
+            profileLedger.GetProperty("binding").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(["persisted-reload"], profileLedger.GetProperty("restart").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(["archive-safety"], profileLedger.GetProperty("retention").EnumerateArray().Select(item => item.GetString()));
         Assert.Equal(
             [
                 "FullyQualifiedName~PricingPersistenceFoundationTests",
@@ -50,6 +75,7 @@ public sealed class Issue95ValidationContractTests
                 "FullyQualifiedName~CostPageTests",
                 "FullyQualifiedName~CostPagePlaywrightTests",
                 "FullyQualifiedName~AlertEngineV2Tests",
+                "FullyQualifiedName~CostAlertPresentationResolverTests",
                 "FullyQualifiedName~GoldenAlertReceiptTests",
                 "FullyQualifiedName~AlertEvaluationApplicationTests",
                 "FullyQualifiedName~SqliteAlertEngineStoreV2Tests",
@@ -61,6 +87,28 @@ public sealed class Issue95ValidationContractTests
                 "FullyQualifiedName~LocalMonitorScriptTests",
             ],
             root.GetProperty("automated_test_filters").EnumerateArray().Select(item => item.GetString()));
+        Assert.All(root.GetProperty("active_rows").EnumerateArray(), row =>
+        {
+            AssertObjectProperties(row,
+                "row_id", "surface", "operation", "required_profiles", "versions",
+                "evidence_references", "automated_test_filters", "blocked_external_contract");
+            Assert.Equal(
+                ["binding", "collection", "compatibility", "content_access", "hook", "otel", "restart", "retention"],
+                row.GetProperty("required_profiles").EnumerateObject().Select(property => property.Name).Order());
+            Assert.NotEmpty(row.GetProperty("versions").EnumerateObject());
+            Assert.NotEmpty(row.GetProperty("evidence_references").EnumerateArray());
+            Assert.NotEmpty(row.GetProperty("automated_test_filters").EnumerateArray());
+        });
+        var live = root.GetProperty("active_rows").EnumerateArray().Single(row =>
+            row.GetProperty("row_id").GetString() == "91-L-095");
+        var liveBlock = live.GetProperty("blocked_external_contract");
+        Assert.Equal(["github-copilot", "claude-code"],
+            liveBlock.GetProperty("required_providers").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(
+            ["positive-estimate-persistence", "configured-budget-evaluation", "alert-center-readback"],
+            liveBlock.GetProperty("unverified_capabilities").EnumerateArray().Select(item => item.GetString()));
+        Assert.Contains("reviewed positive source mappings", liveBlock.GetProperty("retry_condition").GetString(), StringComparison.Ordinal);
+        Assert.Contains("separate live authorization", liveBlock.GetProperty("retry_condition").GetString(), StringComparison.Ordinal);
         Assert.Equal(MatrixRelativePath, root.GetProperty("expected_evidence_location").GetString());
         Assert.Contains("never a future-registry entry", root.GetProperty("canonical_transition").GetString(), StringComparison.Ordinal);
         Assert.Contains("no pass was inherited", root.GetProperty("canonical_transition").GetString(), StringComparison.Ordinal);
@@ -197,6 +245,14 @@ public sealed class Issue95ValidationContractTests
         Assert.Contains("not_applicable_os_security_tests", script, StringComparison.Ordinal);
         Assert.Contains("validation_os", script, StringComparison.Ordinal);
         Assert.Contains("StringComparer]::Ordinal", script, StringComparison.Ordinal);
+        Assert.Contains("row_contract_mismatch", script, StringComparison.Ordinal);
+        Assert.Contains("live_blocker_contract_mismatch", script, StringComparison.Ordinal);
+        Assert.Contains("verifier_working_copy_mismatch", script, StringComparison.Ordinal);
+        Assert.Contains("red_failure_fixture_not_authenticated", script, StringComparison.Ordinal);
+        Assert.Contains("red_failure_correction_not_executable", script, StringComparison.Ordinal);
+        Assert.Contains("live_evidence_anchor_", script, StringComparison.Ordinal);
+        Assert.Contains("Read-AuthenticatedRedFixture", script, StringComparison.Ordinal);
+        Assert.Contains("row_contract_profile_ledger_", script, StringComparison.Ordinal);
         Assert.DoesNotContain("git checkout", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git reset", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git clean", script, StringComparison.OrdinalIgnoreCase);
@@ -226,6 +282,13 @@ public sealed class Issue95ValidationContractTests
         Assert.Contains("ToHaveCountAsync(101)", browser, StringComparison.Ordinal);
         Assert.Contains("Assert.InRange(polls, 1, 40)", browser, StringComparison.Ordinal);
         Assert.DoesNotContain("Task.Delay(300)", browser, StringComparison.Ordinal);
+
+        var alertBrowser = File.ReadAllText(RepositoryPath(
+            "tests/CopilotAgentObservability.LocalMonitor.Tests/AlertCenterPlaywrightTests.cs"));
+        Assert.Contains(
+            "AlertCenter_CostReceiptV2WarningAndCriticalPreserveExactLinksAndLifecycle",
+            alertBrowser,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -271,7 +334,7 @@ public sealed class Issue95ValidationContractTests
         startInfo.ArgumentList.Add("-MatrixValidatorPath");
         startInfo.ArgumentList.Add(RepositoryPath("scripts/validation/issue-91/validate-matrix.ps1"));
         startInfo.ArgumentList.Add("-MatrixFixturePath");
-        startInfo.ArgumentList.Add(RepositoryPath("docs/sprints/issue-75-historical-analysis/validation-matrix.json"));
+        startInfo.ArgumentList.Add(RepositoryPath(RowContractRelativePath));
 
         using var process = Process.Start(startInfo)!;
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -279,7 +342,7 @@ public sealed class Issue95ValidationContractTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await process.WaitForExitAsync(timeout.Token);
         Assert.True(process.ExitCode == 0, $"{await stdoutTask}{await stderrTask}");
-        Assert.Contains("evidence_chain_self_test=PASS cases=17", await stdoutTask, StringComparison.Ordinal);
+        Assert.Contains("evidence_chain_self_test=PASS cases=31", await stdoutTask, StringComparison.Ordinal);
         Assert.Equal(string.Empty, await stderrTask);
     }
 
