@@ -1566,6 +1566,15 @@ public sealed class SqliteSessionStore : ISessionStore
         ValidateExistingSchemaBeforeInitialization(connection, preflightVersion);
     }
 
+    internal static bool IsCurrentSchemaValid(
+        SqliteConnection connection,
+        SqliteTransaction? transaction) =>
+        SessionSchemaV11Validator.IsValid(
+            connection,
+            transaction,
+            CreateCanonicalVersionTwelveSchema,
+            CurrentSchemaVersion);
+
     private static void ValidateExistingSchemaBeforeInitialization(SqliteConnection connection, int? version)
     {
         if (version is null) return;
