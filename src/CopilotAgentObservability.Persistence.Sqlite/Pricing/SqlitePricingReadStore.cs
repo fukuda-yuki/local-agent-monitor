@@ -800,6 +800,36 @@ public sealed partial class SqlitePricingReadStore
             == PricingSelectionSemanticSignature(current);
     }
 
+    internal static bool IsEstimateFreshForBudget(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        string estimateId,
+        PricingCatalog currentCatalog)
+    {
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT run_id FROM pricing_estimates
+            WHERE estimate_id=$estimate AND session_id=$session;
+            """,
+            ("$estimate", estimateId),
+            ("$session", sessionId));
+        if (command.ExecuteScalar() is not string runId)
+            return false;
+        return IsCapturedInputFresh(
+                connection,
+                transaction,
+                sessionId,
+                runId)
+            && IsEstimateSemanticallyFresh(
+                connection,
+                transaction,
+                estimateId,
+                currentCatalog);
+    }
+
     private static string PricingSelectionSemanticSignature(PricingEstimateRecord estimate)
     {
         using var stream = new MemoryStream();

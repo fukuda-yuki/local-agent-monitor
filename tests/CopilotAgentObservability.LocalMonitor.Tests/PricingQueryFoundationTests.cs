@@ -514,6 +514,17 @@ public sealed class PricingQueryFoundationTests
                     sessionId,
                     catalogBytes,
                     null).Value!.Attempts).Freshness);
+        using (var connection = database.Open())
+        using (var transaction = connection.BeginTransaction())
+        {
+            Assert.True(SqlitePricingReadStore.IsEstimateFreshForBudget(
+                connection,
+                transaction,
+                sessionId,
+                estimate.EstimateId,
+                catalog));
+            transaction.Rollback();
+        }
         Assert.Equal(
             "fresh",
             Assert.Single(
@@ -553,6 +564,40 @@ public sealed class PricingQueryFoundationTests
                     sessionId,
                     PricingCanonicalJson.SerializeCatalogSnapshot(changedCatalog),
                     null).Value!.Attempts).Freshness);
+        using (var connection = database.Open())
+        using (var transaction = connection.BeginTransaction())
+        {
+            Assert.False(SqlitePricingReadStore.IsEstimateFreshForBudget(
+                connection,
+                transaction,
+                sessionId,
+                estimate.EstimateId,
+                changedCatalog));
+            transaction.Rollback();
+        }
+        using (var connection = database.Open())
+        {
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                SELECT
+                    'freshness-drift-event','{sessionId}',run_id,'vscode','synthetic',
+                    'freshness-drift-event','turn',
+                    '2026-07-24T01:00:01.0000000+00:00','not_captured','2.0.0'
+                FROM session_runs WHERE session_id='{sessionId}' LIMIT 1;
+                """);
+            using var transaction = connection.BeginTransaction();
+            Assert.False(SqlitePricingReadStore.IsEstimateFreshForBudget(
+                connection,
+                transaction,
+                sessionId,
+                estimate.EstimateId,
+                catalog));
+            transaction.Rollback();
+        }
     }
 
     [Fact]

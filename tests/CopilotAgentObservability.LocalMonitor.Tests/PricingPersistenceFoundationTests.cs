@@ -156,6 +156,25 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal("github-copilot-vscode", Scalar<string>(read, "SELECT source_surface FROM pricing_recalculation_targets;"));
         Assert.Equal("1.2.3", Scalar<string>(read, "SELECT source_application_version FROM pricing_recalculation_targets;"));
         Assert.Equal(0L, Scalar<long>(read, "SELECT base_attempt_revision FROM pricing_recalculation_targets;"));
+        read.Close();
+        clock.UtcNow = createdAt.AddMinutes(3);
+
+        var completed = new SqliteCostRecalculationCoordinatorV1(
+            database.Path,
+            timeProvider: clock).Execute(runId);
+
+        Assert.Equal(PricingCompletionStatus.Success, completed.Status);
+        using var terminal = database.Open();
+        Assert.Equal(
+            new[] { "requested", "running", "succeeded" },
+            Names(
+                terminal,
+                "SELECT event_kind FROM pricing_recalculation_events ORDER BY event_sequence;"));
+        Assert.Equal(
+            "source_adapter_unavailable",
+            Scalar<string>(
+                terminal,
+                "SELECT result_code FROM pricing_recalculation_target_results;"));
     }
 
     [Fact]
@@ -312,6 +331,15 @@ public sealed class PricingPersistenceFoundationTests
             PricingStoreStatus.Success,
             store.MarkRecalculationRunning(successfulRunId).Status);
         clock.UtcNow = calculationTime.AddSeconds(5);
+        var transactionRebuildCount = 0;
+        var budgetPlan = new PricingBudgetEvaluationPlanV1(
+            [evaluation],
+            [budget],
+            (_, _) =>
+            {
+                Interlocked.Increment(ref transactionRebuildCount);
+                return new([evaluation with { }], [budget with { }]);
+            });
         var completionTasks = Enumerable.Range(0, 2)
             .Select(_ => Task.Run(() =>
                 new SqliteCostRecalculationUnitOfWork(
@@ -320,14 +348,14 @@ public sealed class PricingPersistenceFoundationTests
                     clock).Complete(
                         successfulRunId,
                         [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
-                        [evaluation],
-                        [budget])))
+                        budgetPlan)))
             .ToArray();
         var concurrentResults = await Task.WhenAll(completionTasks);
 
         Assert.Equal(
             [PricingCompletionStatus.Success, PricingCompletionStatus.ContractRejected],
             concurrentResults.Select(item => item.Status).Order().ToArray());
+        Assert.Equal(1, transactionRebuildCount);
         using (var afterSuccess = database.Open())
         {
             Assert.Equal(1L, Scalar<long>(afterSuccess, "SELECT COUNT(*) FROM alert_evaluations;"));
@@ -487,11 +515,10 @@ public sealed class PricingPersistenceFoundationTests
         }
         clock.UtcNow = calculationTime.AddSeconds(2);
 
-        var result = unitOfWork.Complete(
+        var result = unitOfWork.Fail(
             runId,
             [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
-            [null!],
-            []);
+            new("adapter", "target", 0, "source_adapter_failed"));
 
         Assert.Equal(0, participant.CallCount);
         Assert.Equal(PricingCompletionStatus.StaleRecalculationInput, result.Status);
@@ -1975,6 +2002,354 @@ public sealed class PricingPersistenceFoundationTests
         Assert.True(PricingSchemaV1.ValidateRows(read, null));
     }
 
+    [Fact]
+    public void PricingCoordinator_DefaultUnavailableProducesCoverageSuppressionAtomically()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 3, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var configuration = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            catalog.CatalogSha256,
+            [new(
+                "github-copilot-vscode",
+                "1.2.3",
+                "capability.v1",
+                "github_copilot",
+                "plan_included",
+                "code_completion")],
+            [new(
+                "session-estimated-cost-threshold",
+                "1",
+                true,
+                "USD",
+                "1",
+                "2",
+                5000,
+                "session",
+                null)],
+            createdAt);
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            configuration,
+            0,
+            null,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, preview).Status);
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open())
+        {
+            InsertSession(connection, sessionId);
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES('run-budget','{sessionId}','vscode','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES(
+                    'event-budget','{sessionId}','run-budget','vscode','synthetic','event-budget',
+                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                """);
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [new("session", sessionId, null, null, null)],
+            "pricing-budget-coordinator-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        clock.UtcNow = createdAt.AddMinutes(2);
+        var alertStore = new SqliteAlertEngineStore(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path,
+            Pooling = false,
+        }.ToString());
+        var coordinator = new SqliteCostRecalculationCoordinatorV1(
+            database.Path,
+            timeProvider: clock,
+            alertParticipant: alertStore);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            coordinator.Start(runId, request, catalogBytes, clock.UtcNow).Status);
+        clock.UtcNow = createdAt.AddMinutes(3);
+
+        var completed = coordinator.Execute(runId);
+
+        Assert.Equal(PricingCompletionStatus.Success, completed.Status);
+        using var read = database.Open();
+        Assert.Equal("succeeded", Scalar<string>(
+            read,
+            "SELECT event_kind FROM pricing_recalculation_events WHERE event_sequence=2;"));
+        Assert.Equal("unavailable", Scalar<string>(
+            read,
+            "SELECT result_kind FROM pricing_recalculation_target_results;"));
+        Assert.Equal("suppression", Scalar<string>(
+            read,
+            "SELECT outcome_kind FROM pricing_recalculation_budget_results;"));
+        Assert.Equal("no_covered_estimate", Scalar<string>(
+            read,
+            "SELECT suppression_code FROM pricing_recalculation_budget_results;"));
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_evaluations;"));
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_suppressions;"));
+        Assert.True(PricingSchemaV1.ValidateRows(read, null));
+    }
+
+    [Fact]
+    public void PricingCoordinator_RejectsAggregateCardinalityBeforeCreatingRun()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 3, 30, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var configuration = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            catalog.CatalogSha256,
+            [new(
+                "github-copilot-vscode",
+                "1.2.3",
+                "pricing-capability.v1",
+                "github_copilot",
+                "github_ai_credits",
+                "credit_consuming_interaction")],
+            [],
+            createdAt);
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            configuration,
+            0,
+            null,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, preview).Status);
+        var sessions = Enumerable.Range(0, 2_001)
+            .Select(_ => Guid.NewGuid().ToString("D"))
+            .ToArray();
+        using (var connection = database.Open())
+        using (var transaction = connection.BeginTransaction())
+        {
+            using var session = connection.CreateCommand();
+            session.Transaction = transaction;
+            session.CommandText =
+                """
+                INSERT INTO sessions(
+                    session_id,status,completeness,last_seen_at,raw_retention_state,
+                    created_at,updated_at)
+                VALUES($id,'completed','full','2026-07-24T01:00:00.0000000+00:00',
+                    'not_captured','2026-07-24T01:00:00.0000000+00:00',
+                    '2026-07-24T01:00:00.0000000+00:00');
+                """;
+            var sessionId = session.Parameters.Add("$id", SqliteType.Text);
+            using var run = connection.CreateCommand();
+            run.Transaction = transaction;
+            run.CommandText =
+                """
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES($run,$session,'vscode','completed');
+                """;
+            var runIdParameter = run.Parameters.Add("$run", SqliteType.Text);
+            var runSessionId = run.Parameters.Add("$session", SqliteType.Text);
+            using var eventCommand = connection.CreateCommand();
+            eventCommand.Transaction = transaction;
+            eventCommand.CommandText =
+                """
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES(
+                    $event,$session,$run,'vscode','synthetic',$source_event,'turn',
+                    '2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                """;
+            var eventId = eventCommand.Parameters.Add("$event", SqliteType.Text);
+            var eventSessionId = eventCommand.Parameters.Add("$session", SqliteType.Text);
+            var eventRunId = eventCommand.Parameters.Add("$run", SqliteType.Text);
+            var sourceEventId = eventCommand.Parameters.Add("$source_event", SqliteType.Text);
+            for (var ordinal = 0; ordinal < sessions.Length; ordinal++)
+            {
+                var id = sessions[ordinal];
+                var runId = $"cardinality-run-{ordinal:D4}";
+                var sourceEvent = $"cardinality-event-{ordinal:D4}";
+                sessionId.Value = id;
+                session.ExecuteNonQuery();
+                runIdParameter.Value = runId;
+                runSessionId.Value = id;
+                run.ExecuteNonQuery();
+                eventId.Value = sourceEvent;
+                eventSessionId.Value = id;
+                eventRunId.Value = runId;
+                sourceEventId.Value = sourceEvent;
+                eventCommand.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessions[0]],
+            [
+                new("utc_day", null, "2026-07-24", null, null),
+                new(
+                    "rolling_period",
+                    null,
+                    null,
+                    new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero),
+                    2),
+            ],
+            "pricing-budget-cardinality-0001");
+        var coordinator = new SqliteCostRecalculationCoordinatorV1(
+            database.Path,
+            timeProvider: clock);
+
+        var started = coordinator.Start(
+            Guid.CreateVersion7().ToString("D"),
+            request,
+            catalogBytes,
+            createdAt.AddMinutes(2));
+
+        Assert.Equal(PricingStoreStatus.CapacityReached, started.Status);
+        Assert.Equal("cost_request_too_large", started.ErrorCode);
+        using var read = database.Open();
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_recalculation_runs;"));
+        Assert.True(PricingSchemaV1.ValidateRows(read, null));
+    }
+
+    [Fact]
+    public void PricingCoordinator_SyntheticAdapterCommitsEstimateAndBudgetReceiptAtomically()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+        var createdAt = new DateTimeOffset(2026, 7, 24, 4, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(createdAt);
+        var store = new SqlitePricingStore(database.Path, clock);
+        store.CreateSchema();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        Assert.Equal(PricingStoreStatus.Success, store.PutCatalogSnapshot(catalogBytes).Status);
+        var configuration = CostConfigurationCanonicalJsonV1.Create(
+            null,
+            catalog.CatalogSha256,
+            [new(
+                "github-copilot-vscode",
+                "1.2.3",
+                "pricing-capability.v1",
+                "github_copilot",
+                "github_ai_credits",
+                "credit_consuming_interaction")],
+            [new(
+                "session-estimated-cost-threshold",
+                "1",
+                true,
+                "USD",
+                "0",
+                "999",
+                10000,
+                "session",
+                null)],
+            createdAt);
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            configuration,
+            0,
+            null,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        clock.UtcNow = createdAt.AddMinutes(1);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            AppendIncompleteConfigurationCommit(store, preview).Status);
+        var sessionId = Guid.NewGuid().ToString("D");
+        using (var connection = database.Open())
+        {
+            InsertSession(connection, sessionId);
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_runs(run_id,session_id,source_surface,status)
+                VALUES('run-positive','{sessionId}','vscode','completed');
+                INSERT INTO session_events(
+                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,source_application_version)
+                VALUES(
+                    'event-positive','{sessionId}','run-positive','vscode','synthetic','event-positive',
+                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                """);
+        }
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [new("session", sessionId, null, null, null)],
+            "pricing-budget-coordinator-0002");
+        var runId = Guid.CreateVersion7().ToString("D");
+        var alertStore = new SqliteAlertEngineStore(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path,
+            Pooling = false,
+        }.ToString());
+        var coordinator = new SqliteCostRecalculationCoordinatorV1(
+            database.Path,
+            new SyntheticPricingSourceAdapter(),
+            clock,
+            alertStore);
+        clock.UtcNow = createdAt.AddMinutes(2);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            coordinator.Start(runId, request, catalogBytes, clock.UtcNow).Status);
+        clock.UtcNow = createdAt.AddMinutes(3);
+
+        var completed = coordinator.Execute(runId);
+
+        Assert.Equal(PricingCompletionStatus.Success, completed.Status);
+        using var read = database.Open();
+        Assert.Equal("estimate", Scalar<string>(
+            read,
+            "SELECT result_kind FROM pricing_recalculation_target_results;"));
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_estimates;"));
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_estimate_heads;"));
+        Assert.Equal("receipt", Scalar<string>(
+            read,
+            "SELECT outcome_kind FROM pricing_recalculation_budget_results;"));
+        Assert.Equal(1L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_receipts;"));
+        Assert.True(PricingSchemaV1.ValidateRows(read, null));
+    }
+
     private static CostConfigurationPreviewV1 CreatePreview(
         string catalogSha,
         DateTimeOffset createdAt,
@@ -2267,6 +2642,47 @@ public sealed class PricingPersistenceFoundationTests
             AlertEvidenceReferenceV2 reference,
             AlertEvidenceResolutionScopeV2 scope) =>
             AlertEvidenceResolutionStatusV2.Resolved;
+    }
+
+    private sealed class SyntheticPricingSourceAdapter : IPricingEstimateSourceAdapterV1
+    {
+        public PricingEstimateSourceAdapterResultV1 Acquire(
+            PricingEstimateSourceAdapterRequestV1 request)
+        {
+            var provenance = new PricingValueProvenance(
+                "synthetic-adapter",
+                "pricing-capability.v1",
+                "synthetic-event",
+                "not_captured",
+                "pricing-normalization.v1");
+            return PricingEstimateSourceAdapterResultV1.Available(new(
+                "pricing-capability.v1",
+                new(
+                    request.SourceSurface,
+                    request.SourceApplicationVersion,
+                    request.SessionId,
+                    request.SessionEffectiveAtUtc,
+                    PricingProviders.GitHubCopilot,
+                    "GPT-5 mini",
+                    PricingBillingModes.GitHubAiCredits,
+                    PricingRoutes.CreditConsumingInteraction,
+                    PricingSourceCompleteness.Full,
+                    [],
+                    provenance,
+                    provenance,
+                    provenance,
+                    provenance,
+                    provenance),
+                new(
+                    new(1000, provenance),
+                    new(2000, provenance),
+                    new(500, provenance),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)));
+        }
     }
 
     private sealed class FailingAlertParticipant : ISqliteAlertEngineTransactionParticipantV2
