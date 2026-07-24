@@ -108,6 +108,37 @@ public class MonitorOptionsTests
     }
 
     [Fact]
+    public void Parse_PreservesPricingRegistryOverridesInCallerOrder()
+    {
+        var first = Path.GetFullPath("first-pricing-registry.json");
+        var second = Path.GetFullPath("second-pricing-registry.json");
+
+        var result = MonitorOptions.Parse(
+            ["--pricing-registry-override", first, "--pricing-registry-override", second]);
+
+        Assert.Null(result.Error);
+        Assert.Equal([first, second], result.Options!.PricingRegistryOverridePaths);
+    }
+
+    [Fact]
+    public void Parse_RejectsMoreThanEightPricingRegistryOverridesWithoutEchoingLocator()
+    {
+        const string marker = "private-pricing-locator";
+        var arguments = Enumerable.Range(0, 9)
+            .SelectMany(index => new[]
+            {
+                "--pricing-registry-override",
+                Path.GetFullPath($"{marker}-{index}.json")
+            })
+            .ToArray();
+
+        var result = MonitorOptions.Parse(arguments);
+
+        Assert.Equal("pricing_catalog_unavailable", result.Error);
+        Assert.DoesNotContain(marker, result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Parse_DefaultsToReadinessThresholdSeconds()
     {
         var result = MonitorOptions.Parse([]);
