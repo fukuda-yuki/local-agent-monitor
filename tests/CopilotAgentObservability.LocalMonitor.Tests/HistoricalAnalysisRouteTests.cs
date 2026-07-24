@@ -619,12 +619,15 @@ public sealed class HistoricalAnalysisRouteTests
     {
         using var temp = new MonitorTempDirectory();
         var executor = new ControllableEfficiencyExecutor(outcome);
+        var efficiencyTimeout = expectedState == "timed_out"
+            ? TimeSpan.FromMilliseconds(50)
+            : TimeSpan.FromSeconds(30);
         await using var host = await MonitorTestHost.StartAsync(
             temp,
             testOptions: QuietOptions(
                 new InstructionSnapshotSource(),
                 historicalEfficiencyExecutor: executor,
-                historicalEfficiencyTimeout: TimeSpan.FromMilliseconds(50)));
+                historicalEfficiencyTimeout: efficiencyTimeout));
         var preview = await PreviewBinding(host);
         using var start = await host.Client.SendAsync(EfficiencyStartRequest(preview));
         using var startJson = JsonDocument.Parse(await start.Content.ReadAsStreamAsync());
