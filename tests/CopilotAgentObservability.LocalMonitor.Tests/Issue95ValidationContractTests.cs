@@ -240,6 +240,7 @@ public sealed class Issue95ValidationContractTests
         Assert.Contains("ArgumentList.Add('--batch')", script, StringComparison.Ordinal);
         Assert.Contains("$gitObjectCache", script, StringComparison.Ordinal);
         Assert.DoesNotContain("ArgumentList.Add('show')", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("16MB", script, StringComparison.Ordinal);
         Assert.Contains("working_tree_substitution_detected", script, StringComparison.Ordinal);
         Assert.Contains("matrix_prep_not_exact_commit", script, StringComparison.Ordinal);
         Assert.Contains("not_candidate_ancestor", script, StringComparison.Ordinal);

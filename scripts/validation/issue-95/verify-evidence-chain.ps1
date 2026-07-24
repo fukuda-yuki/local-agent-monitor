@@ -106,7 +106,6 @@ function Get-GitBatchObject([string] $Spec) {
     $match = [Regex]::Match($header, '^(?<id>[0-9a-f]{40}) (?<type>\S+) (?<size>\d+)$')
     if (-not $match.Success) { throw 'git_batch_header_invalid' }
     $size = [int64]::Parse($match.Groups['size'].Value, [Globalization.CultureInfo]::InvariantCulture)
-    if ($size -gt 16MB) { throw 'git_batch_object_too_large' }
     $object = [pscustomobject]@{
         ObjectId = $match.Groups['id'].Value
         Type = $match.Groups['type'].Value
