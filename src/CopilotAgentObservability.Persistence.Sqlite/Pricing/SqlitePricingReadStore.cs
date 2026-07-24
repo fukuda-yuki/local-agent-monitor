@@ -102,7 +102,7 @@ public sealed record CostSessionRecalculationsReadV1(
     IReadOnlyList<CostSessionRecalculationAttemptReadV1> Attempts,
     long? NextAfter);
 
-public sealed class SqlitePricingReadStore
+public sealed partial class SqlitePricingReadStore
 {
     private readonly string databasePath;
 
