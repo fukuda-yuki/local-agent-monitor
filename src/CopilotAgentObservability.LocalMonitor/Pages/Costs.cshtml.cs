@@ -34,7 +34,7 @@ public sealed class CostsModel : PageModel
         var parts = raw[1..].Split('&');
         if (parts.Length is < 1 or > 2) return false;
         if (!TryPair(parts[0], "session_id", out sessionId)
-            || !ValidUuid7(sessionId))
+            || !ValidCanonicalGuid(sessionId))
             return false;
         if (parts.Length == 1) return true;
         return TryPair(parts[1], "estimate_id", out estimateId)
@@ -63,12 +63,10 @@ public sealed class CostsModel : PageModel
         }
     }
 
-    private static bool ValidUuid7(string? value) =>
+    private static bool ValidCanonicalGuid(string? value) =>
         value is { Length: 36 }
-        && value == value.ToLowerInvariant()
-        && Guid.TryParseExact(value, "D", out _)
-        && value[14] == '7'
-        && value[19] is '8' or '9' or 'a' or 'b';
+        && Guid.TryParseExact(value, "D", out var parsed)
+        && value == parsed.ToString("D");
 
     private static bool ValidEstimateId(string? value) =>
         value is not null
