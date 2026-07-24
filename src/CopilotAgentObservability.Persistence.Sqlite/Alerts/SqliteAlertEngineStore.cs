@@ -3,7 +3,12 @@ using CopilotAgentObservability.Alerts;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEngineQueryStore
+public sealed partial class SqliteAlertEngineStore :
+    IAlertEngineStore,
+    IAlertEngineQueryStore,
+    IAlertEngineStoreV2,
+    IAlertEngineVersionedQueryStore,
+    ISqliteAlertEngineTransactionParticipantV2
 {
     private readonly string _connectionString;
 
@@ -25,7 +30,7 @@ public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEn
                 if (AlertSchemaV1.AnyEngineTableExists(connection, transaction)) return Unavailable();
                 AlertSchemaV1.Create(connection, transaction);
             }
-            if (!AlertSchemaV1.IsValid(connection, transaction)) return Unavailable();
+            if (!AlertSchemaV2.IsRecognized(connection, transaction)) return Unavailable();
             transaction.Commit();
             return Success();
         }
@@ -44,7 +49,7 @@ public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEn
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            if (!AlertSchemaV1.IsValid(connection, transaction)) return Unavailable();
+            if (!AlertSchemaV2.IsRecognized(connection, transaction)) return Unavailable();
 
             var existing = ReadScalar(connection, transaction, "SELECT canonical_json FROM alert_evaluations WHERE evaluation_id=$id;", ("$id", evaluation.EvaluationId));
             if (existing is not null)
@@ -82,9 +87,11 @@ public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEn
         catch (SqliteException) { return Unavailable(); }
     }
 
-    public AlertStoreReadResult GetEvaluation(string evaluationId) => ReadOne("alert_evaluations", "evaluation_id", evaluationId);
+    public AlertStoreReadResult GetEvaluation(string evaluationId) =>
+        ReadOne("alert_evaluations", "evaluation_id", evaluationId, AlertContractVersions.Evaluation);
 
-    public AlertStoreReadResult GetReceipt(string alertId) => ReadOne("alert_receipts", "alert_id", alertId);
+    public AlertStoreReadResult GetReceipt(string alertId) =>
+        ReadOne("alert_receipts", "alert_id", alertId, AlertContractVersions.Receipt);
 
     public AlertStoreListResult ListSuppressions(string evaluationId)
     {
@@ -92,27 +99,42 @@ public sealed partial class SqliteAlertEngineStore : IAlertEngineStore, IAlertEn
         try
         {
             using var connection = Open();
-            if (!AlertSchemaV1.IsValid(connection, null)) return new(AlertStoreStatus.Unavailable, [], "alert_store_unavailable");
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return new(AlertStoreStatus.Unavailable, [], "alert_store_unavailable");
+            if (ReadScalar(
+                    connection,
+                    null,
+                    "SELECT evaluation_id FROM alert_evaluations WHERE evaluation_id=$id AND schema_version='alert.evaluation.v1';",
+                    ("$id", evaluationId)) is null)
+            {
+                return new(AlertStoreStatus.NotFound, [], "alert_not_found");
+            }
             using var command = Command(connection, null, "SELECT canonical_json FROM alert_suppressions WHERE evaluation_id=$id ORDER BY suppression_ordinal;", ("$id", evaluationId));
             using var reader = command.ExecuteReader();
             var values = new List<string>();
             while (reader.Read()) values.Add(reader.GetString(0));
-            if (values.Count == 0 && ReadScalar(connection, null, "SELECT evaluation_id FROM alert_evaluations WHERE evaluation_id=$id;", ("$id", evaluationId)) is null)
-                return new(AlertStoreStatus.NotFound, [], "alert_not_found");
             return new(AlertStoreStatus.Success, values);
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertStoreStatus.Busy, [], "alert_store_busy"); }
         catch (SqliteException) { return new(AlertStoreStatus.Unavailable, [], "alert_store_unavailable"); }
     }
 
-    private AlertStoreReadResult ReadOne(string table, string idColumn, string id)
+    private AlertStoreReadResult ReadOne(
+        string table,
+        string idColumn,
+        string id,
+        string schemaVersion)
     {
         if (!CanonicalHash(id)) return new(AlertStoreStatus.NotFound, null, "alert_not_found");
         try
         {
             using var connection = Open();
-            if (!AlertSchemaV1.IsValid(connection, null)) return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable");
-            var value = ReadScalar(connection, null, $"SELECT canonical_json FROM {table} WHERE {idColumn}=$id;", ("$id", id));
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable");
+            var value = ReadScalar(
+                connection,
+                null,
+                $"SELECT canonical_json FROM {table} WHERE {idColumn}=$id AND schema_version=$schema;",
+                ("$id", id),
+                ("$schema", schemaVersion));
             return value is null ? new(AlertStoreStatus.NotFound, null, "alert_not_found") : new(AlertStoreStatus.Success, value);
         }
         catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertStoreStatus.Busy, null, "alert_store_busy"); }

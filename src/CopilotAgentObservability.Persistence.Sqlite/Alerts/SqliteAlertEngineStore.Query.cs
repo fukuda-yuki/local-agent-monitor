@@ -15,11 +15,11 @@ public sealed partial class SqliteAlertEngineStore
         try
         {
             using var connection = Open();
-            if (!AlertSchemaV1.IsValid(connection, null)) return UnavailableReceipts();
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return UnavailableReceipts();
             using var command = Command(
                 connection,
                 null,
-                "SELECT alert_id,evaluation_id,schema_version,canonical_json FROM alert_receipts WHERE ($after IS NULL OR alert_id>$after) ORDER BY alert_id COLLATE BINARY LIMIT $take;",
+                "SELECT alert_id,evaluation_id,schema_version,canonical_json FROM alert_receipts WHERE schema_version='alert.receipt.v1' AND ($after IS NULL OR alert_id>$after) ORDER BY alert_id COLLATE BINARY LIMIT $take;",
                 ("$after", afterAlertId is null ? DBNull.Value : afterAlertId),
                 ("$take", limit + 1));
             using var reader = command.ExecuteReader();
@@ -80,7 +80,7 @@ public sealed partial class SqliteAlertEngineStore
         try
         {
             using var connection = Open();
-            if (!AlertSchemaV1.IsValid(connection, null)) return UnavailableEvaluations();
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return UnavailableEvaluations();
             using var command = Command(
                 connection,
                 null,
@@ -89,7 +89,8 @@ public sealed partial class SqliteAlertEngineStore
                        (SELECT COUNT(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id),
                        (SELECT COUNT(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id)
                 FROM alert_evaluations e
-                WHERE ($after IS NULL OR e.evaluation_id>$after)
+                WHERE e.schema_version='alert.evaluation.v1'
+                  AND ($after IS NULL OR e.evaluation_id>$after)
                 ORDER BY e.evaluation_id COLLATE BINARY
                 LIMIT $take;
                 """,
@@ -158,11 +159,11 @@ public sealed partial class SqliteAlertEngineStore
         try
         {
             using var connection = Open();
-            if (!AlertSchemaV1.IsValid(connection, null)) return UnavailableSuppressions();
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return UnavailableSuppressions();
             if (ReadScalar(
                     connection,
                     null,
-                    "SELECT evaluation_id FROM alert_evaluations WHERE evaluation_id=$id;",
+                    "SELECT evaluation_id FROM alert_evaluations WHERE evaluation_id=$id AND schema_version='alert.evaluation.v1';",
                     ("$id", evaluationId)) is null)
             {
                 return NotFoundSuppressions();

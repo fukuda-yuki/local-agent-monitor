@@ -85,11 +85,11 @@ public sealed class AlertEvaluationApplicationResult
     public AlertEvaluationOutcomeV1? Outcome { get; }
 }
 
-public sealed class AlertEvaluationApplication
+public sealed partial class AlertEvaluationApplication
 {
-    private readonly AlertEvaluationEngine _engine;
-    private readonly AlertEngineConfiguration _configuration;
-    private readonly IAlertEngineStore _store;
+    private readonly AlertEvaluationEngine? _engine;
+    private readonly AlertEngineConfiguration? _configuration;
+    private readonly IAlertEngineStore? _store;
 
     public AlertEvaluationApplication(
         AlertRuleRegistry registry,
@@ -117,7 +117,7 @@ public sealed class AlertEvaluationApplication
         AlertStoreResult initialization;
         try
         {
-            initialization = _store.Initialize();
+            initialization = _store!.Initialize();
         }
         catch (Exception exception) when (IsNonFatal(exception))
         {
@@ -133,7 +133,7 @@ public sealed class AlertEvaluationApplication
         AlertEvaluationResult evaluation;
         try
         {
-            evaluation = _engine.Evaluate(snapshot, _configuration);
+            evaluation = _engine!.Evaluate(snapshot, _configuration!);
         }
         catch (AlertContractException exception)
         {
@@ -147,7 +147,7 @@ public sealed class AlertEvaluationApplication
         AlertStoreResult append;
         try
         {
-            append = _store.Append(evaluation);
+            append = _store!.Append(evaluation);
         }
         catch (Exception exception) when (IsNonFatal(exception))
         {

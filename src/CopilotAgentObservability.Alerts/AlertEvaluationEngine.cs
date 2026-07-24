@@ -1,9 +1,9 @@
 namespace CopilotAgentObservability.Alerts;
 
-public sealed class AlertEvaluationEngine
+public sealed partial class AlertEvaluationEngine
 {
-    private readonly AlertRuleRegistry _registry;
-    private readonly IAlertEvidenceResolver _evidenceResolver;
+    private readonly AlertRuleRegistry? _registry;
+    private readonly IAlertEvidenceResolver? _evidenceResolver;
 
     public AlertEvaluationEngine(AlertRuleRegistry registry, IAlertEvidenceResolver evidenceResolver)
     {
@@ -15,7 +15,7 @@ public sealed class AlertEvaluationEngine
     {
         AlertValidation.ValidateSnapshot(snapshot);
         snapshot = AlertFreezer.Snapshot(snapshot);
-        var effective = AlertValidation.ResolveConfiguration(_registry, configuration);
+        var effective = AlertValidation.ResolveConfiguration(_registry!, configuration);
         var inputHash = AlertHashing.Sha256(AlertCanonicalJson.SerializeSnapshot(snapshot));
         var configurationBytes = AlertCanonicalJson.SerializeResolvedConfiguration(configuration, effective);
         var configurationHash = AlertHashing.Sha256(configurationBytes);
@@ -25,12 +25,12 @@ public sealed class AlertEvaluationEngine
             inputHash,
             configuration.ConfigurationVersion,
             configurationHash,
-            string.Join('\n', _registry.Rules.Select(rule => $"{rule.Descriptor.RuleId}@{rule.Descriptor.RuleVersion}")));
+            string.Join('\n', _registry!.Rules.Select(rule => $"{rule.Descriptor.RuleId}@{rule.Descriptor.RuleVersion}")));
         var receipts = new Dictionary<string, AlertReceipt>(StringComparer.Ordinal);
         var suppressions = new List<AlertSuppression>();
         var rejected = new List<AlertRejectedMatch>();
 
-        foreach (var rule in _registry.Rules)
+        foreach (var rule in _registry!.Rules)
         {
             var descriptor = rule.Descriptor;
             var resolved = effective[(descriptor.RuleId, descriptor.RuleVersion)];
@@ -162,7 +162,7 @@ public sealed class AlertEvaluationEngine
 
     private bool EvidenceExists(AlertEvidenceReference reference)
     {
-        try { return _evidenceResolver.Exists(reference); }
+        try { return _evidenceResolver!.Exists(reference); }
         catch { return false; }
     }
 }
