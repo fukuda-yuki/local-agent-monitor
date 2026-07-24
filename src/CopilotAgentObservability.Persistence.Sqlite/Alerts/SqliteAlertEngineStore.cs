@@ -91,7 +91,7 @@ public sealed partial class SqliteAlertEngineStore :
         ReadOne("alert_evaluations", "evaluation_id", evaluationId, AlertContractVersions.Evaluation);
 
     public AlertStoreReadResult GetReceipt(string alertId) =>
-        ReadOne("alert_receipts", "alert_id", alertId, AlertContractVersions.Receipt);
+        ReadReceipt(alertId);
 
     public AlertStoreListResult ListSuppressions(string evaluationId)
     {
@@ -140,6 +140,49 @@ public sealed partial class SqliteAlertEngineStore :
         catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertStoreStatus.Busy, null, "alert_store_busy"); }
         catch (SqliteException) { return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable"); }
     }
+
+    private AlertStoreReadResult ReadReceipt(string alertId)
+    {
+        if (!CanonicalHash(alertId)) return new(AlertStoreStatus.NotFound, null, "alert_not_found");
+        try
+        {
+            using var connection = Open();
+            if (!AlertSchemaV2.IsRecognized(connection, null)) return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable");
+            using var command = Command(
+                connection,
+                null,
+                """
+                SELECT r.schema_version,r.canonical_json,e.schema_version
+                FROM alert_receipts r
+                LEFT JOIN alert_evaluations e ON e.evaluation_id=r.evaluation_id
+                WHERE r.alert_id=$id;
+                """,
+                ("$id", alertId));
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+            {
+                return new(AlertStoreStatus.NotFound, null, "alert_not_found");
+            }
+
+            var receiptSchema = reader.GetString(0);
+            var evaluationSchema = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (!ValidReceiptOwnerPair(receiptSchema, evaluationSchema))
+            {
+                return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable");
+            }
+            return receiptSchema == AlertContractVersions.Receipt
+                ? new(AlertStoreStatus.Success, reader.GetString(1))
+                : new(AlertStoreStatus.NotFound, null, "alert_not_found");
+        }
+        catch (SqliteException exception) when (IsBusy(exception)) { return new(AlertStoreStatus.Busy, null, "alert_store_busy"); }
+        catch (SqliteException) { return new(AlertStoreStatus.Unavailable, null, "alert_store_unavailable"); }
+    }
+
+    private static bool ValidReceiptOwnerPair(string receiptSchema, string? evaluationSchema) =>
+        receiptSchema == AlertContractVersions.Receipt
+            && evaluationSchema == AlertContractVersions.Evaluation
+        || receiptSchema == AlertContractVersionsV2.Receipt
+            && evaluationSchema == AlertContractVersionsV2.Evaluation;
 
     private static bool ChildrenMatch(SqliteConnection connection, SqliteTransaction transaction, AlertEvaluationResult evaluation)
     {

@@ -252,6 +252,78 @@ public sealed class SqliteAlertEngineStoreV2Tests : IDisposable
     }
 
     [Fact]
+    public void GetReceipt_V1ReceiptWithV2Parent_ReturnsUnavailable()
+    {
+        var store = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertStoreStatus.Success, store.Initialize().Status);
+        var evaluation = V1Evaluation();
+        Assert.Equal(AlertStoreStatus.Success, store.Append(evaluation).Status);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, store.InitializeV2().Status);
+        using (var connection = Open())
+        {
+            Execute(
+                connection,
+                "UPDATE alert_evaluations SET schema_version='alert.evaluation.v2' WHERE evaluation_id=$id;",
+                ("$id", evaluation.EvaluationId));
+        }
+
+        var result = store.GetReceipt(evaluation.Receipts[0].AlertId);
+
+        Assert.Equal(AlertStoreStatus.Unavailable, result.Status);
+        Assert.Equal("alert_store_unavailable", result.Code);
+        Assert.Null(result.CanonicalJson);
+    }
+
+    [Fact]
+    public void GetReceiptV2_V2ReceiptWithV1Parent_ReturnsUnavailable()
+    {
+        var store = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, store.InitializeV2().Status);
+        var evaluation = AlertEngineV2Tests.Evaluation();
+        Assert.Equal(AlertEngineStoreStatusV2.Success, store.Append(evaluation).Status);
+        Assert.Equal(
+            AlertEngineQueryStatus.Success,
+            store.GetReceiptV2(evaluation.Receipts[0].AlertId).Status);
+        using (var connection = Open())
+        {
+            Execute(
+                connection,
+                "UPDATE alert_evaluations SET schema_version='alert.evaluation.v1' WHERE evaluation_id=$id;",
+                ("$id", evaluation.EvaluationId));
+        }
+
+        var result = store.GetReceiptV2(evaluation.Receipts[0].AlertId);
+
+        Assert.Equal(AlertEngineQueryStatus.Unavailable, result.Status);
+        Assert.Equal("alert_store_unavailable", result.Code);
+        Assert.Empty(result.CanonicalBytes);
+    }
+
+    [Fact]
+    public void V1ReceiptQuery_V1ReceiptWithV2Parent_ReturnsUnavailable()
+    {
+        var store = new SqliteAlertEngineStore(ConnectionString);
+        Assert.Equal(AlertStoreStatus.Success, store.Initialize().Status);
+        var evaluation = V1Evaluation();
+        Assert.Equal(AlertStoreStatus.Success, store.Append(evaluation).Status);
+        Assert.Equal(AlertEngineStoreStatusV2.Success, store.InitializeV2().Status);
+        using (var connection = Open())
+        {
+            Execute(
+                connection,
+                "UPDATE alert_evaluations SET schema_version='alert.evaluation.v2' WHERE evaluation_id=$id;",
+                ("$id", evaluation.EvaluationId));
+        }
+
+        var page = store.ListReceipts(null, 10);
+
+        Assert.Equal(AlertEngineQueryStatus.Unavailable, page.Status);
+        Assert.Equal("alert_store_unavailable", page.Code);
+        Assert.Empty(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
     public void VersionedUnionConstructors_RequireProjectionToMatchContractVersion()
     {
         var evaluation = AlertEngineV2Tests.Evaluation();
