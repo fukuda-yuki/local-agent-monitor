@@ -157,12 +157,63 @@ public sealed class AlertEvidenceResolutionScopeV2
         ExistingEvidenceReadView = existingEvidenceReadView
             ?? throw new ArgumentNullException(nameof(existingEvidenceReadView));
         ArgumentNullException.ThrowIfNull(pendingPricingEvidence);
-        PendingPricingEvidence = Array.AsReadOnly(
-            pendingPricingEvidence.Select(item => item with { }).ToArray());
+        var supplied = pendingPricingEvidence.ToArray();
+        if (!ValidPending(supplied))
+        {
+            throw new AlertContractException(
+                "invalid_evidence_scope",
+                "Pending pricing evidence scope is invalid.");
+        }
+        var pending = supplied.Select(item => item with { }).ToArray();
+        PendingPricingEvidence = Array.AsReadOnly(pending);
     }
 
     public IAlertEvidenceReadViewV2 ExistingEvidenceReadView { get; }
     public IReadOnlyList<StrictPendingPricingEvidenceV2> PendingPricingEvidence { get; }
+
+    private static bool ValidPending(IReadOnlyList<StrictPendingPricingEvidenceV2> pending)
+    {
+        if (pending.Count > 100
+            || pending.Any(item =>
+                item is null
+                || !PricingEstimateId(item.EstimateId)
+                || !CanonicalUuid(item.SessionId)
+                || item.CalculationTimeUtc.Offset != TimeSpan.Zero
+                || !Hash(item.CatalogSha256)
+                || !Hash(item.CanonicalEstimateSha256)
+                || !UuidV7(item.RunId)
+                || item.TargetOrdinal is < 0 or > 99)
+            || pending.Select(item => item.EstimateId).Distinct(StringComparer.Ordinal).Count() != pending.Count
+            || pending.Select(item => item.SessionId).Distinct(StringComparer.Ordinal).Count() != pending.Count
+            || pending.Select(item => (item.RunId, item.TargetOrdinal)).Distinct().Count() != pending.Count
+            || pending.Select(item => item.RunId).Distinct(StringComparer.Ordinal).Count() > 1
+            || !pending.SequenceEqual(pending.OrderBy(item => item.TargetOrdinal)))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool PricingEstimateId(string? value) =>
+        value is { Length: 81 }
+        && value.StartsWith("pricing-estimate-", StringComparison.Ordinal)
+        && Hash(value[17..]);
+
+    private static bool CanonicalUuid(string? value) =>
+        value is not null
+        && Guid.TryParseExact(value, "D", out _)
+        && value == value.ToLowerInvariant();
+
+    private static bool UuidV7(string? value) =>
+        CanonicalUuid(value)
+        && value![14] == '7'
+        && value[19] is '8' or '9' or 'a' or 'b';
+
+    private static bool Hash(string? value) =>
+        value is { Length: 64 }
+        && value.All(character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
 public interface IAlertEvidenceResolverV2

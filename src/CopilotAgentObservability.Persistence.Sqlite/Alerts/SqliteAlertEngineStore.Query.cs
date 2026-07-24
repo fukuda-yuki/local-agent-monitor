@@ -19,7 +19,19 @@ public sealed partial class SqliteAlertEngineStore
             using var command = Command(
                 connection,
                 null,
-                "SELECT alert_id,evaluation_id,schema_version,canonical_json FROM alert_receipts WHERE schema_version='alert.receipt.v1' AND ($after IS NULL OR alert_id>$after) ORDER BY alert_id COLLATE BINARY LIMIT $take;",
+                """
+                SELECT r.alert_id,r.evaluation_id,r.schema_version,r.canonical_json,
+                       e.schema_version,e.canonical_json,
+                       (SELECT COUNT(*) FROM alert_receipts owned WHERE owned.evaluation_id=e.evaluation_id),
+                       (SELECT COUNT(*) FROM alert_receipts owned WHERE owned.evaluation_id=e.evaluation_id AND owned.schema_version='alert.receipt.v1')
+                FROM alert_receipts r
+                JOIN alert_evaluations e ON e.evaluation_id=r.evaluation_id
+                WHERE r.schema_version='alert.receipt.v1'
+                  AND e.schema_version='alert.evaluation.v1'
+                  AND ($after IS NULL OR r.alert_id>$after)
+                ORDER BY r.alert_id COLLATE BINARY
+                LIMIT $take;
+                """,
                 ("$after", afterAlertId is null ? DBNull.Value : afterAlertId),
                 ("$take", limit + 1));
             using var reader = command.ExecuteReader();
@@ -32,6 +44,8 @@ public sealed partial class SqliteAlertEngineStore
                 var evaluationId = reader.GetString(1);
                 var schemaVersion = reader.GetString(2);
                 var canonicalBytes = Encoding.UTF8.GetBytes(reader.GetString(3));
+                var parent = AlertEvaluationConsumerV1.Validate(
+                    Encoding.UTF8.GetBytes(reader.GetString(5)));
                 if (canonicalBytes.Length > AlertEngineQueryLimits.MaximumPageBytes)
                 {
                     return UnavailableReceipts();
@@ -40,7 +54,11 @@ public sealed partial class SqliteAlertEngineStore
                 var receipt = AlertCenterReceiptConsumerV1.Validate(canonicalBytes);
                 if (receipt.AlertId != alertId
                     || receipt.EvaluationId != evaluationId
-                    || schemaVersion != AlertContractVersions.Receipt)
+                    || schemaVersion != AlertContractVersions.Receipt
+                    || reader.GetString(4) != AlertContractVersions.Evaluation
+                    || parent.EvaluationId != evaluationId
+                    || parent.ReceiptCount != reader.GetInt64(6)
+                    || reader.GetInt64(6) != reader.GetInt64(7))
                 {
                     return UnavailableReceipts();
                 }
@@ -86,8 +104,9 @@ public sealed partial class SqliteAlertEngineStore
                 null,
                 """
                 SELECT e.evaluation_id,e.schema_version,e.input_hash,e.configuration_version,e.configuration_hash,e.canonical_json,
-                       (SELECT COUNT(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id),
-                       (SELECT COUNT(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id)
+                       (SELECT COUNT(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id AND r.schema_version='alert.receipt.v1'),
+                       (SELECT COUNT(*) FROM alert_suppressions s WHERE s.evaluation_id=e.evaluation_id),
+                       (SELECT COUNT(*) FROM alert_receipts r WHERE r.evaluation_id=e.evaluation_id)
                 FROM alert_evaluations e
                 WHERE e.schema_version='alert.evaluation.v1'
                   AND ($after IS NULL OR e.evaluation_id>$after)
@@ -115,7 +134,8 @@ public sealed partial class SqliteAlertEngineStore
                     || evaluation.ConfigurationVersion != configurationVersion
                     || evaluation.ConfigurationHash != configurationHash
                     || evaluation.ReceiptCount != receiptCount
-                    || evaluation.SuppressionCount != suppressionCount)
+                    || evaluation.SuppressionCount != suppressionCount
+                    || receiptCount != reader.GetInt64(8))
                 {
                     return UnavailableEvaluations();
                 }

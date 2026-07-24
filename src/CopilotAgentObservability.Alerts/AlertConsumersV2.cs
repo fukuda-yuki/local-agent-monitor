@@ -56,11 +56,40 @@ public static class AlertCenterReceiptConsumerV2
             throw new AlertReceiptConsumerException();
         }
     }
+
+    public static AlertCenterReceiptProjectionV2 Validate(
+        ReadOnlySpan<byte> canonicalReceipt,
+        string eligibilityDigest)
+    {
+        try
+        {
+            var receipt = AlertConsumerV2.ParseReceipt(canonicalReceipt);
+            if (!AlertValidationV2.Hash(eligibilityDigest)
+                || receipt.Scope.ScopeId != AlertCostScopeIdentityV2.Create(
+                    receipt.Scope.Kind,
+                    receipt.Scope.WindowStartUtc,
+                    receipt.Scope.WindowEndUtc,
+                    eligibilityDigest,
+                    receipt.Scope.SessionIds))
+            {
+                throw new AlertContractException(
+                    "invalid_alert_receipt",
+                    "Alert receipt is invalid.");
+            }
+            return new(receipt, eligibilityDigest);
+        }
+        catch (Exception exception) when (AlertConsumerV2.IsNonFatal(exception))
+        {
+            throw new AlertReceiptConsumerException();
+        }
+    }
 }
 
 public sealed class AlertCenterReceiptProjectionV2
 {
-    internal AlertCenterReceiptProjectionV2(AlertReceiptV2 receipt)
+    internal AlertCenterReceiptProjectionV2(
+        AlertReceiptV2 receipt,
+        string? eligibilityDigest = null)
     {
         AlertId = receipt.AlertId;
         EvaluationId = receipt.EvaluationId;
@@ -71,6 +100,7 @@ public sealed class AlertCenterReceiptProjectionV2
         SourceSurface = receipt.SourceSurface;
         SourceVersion = receipt.SourceVersion;
         Scope = receipt.Scope with { SessionIds = Array.AsReadOnly(receipt.Scope.SessionIds.ToArray()) };
+        EligibilityDigest = eligibilityDigest;
         Evidence = Array.AsReadOnly(receipt.Evidence.Select(item => item with { }).ToArray());
         Currency = receipt.Currency;
         AggregateState = receipt.AggregateState;
@@ -111,6 +141,7 @@ public sealed class AlertCenterReceiptProjectionV2
     public string SourceSurface { get; }
     public string SourceVersion { get; }
     public AlertCostScopeV2 Scope { get; }
+    public string? EligibilityDigest { get; }
     public IReadOnlyList<AlertEvidenceReferenceV2> Evidence { get; }
     public string Currency { get; }
     public AlertCostAggregateStateV2 AggregateState { get; }

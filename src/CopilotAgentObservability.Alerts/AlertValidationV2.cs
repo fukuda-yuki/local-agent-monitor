@@ -76,6 +76,7 @@ internal static class AlertValidationV2
                 || AnyCountPresent(snapshot)
                 || snapshot.Members.Count != 0
                 || snapshot.Evidence.Count != 0
+                || snapshot.Scope.SessionIds.Count != 0
                 || snapshot.FirstObservedAt is not null
                 || snapshot.LastObservedAt is not null
                 || snapshot.Scope.Kind == AlertCostScopeKindV2.Session)
@@ -130,6 +131,13 @@ internal static class AlertValidationV2
                 .Select(item => item.EstimateId)
                 .Distinct(StringComparer.Ordinal)
                 .Count() != orderedMembers.Count(item => item.EstimateId is not null)
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Estimated) != snapshot.EstimatedCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Partial) != snapshot.PartialCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.NotEstimable) != snapshot.NotEstimableCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Missing) != snapshot.MissingCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Failed) != snapshot.FailedCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Unavailable) != snapshot.UnavailableCount
+            || orderedMembers.Count(item => item.State == AlertCostMemberStateV2.Stale) != snapshot.StaleCount
             || orderedMembers.Any(item => !ValidMember(item)))
         {
             throw InvalidSnapshot();
@@ -796,7 +804,10 @@ internal static class AlertValidationV2
 
         return suppression.Code switch
         {
-            "scope_not_applicable" => ExpectedScope(suppression.RuleId) != suppression.ScopeKind,
+            "scope_not_applicable" =>
+                ExpectedScope(suppression.RuleId) != suppression.ScopeKind
+                || suppression.RuleId == "period-estimated-cost-threshold"
+                    && suppression.ScopeKind == AlertCostScopeKindV2.RollingPeriod,
             "eligible_set_incomplete" => suppression.EligibleCount is null,
             "no_eligible_sessions" => suppression.EligibleCount == 0,
             "no_covered_estimate" =>
@@ -858,6 +869,12 @@ internal static class AlertValidationV2
             && receipt.ConfigurationHash == evaluation.ConfigurationHash
             && receipt.InputHash == evaluation.InputHash
             && receipt.Scope.ScopeId == evaluation.ScopeId
+            && receipt.Scope.ScopeId == AlertCostScopeIdentityV2.Create(
+                receipt.Scope.Kind,
+                receipt.Scope.WindowStartUtc,
+                receipt.Scope.WindowEndUtc,
+                evaluation.EligibilityDigest,
+                receipt.Scope.SessionIds)
             && receipt.Scope.Kind == evaluation.ScopeKind
             && receipt.Scope.WindowStartUtc == evaluation.ScopeStartUtc
             && receipt.Scope.WindowEndUtc == evaluation.ScopeEndUtc

@@ -51,6 +51,10 @@ public sealed class AlertVersionedReceiptQueryItem
         {
             throw new ArgumentException("Exactly one receipt projection is required.");
         }
+        if (contractVersion != (receiptV1 is null ? AlertContractKind.V2 : AlertContractKind.V1))
+        {
+            throw new ArgumentException("Receipt projection does not match contract version.");
+        }
         ContractVersion = contractVersion;
         CanonicalBytes = Array.AsReadOnly(canonicalBytes.ToArray());
         ReceiptV1 = receiptV1;
@@ -74,6 +78,10 @@ public sealed class AlertVersionedEvaluationQueryItem
         if (evaluationV1 is null == (evaluationV2 is null))
         {
             throw new ArgumentException("Exactly one evaluation projection is required.");
+        }
+        if (contractVersion != (evaluationV1 is null ? AlertContractKind.V2 : AlertContractKind.V1))
+        {
+            throw new ArgumentException("Evaluation projection does not match contract version.");
         }
         ContractVersion = contractVersion;
         CanonicalBytes = Array.AsReadOnly(canonicalBytes.ToArray());
@@ -99,6 +107,10 @@ public sealed class AlertVersionedSuppressionQueryItem
         if (suppressionV1 is null == (suppressionV2 is null))
         {
             throw new ArgumentException("Exactly one suppression projection is required.");
+        }
+        if (contractVersion != (suppressionV1 is null ? AlertContractKind.V2 : AlertContractKind.V1))
+        {
+            throw new ArgumentException("Suppression projection does not match contract version.");
         }
         ContractVersion = contractVersion;
         SuppressionOrdinal = suppressionOrdinal;

@@ -159,6 +159,357 @@ public sealed class AlertEngineV2Tests
             AlertReceiptConsumerV2.Validate(AlertCanonicalJsonV2.SerializeReceipt(tampered)));
     }
 
+    [Fact]
+    public void Evaluate_ClaimedStateCountsMustEqualMemberStates()
+    {
+        var fixture = Fixture();
+        var snapshot = fixture.Snapshot with
+        {
+            AggregateState = AlertCostAggregateStateV2.NotApplicable,
+            Currency = null,
+            Amount = null,
+            EstimatedCount = 0,
+            PartialCount = 1,
+            CoverageNumerator = 0,
+            CoverageBasisPoints = 0,
+        };
+
+        var result = fixture.Engine.Evaluate(
+            new("session-estimated-cost-threshold", "1"),
+            snapshot,
+            fixture.Configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(AlertEvaluationEngineStatusV2.ContractRejected, result.Status);
+        Assert.Equal("invalid_snapshot", result.Code);
+    }
+
+    [Fact]
+    public void Evaluate_IncompleteAcquisitionRequiresEmptyScopeSessionIds()
+    {
+        var fixture = Fixture();
+        var start = new DateTimeOffset(2026, 7, 24, 0, 0, 0, TimeSpan.Zero);
+        var scope = new AlertCostScopeV2(
+            string.Empty,
+            AlertCostScopeKindV2.UtcDay,
+            start,
+            start.AddDays(1),
+            fixture.Snapshot.Scope.SessionIds);
+        scope = scope with
+        {
+            ScopeId = AlertCostScopeIdentityV2.Create(
+                scope.Kind,
+                scope.WindowStartUtc,
+                scope.WindowEndUtc,
+                fixture.Snapshot.EligibilityDigest,
+                scope.SessionIds),
+        };
+        var snapshot = fixture.Snapshot with
+        {
+            AcquisitionState = AlertCostAcquisitionStateV2.Incomplete,
+            AcquisitionReasons = ["eligible_set_incomplete"],
+            AggregateState = AlertCostAggregateStateV2.NotApplicable,
+            EligibleCount = null,
+            EligibleLowerBound = 2_001,
+            Scope = scope,
+            Currency = null,
+            Amount = null,
+            EstimatedCount = null,
+            PartialCount = null,
+            NotEstimableCount = null,
+            MissingCount = null,
+            FailedCount = null,
+            UnavailableCount = null,
+            StaleCount = null,
+            CoverageNumerator = null,
+            CoverageDenominator = null,
+            CoverageBasisPoints = null,
+            Members = [],
+            Evidence = [],
+            Completeness = AlertCostCompletenessV2.Partial,
+            CompletenessReasons = ["eligible_set_incomplete"],
+            FirstObservedAt = null,
+            LastObservedAt = null,
+        };
+
+        var result = fixture.Engine.Evaluate(
+            new("daily-estimated-cost-threshold", "1"),
+            snapshot,
+            fixture.Configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(AlertEvaluationEngineStatusV2.ContractRejected, result.Status);
+        Assert.Equal("invalid_snapshot", result.Code);
+    }
+
+    [Fact]
+    public void Evaluate_PeriodWindowMismatchProducesScopeNotApplicable()
+    {
+        var fixture = Fixture();
+        var start = new DateTimeOffset(2026, 7, 20, 0, 0, 0, TimeSpan.Zero);
+        var scope = fixture.Snapshot.Scope with
+        {
+            Kind = AlertCostScopeKindV2.RollingPeriod,
+            WindowStartUtc = start,
+            WindowEndUtc = start.AddDays(5),
+        };
+        scope = scope with
+        {
+            ScopeId = AlertCostScopeIdentityV2.Create(
+                scope.Kind,
+                scope.WindowStartUtc,
+                scope.WindowEndUtc,
+                fixture.Snapshot.EligibilityDigest,
+                scope.SessionIds),
+        };
+        var snapshot = fixture.Snapshot with { Scope = scope };
+        var configuration = fixture.Configuration with
+        {
+            Rules =
+            [
+                new(
+                    "period-estimated-cost-threshold",
+                    "1",
+                    true,
+                    "USD",
+                    1m,
+                    2m,
+                    10_000,
+                    AlertCostScopeKindV2.RollingPeriod,
+                    7),
+            ],
+        };
+
+        var result = fixture.Engine.Evaluate(
+            new("period-estimated-cost-threshold", "1"),
+            snapshot,
+            configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(AlertEvaluationEngineStatusV2.Success, result.Status);
+        Assert.Equal("scope_not_applicable", Assert.Single(result.Evaluation!.Suppressions).Code);
+    }
+
+    [Fact]
+    public void EvaluationConsumer_BindsEligibilityDigestToReceiptScopeMembers()
+    {
+        var evaluation = Evaluation() with { EligibilityDigest = new string('f', 64) };
+
+        Assert.Throws<AlertEvaluationConsumerException>(() =>
+            AlertEvaluationConsumerV2.Validate(
+                AlertCanonicalJsonV2.SerializeEvaluation(evaluation)));
+    }
+
+    [Fact]
+    public void PendingEvidenceScope_RejectsInvalidBoundsFieldsDuplicatesAndOrder()
+    {
+        var valid = PendingEvidence(0);
+        var invalidSets = new IReadOnlyList<StrictPendingPricingEvidenceV2>[]
+        {
+            Enumerable.Range(0, 101).Select(PendingEvidence).ToArray(),
+            [valid with { EstimateId = "bad" }],
+            [valid, PendingEvidence(1) with { EstimateId = valid.EstimateId }],
+            [valid, PendingEvidence(1) with { SessionId = valid.SessionId }],
+            [valid, PendingEvidence(1) with { TargetOrdinal = valid.TargetOrdinal }],
+            [PendingEvidence(1), valid],
+            [null!],
+        };
+
+        foreach (var invalid in invalidSets)
+        {
+            Assert.Throws<AlertContractException>(() =>
+                new AlertEvidenceResolutionScopeV2(AlertEvidenceReadViewV2.Instance, invalid));
+        }
+    }
+
+    [Theory]
+    [InlineData(AlertEvidenceResolutionStatusV2.Unresolved, AlertEvaluationEngineStatusV2.UnresolvedEvidence, "unresolved_evidence")]
+    [InlineData(AlertEvidenceResolutionStatusV2.StoreFailure, AlertEvaluationEngineStatusV2.StoreFailure, "alert_store_unavailable")]
+    [InlineData(AlertEvidenceResolutionStatusV2.ContractRejected, AlertEvaluationEngineStatusV2.ContractRejected, "alert_contract_rejected")]
+    public void Evaluate_PreservesResolverOutcome(
+        AlertEvidenceResolutionStatusV2 resolverStatus,
+        AlertEvaluationEngineStatusV2 expectedStatus,
+        string expectedCode)
+    {
+        var fixture = Fixture();
+        var engine = new AlertEvaluationEngine(
+            new AlertRuleRegistryV2(),
+            new FixedResolver(resolverStatus));
+
+        var result = engine.Evaluate(
+            new("session-estimated-cost-threshold", "1"),
+            fixture.Snapshot,
+            fixture.Configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(expectedCode, result.Code);
+        Assert.Null(result.Evaluation);
+    }
+
+    [Theory]
+    [InlineData("session-estimated-cost-threshold", AlertCostScopeKindV2.Session, 0, 1, 2, AlertSeverity.Critical)]
+    [InlineData("daily-estimated-cost-threshold", AlertCostScopeKindV2.UtcDay, 1, 2, 3, AlertSeverity.Warning)]
+    [InlineData("period-estimated-cost-threshold", AlertCostScopeKindV2.RollingPeriod, 5, 1, 2, AlertSeverity.Critical)]
+    public void Evaluate_AllRegisteredRulesHonorInclusiveThresholdBoundaries(
+        string ruleId,
+        AlertCostScopeKindV2 scopeKind,
+        int windowDays,
+        decimal warning,
+        decimal critical,
+        AlertSeverity expected)
+    {
+        var fixture = Fixture();
+        var start = new DateTimeOffset(2026, 7, 20, 0, 0, 0, TimeSpan.Zero);
+        var scope = fixture.Snapshot.Scope with
+        {
+            Kind = scopeKind,
+            WindowStartUtc = scopeKind == AlertCostScopeKindV2.Session ? null : start,
+            WindowEndUtc = scopeKind == AlertCostScopeKindV2.Session
+                ? null
+                : start.AddDays(windowDays),
+        };
+        scope = scope with
+        {
+            ScopeId = AlertCostScopeIdentityV2.Create(
+                scope.Kind,
+                scope.WindowStartUtc,
+                scope.WindowEndUtc,
+                fixture.Snapshot.EligibilityDigest,
+                scope.SessionIds),
+        };
+        var snapshot = fixture.Snapshot with { Scope = scope };
+        var configuration = fixture.Configuration with
+        {
+            Rules =
+            [
+                new(
+                    ruleId,
+                    "1",
+                    true,
+                    "USD",
+                    warning,
+                    critical,
+                    10_000,
+                    scopeKind,
+                    scopeKind == AlertCostScopeKindV2.RollingPeriod
+                        ? windowDays
+                        : null),
+            ],
+        };
+
+        var result = fixture.Engine.Evaluate(
+            new(ruleId, "1"),
+            snapshot,
+            configuration,
+            fixture.EvidenceScope);
+
+        Assert.Equal(AlertEvaluationEngineStatusV2.Success, result.Status);
+        Assert.Equal(expected, Assert.Single(result.Evaluation!.Receipts).Severity);
+    }
+
+    [Fact]
+    public void Rules_ApplyTheFixedSuppressionPrecedence()
+    {
+        var fixture = Fixture();
+        var rule = new AlertRuleRegistryV2().Resolve(
+            new("session-estimated-cost-threshold", "1"));
+        var enabled = fixture.Configuration.Rules[0];
+        var cases = new[]
+        {
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    Scope = fixture.Snapshot.Scope with
+                    {
+                        Kind = AlertCostScopeKindV2.UtcDay,
+                        WindowStartUtc = new(2026, 7, 24, 0, 0, 0, TimeSpan.Zero),
+                        WindowEndUtc = new(2026, 7, 25, 0, 0, 0, TimeSpan.Zero),
+                    },
+                    AcquisitionState = AlertCostAcquisitionStateV2.Incomplete,
+                    EligibleCount = 0,
+                    EstimatedCount = 0,
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: (AlertBudgetRuleConfigurationV2?)null,
+                Code: "scope_not_applicable"),
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    AcquisitionState = AlertCostAcquisitionStateV2.Incomplete,
+                    EligibleCount = 0,
+                    EstimatedCount = 0,
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: enabled with { Enabled = false },
+                Code: "rule_disabled"),
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    AcquisitionState = AlertCostAcquisitionStateV2.Incomplete,
+                    EligibleCount = 0,
+                    EstimatedCount = 0,
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: enabled,
+                Code: "eligible_set_incomplete"),
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    EligibleCount = 0,
+                    EstimatedCount = 0,
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: enabled,
+                Code: "no_eligible_sessions"),
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    EstimatedCount = 0,
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: enabled,
+                Code: "no_covered_estimate"),
+            (
+                Snapshot: fixture.Snapshot with
+                {
+                    AggregateState = AlertCostAggregateStateV2.Unrepresentable,
+                    CoverageBasisPoints = 0,
+                },
+                Configuration: enabled,
+                Code: "aggregate_amount_not_representable"),
+            (
+                Snapshot: fixture.Snapshot with { CoverageBasisPoints = 9_999 },
+                Configuration: enabled,
+                Code: "insufficient_estimate_coverage"),
+        };
+
+        foreach (var item in cases)
+        {
+            var outcome = rule.Evaluate(new(item.Snapshot, item.Configuration, rule.Descriptor));
+            Assert.Equal(item.Code, outcome.SuppressionCode);
+            Assert.Null(outcome.Severity);
+        }
+    }
+
+    private static StrictPendingPricingEvidenceV2 PendingEvidence(int ordinal)
+    {
+        var suffix = ordinal.ToString("x12", System.Globalization.CultureInfo.InvariantCulture);
+        return new(
+            "pricing-estimate-" + ordinal.ToString("x64", System.Globalization.CultureInfo.InvariantCulture),
+            "01984045-9d80-7000-8000-" + suffix,
+            new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero),
+            new string('a', 64),
+            new string('b', 64),
+            "01984045-9d80-7000-8000-000000000099",
+            ordinal);
+    }
+
     private static TestFixture Fixture()
     {
         var observedAt = new DateTimeOffset(2026, 7, 24, 1, 2, 3, TimeSpan.Zero);
@@ -261,5 +612,13 @@ public sealed class AlertEngineV2Tests
             AlertEvidenceReferenceV2 reference,
             AlertEvidenceResolutionScopeV2 scope) =>
             AlertEvidenceResolutionStatusV2.Resolved;
+    }
+
+    private sealed class FixedResolver(AlertEvidenceResolutionStatusV2 status)
+        : IAlertEvidenceResolverV2
+    {
+        public AlertEvidenceResolutionStatusV2 Resolve(
+            AlertEvidenceReferenceV2 reference,
+            AlertEvidenceResolutionScopeV2 scope) => status;
     }
 }
