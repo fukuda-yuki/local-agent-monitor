@@ -40,23 +40,34 @@ $rowContractSourcePath = [IO.Path]::GetFullPath($MatrixFixturePath)
 $handoffSourcePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\docs\specifications\contracts\cost-analytics\v1\issue-91-validation-handoff.json'))
 $verifierSourcePath = [IO.Path]::GetFullPath($VerifierPath)
 $selfTestSourcePath = [IO.Path]::GetFullPath($PSCommandPath)
+$fixtureRoot = $null
+$fixtureCandidate = $null
+$fixtureRepositoryCount = 0
 
 function New-FixtureRoot {
-    $root = Join-Path ([IO.Path]::GetTempPath()) ('issue-95-evidence-chain-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $root | Out-Null
-    & git -C $root init -q
-    & git -C $root config user.email 'fixture@example.invalid'
-    & git -C $root config user.name 'Issue95Fixture'
-    & git -C $root config core.autocrlf false
-    Write-FixtureFile $root 'scripts/validation/issue-91/validate-matrix.ps1' ([IO.File]::ReadAllText($MatrixValidatorPath))
-    Write-FixtureFile $root 'scripts/validation/issue-95/verify-evidence-chain.ps1' ([IO.File]::ReadAllText($verifierSourcePath))
-    Write-FixtureFile $root 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json' ([IO.File]::ReadAllText($rowContractSourcePath))
-    & git -C $root add .
-    & git -C $root commit -q -m matrix-prep
-    Write-FixtureFile $root 'scripts/validation/issue-95/test-evidence-chain.ps1' ([IO.File]::ReadAllText($selfTestSourcePath))
-    & git -C $root add scripts/validation/issue-95/test-evidence-chain.ps1
-    & git -C $root commit -q -m candidate
-    return $root
+    if ($null -eq $script:fixtureRoot) {
+        $script:fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('issue-95-evidence-chain-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:fixtureRoot | Out-Null
+        & git -C $script:fixtureRoot init -q
+        & git -C $script:fixtureRoot config user.email 'fixture@example.invalid'
+        & git -C $script:fixtureRoot config user.name 'Issue95Fixture'
+        & git -C $script:fixtureRoot config core.autocrlf false
+        Write-FixtureFile $script:fixtureRoot 'scripts/validation/issue-91/validate-matrix.ps1' ([IO.File]::ReadAllText($MatrixValidatorPath))
+        Write-FixtureFile $script:fixtureRoot 'scripts/validation/issue-95/verify-evidence-chain.ps1' ([IO.File]::ReadAllText($verifierSourcePath))
+        Write-FixtureFile $script:fixtureRoot 'docs/specifications/contracts/cost-analytics/v1/issue-91-validation-row-contract.json' ([IO.File]::ReadAllText($rowContractSourcePath))
+        & git -C $script:fixtureRoot add .
+        & git -C $script:fixtureRoot commit -q -m matrix-prep
+        Write-FixtureFile $script:fixtureRoot 'scripts/validation/issue-95/test-evidence-chain.ps1' ([IO.File]::ReadAllText($selfTestSourcePath))
+        & git -C $script:fixtureRoot add scripts/validation/issue-95/test-evidence-chain.ps1
+        & git -C $script:fixtureRoot commit -q -m candidate
+        $script:fixtureCandidate = (& git -C $script:fixtureRoot rev-parse HEAD).Trim()
+        $script:fixtureRepositoryCount++
+    }
+    else {
+        & git -C $script:fixtureRoot reset --hard -q $script:fixtureCandidate
+        & git -C $script:fixtureRoot clean -fdq
+    }
+    return $script:fixtureRoot
 }
 
 function Write-FixtureFile([string] $Root, [string] $RelativePath, [string] $Content) {
@@ -693,7 +704,7 @@ try {
     Add-Content -LiteralPath (Join-Path $positiveRoot $evidencePaths[2]) 'working-tree substitution'
     Assert-Rejected $positiveRoot $candidate $evidence $attestation 'working_tree_substitution_detected'
 
-    Write-Output 'evidence_chain_self_test=PASS cases=31'
+    Write-Output ('evidence_chain_self_test=PASS cases=31 fixture_repositories={0}' -f $fixtureRepositoryCount)
 }
 finally {
     foreach ($root in $roots) {

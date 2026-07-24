@@ -342,7 +342,9 @@ public sealed class Issue95ValidationContractTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await process.WaitForExitAsync(timeout.Token);
         Assert.True(process.ExitCode == 0, $"{await stdoutTask}{await stderrTask}");
-        Assert.Contains("evidence_chain_self_test=PASS cases=31", await stdoutTask, StringComparison.Ordinal);
+        Assert.Equal(
+            "evidence_chain_self_test=PASS cases=31 fixture_repositories=1",
+            (await stdoutTask).Trim());
         Assert.Equal(string.Empty, await stderrTask);
     }
 
