@@ -332,19 +332,24 @@ public sealed class PricingPersistenceFoundationTests
             store.MarkRecalculationRunning(successfulRunId).Status);
         clock.UtcNow = calculationTime.AddSeconds(5);
         var transactionRebuildCount = 0;
+        var rebuiltEvaluation = evaluation with { };
+        var rebuiltBudget = budget with { };
         var budgetPlan = new PricingBudgetEvaluationPlanV1(
             [evaluation],
             [budget],
             (_, _) =>
             {
                 Interlocked.Increment(ref transactionRebuildCount);
-                return new([evaluation with { }], [budget with { }]);
+                return new([rebuiltEvaluation], [rebuiltBudget]);
             });
+        var recordingParticipant = new RecordingAlertParticipant(
+            alertStore,
+            rebuiltEvaluation);
         var completionTasks = Enumerable.Range(0, 2)
             .Select(_ => Task.Run(() =>
                 new SqliteCostRecalculationUnitOfWork(
                     database.Path,
-                    alertStore,
+                    recordingParticipant,
                     clock).Complete(
                         successfulRunId,
                         [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
@@ -356,6 +361,7 @@ public sealed class PricingPersistenceFoundationTests
             [PricingCompletionStatus.Success, PricingCompletionStatus.ContractRejected],
             concurrentResults.Select(item => item.Status).Order().ToArray());
         Assert.Equal(1, transactionRebuildCount);
+        Assert.True(recordingParticipant.ReceivedExpectedInstance);
         using (var afterSuccess = database.Open())
         {
             Assert.Equal(1L, Scalar<long>(afterSuccess, "SELECT COUNT(*) FROM alert_evaluations;"));
@@ -2642,6 +2648,23 @@ public sealed class PricingPersistenceFoundationTests
             AlertEvidenceReferenceV2 reference,
             AlertEvidenceResolutionScopeV2 scope) =>
             AlertEvidenceResolutionStatusV2.Resolved;
+    }
+
+    private sealed class RecordingAlertParticipant(
+        ISqliteAlertEngineTransactionParticipantV2 inner,
+        AlertEvaluationResultV2 expected)
+        : ISqliteAlertEngineTransactionParticipantV2
+    {
+        internal bool ReceivedExpectedInstance { get; private set; }
+
+        public AlertEngineTransactionAppendResultV2 AppendEvaluation(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            AlertEvaluationResultV2 evaluation)
+        {
+            ReceivedExpectedInstance = ReferenceEquals(expected, evaluation);
+            return inner.AppendEvaluation(connection, transaction, evaluation);
+        }
     }
 
     private sealed class SyntheticPricingSourceAdapter : IPricingEstimateSourceAdapterV1

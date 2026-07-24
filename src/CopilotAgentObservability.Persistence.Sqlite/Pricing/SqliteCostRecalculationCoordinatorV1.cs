@@ -996,10 +996,11 @@ internal sealed class CostAlertEvidenceResolverV1 : IAlertEvidenceResolverV2
                     ? AlertEvidenceResolutionStatusV2.Resolved
                     : AlertEvidenceResolutionStatusV2.ContractRejected;
         }
-        return view.Estimates.TryGetValue(reference.EvidenceId, out var estimate)
-            && estimate.SessionId == reference.SessionId
+        if (!view.Estimates.TryGetValue(reference.EvidenceId, out var estimate))
+            return AlertEvidenceResolutionStatusV2.Unresolved;
+        return estimate.SessionId == reference.SessionId
             && estimate.ObservedAtUtc == reference.ObservedAtUtc
                 ? AlertEvidenceResolutionStatusV2.Resolved
-                : AlertEvidenceResolutionStatusV2.Unresolved;
+                : AlertEvidenceResolutionStatusV2.ContractRejected;
     }
 }
