@@ -11,6 +11,7 @@ using CopilotAgentObservability.LocalMonitor.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
+using CopilotAgentObservability.LocalMonitor.Pricing;
 using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
@@ -106,6 +107,7 @@ internal static class MonitorHost
         builder.WebHost.ConfigureKestrel(kestrelOptions =>
         {
             kestrelOptions.Limits.MaxRequestBodySize = options.MaxRequestBodyBytes;
+            kestrelOptions.Limits.MaxRequestLineSize = 16_384;
         });
 
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
@@ -322,6 +324,13 @@ internal static class MonitorHost
         if (pricingInitialization.Status != PricingStoreStatus.Success)
             throw new InvalidOperationException(PricingStoreUnavailable);
         builder.Services.AddSingleton(pricingStore);
+        var costApplication = new CostHttpApplication(
+            options.DatabasePath,
+            pricingStore,
+            pricingCatalogProvider,
+            timeProvider,
+            alertEngineStore as ISqliteAlertEngineTransactionParticipantV2);
+        builder.Services.AddHostedService(_ => costApplication);
 
         var app = builder.Build();
         var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
@@ -350,6 +359,18 @@ internal static class MonitorHost
                 {
                     var mapped = SanitizedImportRoutes.MapUnhandledException(exception);
                     await SanitizedImportRoutes.ErrorAsync(context, mapped.Status, mapped.Error);
+                    return;
+                }
+                if (CostRoutes.IsPath(context.Request.Path))
+                {
+                    var tooLarge = exception is BadHttpRequestException costBodyException
+                        && costBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge;
+                    await CostRoutes.ErrorAsync(
+                        context,
+                        tooLarge
+                            ? StatusCodes.Status413PayloadTooLarge
+                            : StatusCodes.Status503ServiceUnavailable,
+                        tooLarge ? "cost_request_too_large" : "cost_store_unavailable");
                     return;
                 }
                 if (RetentionMutationRoutes.IsRetentionPath(context.Request.Path))
@@ -505,6 +526,13 @@ internal static class MonitorHost
                 {
                     await DoctorRoutes.WriteInvalidHostAsync(context);
                 }
+                else if (CostRoutes.IsPath(context.Request.Path))
+                {
+                    await CostRoutes.ErrorAsync(
+                        context,
+                        StatusCodes.Status400BadRequest,
+                        "invalid_host");
+                }
                 else
                 {
                     await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
@@ -539,6 +567,7 @@ internal static class MonitorHost
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
         HistoricalAnalysisRoutes.Map(app, historicalAnalysisCoordinator);
         AlertCenterRoutes.Map(app, alertCenterReadModel, alertCenterReadModelV2, alertCenterEvaluationCoordinator, timeProvider);
+        CostRoutes.Map(app, costApplication);
         app.MapGet("/health/live", async context =>
         {
             context.Response.StatusCode = StatusCodes.Status200OK;
