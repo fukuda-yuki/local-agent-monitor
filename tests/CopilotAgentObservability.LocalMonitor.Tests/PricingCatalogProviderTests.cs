@@ -177,6 +177,37 @@ public sealed class PricingCatalogProviderTests
     }
 
     [Fact]
+    public async Task Create_RejectsALinuxFifoWithoutWaitingForAWriter()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        using var temp = new PricingCatalogProviderTempDirectory();
+        var path = Path.Combine(temp.Root, "private-pricing-fifo");
+        Assert.Equal(0, MakeFifo(path, 0x180));
+        var loadTask = Task.Run(
+            () => Record.Exception(() => DefaultPricingCatalogProvider.Create([path])));
+        var completed = await Task.WhenAny(loadTask, Task.Delay(TimeSpan.FromSeconds(2)));
+
+        if (completed != loadTask)
+        {
+            await using var writer = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.ReadWrite);
+            await loadTask.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        Assert.Same(loadTask, completed);
+        var failure = Assert.IsType<PricingCatalogUnavailableException>(await loadTask);
+        Assert.Equal("pricing_catalog_unavailable", failure.Message);
+        Assert.DoesNotContain(path, failure.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RunAsync_ReportsOnlyTheFixedCatalogFailure()
     {
         using var temp = new MonitorTempDirectory();
@@ -299,4 +330,9 @@ public sealed class PricingCatalogProviderTests
             Directory.Delete(Root, recursive: true);
         }
     }
+
+    [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int MakeFifo(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        uint mode);
 }

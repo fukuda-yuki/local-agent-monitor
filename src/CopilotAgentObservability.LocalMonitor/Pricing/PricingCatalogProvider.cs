@@ -329,9 +329,17 @@ internal static class LinuxNativeFile
 {
     private const int AtFdcwd = -100;
     private const int OReadOnly = 0;
+    private const int ONonBlock = 0x800;
     private const int ODirectory = 0x10000;
     private const int ONoFollow = 0x20000;
     private const int OCloseOnExec = 0x80000;
+    private const int AtEmptyPath = 0x1000;
+    private const uint StatxType = 0x0001;
+    private const uint StatxModifiedTime = 0x0040;
+    private const uint StatxInode = 0x0100;
+    private const uint StatxSize = 0x0200;
+    private const uint StatxBasicStats = 0x07ff;
+    private const uint RequiredStatxFields = StatxType | StatxModifiedTime | StatxInode | StatxSize;
     private const uint FileTypeMask = 0xF000;
     private const uint RegularFile = 0x8000;
 
@@ -348,7 +356,7 @@ internal static class LinuxNativeFile
             var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
             for (var index = 0; index < segments.Length; index++)
             {
-                var flags = OReadOnly | ONoFollow | OCloseOnExec;
+                var flags = OReadOnly | ONoFollow | OCloseOnExec | ONonBlock;
                 if (index < segments.Length - 1)
                 {
                     flags |= ODirectory;
@@ -379,17 +387,22 @@ internal static class LinuxNativeFile
 
     internal static NativeFileIdentity Identity(SafeFileHandle handle)
     {
-        if (FStat(handle, out var status) != 0)
+        if (StatX(handle, string.Empty, AtEmptyPath, StatxBasicStats, out var status) != 0)
         {
             throw new Win32Exception(Marshal.GetLastPInvokeError());
         }
 
+        if ((status.Mask & RequiredStatxFields) != RequiredStatxFields)
+        {
+            throw new PricingCatalogUnavailableException();
+        }
+
         return new NativeFileIdentity(
-            status.Device,
+            ((ulong)status.DeviceMajor << 32) | status.DeviceMinor,
             status.Inode,
             status.Size,
-            status.ModifiedTime.Seconds,
-            status.ModifiedTime.Nanoseconds,
+            status.ModifiedTimeSeconds,
+            status.ModifiedTimeNanoseconds,
             (status.Mode & FileTypeMask) == RegularFile);
     }
 
@@ -399,35 +412,32 @@ internal static class LinuxNativeFile
     [DllImport("libc", EntryPoint = "close")]
     private static extern int Close(int descriptor);
 
-    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
-    private static extern int FStat(SafeFileHandle descriptor, out LinuxStat status);
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int StatX(
+        SafeFileHandle descriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        int flags,
+        uint mask,
+        out LinuxStatX status);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LinuxStat
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct LinuxStatX
     {
-        internal ulong Device;
-        internal ulong Inode;
-        internal ulong LinkCount;
+        [FieldOffset(0)]
+        internal uint Mask;
+        [FieldOffset(28)]
         internal uint Mode;
-        internal uint UserId;
-        internal uint GroupId;
-        internal int Padding;
-        internal ulong SpecialDevice;
+        [FieldOffset(32)]
+        internal ulong Inode;
+        [FieldOffset(40)]
         internal long Size;
-        internal long BlockSize;
-        internal long BlockCount;
-        internal LinuxTimespec AccessTime;
-        internal LinuxTimespec ModifiedTime;
-        internal LinuxTimespec ChangedTime;
-        private long Reserved0;
-        private long Reserved1;
-        private long Reserved2;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LinuxTimespec
-    {
-        internal long Seconds;
-        internal long Nanoseconds;
+        [FieldOffset(112)]
+        internal long ModifiedTimeSeconds;
+        [FieldOffset(120)]
+        internal uint ModifiedTimeNanoseconds;
+        [FieldOffset(136)]
+        internal uint DeviceMajor;
+        [FieldOffset(140)]
+        internal uint DeviceMinor;
     }
 }
