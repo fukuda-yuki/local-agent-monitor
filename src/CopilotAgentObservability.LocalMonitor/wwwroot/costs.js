@@ -4,6 +4,8 @@
   const root = document.getElementById("cost-root");
   if (!root) return;
 
+  const recalculationPollIntervalMilliseconds = 100;
+  const maxRecalculationPollObservations = 40;
   const byId = id => document.getElementById(id);
   const sessionId = root.dataset.sessionId || null;
   const estimateId = root.dataset.estimateId || null;
@@ -781,9 +783,11 @@
       const body = JSON.stringify(request);
       try {
         let result = await postExact("/api/costs/v1/recalculations", body, true);
+        let pollObservations = 0;
         if (requestedGeneration === state.generation) renderRecalculation(result);
-        while (result.state === "requested" || result.state === "running") {
-          await new Promise(resolve => setTimeout(resolve, 100));
+        while ((result.state === "requested" || result.state === "running")
+          && pollObservations < maxRecalculationPollObservations) {
+          await new Promise(resolve => setTimeout(resolve, recalculationPollIntervalMilliseconds));
           const pollGeneration = state.generation;
           try {
             result = await getJson(
@@ -793,7 +797,12 @@
             if (failure?.name === "AbortError" && pollGeneration !== state.generation) continue;
             throw failure;
           }
+          pollObservations += 1;
           if (requestedGeneration === state.generation) renderRecalculation(result);
+        }
+        if (result.state === "requested" || result.state === "running") {
+          byId("cost-recalculation").textContent = "polling_stopped · retryable";
+          return;
         }
         if (requestedGeneration === state.generation) {
           announce(`recalculation ${result.state}。history と analytics を更新します。`);

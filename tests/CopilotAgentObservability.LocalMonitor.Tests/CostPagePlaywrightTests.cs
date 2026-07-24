@@ -599,6 +599,70 @@ public sealed class CostPagePlaywrightTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task CostPage_NeverTerminalRecalculationStopsAfterFortyPollsAndAllowsReadback()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/estimates?*", route =>
+            route.FulfillAsync(Json(SessionHistory)));
+        var historyReads = 0;
+        var historyReadback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/recalculations?*", route =>
+        {
+            historyReads++;
+            if (historyReads == 2) historyReadback.SetResult();
+            return route.FulfillAsync(Json(SessionRecalculations));
+        });
+        var recalculationPosts = 0;
+        await page.RouteAsync("**/api/costs/v1/recalculations", route =>
+        {
+            recalculationPosts++;
+            return route.FulfillAsync(Json(RecalculationRunning, 202));
+        });
+        var polls = 0;
+        var fortyFirstPoll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync(
+            "**/api/costs/v1/recalculations/0198f5b8-0c00-7000-8000-000000000099",
+            route =>
+            {
+                polls++;
+                if (polls == 41) fortyFirstPoll.SetResult();
+                return route.FulfillAsync(Json(RecalculationRunning));
+            });
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
+        await page.Locator("#cost-recalculate").ClickAsync();
+
+        await Expect(page.Locator("#cost-recalculation")).ToContainTextAsync(
+            "polling_stopped · retryable",
+            new LocatorAssertionsToContainTextOptions { Timeout = 8_000 });
+        Assert.Equal(1, recalculationPosts);
+        Assert.Equal(40, polls);
+        Assert.NotSame(
+            fortyFirstPoll.Task,
+            await Task.WhenAny(fortyFirstPoll.Task, Task.Delay(300)));
+        Assert.False(fortyFirstPoll.Task.IsCompleted);
+        await Expect(page.Locator("#cost-recalculate")).ToBeEnabledAsync();
+        await Expect(page.Locator("#cost-recalculation")).Not.ToContainTextAsync("succeeded");
+        await Expect(page.Locator("#cost-recalculation")).Not.ToContainTextAsync("failed");
+        await Expect(page.Locator("#cost-live")).Not.ToContainTextAsync("recalculation succeeded");
+        await Expect(page.Locator("#cost-live")).Not.ToContainTextAsync("recalculation failed");
+
+        await page.Locator("#cost-filters button[type='submit']").ClickAsync();
+        await historyReadback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, historyReads);
+        Assert.Equal(40, polls);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task CostPage_ReplacesBoundedCatalogEstimateAndAttemptPagesUsingExactCursors()
     {
         using var temp = new MonitorTempDirectory();
