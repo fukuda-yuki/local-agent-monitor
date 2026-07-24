@@ -7,7 +7,9 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Alerts;
 
-internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
+internal sealed class SqliteAlertCenterReadModel :
+    IAlertCenterReadModel,
+    IAlertCenterOwnedReceiptProjectorV1
 {
     private const int MaximumReceiptSnapshot = 2_000;
     private const int MaximumCoverageEvaluationPages = 20;
@@ -149,6 +151,62 @@ internal sealed class SqliteAlertCenterReadModel : IAlertCenterReadModel
         {
             return Failure(AlertCenterReadStatus.Unavailable);
         }
+    }
+
+    public AlertCenterOwnedProjectionResult ProjectOwned(
+        IReadOnlyList<AlertCenterReceiptProjectionV1> receipts,
+        AlertCenterQuery query,
+        bool incomplete)
+    {
+        var lifecycles = new Dictionary<string, AlertLifecycleView>(StringComparer.Ordinal);
+        var histories = new Dictionary<string, IReadOnlyList<AlertLifecycleEvent>>(StringComparer.Ordinal);
+        foreach (var receipt in receipts)
+        {
+            var lifecycle = lifecycleStore.Get(receipt.AlertId);
+            if (lifecycle.Status != AlertLifecycleStoreStatus.Success
+                || lifecycle.Lifecycle is null
+                || lifecycle.Lifecycle.AlertId != receipt.AlertId)
+            {
+                return new(
+                    lifecycle.Status == AlertLifecycleStoreStatus.Success
+                        ? AlertCenterReadStatus.Unavailable
+                        : Map(lifecycle.Status),
+                    [], [], []);
+            }
+            var history = lifecycleStore.History(receipt.AlertId, 100);
+            if (history.Status != AlertLifecycleStoreStatus.Success
+                || !ValidHistory(lifecycle.Lifecycle, history.Events))
+            {
+                return new(
+                    history.Status == AlertLifecycleStoreStatus.Success
+                        ? AlertCenterReadStatus.Unavailable
+                        : Map(history.Status),
+                    [], [], []);
+            }
+            lifecycles.Add(receipt.AlertId, lifecycle.Lifecycle);
+            histories.Add(receipt.AlertId, history.Events);
+        }
+        var relationships = Relationships(histories.Values);
+        var traceCache = new Dictionary<string, MonitorTraceRow?>(StringComparer.Ordinal);
+        var sessionCache = new Dictionary<string, SessionDetail?>(StringComparer.Ordinal);
+        var all = receipts.Select(receipt => Project(
+            receipt,
+            lifecycles[receipt.AlertId],
+            histories[receipt.AlertId],
+            relationships,
+            traceCache,
+            sessionCache)).ToArray();
+        var filtered = all
+            .Where(item => Matches(item, query))
+            .OrderBy(item => SeverityRank(item.Severity))
+            .ThenByDescending(item => item.LastObservedAt, StringComparer.Ordinal)
+            .ThenBy(item => item.AlertId, StringComparer.Ordinal)
+            .ToArray();
+        return new(
+            AlertCenterReadStatus.Success,
+            all,
+            filtered,
+            Aggregate(filtered, query, incomplete));
     }
 
     private ReceiptAcquisition AcquireReceipts()

@@ -56,7 +56,7 @@ public sealed class AlertCenterPlaywrightTests
         await Expect(page.Locator("#alert-detail")).ToContainTextAsync("session-repo");
         await Expect(page.Locator("#alert-rows .alert-row").First).ToContainTextAsync("初回");
         await Expect(page.Locator("#alert-rows .alert-row").First).ToContainTextAsync("最終");
-        await Expect(page.Locator("#alert-recurring")).ToContainTextAsync("mixed completeness");
+        await Expect(page.Locator("#alert-recurring")).Not.ToContainTextAsync("mixed completeness");
         await Expect(page.Locator("#alert-action-comment")).ToHaveAttributeAsync("maxlength", "256");
         await Expect(page.Locator(".sidebar-nav a")).ToHaveCountAsync(2);
         await Expect(page.Locator(".sidebar-nav a[href='/alerts']")).ToHaveCountAsync(0);
@@ -90,7 +90,7 @@ public sealed class AlertCenterPlaywrightTests
         await Expect(page.Locator("[data-alert-action='reopen']")).ToBeVisibleAsync();
 
         var filterResponseTask = page.WaitForResponseAsync(response =>
-            response.Url.Contains("/api/alert-center/v1/alerts?", StringComparison.Ordinal)
+            response.Url.Contains("/api/alert-center/v2/alerts?", StringComparison.Ordinal)
             && response.Url.Contains("state=acknowledged", StringComparison.Ordinal));
         await page.Locator("#alert-filter-state").SelectOptionAsync("acknowledged");
         await filterResponseTask;
@@ -119,7 +119,7 @@ public sealed class AlertCenterPlaywrightTests
         await Expect(page.Locator("#alert-page-next")).ToBeEnabledAsync();
         await page.Locator("#alert-page-next").ClickAsync();
 
-        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("offset=100"));
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("cursor=alert-center-cursor-v2"));
         await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(1);
         await Expect(page.Locator("#alert-count")).ToContainTextAsync("101–101 / 101");
         await Expect(page.Locator("#alert-page-next")).ToBeDisabledAsync();
@@ -127,14 +127,14 @@ public sealed class AlertCenterPlaywrightTests
         Assert.Contains(readModel.Queries, query => query.Offset == 100 && query.Limit == 100);
 
         await page.Locator("#alert-page-previous").ClickAsync();
-        await Expect(page).Not.ToHaveURLAsync(new System.Text.RegularExpressions.Regex("offset="));
+        await Expect(page).Not.ToHaveURLAsync(new System.Text.RegularExpressions.Regex("cursor="));
         await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(100);
 
         await page.Locator("#alert-page-next").ClickAsync();
-        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("offset=100"));
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex("cursor=alert-center-cursor-v2"));
         await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(1);
         await page.Locator("#alert-filter-severity").SelectOptionAsync("critical");
-        await Expect(page).Not.ToHaveURLAsync(new System.Text.RegularExpressions.Regex("offset="));
+        await Expect(page).Not.ToHaveURLAsync(new System.Text.RegularExpressions.Regex("cursor="));
         await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(100);
         Assert.Contains(readModel.Queries, query => query.Offset == 0 && query.Severity == "critical");
 
@@ -254,7 +254,7 @@ public sealed class AlertCenterPlaywrightTests
         await page.Locator("#alert-filter-repository").FillAsync(exactRepository);
         await page.Locator("#alert-filter-workspace").FillAsync(exactWorkspace);
         var responseTask = page.WaitForResponseAsync(response =>
-            response.Url.Contains("/api/alert-center/v1/alerts?", StringComparison.Ordinal));
+            response.Url.Contains("/api/alert-center/v2/alerts?", StringComparison.Ordinal));
         await page.Locator("#alert-filters button[type='submit']").ClickAsync();
         await responseTask;
         await Expect(page.Locator("#alert-filter-repository")).ToHaveValueAsync(exactRepository);
@@ -287,6 +287,14 @@ public sealed class AlertCenterPlaywrightTests
         {
             Assert.Equal(System.Net.HttpStatusCode.OK, apiResponse.StatusCode);
             var apiText = await apiResponse.Content.ReadAsStringAsync();
+            Assert.DoesNotContain(rawMarker, apiText, StringComparison.Ordinal);
+            Assert.DoesNotContain(unsafeRepository, apiText, StringComparison.Ordinal);
+            Assert.DoesNotContain(unsafeWorkspace, apiText, StringComparison.Ordinal);
+        }
+        using (var apiResponse = await host.Client.GetAsync("/api/alert-center/v2/alerts?period=30d"))
+        {
+            var apiText = await apiResponse.Content.ReadAsStringAsync();
+            Assert.True(apiResponse.IsSuccessStatusCode, apiText);
             Assert.DoesNotContain(rawMarker, apiText, StringComparison.Ordinal);
             Assert.DoesNotContain(unsafeRepository, apiText, StringComparison.Ordinal);
             Assert.DoesNotContain(unsafeWorkspace, apiText, StringComparison.Ordinal);
@@ -326,7 +334,7 @@ public sealed class AlertCenterPlaywrightTests
         var staleStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var staleFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseStale = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await page.RouteAsync("**/api/alert-center/v1/alerts?*", async route =>
+        await page.RouteAsync("**/api/alert-center/v2/alerts?*", async route =>
         {
             var query = new Uri(route.Request.Url).Query;
             if (query.Contains("severity=critical", StringComparison.Ordinal))
@@ -335,7 +343,7 @@ public sealed class AlertCenterPlaywrightTests
                 await releaseStale.Task;
                 try
                 {
-                    await route.FulfillAsync(JsonResponse(Snapshot([stale], [], [])));
+                    await route.FulfillAsync(JsonResponseV2(Snapshot([stale], [], [])));
                 }
                 catch (PlaywrightException)
                 {
@@ -349,7 +357,7 @@ public sealed class AlertCenterPlaywrightTests
             }
             if (query.Contains("severity=warning", StringComparison.Ordinal))
             {
-                await route.FulfillAsync(JsonResponse(Snapshot([fresh], [], [])));
+                await route.FulfillAsync(JsonResponseV2(Snapshot([fresh], [], [])));
                 return;
             }
             await route.ContinueAsync();
@@ -651,6 +659,68 @@ public sealed class AlertCenterPlaywrightTests
         ContentType = "application/json",
         Body = JsonSerializer.Serialize(value, AlertCenterJson),
     };
+
+    private static RouteFulfillOptions JsonResponseV2(AlertCenterSnapshot value)
+    {
+        var snapshot = new AlertCenterSnapshotV2(
+            AlertCenterContractVersions.CenterV2,
+            "alert-center-snapshot-" + new string('a', 64),
+            value.SnapshotState,
+            value.SnapshotState == "complete" ? null : "owner_more",
+            checked((int)value.TotalCount),
+            value.SnapshotState == "complete" ? "exact" : "acquired_only",
+            checked((int)value.TotalCount),
+            new(
+                value.Query.AlertId,
+                value.Query.SessionId,
+                value.Query.TraceId,
+                value.Query.Severity,
+                value.Query.State,
+                value.Query.RuleId,
+                value.Query.SourceSurface,
+                value.Query.Repository,
+                value.Query.Workspace,
+                value.Query.Completeness,
+                value.Query.From,
+                value.Query.To,
+                "all",
+                "all",
+                "all",
+                "all",
+                value.Query.Limit),
+            value.Alerts.Select(item => new AlertCenterItemV2("receipt_v1", item, null)).ToArray(),
+            value.Alerts.Count == 0 ? 0 : value.Query.Offset + 1,
+            value.Alerts.Count == 0 ? 0 : value.Query.Offset + value.Alerts.Count,
+            value.Query.Offset > 0,
+            null,
+            null,
+            value.SnapshotState == "complete" ? "complete" : "incomplete_snapshot",
+            value.SnapshotState == "complete" ? value.RecurringGroups : [],
+            value.CoverageState,
+            value.Coverage.Select((item, index) => new AlertCenterCoverageItemV2(
+                "suppression_v1",
+                new(
+                    item.EvaluationId,
+                    index,
+                    item.RuleId,
+                    item.RuleVersion,
+                    item.Code,
+                    item.MissingCapabilities,
+                    item.ContextState,
+                    item.SourceSurface,
+                    item.SourceVersion,
+                    item.SessionId,
+                    item.TraceId,
+                    item.ObservationDate),
+                null)).ToArray(),
+            value.OmittedCoverageFactCount);
+        return new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = JsonSerializer.Serialize(snapshot, AlertCenterJson),
+        };
+    }
 
     private static AlertCenterSnapshot Snapshot(
         IReadOnlyList<AlertCenterAlert> alerts,

@@ -1,10 +1,59 @@
+using CopilotAgentObservability.Alerts;
+
 namespace CopilotAgentObservability.LocalMonitor.Alerts;
 
 internal static class AlertCenterContractVersions
 {
     public const string Center = "alert.center.v1";
+    public const string CenterV2 = "alert.center.v2";
+    public const string ErrorV2 = "alert.center.error.v2";
     public const string EvaluationRequest = "alert.center.evaluation-request.v1";
     public const string EvaluationResult = "alert.center.evaluation-result.v1";
+}
+
+internal enum AlertCenterReadStatusV2
+{
+    Success,
+    Busy,
+    Unavailable,
+    InvalidQuery,
+    SnapshotChanged,
+    ResponseTooLarge,
+}
+
+internal sealed record AlertCenterReadResultV2(
+    AlertCenterReadStatusV2 Status,
+    object? Snapshot = null);
+
+internal sealed record AlertCenterQueryV2(
+    string? AlertId,
+    string? SessionId,
+    string? TraceId,
+    string? Severity,
+    string? State,
+    string? RuleId,
+    string? SourceSurface,
+    string? Repository,
+    string? Workspace,
+    string? Completeness,
+    DateOnly From,
+    DateOnly To,
+    string ReceiptKind,
+    string ScopeKind,
+    string Currency,
+    string CoverageState,
+    string? Cursor,
+    int Limit);
+
+internal interface IAlertCenterReadModelV2
+{
+    AlertCenterReadResultV2 Read(AlertCenterQueryV2 query);
+}
+
+internal sealed class UnavailableAlertCenterReadModelV2 : IAlertCenterReadModelV2
+{
+    public AlertCenterReadResultV2 Read(AlertCenterQueryV2 query) =>
+        new(AlertCenterReadStatusV2.Unavailable);
 }
 
 internal enum AlertCenterReadStatus
@@ -210,6 +259,20 @@ internal sealed record AlertCenterCoverageFact(
 internal interface IAlertCenterReadModel
 {
     AlertCenterReadResult Read(AlertCenterQuery query);
+}
+
+internal sealed record AlertCenterOwnedProjectionResult(
+    AlertCenterReadStatus Status,
+    IReadOnlyList<AlertCenterAlert> AllAlerts,
+    IReadOnlyList<AlertCenterAlert> FilteredAlerts,
+    IReadOnlyList<AlertCenterRecurringGroup> RecurringGroups);
+
+internal interface IAlertCenterOwnedReceiptProjectorV1
+{
+    AlertCenterOwnedProjectionResult ProjectOwned(
+        IReadOnlyList<AlertCenterReceiptProjectionV1> receipts,
+        AlertCenterQuery query,
+        bool incomplete);
 }
 
 internal sealed class UnavailableAlertCenterReadModel : IAlertCenterReadModel

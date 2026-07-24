@@ -34,6 +34,26 @@
                     <option value="">すべて</option><option value="unbound">unbound</option><option value="partial">partial</option><option value="rich">rich</option><option value="full">full</option>
                 </select>
             </label>
+            <label>Receipt
+                <select id="alert-filter-receipt-kind" name="receipt_kind">
+                    <option value="all">すべて</option><option value="receipt_v1">従来アラート</option><option value="cost_receipt_v2">コストアラート</option>
+                </select>
+            </label>
+            <label>Scope
+                <select id="alert-filter-scope-kind" name="scope_kind">
+                    <option value="all">すべて</option><option value="session">Session</option><option value="utc_day">UTC day</option><option value="rolling_period">rolling period</option>
+                </select>
+            </label>
+            <label>Currency
+                <select id="alert-filter-currency" name="currency">
+                    <option value="all">すべて</option><option value="USD">USD</option>
+                </select>
+            </label>
+            <label>Cost coverage
+                <select id="alert-filter-coverage-state" name="coverage_state">
+                    <option value="all">すべて</option><option value="full">full</option><option value="partial">partial</option>
+                </select>
+            </label>
             <label>期間
                 <select id="alert-filter-period" name="period"><option value="today">今日</option><option value="7d">7日</option><option value="30d" selected>30日</option><option value="custom">指定</option></select>
             </label>

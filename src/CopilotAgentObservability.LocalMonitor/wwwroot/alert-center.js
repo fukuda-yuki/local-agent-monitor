@@ -56,7 +56,9 @@
       ["alert-filter-severity", "severity"], ["alert-filter-state", "state"],
       ["alert-filter-rule", "rule_id"], ["alert-filter-source", "source_surface"],
       ["alert-filter-completeness", "completeness"], ["alert-filter-repository", "repository"],
-      ["alert-filter-workspace", "workspace"],
+      ["alert-filter-workspace", "workspace"], ["alert-filter-receipt-kind", "receipt_kind"],
+      ["alert-filter-scope-kind", "scope_kind"], ["alert-filter-currency", "currency"],
+      ["alert-filter-coverage-state", "coverage_state"],
     ];
     for (const [id, key] of mappings) {
       const control = document.getElementById(id);
@@ -126,12 +128,14 @@
       ["alert-filter-severity", "severity"], ["alert-filter-state", "state"],
       ["alert-filter-rule", "rule_id"], ["alert-filter-source", "source_surface"],
       ["alert-filter-completeness", "completeness"], ["alert-filter-repository", "repository"],
-      ["alert-filter-workspace", "workspace"],
+      ["alert-filter-workspace", "workspace"], ["alert-filter-receipt-kind", "receipt_kind"],
+      ["alert-filter-scope-kind", "scope_kind"], ["alert-filter-currency", "currency"],
+      ["alert-filter-coverage-state", "coverage_state"],
     ];
     for (const [id, key] of mappings) {
       const rawValue = document.getElementById(id).value;
       const value = key === "repository" || key === "workspace" ? rawValue : rawValue.trim();
-      if (value) params.set(key, value); else params.delete(key);
+      if (value && value !== "all") params.set(key, value); else params.delete(key);
     }
     const period = document.getElementById("alert-filter-period").value;
     if (period === "custom") {
@@ -146,7 +150,7 @@
       params.delete("to");
     }
     params.delete("alert");
-    params.delete("offset");
+    params.delete("cursor");
     window.history.replaceState(null, "", `${url.pathname}?${params.toString()}`);
     return true;
   }
@@ -154,12 +158,85 @@
   function apiParameters() {
     const pageParams = currentUrl().searchParams;
     const api = new URLSearchParams();
-    const direct = ["session_id", "trace_id", "severity", "state", "rule_id", "source_surface", "repository", "workspace", "completeness", "period", "from", "to", "offset"];
+    const direct = ["session_id", "trace_id", "severity", "state", "rule_id", "source_surface", "repository", "workspace", "completeness", "period", "from", "to", "receipt_kind", "scope_kind", "currency", "coverage_state", "cursor"];
     for (const key of direct) if (pageParams.has(key)) api.set(key, pageParams.get(key));
     if (pageParams.has("alert")) api.set("alert_id", pageParams.get("alert"));
     if (!api.has("period") && !(api.has("from") && api.has("to"))) api.set("period", "30d");
     api.set("limit", "100");
     return api;
+  }
+
+  function normalizeCostReceipt(cost) {
+    const first = cost.members[0] ?? null;
+    return {
+      ...cost,
+      receipt_kind: "cost_receipt_v2",
+      cost_scope: cost.scope,
+      rule: { ...cost.rule, formula: cost.formula, required_capabilities: [] },
+      observed_values: [{ name: "estimated_cost", unit: cost.currency, value: cost.observed_amount }],
+      effective_thresholds: [
+        { name: "warning", unit: cost.currency, value: cost.warning_threshold },
+        { name: "critical", unit: cost.currency, value: cost.critical_threshold },
+      ],
+      source: { surface: cost.source_surface, version: cost.source_version, capability_state: "supported_at_evaluation" },
+      session_id: first?.session_id ?? "multi-session",
+      trace_id: null,
+      scope: {
+        state: first?.scope_state ?? "unavailable",
+        repository: first?.repository ?? null,
+        workspace: first?.workspace ?? null,
+        trace_repository: null,
+        trace_workspace: null,
+        session_repository: first?.repository ?? null,
+        session_workspace: first?.workspace ?? null,
+      },
+      completeness: { state: cost.completeness, reason_codes: cost.completeness_reasons },
+      evidence: cost.evidence.map(item => ({
+        kind: item.kind,
+        evidence_id: item.evidence_id,
+        session_id: item.session_id,
+        trace_id: null,
+        span_id: null,
+        turn_id: null,
+        event_id: null,
+        tool_call_id: null,
+        observed_at: item.observed_at_utc,
+        availability_state: item.state,
+        content_state: null,
+        href: item.href,
+      })),
+      evidence_count: cost.evidence.length,
+      relationships: { predecessor_alert_ids: [], successor_alert_ids: [] },
+      coverage_note: `${cost.coverage_basis_points} bps · ${cost.estimated_count}/${cost.eligible_count} estimated`,
+    };
+  }
+
+  function normalizeSnapshot(value) {
+    const alerts = value.items.map(item =>
+      item.receipt_kind === "receipt_v1"
+        ? { ...item.receipt_v1, receipt_kind: "receipt_v1" }
+        : normalizeCostReceipt(item.cost_receipt_v2));
+    const coverageFacts = value.coverage.map(item => {
+      if (item.coverage_kind === "suppression_v1") return item.suppression_v1;
+      const fact = item.cost_suppression_v2;
+      return {
+        ...fact,
+        missing_capabilities: [],
+        context_state: "cost_scope",
+        source_surface: null,
+        source_version: null,
+        session_id: null,
+        observation_date: fact.last_observed_at?.slice(0, 10) ?? null,
+      };
+    });
+    return {
+      ...value,
+      alerts,
+      coverage: coverageFacts,
+      snapshot_state: value.acquisition_state,
+      total_count: value.matched_item_count,
+      recurring_groups: value.recurring_groups,
+    };
   }
 
   function setDynamicOptions(id, values, label) {
@@ -274,6 +351,31 @@
       ["Completeness", `${alert.completeness.state}${alert.completeness.reason_codes.length ? ` · ${alert.completeness.reason_codes.join(", ")}` : ""}`],
       ["First / last", `${formatTime(alert.first_observed_at)} / ${formatTime(alert.last_observed_at)}`],
     ]));
+    if (alert.receipt_kind === "cost_receipt_v2") {
+      const cost = node("section", "alert-detail-section");
+      cost.append(node("h4", null, "Cost scope / estimates"));
+      cost.append(definitionList([
+        ["Scope", `${alert.cost_scope.kind} · ${alert.cost_scope.scope_id}`],
+        ["Configuration", `${alert.source_cost_configuration_id} · revision ${alert.source_configuration_head_revision}`],
+        ["Catalog", alert.source_configuration_catalog_sha256],
+        ["Billing coverage", `${alert.coverage_basis_points} bps · ${alert.estimated_count}/${alert.eligible_count}`],
+      ]));
+      const members = node("ul", "alert-evidence-list");
+      for (const member of alert.members) {
+        const item = node("li");
+        const sessionLink = node("a", "alert-evidence-link", `${shortId(member.session_id)} · ${member.state} · ${member.billing_mode ?? "billing unknown"}`);
+        sessionLink.href = member.session_href;
+        item.append(sessionLink);
+        if (member.estimate_href) {
+          const estimate = node("a", "alert-evidence-link", ` estimate ${shortId(member.estimate_id)} · ${member.estimate_evidence_state}`);
+          estimate.href = member.estimate_href;
+          item.append(estimate);
+        }
+        members.append(item);
+      }
+      cost.append(members);
+      provenance.append(cost);
+    }
 
     const evidenceSection = node("section", "alert-detail-section");
     evidenceSection.append(node("h4", null, `Evidence (${alert.evidence_count})`));
@@ -380,7 +482,7 @@
     recurring.replaceChildren();
     if (groups.length === 0) {
       recurring.append(node("p", "empty-state", snapshotState === "incomplete"
-        ? "取得範囲に recurring group はありません。スナップショットが不完全なため、全体として 0 件とは断定できません。"
+        ? "incomplete_snapshot · 取得範囲に recurring group はありません。スナップショットが不完全なため、全体として 0 件とは断定できません。"
         : "この期間の recurring group はありません。"));
       return;
     }
@@ -414,6 +516,10 @@
     coverage.append(node("p", "monitor-subtle retention-diagnostics-help", "以下の suppression fact はアラートではありません。"));
     if (coverageState === "incomplete") {
       coverage.append(node("p", "monitor-subtle", "coverage の取得上限に達しました。省略件数は不明です。"));
+    }
+    if (coverageState === "unavailable") {
+      coverage.append(node("p", "empty-state", "coverage は現在利用できません。suppression fact の有無は未確認です。"));
+      return;
     }
     if (facts.length === 0) {
       coverage.append(node("p", "empty-state", coverageState === "incomplete"
@@ -488,21 +594,18 @@
   }
 
   function renderPagination(value) {
-    const offset = Number.isInteger(value.query?.offset) ? value.query.offset : 0;
-    const limit = Number.isInteger(value.query?.limit) ? value.query.limit : 100;
-    const total = Number.isInteger(value.total_count) ? value.total_count : 0;
-    const first = value.alerts.length === 0 ? 0 : offset + 1;
-    const last = Math.min(total, offset + value.alerts.length);
-    pageInfo.textContent = `${first}–${last} / ${total} 件`;
-    previousPage.disabled = offset === 0;
-    previousPage.dataset.offset = String(Math.max(0, offset - limit));
-    nextPage.disabled = offset + limit >= total;
-    nextPage.dataset.offset = String(offset + limit);
+    const total = Number.isInteger(value.matched_item_count) ? value.matched_item_count : 0;
+    const suffix = value.match_count_state === "exact" ? `${total} 件` : `${total} acquired matches`;
+    pageInfo.textContent = `${value.visible_start_ordinal}–${value.visible_end_ordinal} / ${suffix}`;
+    previousPage.disabled = !value.has_previous;
+    previousPage.dataset.cursor = value.previous_cursor ?? "";
+    nextPage.disabled = !value.next_cursor;
+    nextPage.dataset.cursor = value.next_cursor ?? "";
   }
 
-  function setPageOffset(offset) {
+  function setPageCursor(cursor) {
     const url = currentUrl();
-    if (offset === 0) url.searchParams.delete("offset"); else url.searchParams.set("offset", String(offset));
+    if (cursor) url.searchParams.set("cursor", cursor); else url.searchParams.delete("cursor");
     url.searchParams.delete("alert");
     selectedAlertId = null;
     window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}`);
@@ -519,11 +622,20 @@
     error.hidden = true;
     empty.hidden = true;
     try {
-      const response = await fetch(`/api/alert-center/v1/alerts?${apiParameters().toString()}`, { cache: "no-store", signal: controller.signal });
+      const response = await fetch(`/api/alert-center/v2/alerts?${apiParameters().toString()}`, { cache: "no-store", signal: controller.signal });
+      if (response.status === 409) {
+        const body = await response.json();
+        if (body?.error === "alert_center_snapshot_changed") {
+          const url = currentUrl();
+          url.searchParams.delete("cursor");
+          window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}`);
+          return load(announceSelection);
+        }
+      }
       if (!response.ok) throw new Error("api");
       const value = await response.json();
       if (generation !== loadGeneration) return false;
-      snapshot = value;
+      snapshot = normalizeSnapshot(value);
       setDynamicOptions("alert-filter-rule", [
         ...snapshot.alerts.map(item => item.rule.rule_id),
         ...snapshot.coverage.map(item => item.rule_id),
@@ -533,10 +645,7 @@
         ...snapshot.coverage.map(item => item.source_surface),
       ], "すべて");
       renderPagination(snapshot);
-      const offset = snapshot.query?.offset ?? 0;
-      const first = snapshot.alerts.length === 0 ? 0 : offset + 1;
-      const last = Math.min(snapshot.total_count, offset + snapshot.alerts.length);
-      const range = `${first}–${last} / ${snapshot.total_count} 件`;
+      const range = `${snapshot.visible_start_ordinal}–${snapshot.visible_end_ordinal} / ${snapshot.matched_item_count} ${snapshot.match_count_state}`;
       document.getElementById("alert-count").textContent = snapshot.snapshot_state === "incomplete"
         ? `${range} · incomplete · acquired range · omitted unknown`
         : `${range} · complete snapshot`;
@@ -601,13 +710,13 @@
       document.getElementById("alert-filter-to").setCustomValidity("");
     });
   }
-  for (const id of ["alert-filter-severity", "alert-filter-state", "alert-filter-rule", "alert-filter-source", "alert-filter-completeness"]) {
+  for (const id of ["alert-filter-severity", "alert-filter-state", "alert-filter-rule", "alert-filter-source", "alert-filter-completeness", "alert-filter-receipt-kind", "alert-filter-scope-kind", "alert-filter-currency", "alert-filter-coverage-state"]) {
     document.getElementById(id).addEventListener("change", () => {
       if (updateUrlFromFilters()) load(true);
     });
   }
-  previousPage.addEventListener("click", () => setPageOffset(Number(previousPage.dataset.offset)));
-  nextPage.addEventListener("click", () => setPageOffset(Number(nextPage.dataset.offset)));
+  previousPage.addEventListener("click", () => setPageCursor(previousPage.dataset.cursor));
+  nextPage.addEventListener("click", () => setPageCursor(nextPage.dataset.cursor));
 
   hydrateFilters();
   if (validateCustomPeriod(true)) load(false);

@@ -14,6 +14,12 @@ internal static class AlertCenterRoutes
         "alert_id", "session_id", "trace_id", "severity", "state", "rule_id", "source_surface",
         "repository", "workspace", "completeness", "period", "from", "to", "offset", "limit",
     };
+    private static readonly HashSet<string> AllowedQueryMembersV2 = new(StringComparer.Ordinal)
+    {
+        "alert_id", "session_id", "trace_id", "severity", "state", "rule_id", "source_surface",
+        "repository", "workspace", "completeness", "period", "from", "to", "receipt_kind",
+        "scope_kind", "currency", "coverage_state", "cursor", "limit",
+    };
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -21,16 +27,66 @@ internal static class AlertCenterRoutes
 
     internal static bool IsPath(PathString path) =>
         path.StartsWithSegments("/api/alert-center/v1")
+        || path.StartsWithSegments("/api/alert-center/v2")
         || string.Equals(path.Value, "/alerts", StringComparison.Ordinal);
 
     internal static void Map(
         WebApplication app,
         IAlertCenterReadModel readModel,
+        IAlertCenterReadModelV2 readModelV2,
         IAlertCenterEvaluationCoordinator evaluationCoordinator,
         TimeProvider timeProvider)
     {
         app.MapGet("/api/alert-center/v1/alerts", context => ReadAsync(context, readModel, timeProvider));
+        app.MapGet("/api/alert-center/v2/alerts", context => ReadV2Async(context, readModelV2, timeProvider));
         app.MapPost("/api/alert-center/v1/evaluations", context => EvaluateAsync(context, evaluationCoordinator));
+    }
+
+    private static async Task ReadV2Async(
+        HttpContext context,
+        IAlertCenterReadModelV2 readModel,
+        TimeProvider timeProvider)
+    {
+        Prepare(context.Response);
+        if (MonitorHost.IsCrossSiteRequest(context))
+        {
+            await WriteErrorV2Async(context, StatusCodes.Status403Forbidden, "cross_origin_forbidden");
+            return;
+        }
+        if (!TryParseQueryV2(context.Request, timeProvider, out var query))
+        {
+            await WriteErrorV2Async(context, StatusCodes.Status400BadRequest, "alert_center_invalid_query");
+            return;
+        }
+        var result = readModel.Read(query!);
+        if (result.Status != AlertCenterReadStatusV2.Success || result.Snapshot is null)
+        {
+            var (status, code) = result.Status switch
+            {
+                AlertCenterReadStatusV2.SnapshotChanged =>
+                    (StatusCodes.Status409Conflict, "alert_center_snapshot_changed"),
+                AlertCenterReadStatusV2.InvalidQuery =>
+                    (StatusCodes.Status400BadRequest, "alert_center_invalid_query"),
+                AlertCenterReadStatusV2.ResponseTooLarge =>
+                    (StatusCodes.Status503ServiceUnavailable, "alert_center_response_too_large"),
+                AlertCenterReadStatusV2.Busy =>
+                    (StatusCodes.Status503ServiceUnavailable, "alert_center_store_busy"),
+                _ => (StatusCodes.Status503ServiceUnavailable, "alert_center_store_unavailable"),
+            };
+            await WriteErrorV2Async(context, status, code);
+            return;
+        }
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await JsonSerializer.SerializeAsync(context.Response.Body, result.Snapshot, Json, context.RequestAborted);
+    }
+
+    private static Task WriteErrorV2Async(HttpContext context, int status, string code)
+    {
+        Prepare(context.Response);
+        context.Response.StatusCode = status;
+        return context.Response.Body.WriteAsync(
+            Encoding.UTF8.GetBytes($"{{\"schema_version\":\"{AlertCenterContractVersions.ErrorV2}\",\"error\":\"{code}\"}}"),
+            context.RequestAborted).AsTask();
     }
 
     internal static Task WriteErrorAsync(HttpContext context, int status, string code)
@@ -41,6 +97,14 @@ internal static class AlertCenterRoutes
             Encoding.UTF8.GetBytes($"{{\"schema_version\":\"{AlertCenterContractVersions.Center}\",\"error\":\"{code}\"}}"),
             context.RequestAborted).AsTask();
     }
+
+    internal static Task WriteErrorForPathAsync(
+        HttpContext context,
+        int status,
+        string code) =>
+        context.Request.Path.StartsWithSegments("/api/alert-center/v2")
+            ? WriteErrorV2Async(context, status, code)
+            : WriteErrorAsync(context, status, code);
 
     private static async Task ReadAsync(HttpContext context, IAlertCenterReadModel readModel, TimeProvider timeProvider)
     {
@@ -257,6 +321,123 @@ internal static class AlertCenterRoutes
             || !TryInteger(Value("limit"), 1, 100, 50, out var limit)) return false;
         query = new(alertId, sessionId, traceId, severity, state, ruleId, source, repository, workspace, completeness, from, to, offset, limit);
         return true;
+    }
+
+    private static bool TryParseQueryV2(
+        HttpRequest request,
+        TimeProvider timeProvider,
+        out AlertCenterQueryV2? query)
+    {
+        query = null;
+        if (!ValidEncodedQueryV2(request.QueryString.Value)
+            || request.Query.Any(pair =>
+                !AllowedQueryMembersV2.Contains(pair.Key)
+                || pair.Value.Count != 1
+                || pair.Value[0] is null
+                || pair.Value[0]!.Length == 0))
+        {
+            return false;
+        }
+        string? Value(string name) => request.Query.TryGetValue(name, out var value) ? value[0] : null;
+        var alertId = Value("alert_id");
+        var sessionId = Value("session_id");
+        var traceId = Value("trace_id");
+        var severity = Value("severity");
+        var state = Value("state");
+        var ruleId = Value("rule_id");
+        var source = Value("source_surface");
+        var repository = Value("repository");
+        var workspace = Value("workspace");
+        var completeness = Value("completeness");
+        var receiptKind = Value("receipt_kind") ?? "all";
+        var scopeKind = Value("scope_kind") ?? "all";
+        var currency = Value("currency") ?? "all";
+        var coverageState = Value("coverage_state") ?? "all";
+        var cursor = Value("cursor");
+        if (alertId is not null && !CanonicalHash(alertId)
+            || sessionId is not null && !OpaqueId(sessionId)
+            || traceId is not null && !OpaqueId(traceId)
+            || severity is not null && severity is not ("critical" or "warning" or "info")
+            || state is not null && state is not ("open" or "acknowledged" or "dismissed" or "resolved" or "superseded")
+            || ruleId is not null && !Token(ruleId)
+            || source is not null && !Token(source)
+            || repository is not null && !Label(repository)
+            || workspace is not null && !Label(workspace)
+            || completeness is not null && completeness is not ("unbound" or "partial" or "rich" or "full")
+            || receiptKind is not ("all" or "receipt_v1" or "cost_receipt_v2")
+            || scopeKind is not ("all" or "session" or "utc_day" or "rolling_period")
+            || currency is not ("all" or "USD")
+            || coverageState is not ("all" or "full" or "partial")
+            || cursor is not null && (cursor.Length > 1_024
+                || !cursor.StartsWith("alert-center-cursor-v2.", StringComparison.Ordinal)
+                || cursor.Any(character => character is '%' or >= (char)0x80)))
+        {
+            return false;
+        }
+
+        var period = Value("period");
+        var fromText = Value("from");
+        var toText = Value("to");
+        DateOnly from;
+        DateOnly to;
+        if (fromText is not null || toText is not null)
+        {
+            if (period is not null || fromText is null || toText is null
+                || !DateOnly.TryParseExact(fromText, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out from)
+                || !DateOnly.TryParseExact(toText, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out to)
+                || from > to || to.DayNumber - from.DayNumber >= 366)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            period ??= "30d";
+            if (period is not ("today" or "7d" or "30d")) return false;
+            to = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime);
+            from = period switch { "today" => to, "7d" => to.AddDays(-6), _ => to.AddDays(-29) };
+        }
+        if (!TryInteger(Value("limit"), 1, 100, 50, out var limit)) return false;
+        query = new(
+            alertId, sessionId, traceId, severity, state, ruleId, source, repository,
+            workspace, completeness, from, to, receiptKind, scopeKind, currency,
+            coverageState, cursor, limit);
+        return true;
+    }
+
+    private static bool ValidEncodedQueryV2(string? queryString)
+    {
+        if (string.IsNullOrEmpty(queryString)) return true;
+        var raw = queryString[0] == '?' ? queryString[1..] : queryString;
+        if (Encoding.UTF8.GetByteCount(raw) > 8_192) return false;
+        var filters = new List<string>();
+        var cursorCount = 0;
+        foreach (var component in raw.Split('&'))
+        {
+            if (component.Length == 0) return false;
+            var separator = component.IndexOf('=');
+            var encodedName = separator < 0 ? component : component[..separator];
+            if (!encodedName.Equals("cursor", StringComparison.Ordinal)
+                && Uri.UnescapeDataString(encodedName).Equals("cursor", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            if (component.StartsWith("cursor=", StringComparison.Ordinal))
+            {
+                cursorCount++;
+                if (component.Length == "cursor=".Length
+                    || component["cursor=".Length..].Contains('%', StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                filters.Add(component);
+            }
+        }
+        return cursorCount <= 1
+            && Encoding.UTF8.GetByteCount(string.Join('&', filters)) <= 7_000;
     }
 
     private static bool TryInteger(string? value, int minimum, int maximum, int fallback, out int result)
