@@ -330,6 +330,49 @@ public sealed class CostRouteTests
         }
     }
 
+    [Fact]
+    public void RecalculationBudgetResultProjectsExactClosedScopeShapes()
+    {
+        var sessionId = Guid.CreateVersion7().ToString("D");
+        var scopes = new[]
+        {
+            (
+                Scope: new CostBudgetScopeV1("session", sessionId, null, null, null),
+                Expected: new[] { "scope_kind", "session_id" }),
+            (
+                Scope: new CostBudgetScopeV1("utc_day", null, "2026-07-24", null, null),
+                Expected: new[] { "scope_kind", "utc_date" }),
+            (
+                Scope: new CostBudgetScopeV1(
+                    "rolling_period",
+                    null,
+                    null,
+                    new DateTimeOffset(2026, 7, 24, 0, 0, 0, TimeSpan.Zero),
+                    30),
+                Expected: new[] { "scope_kind", "cutoff_utc", "window_days" }),
+        };
+        var json = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+
+        foreach (var (scope, expected) in scopes)
+        {
+            var projection = CostHttpApplication.BudgetResult(new CostRecalculationBudgetResultReadV1(
+                0,
+                scope,
+                "rule",
+                "1",
+                "no_match",
+                new string('a', 64),
+                null,
+                null,
+                null));
+            var element = JsonSerializer.SerializeToElement(projection, json);
+
+            Assert.Equal(
+                expected,
+                element.GetProperty("scope").EnumerateObject().Select(property => property.Name));
+        }
+    }
+
     [Theory]
     [InlineData("store")]
     [InlineData("application")]

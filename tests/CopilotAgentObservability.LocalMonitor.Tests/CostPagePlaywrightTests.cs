@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
@@ -86,11 +87,17 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("label:has(#cost-filter-from)")).ToContainTextAsync("開始（UTC）");
         await Expect(page.Locator("label:has(#cost-filter-to)")).ToContainTextAsync("終了（UTC、含まない）");
         await Expect(page.Locator("label:has(#cost-filter-status)")).ToContainTextAsync("状態");
+        await Expect(page.Locator("label:has(#cost-filter-repository)")).ToContainTextAsync("Repository");
+        await Expect(page.Locator("label:has(#cost-filter-workspace)")).ToContainTextAsync("Workspace");
         await page.Locator("#cost-filter-status").FocusAsync();
         await page.Keyboard.PressAsync("Tab");
         await Expect(page.Locator("#cost-filter-registry")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#cost-filter-repository")).ToBeFocusedAsync();
+        await page.Keyboard.PressAsync("Tab");
+        await Expect(page.Locator("#cost-filter-workspace")).ToBeFocusedAsync();
         await page.Keyboard.PressAsync("Shift+Tab");
-        await Expect(page.Locator("#cost-filter-status")).ToBeFocusedAsync();
+        await Expect(page.Locator("#cost-filter-repository")).ToBeFocusedAsync();
         await Expect(page.Locator("#cost-range-total-list")).ToContainTextAsync("12.50 USD");
         await Expect(page.Locator("#cost-groups-next")).ToBeVisibleAsync();
         analytics = IncompleteAnalytics;
@@ -755,22 +762,301 @@ public sealed class CostPagePlaywrightTests
         await Expect(page.Locator("#cost-live")).Not.ToContainTextAsync("結果を確認できません");
     }
 
-    private static async Task RouteBaseReads(IPage page, string analytics)
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_FiltersExactRepositoryWorkspaceAndSeparatesMixedRegistryCurrencyStates()
     {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
         await page.RouteAsync("**/api/costs/v1/configuration", route =>
             route.FulfillAsync(Json(Configuration)));
         await page.RouteAsync("**/api/costs/v1/catalog?*", route =>
             route.FulfillAsync(Json(Catalog)));
+        string? analyticsUrl = null;
+        var analyticsReads = 0;
+        var filteredAnalyticsRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await page.RouteAsync("**/api/costs/v1/analytics?*", async route =>
+        {
+            analyticsUrl = route.Request.Url;
+            analyticsReads++;
+            var isFiltered = route.Request.Url.Contains("repository=Repo.Label", StringComparison.Ordinal);
+            await route.FulfillAsync(Json(isFiltered ? FilteredRepositoryAnalytics : MixedRepositoryAnalytics));
+            if (isFiltered) filteredAnalyticsRead.SetResult();
+        });
+
+        await page.GotoAsync($"{host.Url}/costs", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#cost-group-rows tr")).ToHaveCountAsync(3);
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("registry-a");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("4.00 USD");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(1)).ToContainTextAsync("registry-b");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(1)).ToContainTextAsync("4.50 USD");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(1)).ToContainTextAsync(
+            "repository unknown / workspace unknown");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(2)).ToContainTextAsync(
+            "repository (missing) / workspace (missing)");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(2)).ToContainTextAsync("currency (missing)");
+        await page.Locator("#cost-filter-repository").FillAsync("Repo.Label");
+        await page.Locator("#cost-filter-workspace").FillAsync("Workspace Label");
+        await page.Locator("#cost-filters button[type='submit']").ClickAsync();
+        await filteredAnalyticsRead.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Expect(page.Locator("#cost-group-rows tr")).ToHaveCountAsync(1);
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("filtered-model");
+
+        Assert.Contains("repository=Repo.Label", analyticsUrl, StringComparison.Ordinal);
+        Assert.Contains("workspace=Workspace+Label", analyticsUrl, StringComparison.Ordinal);
+        Assert.Equal(2, analyticsReads);
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("Repo.Label");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("Workspace Label");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("registry-a");
+        await Expect(page.Locator("#cost-group-rows tr").Nth(0)).ToContainTextAsync("USD");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_RendersFullSessionEstimateAsCompleteNonzeroTotal()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        await RouteSessionReads(page, FullEstimate, FullEstimateHistory);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("estimated / fresh");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("complete_total · 4.25 USD");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("1/1 categories");
+        await Expect(page.Locator("#cost-exact-estimate")).Not.ToContainTextAsync("provisional");
+        await Expect(page.Locator("#cost-exact-estimate")).Not.ToContainTextAsync("not-estimable");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_ExplainsPlanIncludedZeroAsZeroAdditionalCostAndShowsProvenance()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics, catalog: CatalogWithIncludedZero);
+        await RouteSessionReads(page, PlanIncludedZeroEstimate, PlanIncludedZeroHistory);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("estimated / fresh");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("0 USD");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync(
+            "追加コスト 0（plan/seat 自体の価格が 0 という意味ではありません）");
+        await Expect(page.Locator("#cost-catalog")).ToContainTextAsync(
+            "追加コスト 0（plan/seat 自体の価格が 0 という意味ではありません）");
+        await Expect(page.Locator("#cost-exact-estimate")).Not.ToContainTextAsync("free");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync(CatalogSha);
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("reviewed 2026-07-20");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("stale after 2026-08-20");
+    }
+
+    [Theory(Timeout = 60_000)]
+    [InlineData("subscription")]
+    [InlineData("custom_enterprise")]
+    public async Task CostPage_RendersSubscriptionAndCustomModesAsNotEstimable(string billingMode)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        var reason = billingMode == "subscription"
+            ? "subscription_or_contract_unknown"
+            : "custom_contract";
+        var estimate = NotEstimableEstimate
+            .Replace("__BILLING_MODE__", billingMode, StringComparison.Ordinal)
+            .Replace("__REASON__", reason, StringComparison.Ordinal);
+        var history = NotEstimableHistory
+            .Replace("__BILLING_MODE__", billingMode, StringComparison.Ordinal)
+            .Replace("__REASON__", reason, StringComparison.Ordinal);
+        await RouteSessionReads(page, estimate, history);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("not-estimable / fresh");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync(billingMode);
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("not_applicable");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync(reason);
+        await Expect(page.Locator("#cost-exact-estimate")).Not.ToContainTextAsync("0 USD");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_WarnsWhenEstimateCalculationUtcDateIsAfterRegistryStaleAfterDate()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        await RouteSessionReads(page, StaleRegistryEstimate, StaleRegistryHistory);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-exact-estimate [role='note']")).ToContainTextAsync(
+            "registry metadata warning");
+        await Expect(page.Locator("#cost-exact-estimate [role='note']")).ToContainTextAsync(
+            "calculation UTC date 2026-08-21 > stale after 2026-08-20");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_DoesNotWarnWhenCalculationUtcDateEqualsRegistryStaleAfterDate()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        await RouteSessionReads(page, StaleBoundaryEstimate, StaleBoundaryHistory);
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("stale after 2026-08-20");
+        await Expect(page.Locator("#cost-exact-estimate [role='note']")).ToHaveCountAsync(0);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_RetainsAtMostSixtyFourSourcesAndOneHundredCatalogEntries()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics, catalog: OversizedCatalog);
+
+        await page.GotoAsync($"{host.Url}/costs", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-catalog article")).ToHaveCountAsync(164);
+        await Expect(page.Locator("#cost-config-entry option")).ToHaveCountAsync(101);
+        await Expect(page.Locator("#cost-catalog")).Not.ToContainTextAsync("source-64");
+        await Expect(page.Locator("#cost-catalog")).Not.ToContainTextAsync("model-100");
+
+        await page.EvaluateAsync(
+            """
+            () => {
+              const select = document.getElementById("cost-config-entry");
+              const option = document.createElement("option");
+              option.value = "entry-100";
+              option.textContent = "synthetic unretained entry";
+              select.append(option);
+              select.value = option.value;
+              select.dispatchEvent(new Event("change"));
+            }
+            """);
+        await Expect(page.Locator("#cost-config-provider")).ToHaveValueAsync("");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_RendersBudgetWarningCriticalAndCoverageSuppressionFromCanonicalReadFields()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics, PreservedConfiguration);
+        await RouteSessionReads(page);
+        await page.RouteAsync("**/api/costs/v1/recalculations", route =>
+            route.FulfillAsync(Json(RecalculationWithBudgetMatrix, 202)));
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#cost-budget-state")).ToContainTextAsync(
+            "session-estimated-cost-threshold · enabled · USD · warning 10 / critical 20");
+        await Expect(page.Locator("#cost-budget-state")).ToContainTextAsync(
+            "daily-estimated-cost-threshold · disabled · USD · warning 50 / critical 100");
+        await Expect(page.Locator("#cost-budget-state")).ToContainTextAsync(
+            "period-estimated-cost-threshold · enabled · USD · warning 200 / critical 400");
+        await page.Locator("#cost-scope-utc-day").CheckAsync();
+        await page.Locator("#cost-scope-period").CheckAsync();
+        await page.Locator("#cost-recalculate").ClickAsync();
+
+        await Expect(page.Locator("#cost-recalculation")).ToContainTextAsync(
+            $"session-estimated-cost-threshold · receipt · {new string('1', 64)}");
+        await Expect(page.Locator("#cost-recalculation")).ToContainTextAsync(
+            $"daily-estimated-cost-threshold · receipt · {new string('2', 64)}");
+        await Expect(page.Locator("#cost-recalculation")).ToContainTextAsync(
+            "period-estimated-cost-threshold · suppression · insufficient_estimate_coverage");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task CostPage_RendersCodexDefaultAdapterUnavailableWithoutInventingZero()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+        await RouteBaseReads(page, CompleteAnalytics);
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/estimates?*", route =>
+            route.FulfillAsync(Json(CodexUnavailableHistory)));
+        await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/recalculations?*", route =>
+            route.FulfillAsync(Json(SessionRecalculations)));
+
+        await page.GotoAsync(
+            $"{host.Url}/costs?session_id={SessionId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+
+        await Expect(page.Locator("#cost-session")).ToContainTextAsync("unavailable");
+        await Expect(page.Locator("#cost-session")).ToContainTextAsync("codex_adapter_unavailable");
+        await Expect(page.Locator("#cost-exact-estimate")).ToContainTextAsync("monetary zero ではありません");
+        await Expect(page.Locator("#cost-exact-estimate")).Not.ToContainTextAsync("0 USD");
+    }
+
+    private static async Task RouteBaseReads(
+        IPage page,
+        string analytics,
+        string? configuration = null,
+        string? catalog = null)
+    {
+        await page.RouteAsync("**/api/costs/v1/configuration", route =>
+            route.FulfillAsync(Json(configuration ?? Configuration)));
+        await page.RouteAsync("**/api/costs/v1/catalog?*", route =>
+            route.FulfillAsync(Json(catalog ?? Catalog)));
         await page.RouteAsync("**/api/costs/v1/analytics?*", route =>
             route.FulfillAsync(Json(analytics)));
     }
 
-    private static async Task RouteSessionReads(IPage page)
+    private static async Task RouteSessionReads(
+        IPage page,
+        string exactEstimate = ExactEstimate,
+        string sessionHistory = SessionHistory)
     {
         await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/estimates?*", route =>
-            route.FulfillAsync(Json(SessionHistory)));
+            route.FulfillAsync(Json(sessionHistory)));
         await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/estimates/{EstimateId}", route =>
-            route.FulfillAsync(Json(ExactEstimate)));
+            route.FulfillAsync(Json(exactEstimate)));
         await page.RouteAsync($"**/api/costs/v1/sessions/{SessionId}/recalculations?*", route =>
             route.FulfillAsync(Json(SessionRecalculations)));
     }
@@ -869,6 +1155,71 @@ public sealed class CostPagePlaywrightTests
 
     private static string SerializeApi<T>(T value) =>
         JsonSerializer.Serialize(value, ApiJson);
+
+    private static string CreateOversizedCatalog()
+    {
+        var sources = Enumerable.Range(0, 65)
+            .Select(index => new CostCatalogSourceReadV1(
+                "bundled",
+                $"source-{index:D2}",
+                $"Synthetic source {index:D2}",
+                $"registry-{index:D2}",
+                new DateOnly(2026, 7, 1),
+                new DateOnly(2026, 8, 1)))
+            .ToArray();
+        var entries = Enumerable.Range(0, 101)
+            .Select(index => new CostCatalogEntryReadV1(
+                "bundled",
+                "source-00",
+                "Synthetic source 00",
+                "registry-00",
+                $"entry-{index:D3}",
+                null,
+                "active",
+                null,
+                "github_copilot",
+                $"model-{index:D3}",
+                "github_ai_credits",
+                "credit_consuming_interaction",
+                new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero),
+                null,
+                new DateOnly(2026, 7, 1),
+                new DateOnly(2026, 8, 1),
+                "USD",
+                false,
+                "https://example.com/pricing/synthetic"))
+            .ToArray();
+        return SerializeApi(new CostCatalogApplicationV1(
+            "cost.catalog.v1",
+            CatalogSha,
+            sources,
+            entries,
+            null));
+    }
+
+    private static string CreateFilteredRepositoryAnalytics()
+    {
+        var root = JsonNode.Parse(MixedRepositoryAnalytics)!.AsObject();
+        root["snapshot_id"] =
+            "cost-analytics-snapshot-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        root["eligible_session_count"] = 1;
+        var filters = root["filters"]!.AsObject();
+        filters["repository"] = "Repo.Label";
+        filters["workspace"] = "Workspace Label";
+        var overall = root["overall"]!.AsObject();
+        overall["eligible_session_count"] = 1;
+        overall["estimated_session_count"] = 1;
+        overall["not_estimable_session_count"] = 0;
+        overall["coverage_numerator"] = 1;
+        overall["coverage_denominator"] = 1;
+        overall["coverage_basis_points"] = 10000;
+        root["range_totals"] = new JsonArray(root["range_totals"]![0]!.DeepClone());
+        root["daily_totals"] = new JsonArray(root["daily_totals"]![0]!.DeepClone());
+        var group = root["groups"]![0]!.DeepClone().AsObject();
+        group["model"] = "filtered-model";
+        root["groups"] = new JsonArray(group);
+        return root.ToJsonString();
+    }
 
     private static JsonSerializerOptions CreateApiJsonOptions()
     {
@@ -969,10 +1320,18 @@ public sealed class CostPagePlaywrightTests
                 false,
                 "https://example.com/pricing/%3Cscript%3E")],
             null));
+    private static readonly string CatalogWithIncludedZero = Catalog.Replace(
+        "\"included_zero_incremental_cost\":false",
+        "\"included_zero_incremental_cost\":true",
+        StringComparison.Ordinal);
+    private static readonly string OversizedCatalog = CreateOversizedCatalog();
+    private static readonly string FilteredRepositoryAnalytics = CreateFilteredRepositoryAnalytics();
     private const string CompleteAnalytics =
         """{"schema_version":"cost.analytics.v1","snapshot_id":"cost-analytics-snapshot-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"complete","cap_reason":null,"eligible_session_count":4,"eligible_session_lower_bound":null,"group_lower_bound":null,"filters":{"from":"2026-07-22T00:00:00.0000000Z","to":"2026-07-24T00:00:00.0000000Z","source_surface":null,"provider":null,"model":null,"billing_mode":null,"status":null,"registry_version":null,"currency":null,"repository":null,"workspace":null,"limit":50},"overall":{"eligible_session_count":4,"estimated_session_count":2,"partial_session_count":1,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":1,"unavailable_session_count":0,"stale_session_count":0,"coverage_numerator":2,"coverage_denominator":4,"coverage_basis_points":5000},"range_totals":[{"registry_version":"2026-07-01","currency":"USD","estimated_amount_state":"available","estimated_amount":"12.50","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"daily_totals":[{"utc_date":"2026-07-23","registry_version":"2026-07-01","currency":"USD","estimated_amount_state":"available","estimated_amount":"12.50","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"groups":[{"utc_date":"2026-07-23","source_surface":"github-copilot-vscode","provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","repository":null,"workspace":null,"registry_version":"2026-07-01","currency":"USD","component_category":"input","group_id":"cost-analytics-group-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unknown_dimensions":["repository","workspace"],"eligible_session_count":4,"estimated_session_count":2,"partial_session_count":1,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":1,"unavailable_session_count":0,"stale_session_count":0,"coverage_basis_points":5000,"component_session_count":3,"estimated_component_session_count":2,"partial_component_session_count":1,"estimated_amount_state":"available","estimated_amount":"8.00","partial_known_component_amount_state":"available","partial_known_component_amount":"1.25","partial_reason_counts":[{"reason":"unknown_model","session_count":1}]}],"next_cursor":null}""";
     private const string IncompleteAnalytics =
         """{"schema_version":"cost.analytics.v1","snapshot_id":"cost-analytics-snapshot-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"incomplete","cap_reason":"eligible_session_limit","eligible_session_count":null,"eligible_session_lower_bound":2001,"group_lower_bound":null,"filters":{"from":"2026-07-22T00:00:00.0000000Z","to":"2026-07-24T00:00:00.0000000Z","source_surface":null,"provider":null,"model":null,"billing_mode":null,"status":null,"registry_version":null,"currency":null,"repository":null,"workspace":null,"limit":50},"overall":null,"range_totals":[],"daily_totals":[],"groups":[],"next_cursor":null}""";
+    private const string MixedRepositoryAnalytics =
+        """{"schema_version":"cost.analytics.v1","snapshot_id":"cost-analytics-snapshot-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","state":"complete","cap_reason":null,"eligible_session_count":3,"eligible_session_lower_bound":null,"group_lower_bound":null,"filters":{"from":"2026-07-22T00:00:00.0000000Z","to":"2026-07-24T00:00:00.0000000Z","source_surface":null,"provider":null,"model":null,"billing_mode":null,"status":null,"registry_version":null,"currency":null,"repository":null,"workspace":null,"limit":50},"overall":{"eligible_session_count":3,"estimated_session_count":2,"partial_session_count":0,"not_estimable_session_count":1,"missing_session_count":0,"failed_session_count":0,"unavailable_session_count":0,"stale_session_count":0,"coverage_numerator":2,"coverage_denominator":3,"coverage_basis_points":6666},"range_totals":[{"registry_version":"registry-a","currency":"USD","estimated_amount_state":"available","estimated_amount":"4.00","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]},{"registry_version":"registry-b","currency":"USD","estimated_amount_state":"available","estimated_amount":"4.50","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]}],"daily_totals":[{"utc_date":"2026-07-23","registry_version":"registry-a","currency":"USD","estimated_amount_state":"available","estimated_amount":"4.00","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]},{"utc_date":"2026-07-23","registry_version":"registry-b","currency":"USD","estimated_amount_state":"available","estimated_amount":"4.50","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]}],"groups":[{"utc_date":"2026-07-23","source_surface":"github-copilot-vscode","provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","repository":"Repo.Label","workspace":"Workspace Label","registry_version":"registry-a","currency":"USD","component_category":"input","group_id":"cost-analytics-group-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unknown_dimensions":[],"eligible_session_count":1,"estimated_session_count":1,"partial_session_count":0,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":0,"unavailable_session_count":0,"stale_session_count":0,"coverage_basis_points":10000,"component_session_count":1,"estimated_component_session_count":1,"partial_component_session_count":0,"estimated_amount_state":"available","estimated_amount":"4.00","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]},{"utc_date":"2026-07-23","source_surface":"github-copilot-vscode","provider":"github_copilot","model":"gpt-4.2","billing_mode":"github_ai_credits","repository":"unknown","workspace":"unknown","registry_version":"registry-b","currency":"USD","component_category":"output","group_id":"cost-analytics-group-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","unknown_dimensions":[],"eligible_session_count":1,"estimated_session_count":1,"partial_session_count":0,"not_estimable_session_count":0,"missing_session_count":0,"failed_session_count":0,"unavailable_session_count":0,"stale_session_count":0,"coverage_basis_points":10000,"component_session_count":1,"estimated_component_session_count":1,"partial_component_session_count":0,"estimated_amount_state":"available","estimated_amount":"4.50","partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]},{"utc_date":"2026-07-23","source_surface":"github-copilot-vscode","provider":"github_copilot","model":"contract-model","billing_mode":"subscription","repository":null,"workspace":null,"registry_version":null,"currency":null,"component_category":null,"group_id":"cost-analytics-group-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","unknown_dimensions":["repository","workspace","registry_version","currency","component_category"],"eligible_session_count":1,"estimated_session_count":0,"partial_session_count":0,"not_estimable_session_count":1,"missing_session_count":0,"failed_session_count":0,"unavailable_session_count":0,"stale_session_count":0,"coverage_basis_points":0,"component_session_count":0,"estimated_component_session_count":0,"partial_component_session_count":0,"estimated_amount_state":"not_applicable","estimated_amount":null,"partial_known_component_amount_state":"not_applicable","partial_known_component_amount":null,"partial_reason_counts":[]}],"next_cursor":null}""";
     private static readonly string CompleteAnalyticsWithCursor =
         CompleteAnalytics.Replace(
             "\"next_cursor\":null",
@@ -988,10 +1347,90 @@ public sealed class CostPagePlaywrightTests
         """{"schema_version":"cost.session-estimates.v1","session_id":"0198f5b8-0c00-7000-8000-000000000001","calculation_state":"partial","active_head_revision":2,"active_estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_attempt_revision":3,"latest_attempt":{"attempt_revision":3,"run_id":"0198f5b8-0c00-7000-8000-000000000003","calculation_time_utc":"2026-07-23T03:00:00.0000000Z","freshness":"stale","kind":"failed","estimate_status":null,"estimate_id":null,"code":"source_mapping_unavailable"},"items":[{"head_revision":2,"estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","predecessor_estimate_id":"pricing-estimate-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","calculation_time_utc":"2026-07-23T02:00:00.0000000Z","session_effective_at_utc":"2026-07-23T01:00:00.0000000Z","estimate_status":"partial","freshness":"fresh","amount_kind":"provisional_known_component_subtotal","amount":"1.25","currency":"USD","provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","pricing_route":"credit_consuming_interaction","catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configuration_id":"cost-configuration-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registry":{"registry_version":"local-1","source_kind":"local_override","source_id":"operator-reviewed","source_label":"Operator reviewed override","entry_key":"github:model:api","effective_from_utc":"2026-07-20T00:00:00.0000000Z","effective_to_utc":null,"last_reviewed_date":"2026-07-20","stale_after_date":"2026-08-20","currency":"USD","source_reference":null},"components":[{"category":"input","state":"available","amount":"1.25","missing_reason":null},{"category":"output","state":"missing","amount":null,"missing_reason":"unknown_model"}],"coverage":{"required_categories":["input","output"],"estimated_categories":["input"],"missing_categories":["output"]},"reasons":["unknown_model"],"delta":{"state":"not_applicable","amount":null,"currency":null,"basis_freshness":null,"changed_fields":["coverage"]},"disclaimer":"estimated_cost_not_invoice.v1"}],"next_after":null}""";
     private const string ExactEstimate =
         """{"schema_version":"cost.session-estimate.v1","session_id":"0198f5b8-0c00-7000-8000-000000000001","active_head_revision":2,"active_estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","item":{"head_revision":2,"estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","predecessor_estimate_id":null,"calculation_time_utc":"2026-07-23T02:00:00.0000000Z","session_effective_at_utc":"2026-07-23T01:00:00.0000000Z","estimate_status":"partial","freshness":"fresh","amount_kind":"provisional_known_component_subtotal","amount":"1.25","currency":"USD","provider":"github_copilot","model":"gpt-4.1","billing_mode":"github_ai_credits","pricing_route":"credit_consuming_interaction","catalog_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configuration_id":"cost-configuration-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registry":{"registry_version":"local-1","source_kind":"local_override","source_id":"operator-reviewed","source_label":"Operator reviewed override","entry_key":"github:model:api","effective_from_utc":"2026-07-20T00:00:00.0000000Z","effective_to_utc":null,"last_reviewed_date":"2026-07-20","stale_after_date":"2026-08-20","currency":"USD","source_reference":null},"components":[{"category":"input","state":"available","amount":"1.25","missing_reason":null},{"category":"output","state":"missing","amount":null,"missing_reason":"unknown_model"}],"coverage":{"required_categories":["input","output"],"estimated_categories":["input"],"missing_categories":["output"]},"reasons":["unknown_model"],"delta":{"state":"not_applicable","amount":null,"currency":null,"basis_freshness":null,"changed_fields":[]},"disclaimer":"estimated_cost_not_invoice.v1"}}""";
+    private static readonly string PlanIncludedZeroEstimate = ExactEstimate
+        .Replace("\"estimate_status\":\"partial\"", "\"estimate_status\":\"estimated\"", StringComparison.Ordinal)
+        .Replace("\"amount_kind\":\"provisional_known_component_subtotal\"", "\"amount_kind\":\"complete_total\"", StringComparison.Ordinal)
+        .Replace("\"amount\":\"1.25\"", "\"amount\":\"0\"", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"github_ai_credits\"", "\"billing_mode\":\"plan_included\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"credit_consuming_interaction\"", "\"pricing_route\":\"plan_included_zero\"", StringComparison.Ordinal)
+        .Replace(
+            """{"category":"input","state":"available","amount":"0","missing_reason":null},{"category":"output","state":"missing","amount":null,"missing_reason":"unknown_model"}""",
+            """{"category":"included_zero_incremental_cost","state":"available","amount":"0","missing_reason":null}""",
+            StringComparison.Ordinal)
+        .Replace(
+            "\"coverage\":{\"required_categories\":[\"input\",\"output\"],\"estimated_categories\":[\"input\"],\"missing_categories\":[\"output\"]},\"reasons\":[\"unknown_model\"]",
+            "\"coverage\":{\"required_categories\":[\"included_zero_incremental_cost\"],\"estimated_categories\":[\"included_zero_incremental_cost\"],\"missing_categories\":[]},\"reasons\":[]",
+            StringComparison.Ordinal);
+    private static readonly string PlanIncludedZeroHistory = SessionHistory
+        .Replace("\"calculation_state\":\"partial\"", "\"calculation_state\":\"estimated\"", StringComparison.Ordinal)
+        .Replace("\"estimate_status\":\"partial\"", "\"estimate_status\":\"estimated\"", StringComparison.Ordinal)
+        .Replace("\"amount_kind\":\"provisional_known_component_subtotal\"", "\"amount_kind\":\"complete_total\"", StringComparison.Ordinal)
+        .Replace("\"amount\":\"1.25\"", "\"amount\":\"0\"", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"github_ai_credits\"", "\"billing_mode\":\"plan_included\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"credit_consuming_interaction\"", "\"pricing_route\":\"plan_included_zero\"", StringComparison.Ordinal)
+        .Replace(
+            """{"category":"input","state":"available","amount":"0","missing_reason":null},{"category":"output","state":"missing","amount":null,"missing_reason":"unknown_model"}""",
+            """{"category":"included_zero_incremental_cost","state":"available","amount":"0","missing_reason":null}""",
+            StringComparison.Ordinal)
+        .Replace(
+            "\"coverage\":{\"required_categories\":[\"input\",\"output\"],\"estimated_categories\":[\"input\"],\"missing_categories\":[\"output\"]},\"reasons\":[\"unknown_model\"]",
+            "\"coverage\":{\"required_categories\":[\"included_zero_incremental_cost\"],\"estimated_categories\":[\"included_zero_incremental_cost\"],\"missing_categories\":[]},\"reasons\":[]",
+            StringComparison.Ordinal);
+    private static readonly string FullEstimate = PlanIncludedZeroEstimate
+        .Replace("\"amount\":\"0\"", "\"amount\":\"4.25\"", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"plan_included\"", "\"billing_mode\":\"github_ai_credits\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"plan_included_zero\"", "\"pricing_route\":\"credit_consuming_interaction\"", StringComparison.Ordinal)
+        .Replace("included_zero_incremental_cost", "input", StringComparison.Ordinal);
+    private static readonly string FullEstimateHistory = PlanIncludedZeroHistory
+        .Replace("\"amount\":\"0\"", "\"amount\":\"4.25\"", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"plan_included\"", "\"billing_mode\":\"github_ai_credits\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"plan_included_zero\"", "\"pricing_route\":\"credit_consuming_interaction\"", StringComparison.Ordinal)
+        .Replace("included_zero_incremental_cost", "input", StringComparison.Ordinal);
+    private static readonly string NotEstimableEstimate = ExactEstimate
+        .Replace("\"estimate_status\":\"partial\"", "\"estimate_status\":\"not-estimable\"", StringComparison.Ordinal)
+        .Replace("\"amount_kind\":\"provisional_known_component_subtotal\"", "\"amount_kind\":\"not_applicable\"", StringComparison.Ordinal)
+        .Replace("\"amount\":\"1.25\",\"currency\":\"USD\"", "\"amount\":null,\"currency\":null", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"github_ai_credits\"", "\"billing_mode\":\"__BILLING_MODE__\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"credit_consuming_interaction\"", "\"pricing_route\":\"not_estimable_contract\"", StringComparison.Ordinal)
+        .Replace(
+            "\"components\":[{\"category\":\"input\",\"state\":\"available\",\"amount\":\"1.25\",\"missing_reason\":null},{\"category\":\"output\",\"state\":\"missing\",\"amount\":null,\"missing_reason\":\"unknown_model\"}],\"coverage\":{\"required_categories\":[\"input\",\"output\"],\"estimated_categories\":[\"input\"],\"missing_categories\":[\"output\"]},\"reasons\":[\"unknown_model\"]",
+            "\"components\":[],\"coverage\":{\"required_categories\":[],\"estimated_categories\":[],\"missing_categories\":[]},\"reasons\":[\"__REASON__\"]",
+            StringComparison.Ordinal);
+    private static readonly string NotEstimableHistory = SessionHistory
+        .Replace("\"calculation_state\":\"partial\"", "\"calculation_state\":\"not_estimable\"", StringComparison.Ordinal)
+        .Replace("\"estimate_status\":\"partial\"", "\"estimate_status\":\"not-estimable\"", StringComparison.Ordinal)
+        .Replace("\"amount_kind\":\"provisional_known_component_subtotal\"", "\"amount_kind\":\"not_applicable\"", StringComparison.Ordinal)
+        .Replace("\"amount\":\"1.25\",\"currency\":\"USD\"", "\"amount\":null,\"currency\":null", StringComparison.Ordinal)
+        .Replace("\"billing_mode\":\"github_ai_credits\"", "\"billing_mode\":\"__BILLING_MODE__\"", StringComparison.Ordinal)
+        .Replace("\"pricing_route\":\"credit_consuming_interaction\"", "\"pricing_route\":\"not_estimable_contract\"", StringComparison.Ordinal)
+        .Replace(
+            "\"components\":[{\"category\":\"input\",\"state\":\"available\",\"amount\":\"1.25\",\"missing_reason\":null},{\"category\":\"output\",\"state\":\"missing\",\"amount\":null,\"missing_reason\":\"unknown_model\"}],\"coverage\":{\"required_categories\":[\"input\",\"output\"],\"estimated_categories\":[\"input\"],\"missing_categories\":[\"output\"]},\"reasons\":[\"unknown_model\"]",
+            "\"components\":[],\"coverage\":{\"required_categories\":[],\"estimated_categories\":[],\"missing_categories\":[]},\"reasons\":[\"__REASON__\"]",
+            StringComparison.Ordinal);
+    private static readonly string StaleRegistryEstimate = ExactEstimate.Replace(
+        "\"calculation_time_utc\":\"2026-07-23T02:00:00.0000000Z\"",
+        "\"calculation_time_utc\":\"2026-08-21T02:00:00.0000000Z\"",
+        StringComparison.Ordinal);
+    private static readonly string StaleRegistryHistory = SessionHistory.Replace(
+        "\"calculation_time_utc\":\"2026-07-23T02:00:00.0000000Z\"",
+        "\"calculation_time_utc\":\"2026-08-21T02:00:00.0000000Z\"",
+        StringComparison.Ordinal);
+    private static readonly string StaleBoundaryEstimate = ExactEstimate.Replace(
+        "\"calculation_time_utc\":\"2026-07-23T02:00:00.0000000Z\"",
+        "\"calculation_time_utc\":\"2026-08-20T02:00:00.0000000Z\"",
+        StringComparison.Ordinal);
+    private static readonly string StaleBoundaryHistory = SessionHistory.Replace(
+        "\"calculation_time_utc\":\"2026-07-23T02:00:00.0000000Z\"",
+        "\"calculation_time_utc\":\"2026-08-20T02:00:00.0000000Z\"",
+        StringComparison.Ordinal);
+    private const string CodexUnavailableHistory =
+        """{"schema_version":"cost.session-estimates.v1","session_id":"0198f5b8-0c00-7000-8000-000000000001","calculation_state":"unavailable","active_head_revision":null,"active_estimate_id":null,"latest_attempt_revision":1,"latest_attempt":{"attempt_revision":1,"run_id":"0198f5b8-0c00-7000-8000-000000000003","calculation_time_utc":"2026-07-23T03:00:00.0000000Z","freshness":"fresh","kind":"unavailable","estimate_status":null,"estimate_id":null,"code":"codex_adapter_unavailable"},"items":[],"next_after":null}""";
     private const string SessionRecalculations =
         """{"schema_version":"cost.session-recalculations.v1","session_id":"0198f5b8-0c00-7000-8000-000000000001","active":null,"attempts":[{"attempt_revision":3,"run_id":"0198f5b8-0c00-7000-8000-000000000003","calculation_time_utc":"2026-07-23T03:00:00.0000000Z","freshness":"stale","kind":"failed","estimate_status":null,"estimate_id":null,"code":"source_mapping_unavailable","recalculation_href":"/api/costs/v1/recalculations/0198f5b8-0c00-7000-8000-000000000003"}],"next_after":null}""";
     private const string RecalculationRunning =
         """{"schema_version":"cost.recalculation.v1","run_id":"0198f5b8-0c00-7000-8000-000000000099","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"running","target_count":1,"scope_count":1,"targets":[{"target_ordinal":0,"session_id":"0198f5b8-0c00-7000-8000-000000000001","base_head_revision":2,"base_estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","result":null}],"events":[],"budget_results":[],"failure_code":null}""";
     private const string RecalculationSucceeded =
         """{"schema_version":"cost.recalculation.v1","run_id":"0198f5b8-0c00-7000-8000-000000000099","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"succeeded","target_count":1,"scope_count":1,"targets":[{"target_ordinal":0,"session_id":"0198f5b8-0c00-7000-8000-000000000001","base_head_revision":2,"base_estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","result":{"kind":"estimate","status":"estimated","estimate_id":"pricing-estimate-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}],"events":[],"budget_results":[{"scope_ordinal":0,"scope":{"scope_kind":"session","session_id":"0198f5b8-0c00-7000-8000-000000000001"},"rule_id":"session-estimated-cost-threshold","rule_version":"1","outcome":{"kind":"no_match","evaluation_id":"evaluation-a"}}],"failure_code":null}""";
+    private const string RecalculationWithBudgetMatrix =
+        """{"schema_version":"cost.recalculation.v1","run_id":"0198f5b8-0c00-7000-8000-000000000099","request_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"succeeded","target_count":1,"scope_count":3,"targets":[{"target_ordinal":0,"session_id":"0198f5b8-0c00-7000-8000-000000000001","base_head_revision":2,"base_estimate_id":"pricing-estimate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","result":{"kind":"estimate","status":"estimated","estimate_id":"pricing-estimate-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}],"events":[],"budget_results":[{"scope_ordinal":0,"scope":{"scope_kind":"session","session_id":"0198f5b8-0c00-7000-8000-000000000001"},"rule_id":"session-estimated-cost-threshold","rule_version":"1","outcome":{"kind":"receipt","evaluation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","alert_id":"1111111111111111111111111111111111111111111111111111111111111111"}},{"scope_ordinal":1,"scope":{"scope_kind":"utc_day","utc_date":"2026-07-23"},"rule_id":"daily-estimated-cost-threshold","rule_version":"1","outcome":{"kind":"receipt","evaluation_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","alert_id":"2222222222222222222222222222222222222222222222222222222222222222"}},{"scope_ordinal":2,"scope":{"scope_kind":"rolling_period","cutoff_utc":"2026-07-24T00:00:00.0000000Z","window_days":30},"rule_id":"period-estimated-cost-threshold","rule_version":"1","outcome":{"kind":"suppression","evaluation_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suppression_ordinal":0,"code":"insufficient_estimate_coverage"}}],"failure_code":null}""";
 }
