@@ -117,6 +117,19 @@ public sealed class PricingQueryFoundationTests
         Assert.Equal(
             PricingReadStatus.InvalidCursor,
             PricingCatalogReadProjectorV1.Read(catalog, "not-a-cursor", 1).Status);
+        Assert.Equal(
+            PricingReadStatus.InvalidCursor,
+            PricingCatalogReadProjectorV1.Read(catalog, first.Value.NextAfter + "=", 1).Status);
+        Assert.Equal(
+            PricingReadStatus.InvalidCursor,
+            PricingCatalogReadProjectorV1.Read(catalog, first.Value.NextAfter + " ", 1).Status);
+        var standardAlphabetAlias = first.Value.NextAfter
+            .Replace('-', '+')
+            .Replace('_', '/');
+        if (standardAlphabetAlias != first.Value.NextAfter)
+            Assert.Equal(
+                PricingReadStatus.InvalidCursor,
+                PricingCatalogReadProjectorV1.Read(catalog, standardAlphabetAlias, 1).Status);
         var changedBytes = Encoding.UTF8.GetBytes(
             $$"""{"schema_version":"cost.catalog.cursor.v1","catalog_sha256":"{{new string('f', 64)}}","entry_key":"{{Assert.Single(first.Value.Entries).EntryKey}}"}""");
         var changedCursor = "cost-catalog-cursor-v1."
@@ -171,6 +184,101 @@ public sealed class PricingQueryFoundationTests
     }
 
     [Fact]
+    public void RecalculationRead_RetainsExactCanonicalBudgetScopeObjects()
+    {
+        using var database = new QueryDatabase();
+        var calculationTime = new DateTimeOffset(2026, 7, 24, 2, 30, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddMinutes(-2));
+        var (store, catalog, configuration) = database.CreateConfiguredPricingStore(clock);
+        var sessionId = database.InsertResolvedSession();
+        using (var connection = database.Open())
+            Execute(
+                connection,
+                $$"""
+                INSERT INTO alert_evaluations(
+                    evaluation_id,schema_version,input_hash,configuration_version,
+                    configuration_hash,canonical_json)
+                VALUES
+                    ('{{new string('a', 64)}}','alert.evaluation.v2','{{new string('1', 64)}}',
+                        'fixture-v2','{{new string('2', 64)}}',
+                        '{"evaluation_id":"{{new string('a', 64)}}"}'),
+                    ('{{new string('b', 64)}}','alert.evaluation.v2','{{new string('3', 64)}}',
+                        'fixture-v2','{{new string('4', 64)}}',
+                        '{"evaluation_id":"{{new string('b', 64)}}"}'),
+                    ('{{new string('c', 64)}}','alert.evaluation.v2','{{new string('5', 64)}}',
+                        'fixture-v2','{{new string('6', 64)}}',
+                        '{"evaluation_id":"{{new string('c', 64)}}"}');
+                """);
+        var cutoff = new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero);
+        CostBudgetScopeV1[] scopes =
+        [
+            new("session", sessionId, null, null, null),
+            new("utc_day", null, "2026-07-24", null, null),
+            new("rolling_period", null, null, cutoff, 7),
+        ];
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            scopes,
+            "pricing-query-scopes-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                runId,
+                request,
+                [database.CaptureTarget(sessionId)],
+                calculationTime).Status);
+        clock.UtcNow = calculationTime.AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        var eligibilityDigest = new string('9', 64);
+        var eligible = new[] { sessionId };
+        PricingBudgetResultWrite[] results =
+        [
+            new(
+                0, "session",
+                PricingAlertCostScopeIdentityV2.Create(
+                    "session", null, null, eligibilityDigest, eligible),
+                eligibilityDigest, eligible, null, null,
+                "session-estimated-cost-threshold", "1", new string('a', 64),
+                "no_match", null, null, null),
+            new(
+                1, "utc_day",
+                PricingAlertCostScopeIdentityV2.Create(
+                    "utc_day", cutoff.AddDays(-1), cutoff, eligibilityDigest, eligible),
+                eligibilityDigest, eligible, cutoff.AddDays(-1), cutoff,
+                "daily-estimated-cost-threshold", "1", new string('b', 64),
+                "no_match", null, null, null),
+            new(
+                2, "rolling_period",
+                PricingAlertCostScopeIdentityV2.Create(
+                    "rolling_period", cutoff.AddDays(-7), cutoff, eligibilityDigest, eligible),
+                eligibilityDigest, eligible, cutoff.AddDays(-7), cutoff,
+                "period-estimated-cost-threshold", "1", new string('c', 64),
+                "no_match", null, null, null),
+        ];
+        clock.UtcNow = calculationTime.AddSeconds(2);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.AppendRecalculationCompletionApplication(
+                runId,
+                [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+                results,
+                failure: null).Status);
+
+        var read = new SqlitePricingReadStore(database.Path).ReadRecalculation(runId);
+
+        Assert.Equal(PricingReadStatus.Success, read.Status);
+        Assert.Equal(scopes, read.Value!.BudgetResults.Select(result => result.Scope));
+        Assert.Equal(sessionId, read.Value.BudgetResults[0].Scope.SessionId);
+        Assert.Equal("2026-07-24", read.Value.BudgetResults[1].Scope.UtcDate);
+        Assert.Equal(cutoff, read.Value.BudgetResults[2].Scope.CutoffUtc);
+        Assert.Equal(7, read.Value.BudgetResults[2].Scope.WindowDays);
+    }
+
+    [Fact]
     public void SessionRecalculationHistory_OrdersContiguousAttemptsAndValidatesCursorMembership()
     {
         using var database = new QueryDatabase();
@@ -199,10 +307,12 @@ public sealed class PricingQueryFoundationTests
             Assert.Equal(PricingStoreStatus.Success, store.RecoverInterruptedRuns().Status);
         }
         var queries = new SqlitePricingReadStore(database.Path);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
 
-        var first = queries.ReadSessionRecalculations(sessionId, null, 1);
+        var first = queries.ReadSessionRecalculations(sessionId, catalogBytes, null, 1);
         var second = queries.ReadSessionRecalculations(
             sessionId,
+            catalogBytes,
             Assert.Single(first.Value!.Attempts).AttemptRevision,
             1);
 
@@ -227,11 +337,247 @@ public sealed class PricingQueryFoundationTests
                 WHERE session_id='{sessionId}';
                 """);
         Assert.All(
-            queries.ReadSessionRecalculations(sessionId, null, 2).Value!.Attempts,
+            queries.ReadSessionRecalculations(sessionId, catalogBytes, null, 2).Value!.Attempts,
             attempt => Assert.Equal("stale", attempt.Freshness));
         Assert.Equal(
             PricingReadStatus.InvalidCursor,
-            queries.ReadSessionRecalculations(database.InsertResolvedSession(), 1, 1).Status);
+            queries.ReadSessionRecalculations(
+                database.InsertResolvedSession(),
+                catalogBytes,
+                1,
+                1).Status);
+    }
+
+    [Fact]
+    public void ActiveRecalculation_IsStaleAfterBudgetOnlyConfigurationHeadChange()
+    {
+        using var database = new QueryDatabase();
+        var calculationTime = new DateTimeOffset(2026, 7, 24, 4, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddMinutes(-2));
+        var (store, catalog, configuration) = database.CreateConfiguredPricingStore(clock);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var sessionId = database.InsertResolvedSession();
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-active-freshness-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                runId,
+                request,
+                [database.CaptureTarget(sessionId)],
+                calculationTime).Status);
+        var queries = new SqlitePricingReadStore(database.Path);
+        Assert.Equal(
+            "fresh",
+            queries.ReadSessionRecalculations(sessionId, catalogBytes, null).Value!.Active!.Freshness);
+        var unrelatedCatalog = CreateUnrelatedCatalog();
+        var unrelatedCatalogBytes =
+            PricingCanonicalJson.SerializeCatalogSnapshot(unrelatedCatalog);
+        Assert.Equal(
+            "stale",
+            queries.ReadSessionRecalculations(
+                sessionId,
+                unrelatedCatalogBytes,
+                null).Value!.Active!.Freshness);
+
+        clock.UtcNow = calculationTime.AddMinutes(1);
+        var changed = CostConfigurationCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            catalog.CatalogSha256,
+            configuration.SourceEntries,
+            [new(
+                "session-estimated-cost-threshold",
+                "1",
+                false,
+                "USD",
+                "1",
+                "2",
+                5000,
+                "session",
+                null)],
+            clock.UtcNow);
+        var preview = CostConfigurationPreviewCanonicalJsonV1.Create(
+            changed,
+            1,
+            configuration.ConfigurationId,
+            catalog.CatalogSha256,
+            PricingConfigurationSelectionDigestV1.Create([]),
+            0,
+            0,
+            "exact",
+            0,
+            "exact");
+        Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.AppendConfigurationCommitApplication(
+                preview,
+                new(catalog.CatalogSha256, catalogBytes),
+                []).Status);
+
+        Assert.Equal(
+            "stale",
+            queries.ReadSessionRecalculations(sessionId, catalogBytes, null).Value!.Active!.Freshness);
+        clock.UtcNow = calculationTime.AddMinutes(2);
+        Assert.Equal(PricingStoreStatus.Success, store.RecoverInterruptedRuns().Status);
+        Assert.Equal(
+            "fresh",
+            Assert.Single(
+                queries.ReadSessionRecalculations(
+                    sessionId,
+                    unrelatedCatalogBytes,
+                    null).Value!.Attempts).Freshness);
+    }
+
+    [Fact]
+    public void EstimateAttempt_UsesExactPricingSelectionSemanticFreshness()
+    {
+        using var database = new QueryDatabase();
+        var calculationTime = new DateTimeOffset(2026, 7, 25, 2, 0, 0, TimeSpan.Zero);
+        var clock = new MutableTimeProvider(calculationTime.AddMinutes(-2));
+        var (store, catalog, configuration) =
+            database.CreateConfiguredPricingStore(clock, estimateCapable: true);
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var sessionId = database.InsertResolvedSession();
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            1,
+            catalog.CatalogSha256,
+            [sessionId],
+            [],
+            "pricing-estimate-freshness-0001");
+        var runId = Guid.CreateVersion7().ToString("D");
+        var target = database.CaptureTarget(sessionId);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.StartRecalculationApplication(
+                runId,
+                request,
+                [target],
+                calculationTime).Status);
+        clock.UtcNow = calculationTime.AddSeconds(1);
+        Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
+        var quantityProvenance = new PricingValueProvenance(
+            "synthetic-adapter",
+            "pricing-capability.v1",
+            "event-1",
+            "not_captured",
+            "pricing-normalization.v1");
+        var configurationProvenance = new PricingValueProvenance(
+            "local-monitor-cost-configuration",
+            "cost.configuration.v1",
+            configuration.ConfigurationId + ".source-entry-000",
+            "not_captured",
+            "cost-configuration-provenance.v1");
+        var estimateRequest = new PricingEstimateRequest(
+            PricingContractVersions.EstimateRequest,
+            calculationTime,
+            null,
+            new(
+                "github-copilot-vscode",
+                "1.2.3",
+                sessionId,
+                target.SessionEffectiveAtUtc,
+                PricingProviders.GitHubCopilot,
+                "GPT-5 mini",
+                PricingBillingModes.PlanIncluded,
+                PricingRoutes.CreditConsumingInteraction,
+                PricingSourceCompleteness.Full,
+                [],
+                quantityProvenance,
+                quantityProvenance,
+                quantityProvenance,
+                configurationProvenance,
+                configurationProvenance),
+            PricingUsage.Empty);
+        var estimate = new PricingEstimationEngine(catalog).Estimate(estimateRequest);
+        clock.UtcNow = calculationTime.AddSeconds(2);
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.AppendEstimateSuccessApplication(
+                runId,
+                0,
+                0,
+                estimateRequest,
+                PricingCanonicalJson.Serialize(estimate)).Status);
+        var queries = new SqlitePricingReadStore(database.Path);
+        Assert.Equal(
+            "fresh",
+            Assert.Single(
+                queries.ReadSessionRecalculations(
+                    sessionId,
+                    catalogBytes,
+                    null).Value!.Attempts).Freshness);
+        Assert.Equal(
+            "fresh",
+            Assert.Single(
+                queries.ReadSessionRecalculations(
+                    sessionId,
+                    PricingCanonicalJson.SerializeCatalogSnapshot(CreateUnrelatedCatalog()),
+                    null).Value!.Attempts).Freshness);
+
+        var bundled = BundledPricingRegistry.Load();
+        var selected = catalog.Select(
+            PricingProviders.GitHubCopilot,
+            "GPT-5 mini",
+            PricingBillingModes.PlanIncluded,
+            PricingRoutes.CreditConsumingInteraction,
+            target.SessionEffectiveAtUtc);
+        var local = selected.Document with
+        {
+            RegistryVersion = "query-local-v1",
+            SourceKind = PricingRegistrySourceKinds.LocalOverride,
+            SourceId = "query-local",
+            SourceLabel = "Query freshness local override",
+            Entries =
+            [
+                selected.Entry with
+                {
+                    EntryId = "query-local-plan",
+                    SupersedesEntryKey = selected.EntryKey,
+                },
+            ],
+        };
+        var changedCatalog = PricingCatalog.Create(bundled, local);
+
+        Assert.Equal(
+            "stale",
+            Assert.Single(
+                queries.ReadSessionRecalculations(
+                    sessionId,
+                    PricingCanonicalJson.SerializeCatalogSnapshot(changedCatalog),
+                    null).Value!.Attempts).Freshness);
+    }
+
+    private static PricingCatalog CreateUnrelatedCatalog()
+    {
+        var bundled = BundledPricingRegistry.Load();
+        var source = bundled.Entries[0];
+        return PricingCatalog.Create(
+            bundled,
+            bundled with
+            {
+                RegistryVersion = "query-unrelated-v1",
+                SourceKind = PricingRegistrySourceKinds.LocalOverride,
+                SourceId = "query-unrelated",
+                SourceLabel = "Query freshness unrelated entry",
+                Entries =
+                [
+                    source with
+                    {
+                        EntryId = "query-unrelated-entry",
+                        CanonicalModelId = "query-unrelated-model",
+                        Aliases = [],
+                        SupersedesEntryKey = null,
+                    },
+                ],
+            });
     }
 
     private static void Execute(SqliteConnection connection, string sql)
@@ -290,7 +636,9 @@ public sealed class PricingQueryFoundationTests
         }
 
         internal (SqlitePricingStore Store, PricingCatalog Catalog, CostConfigurationV1 Configuration)
-            CreateConfiguredPricingStore(MutableTimeProvider clock)
+            CreateConfiguredPricingStore(
+                MutableTimeProvider clock,
+                bool estimateCapable = false)
         {
             var store = CreatePricingStore(clock);
             var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
@@ -302,10 +650,12 @@ public sealed class PricingQueryFoundationTests
                 [new(
                     "github-copilot-vscode",
                     "1.2.3",
-                    "synthetic-capability.v1",
+                    estimateCapable ? "pricing-capability.v1" : "synthetic-capability.v1",
                     PricingProviders.GitHubCopilot,
                     PricingBillingModes.PlanIncluded,
-                    PricingRoutes.CodeCompletion)],
+                    estimateCapable
+                        ? PricingRoutes.CreditConsumingInteraction
+                        : PricingRoutes.CodeCompletion)],
                 [],
                 clock.UtcNow);
             var preview = CostConfigurationPreviewCanonicalJsonV1.Create(

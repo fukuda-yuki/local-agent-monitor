@@ -158,6 +158,11 @@ public static class PricingCatalogReadProjectorV1
                 || string.IsNullOrEmpty(parsed.EntryKey)
                 || !bytes.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(parsed)))
                 return false;
+            if (!string.Equals(
+                    value,
+                    WriteCursor(parsed.CatalogSha256, parsed.EntryKey),
+                    StringComparison.Ordinal))
+                return false;
             cursor = parsed;
             return true;
         }

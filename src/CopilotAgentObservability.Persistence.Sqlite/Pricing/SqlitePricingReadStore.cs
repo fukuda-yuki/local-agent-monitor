@@ -1,5 +1,9 @@
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Pricing;
@@ -55,7 +59,7 @@ public sealed record CostRecalculationEventReadV1(
 
 public sealed record CostRecalculationBudgetResultReadV1(
     int ScopeOrdinal,
-    string ScopeKind,
+    CostBudgetScopeV1 Scope,
     string RuleId,
     string RuleVersion,
     string OutcomeKind,
@@ -236,8 +240,13 @@ public sealed class SqlitePricingReadStore
 
             var targets = ReadTargets(connection, transaction, runId);
             var events = ReadEvents(connection, transaction, runId);
-            var budgets = ReadBudgetResults(connection, transaction, runId);
-            if (targets.Count != targetCount
+            var budgets = ReadBudgetResults(
+                connection,
+                transaction,
+                runId,
+                request.Value.BudgetScopes);
+            if (budgets is null
+                || targets.Count != targetCount
                 || events.Count == 0
                 || !targets.Select(item => item.TargetOrdinal).SequenceEqual(Enumerable.Range(0, targetCount))
                 || !events.Select(item => item.EventSequence).SequenceEqual(Enumerable.Range(0, events.Count)))
@@ -358,6 +367,7 @@ public sealed class SqlitePricingReadStore
 
     public PricingReadResult<CostSessionRecalculationsReadV1> ReadSessionRecalculations(
         string sessionId,
+        ReadOnlyMemory<byte> currentProviderCatalogBytes,
         long? after,
         int limit = 50)
     {
@@ -366,6 +376,8 @@ public sealed class SqlitePricingReadStore
             return new(PricingReadStatus.InvalidCursor);
         try
         {
+            var currentCatalog = PricingCatalogSnapshotConsumer.Deserialize(
+                currentProviderCatalogBytes.Span);
             using var connection = Open();
             using var transaction = connection.BeginTransaction();
             if (!PricingSchemaV1.ValidateRows(connection, transaction))
@@ -394,11 +406,16 @@ public sealed class SqlitePricingReadStore
                     transaction,
                     PricingReadStatus.InvalidCursor);
 
-            var active = ReadActiveAttempt(connection, transaction, sessionId);
+            var active = ReadActiveAttempt(
+                connection,
+                transaction,
+                sessionId,
+                currentCatalog);
             var attempts = ReadTerminalAttempts(
                 connection,
                 transaction,
                 sessionId,
+                currentCatalog,
                 after,
                 limit + 1);
             if (!AttemptsAreContiguous(connection, transaction, sessionId)
@@ -430,7 +447,9 @@ public sealed class SqlitePricingReadStore
             exception is SqliteException
                 or InvalidOperationException
                 or FormatException
-                or ArgumentException)
+                or ArgumentException
+                or PricingRegistryValidationException
+                or PricingEstimateValidationException)
         {
             return new(PricingReadStatus.Unavailable);
         }
@@ -547,10 +566,11 @@ public sealed class SqlitePricingReadStore
         return values;
     }
 
-    private static List<CostRecalculationBudgetResultReadV1> ReadBudgetResults(
+    private static List<CostRecalculationBudgetResultReadV1>? ReadBudgetResults(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string runId)
+        string runId,
+        IReadOnlyList<CostBudgetScopeV1> requestedScopes)
     {
         using var command = Command(
             connection,
@@ -565,9 +585,15 @@ public sealed class SqlitePricingReadStore
         using var reader = command.ExecuteReader();
         var values = new List<CostRecalculationBudgetResultReadV1>();
         while (reader.Read())
+        {
+            var ordinal = reader.GetInt32(0);
+            if (ordinal < 0
+                || ordinal >= requestedScopes.Count
+                || reader.GetString(1) != requestedScopes[ordinal].ScopeKind)
+                return null;
             values.Add(new(
-                reader.GetInt32(0),
-                reader.GetString(1),
+                ordinal,
+                requestedScopes[ordinal] with { },
                 reader.GetString(2),
                 reader.GetString(3),
                 reader.GetString(4),
@@ -575,13 +601,15 @@ public sealed class SqlitePricingReadStore
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetInt32(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8)));
+        }
         return values;
     }
 
     private static CostSessionActiveRecalculationReadV1? ReadActiveAttempt(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string sessionId)
+        string sessionId,
+        PricingCatalog currentCatalog)
     {
         using var command = Command(
             connection,
@@ -610,7 +638,12 @@ public sealed class SqlitePricingReadStore
         reader.Close();
         return value with
         {
-            Freshness = IsAttemptFresh(connection, transaction, sessionId, runId)
+            Freshness = IsActiveAttemptFresh(
+                connection,
+                transaction,
+                sessionId,
+                runId,
+                currentCatalog)
                 ? "fresh"
                 : "stale",
         };
@@ -620,6 +653,7 @@ public sealed class SqlitePricingReadStore
         SqliteConnection connection,
         SqliteTransaction transaction,
         string sessionId,
+        PricingCatalog currentCatalog,
         long? after,
         int limit)
     {
@@ -661,14 +695,171 @@ public sealed class SqlitePricingReadStore
             row.Revision,
             row.RunId,
             row.Time,
-            IsAttemptFresh(connection, transaction, sessionId, row.RunId) ? "fresh" : "stale",
+            IsTerminalAttemptFresh(
+                connection,
+                transaction,
+                sessionId,
+                row.RunId,
+                row.Kind,
+                row.EstimateId,
+                currentCatalog) ? "fresh" : "stale",
             row.Kind,
             row.Status,
             row.EstimateId,
             row.Code)).ToList();
     }
 
-    private static bool IsAttemptFresh(
+    private static bool IsActiveAttemptFresh(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        string runId,
+        PricingCatalog currentCatalog)
+    {
+        using var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT r.configuration_id,r.configuration_head_revision,r.catalog_sha256,
+                h.configuration_id,h.head_revision
+            FROM pricing_recalculation_runs r
+            LEFT JOIN pricing_configuration_heads h
+                ON h.head_revision=(SELECT MAX(head_revision) FROM pricing_configuration_heads)
+            WHERE r.run_id=$run;
+            """,
+            ("$run", runId));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return false;
+        var matchesCas = !reader.IsDBNull(3)
+            && reader.GetString(0) == reader.GetString(3)
+            && reader.GetInt64(1) == reader.GetInt64(4)
+            && reader.GetString(2) == currentCatalog.CatalogSha256;
+        reader.Close();
+        return matchesCas
+            && IsCapturedInputFresh(connection, transaction, sessionId, runId);
+    }
+
+    private static bool IsTerminalAttemptFresh(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        string runId,
+        string resultKind,
+        string? estimateId,
+        PricingCatalog currentCatalog)
+    {
+        if (!IsCapturedInputFresh(connection, transaction, sessionId, runId))
+            return false;
+        if (resultKind != "estimate") return true;
+        return estimateId is not null
+            && IsEstimateSemanticallyFresh(
+                connection,
+                transaction,
+                estimateId,
+                currentCatalog);
+    }
+
+    private static bool IsEstimateSemanticallyFresh(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string estimateId,
+        PricingCatalog currentCatalog)
+    {
+        byte[] estimateBytes;
+        byte[] exactCatalogBytes;
+        using (var command = Command(
+            connection,
+            transaction,
+            """
+            SELECT e.canonical_blob,c.canonical_blob
+            FROM pricing_estimates e
+            JOIN pricing_catalog_snapshots c ON c.catalog_sha256=e.catalog_sha256
+            WHERE e.estimate_id=$estimate;
+            """,
+            ("$estimate", estimateId)))
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read())
+                throw new InvalidOperationException("Estimate freshness source is missing.");
+            estimateBytes = ((byte[])reader[0]).ToArray();
+            exactCatalogBytes = ((byte[])reader[1]).ToArray();
+            if (reader.Read())
+                throw new InvalidOperationException("Estimate freshness source is ambiguous.");
+        }
+
+        var exactCatalog = PricingCatalogSnapshotConsumer.Deserialize(exactCatalogBytes);
+        var original = PricingEstimateConsumer.Deserialize(estimateBytes, exactCatalog);
+        var current = new PricingEstimationEngine(currentCatalog).Estimate(
+            new(
+                PricingContractVersions.EstimateRequest,
+                original.CalculationTimeUtc,
+                original.SupersedesEstimateId,
+                original.Source,
+                original.Usage));
+        return PricingSelectionSemanticSignature(original)
+            == PricingSelectionSemanticSignature(current);
+    }
+
+    private static string PricingSelectionSemanticSignature(PricingEstimateRecord estimate)
+    {
+        using var stream = new MemoryStream();
+        Frame(stream, "cost-pricing-selection-semantic/v1");
+        Frame(stream, estimate.Status);
+        Frame(stream, estimate.Amount?.ToString("G29", CultureInfo.InvariantCulture));
+        Frame(stream, estimate.Currency);
+        WriteCount(stream, estimate.Components.Count);
+        foreach (var component in estimate.Components)
+        {
+            Frame(stream, component.Category);
+            Frame(stream, component.Amount is null ? "missing" : "available");
+            Frame(stream, component.Amount?.ToString("G29", CultureInfo.InvariantCulture));
+            Frame(stream, component.MissingReason);
+        }
+        WriteCount(stream, estimate.Reasons.Count);
+        foreach (var reason in estimate.Reasons) Frame(stream, reason);
+        if (estimate.Registry is null)
+        {
+            Frame(stream, null);
+        }
+        else
+        {
+            Frame(stream, "selected");
+            Frame(stream, estimate.Registry.SourceKind);
+            Frame(stream, estimate.Registry.SourceId);
+            Frame(stream, estimate.Registry.RegistryVersion);
+            Frame(stream, estimate.Registry.EntryKey);
+            Frame(stream, estimate.Registry.EffectiveFromUtc.ToString("O", CultureInfo.InvariantCulture));
+            Frame(
+                stream,
+                estimate.Registry.EffectiveToUtc?.ToString("O", CultureInfo.InvariantCulture));
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray())).ToLowerInvariant();
+    }
+
+    private static void WriteCount(Stream stream, int count)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(bytes, count);
+        stream.Write(bytes);
+    }
+
+    private static void Frame(Stream stream, string? value)
+    {
+        if (value is null)
+        {
+            Span<byte> missingLength = stackalloc byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(missingLength, -1);
+            stream.Write(missingLength);
+            return;
+        }
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+        stream.Write(length);
+        stream.Write(bytes);
+    }
+
+    private static bool IsCapturedInputFresh(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string sessionId,
