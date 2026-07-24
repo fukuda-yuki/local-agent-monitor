@@ -777,25 +777,27 @@
     await mutation(async () => {
       setMutationDisabled(true);
       const requestedGeneration = state.generation;
-      const readRequest = { generation: requestedGeneration, signal: state.controller.signal };
       const request = recalculationRequest();
       const body = JSON.stringify(request);
       try {
         let result = await postExact("/api/costs/v1/recalculations", body, true);
-        if (requestedGeneration !== state.generation) {
-          if (result.state === "succeeded") await refreshDerivedState();
-          return;
-        }
-        renderRecalculation(result);
+        if (requestedGeneration === state.generation) renderRecalculation(result);
         while (result.state === "requested" || result.state === "running") {
           await new Promise(resolve => setTimeout(resolve, 100));
-          if (requestedGeneration !== state.generation) return;
-          result = await getJson(
-            `/api/costs/v1/recalculations/${encodeURIComponent(result.run_id)}`,
-            readRequest);
-          renderRecalculation(result);
+          const pollGeneration = state.generation;
+          try {
+            result = await getJson(
+              `/api/costs/v1/recalculations/${encodeURIComponent(result.run_id)}`,
+              { generation: pollGeneration, signal: state.controller.signal });
+          } catch (failure) {
+            if (failure?.name === "AbortError" && pollGeneration !== state.generation) continue;
+            throw failure;
+          }
+          if (requestedGeneration === state.generation) renderRecalculation(result);
         }
-        announce(`recalculation ${result.state}。history と analytics を更新します。`);
+        if (requestedGeneration === state.generation) {
+          announce(`recalculation ${result.state}。history と analytics を更新します。`);
+        }
         if (result.state === "succeeded") await refreshDerivedState();
       } catch (failure) {
         if (failure?.name !== "AbortError" && requestedGeneration === state.generation) {
