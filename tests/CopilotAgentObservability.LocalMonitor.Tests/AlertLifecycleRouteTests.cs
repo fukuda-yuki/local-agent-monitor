@@ -9,7 +9,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection("Retention mutation API routes")]
 public sealed class AlertLifecycleRouteTests
 {
-    private const string AlertId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private static readonly AlertEvaluationResult ReceiptEvaluation = CreateReceiptEvaluation();
+    private static readonly string AlertId = ReceiptEvaluation.Receipts.Single().AlertId;
 
     [Fact]
     public async Task FreshHost_InitializesAcceptedParentThenReturnsNotFoundForMissingReceipt()
@@ -21,17 +22,17 @@ public sealed class AlertLifecycleRouteTests
     }
 
     [Fact]
-    public async Task CounterfeitReceiptTableWithoutAcceptedParent_FailsClosedWithoutLifecycleCreation()
+    public async Task InvalidAcceptedParentAfterValidHostStartup_FailsClosedWithoutLifecycleCreation()
     {
         using var temp = NewTemp();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
         await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString()))
         {
             await connection.OpenAsync();
             using var command = connection.CreateCommand();
-            command.CommandText = "CREATE TABLE alert_receipts(alert_id TEXT PRIMARY KEY,canonical_json TEXT NOT NULL);";
+            command.CommandText = "DELETE FROM schema_version WHERE component='alert_engine';";
             await command.ExecuteNonQueryAsync();
         }
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
 
         await AssertError(await host.Client.GetAsync($"/api/alerts/v1/{AlertId}/lifecycle"), HttpStatusCode.ServiceUnavailable, "alert_lifecycle_store_unavailable");
         await using var check = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString());
@@ -65,7 +66,7 @@ public sealed class AlertLifecycleRouteTests
         Assert.Equal("no-store", updated.Headers.CacheControl?.ToString());
         var updatedBytes = await updated.Content.ReadAsStringAsync();
         Assert.Equal(
-            """{"schema_version":"alert.lifecycle.v1","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"acknowledged","revision":1,"last_occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","event":{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"},"idempotent_replay":false}""",
+            $$"""{"schema_version":"alert.lifecycle.v1","alert_id":"{{AlertId}}","state":"acknowledged","revision":1,"last_occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","event":{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"{{AlertId}}","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"},"idempotent_replay":false}""",
             updatedBytes);
         using (var json = JsonDocument.Parse(updatedBytes))
         {
@@ -79,7 +80,7 @@ public sealed class AlertLifecycleRouteTests
         Assert.Equal("no-store", history.Headers.CacheControl?.ToString());
         var historyBytes = await history.Content.ReadAsStringAsync();
         Assert.Equal(
-            """{"schema_version":"alert.lifecycle.v1","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","events":[{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"}]}""",
+            $$"""{"schema_version":"alert.lifecycle.v1","alert_id":"{{AlertId}}","events":[{"schema_version":"alert.lifecycle.v1","event_id":"128183c3c9d95293a465423cccabbef08c7676e471a227cf94a011764c8c92bd","alert_id":"{{AlertId}}","revision":1,"expected_revision":0,"action":"acknowledge","previous_state":"open","state":"acknowledged","occurred_at":"2026-07-22T00:00:00.0000000\u002B00:00","actor":"local_user","reason_code":"user_reviewed","comment":"reviewed locally","old_alert_id":null,"new_alert_id":null,"result_code":"alert_lifecycle_updated"}]}""",
             historyBytes);
         using var historyJson = JsonDocument.Parse(historyBytes);
         Assert.Equal(["schema_version", "alert_id", "events"], historyJson.RootElement.EnumerateObject().Select(item => item.Name));
@@ -283,13 +284,80 @@ public sealed class AlertLifecycleRouteTests
         var connection = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString();
         var engine = new SqliteAlertEngineStore(connection);
         Assert.Equal(AlertStoreStatus.Success, engine.Initialize().Status);
-        var observed = temp.TimeProvider.GetUtcNow();
-        var evidence = new AlertEvidenceReference(AlertEvidenceKind.Event, "evidence-1", "session-1", "trace-1", "span-1", null, "event-1", null, observed);
-        var receipt = new AlertReceipt(AlertContractVersions.Receipt, AlertContractVersions.SanitizedReceiptProfile, AlertId, new string('e', 64), "fixture-rule", "1", AlertSeverity.Warning,
-            AlertInitialState.Open, "github-copilot", "1.2.3", "session-1", "trace-1", [evidence], [new("count", "calls", 2)], [new("count.warning", "calls", 1)],
-            "fixture-v1", new string('c', 64), ["tool-events"], AlertCompleteness.Partial, ["ingest_gap"], observed, observed, new string('d', 64), "Fixture summary");
-        var evaluation = new AlertEvaluationResult(AlertContractVersions.Evaluation, new string('e', 64), new string('d', 64), "fixture-v1", new string('c', 64), [receipt], [], []);
-        Assert.Equal(AlertStoreStatus.Success, engine.Append(evaluation).Status);
+        Assert.Equal(AlertStoreStatus.Success, engine.Append(ReceiptEvaluation).Status);
+    }
+
+    private static AlertEvaluationResult CreateReceiptEvaluation()
+    {
+        var observed = new DateTimeOffset(2026, 7, 22, 0, 0, 0, TimeSpan.Zero);
+        var evidence = new AlertEvidenceReference(
+            AlertEvidenceKind.Session,
+            "session-evidence",
+            "session-1",
+            null,
+            null,
+            null,
+            null,
+            null,
+            observed);
+        var snapshot = new AlertNormalizedSnapshot(
+            AlertContractVersions.Snapshot,
+            "github-copilot",
+            "1",
+            "session-1",
+            null,
+            AlertCompleteness.Full,
+            [],
+            observed,
+            observed,
+            [new("tool-events", AlertCapabilityAvailability.Available)],
+            [
+                new(
+                    "signal-1",
+                    AlertSignalKind.SessionEvent,
+                    0,
+                    observed,
+                    null,
+                    AlertSignalStatus.Success,
+                    [],
+                    [],
+                    evidence),
+            ]);
+        var descriptor = new AlertRuleDescriptor(
+            "migration-fixture",
+            "1",
+            "Migration fixture",
+            "Produces one strict v1 receipt for migration.",
+            ["tool-events"],
+            AlertRuleScope.Session,
+            [],
+            "session",
+            [],
+            ["missing_required_capability", "rule_disabled", "source_not_applicable"],
+            ["github-copilot"]);
+        var rule = new FixedRule(
+            descriptor,
+            new(
+                [new(AlertSeverity.Warning, [new("count", "calls", 1)], [evidence], observed, observed)],
+                []));
+        return new AlertEvaluationEngine(
+            new AlertRuleRegistry([rule]),
+            new ExistingResolver()).Evaluate(
+                snapshot,
+                new(AlertContractVersions.Configuration, "migration-v1", []));
+    }
+
+    private sealed class FixedRule(
+        AlertRuleDescriptor descriptor,
+        AlertRuleOutcome outcome) : IAlertRule
+    {
+        public AlertRuleDescriptor Descriptor { get; } = descriptor;
+        public AlertRuleOutcome Evaluate(AlertRuleContext context) => outcome;
+    }
+
+    private sealed class ExistingResolver : IAlertEvidenceResolver
+    {
+        public bool Exists(AlertEvidenceReference reference) => true;
     }
 
     private sealed class UnavailableStore : IAlertLifecycleStore
