@@ -356,6 +356,66 @@ public sealed partial class SqlitePricingStore
         }
     }
 
+    public PricingStoreResult InitializeForMonitorStartup(
+        ReadOnlyMemory<byte> canonicalCatalogBytes,
+        string catalogSha256)
+    {
+        var frozenBytes = canonicalCatalogBytes.ToArray();
+        PricingCatalog catalog;
+        try
+        {
+            catalog = PricingCatalogSnapshotConsumer.Deserialize(frozenBytes);
+        }
+        catch (PricingRegistryValidationException)
+        {
+            return new(PricingStoreStatus.ContractRejected);
+        }
+        if (!string.Equals(catalog.CatalogSha256, catalogSha256, StringComparison.Ordinal))
+            return new(PricingStoreStatus.ContractRejected);
+
+        try
+        {
+            using var connection = Open(SqliteOpenMode.ReadWrite);
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (!PricingSchemaV1.ValidateRows(connection, transaction))
+                return Rollback(transaction, PricingStoreStatus.Unavailable);
+
+            var startupTimeUtc = timeProvider.GetUtcNow();
+            var catalogStatus = InsertCatalogSnapshot(
+                connection,
+                transaction,
+                catalog,
+                frozenBytes,
+                startupTimeUtc);
+            if (catalogStatus != PricingStoreStatus.Success)
+                return Rollback(transaction, catalogStatus);
+
+            using (var cleanup = Command(
+                connection,
+                transaction,
+                "DELETE FROM pricing_configuration_previews WHERE expires_at_utc<=$now;",
+                ("$now", Format(startupTimeUtc))))
+                cleanup.ExecuteNonQuery();
+
+            var recoveryStatus = RecoverInterruptedRuns(connection, transaction);
+            if (recoveryStatus != PricingStoreStatus.Success)
+                return Rollback(transaction, recoveryStatus);
+            if (!PricingSchemaV1.ValidateRows(connection, transaction))
+                return Rollback(transaction, PricingStoreStatus.Unavailable);
+
+            transaction.Commit();
+            return new(PricingStoreStatus.Success);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return new(PricingStoreStatus.Busy);
+        }
+        catch (SqliteException)
+        {
+            return new(PricingStoreStatus.Unavailable);
+        }
+    }
+
     public PricingStoreResult PutConfigurationPreview(
         CostConfigurationPreviewV1 preview)
     {
@@ -796,76 +856,9 @@ public sealed partial class SqlitePricingStore
             using var transaction = connection.BeginTransaction(deferred: false);
             if (!PricingSchemaV1.ValidateRows(connection, transaction))
                 return Rollback(transaction, PricingStoreStatus.Unavailable);
-            var runs = new List<(string RunId, int NextSequence)>();
-            using (var select = Command(
-                connection,
-                transaction,
-                """
-                SELECT r.run_id,MAX(e.event_sequence)+1
-                FROM pricing_recalculation_runs r
-                JOIN pricing_recalculation_events e ON e.run_id=r.run_id
-                GROUP BY r.run_id
-                HAVING MAX(CASE WHEN e.event_kind IN ('succeeded','failed') THEN 1 ELSE 0 END)=0
-                ORDER BY r.calculation_time_utc,r.run_id;
-                """))
-            using (var reader = select.ExecuteReader())
-                while (reader.Read()) runs.Add((reader.GetString(0), reader.GetInt32(1)));
-            foreach (var run in runs)
-            {
-                using (var artifacts = Command(
-                    connection,
-                    transaction,
-                    """
-                    SELECT
-                      (SELECT COUNT(*) FROM pricing_recalculation_target_results WHERE run_id=$run)+
-                      (SELECT COUNT(*) FROM pricing_session_attempts WHERE run_id=$run)+
-                      (SELECT COUNT(*) FROM pricing_estimates WHERE run_id=$run)+
-                      (SELECT COUNT(*) FROM pricing_recalculation_budget_results WHERE run_id=$run);
-                    """,
-                    ("$run", run.RunId)))
-                    if (Convert.ToInt64(artifacts.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-                        return Rollback(transaction, PricingStoreStatus.Unavailable);
-                var occurredAtUtc = timeProvider.GetUtcNow();
-                using (var failed = Command(
-                    connection,
-                    transaction,
-                    """
-                    INSERT INTO pricing_recalculation_events(
-                        run_id,event_sequence,event_kind,occurred_at_utc,failure_phase,
-                        failure_ordinal_kind,failure_ordinal,failure_code)
-                    VALUES($run,$sequence,'failed',$time,'recovery',NULL,NULL,'recalculation_interrupted');
-                    """,
-                    ("$run", run.RunId), ("$sequence", run.NextSequence), ("$time", Format(occurredAtUtc))))
-                    failed.ExecuteNonQuery();
-                var targets = new List<(int Ordinal, string SessionId, long BaseAttempt)>();
-                using (var selectTargets = Command(
-                    connection,
-                    transaction,
-                    "SELECT target_ordinal,session_id,base_attempt_revision FROM pricing_recalculation_targets WHERE run_id=$run ORDER BY target_ordinal;",
-                    ("$run", run.RunId)))
-                using (var reader = selectTargets.ExecuteReader())
-                    while (reader.Read()) targets.Add((reader.GetInt32(0), reader.GetString(1), reader.GetInt64(2)));
-                foreach (var target in targets)
-                {
-                    using (var result = Command(
-                        connection,
-                        transaction,
-                        "INSERT INTO pricing_recalculation_target_results(run_id,target_ordinal,result_kind,result_code) VALUES($run,$ordinal,'failed','recalculation_interrupted');",
-                        ("$run", run.RunId), ("$ordinal", target.Ordinal)))
-                        result.ExecuteNonQuery();
-                    using var attempt = Command(
-                        connection,
-                        transaction,
-                        """
-                        INSERT INTO pricing_session_attempts(
-                            session_id,attempt_revision,run_id,target_ordinal,result_kind,result_code)
-                        VALUES($session,$revision,$run,$ordinal,'failed','recalculation_interrupted');
-                        """,
-                        ("$session", target.SessionId), ("$revision", target.BaseAttempt + 1),
-                        ("$run", run.RunId), ("$ordinal", target.Ordinal));
-                    attempt.ExecuteNonQuery();
-                }
-            }
+            var recoveryStatus = RecoverInterruptedRuns(connection, transaction);
+            if (recoveryStatus != PricingStoreStatus.Success)
+                return Rollback(transaction, recoveryStatus);
             transaction.Commit();
             return new(PricingStoreStatus.Success);
         }
@@ -877,6 +870,87 @@ public sealed partial class SqlitePricingStore
         {
             return new(PricingStoreStatus.Unavailable);
         }
+    }
+
+    private PricingStoreStatus RecoverInterruptedRuns(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var runs = new List<(string RunId, int NextSequence)>();
+        using (var select = Command(
+            connection,
+            transaction,
+            """
+            SELECT r.run_id,MAX(e.event_sequence)+1
+            FROM pricing_recalculation_runs r
+            JOIN pricing_recalculation_events e ON e.run_id=r.run_id
+            GROUP BY r.run_id
+            HAVING MAX(CASE WHEN e.event_kind IN ('succeeded','failed') THEN 1 ELSE 0 END)=0
+            ORDER BY r.calculation_time_utc,r.run_id;
+            """))
+        using (var reader = select.ExecuteReader())
+            while (reader.Read()) runs.Add((reader.GetString(0), reader.GetInt32(1)));
+
+        foreach (var run in runs)
+        {
+            using (var artifacts = Command(
+                connection,
+                transaction,
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM pricing_recalculation_target_results WHERE run_id=$run)+
+                  (SELECT COUNT(*) FROM pricing_session_attempts WHERE run_id=$run)+
+                  (SELECT COUNT(*) FROM pricing_estimates WHERE run_id=$run)+
+                  (SELECT COUNT(*) FROM pricing_recalculation_budget_results WHERE run_id=$run);
+                """,
+                ("$run", run.RunId)))
+                if (Convert.ToInt64(artifacts.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                    return PricingStoreStatus.Unavailable;
+
+            var occurredAtUtc = timeProvider.GetUtcNow();
+            using (var failed = Command(
+                connection,
+                transaction,
+                """
+                INSERT INTO pricing_recalculation_events(
+                    run_id,event_sequence,event_kind,occurred_at_utc,failure_phase,
+                    failure_ordinal_kind,failure_ordinal,failure_code)
+                VALUES($run,$sequence,'failed',$time,'recovery',NULL,NULL,'recalculation_interrupted');
+                """,
+                ("$run", run.RunId), ("$sequence", run.NextSequence), ("$time", Format(occurredAtUtc))))
+                failed.ExecuteNonQuery();
+
+            var targets = new List<(int Ordinal, string SessionId, long BaseAttempt)>();
+            using (var selectTargets = Command(
+                connection,
+                transaction,
+                "SELECT target_ordinal,session_id,base_attempt_revision FROM pricing_recalculation_targets WHERE run_id=$run ORDER BY target_ordinal;",
+                ("$run", run.RunId)))
+            using (var reader = selectTargets.ExecuteReader())
+                while (reader.Read()) targets.Add((reader.GetInt32(0), reader.GetString(1), reader.GetInt64(2)));
+            foreach (var target in targets)
+            {
+                using (var result = Command(
+                    connection,
+                    transaction,
+                    "INSERT INTO pricing_recalculation_target_results(run_id,target_ordinal,result_kind,result_code) VALUES($run,$ordinal,'failed','recalculation_interrupted');",
+                    ("$run", run.RunId), ("$ordinal", target.Ordinal)))
+                    result.ExecuteNonQuery();
+                using var attempt = Command(
+                    connection,
+                    transaction,
+                    """
+                    INSERT INTO pricing_session_attempts(
+                        session_id,attempt_revision,run_id,target_ordinal,result_kind,result_code)
+                    VALUES($session,$revision,$run,$ordinal,'failed','recalculation_interrupted');
+                    """,
+                    ("$session", target.SessionId), ("$revision", target.BaseAttempt + 1),
+                    ("$run", run.RunId), ("$ordinal", target.Ordinal));
+                attempt.ExecuteNonQuery();
+            }
+        }
+
+        return PricingStoreStatus.Success;
     }
 
     public PricingStoreResult MarkRecalculationRunning(string runId)
