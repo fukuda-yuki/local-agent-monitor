@@ -847,12 +847,12 @@
       sessionId
       && configuration?.configuration?.configuration_id
       && configuration?.head_revision > 0
-      && configuration?.catalog_state === "matched");
+      && configuration?.catalog_state === "matching");
     const button = byId("cost-recalculate");
     button.disabled = mutationDisabled || !usable;
     button.title = usable
       ? "現在の immutable configuration で再計算します。"
-      : "Session context と matched configuration が必要です。";
+      : "Session context と matching configuration が必要です。";
   }
 
   function selectCatalogEntry() {
