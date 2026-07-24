@@ -211,6 +211,64 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
         Assert.DoesNotContain("private-override-must-not-read", Encoding.UTF8.GetString(record.CanonicalBytes), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Capture_CorruptSelectedV1ReceiptBesideOwnerValidV2FailsClosed()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.SeedAlert(SanitizedExportAlertFixture.Bytes());
+        fixture.SeedValidV2Alert();
+        fixture.Execute("""
+            UPDATE alert_receipts
+            SET canonical_json=replace(canonical_json,'sanitized-alert-receipt.v1','sanitized-alert-receipt.v2')
+            WHERE schema_version='alert.receipt.v1';
+            """);
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void Capture_SelectedV1ReceiptWithMissingParentBesideOwnerValidV2FailsClosed()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.SeedAlert(SanitizedExportAlertFixture.Bytes());
+        fixture.SeedValidV2Alert();
+        fixture.Execute("""
+            PRAGMA foreign_keys=OFF;
+            DELETE FROM alert_evaluations WHERE schema_version='alert.evaluation.v1';
+            """);
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void Capture_OversizedV2AndUnreadablePricingPayloadsAreNeverRead()
+    {
+        using var fixture = new Fixture();
+        fixture.InitializeAlertEngineV2();
+        fixture.SeedOpaqueV2Alert("semantically-invalid-v2");
+        fixture.PoisonV2PayloadsBeyondV1CarrierLimit();
+        fixture.SeedUnreadablePricingPayloads();
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(ReceiptTypes: ["alert_receipt"]));
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Empty(result.Snapshot!.Records);
+        Assert.Equal("missing", result.Snapshot.Capabilities.AlertReceipts);
+        Assert.Equal("2", result.Snapshot.ProcessingVersions!["alert_engine_schema"]);
+        Assert.DoesNotContain(result.Snapshot.ProcessingVersions.Keys, key => key.Contains("pricing", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("schema_version='alert.evaluation.v2'")]
     [InlineData("input_hash='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'")]
@@ -373,6 +431,14 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             Assert.Equal(AlertEngineStoreStatusV2.Success, new SqliteAlertEngineStore(connectionString).InitializeV2().Status);
         }
 
+        internal void SeedValidV2Alert()
+        {
+            var connectionString = new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString();
+            Assert.Equal(
+                AlertEngineStoreStatusV2.Success,
+                new SqliteAlertEngineStore(connectionString).Append(SanitizedExportAlertFixture.EvaluationV2()).Status);
+        }
+
         internal void SeedOpaqueV2Alert(string opaquePayload)
         {
             var evaluationId = new string('e', 64);
@@ -385,6 +451,8 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
                 VALUES($evaluation,'alert.evaluation.v2',$input,'fixture-v2',$configuration,$evaluation_json);
                 INSERT INTO alert_receipts(alert_id,evaluation_id,receipt_ordinal,schema_version,canonical_json)
                 VALUES($alert,$evaluation,0,'alert.receipt.v2',$receipt);
+                INSERT INTO alert_suppressions(evaluation_id,suppression_ordinal,rule_id,rule_version,code,canonical_json)
+                VALUES($evaluation,0,'fixture-rule','2','rule-disabled',$suppression);
                 """;
             command.Parameters.AddWithValue("$alert", alertId);
             command.Parameters.AddWithValue("$evaluation", evaluationId);
@@ -392,6 +460,51 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             command.Parameters.AddWithValue("$configuration", new string('c', 64));
             command.Parameters.AddWithValue("$evaluation_json", $"{{\"evaluation_id\":\"{evaluationId}\",\"opaque\":{JsonSerializer.Serialize(opaquePayload)}}}");
             command.Parameters.AddWithValue("$receipt", $"{{\"alert_id\":\"{alertId}\",\"evaluation_id\":\"{evaluationId}\",\"opaque\":{JsonSerializer.Serialize(opaquePayload)}}}");
+            command.Parameters.AddWithValue("$suppression", $"{{\"evaluation_id\":\"{evaluationId}\",\"opaque\":{JsonSerializer.Serialize(opaquePayload)}}}");
+            command.ExecuteNonQuery();
+        }
+
+        internal void PoisonV2PayloadsBeyondV1CarrierLimit()
+        {
+            using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE alert_evaluations
+                SET canonical_json=json_object(
+                    'evaluation_id',evaluation_id,
+                    'opaque',printf('%.*c',$length,'x'))
+                WHERE schema_version='alert.evaluation.v2';
+                UPDATE alert_receipts
+                SET canonical_json=json_object(
+                    'alert_id',alert_id,
+                    'evaluation_id',evaluation_id,
+                    'opaque',printf('%.*c',$length,'x'))
+                WHERE schema_version='alert.receipt.v2';
+                UPDATE alert_suppressions
+                SET canonical_json=json_object(
+                    'evaluation_id',evaluation_id,
+                    'opaque',printf('%.*c',$length,'x'));
+                """;
+            command.Parameters.AddWithValue("$length", SanitizedExportLimits.MaximumRecordBytes + 1);
+            command.ExecuteNonQuery();
+        }
+
+        internal void SeedUnreadablePricingPayloads()
+        {
+            using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO schema_version(component,version) VALUES('pricing',1);
+                CREATE TABLE pricing_catalog_snapshots(canonical_blob BLOB NOT NULL);
+                CREATE TABLE pricing_estimates(canonical_blob BLOB NOT NULL);
+                INSERT INTO pricing_catalog_snapshots(canonical_blob) VALUES(x'80ff');
+                INSERT INTO pricing_estimates(canonical_blob) VALUES(x'80ff');
+                INSERT INTO pricing_catalog_snapshots(canonical_blob) VALUES(zeroblob($length));
+                INSERT INTO pricing_estimates(canonical_blob) VALUES(zeroblob($length));
+                """;
+            command.Parameters.AddWithValue("$length", SanitizedExportLimits.MaximumRecordBytes + 1);
             command.ExecuteNonQuery();
         }
 
