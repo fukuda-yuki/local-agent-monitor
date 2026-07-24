@@ -288,6 +288,10 @@ internal sealed class SqliteCostRecalculationUnitOfWork
 
         PricingRunFailureWrite? selectedFailure = null;
         var preserveUnavailable = false;
+        IReadOnlyList<AlertEvaluationResultV2> transactionEvaluations =
+            frozenAlertEvaluations;
+        IReadOnlyList<PricingBudgetResultWrite> transactionBudgetResults =
+            frozenBudgetResults;
         PricingStoreResult core;
         try
         {
@@ -362,6 +366,10 @@ internal sealed class SqliteCostRecalculationUnitOfWork
                                 selectedFailure,
                                 preserveUnavailable);
                         }
+                        transactionEvaluations =
+                            transactionCandidate.Evaluations.ToArray();
+                        transactionBudgetResults =
+                            transactionCandidate.BudgetResults.ToArray();
                     }
                     catch (PricingRecalculationInputChangedException)
                     {
@@ -399,20 +407,20 @@ internal sealed class SqliteCostRecalculationUnitOfWork
                 core = store.AppendRecalculationCompletionCore(
                     runId,
                     frozenTargetResults,
-                    frozenBudgetResults,
+                    transactionBudgetResults,
                     failure: null,
                     connection,
                     transaction,
                     (sharedConnection, sharedTransaction) =>
                     {
-                        for (var ordinal = 0; ordinal < frozenAlertEvaluations.Length; ordinal++)
+                        for (var ordinal = 0; ordinal < transactionEvaluations.Count; ordinal++)
                         {
                             try
                             {
                                 var append = alertParticipant!.AppendEvaluation(
                                     sharedConnection,
                                     sharedTransaction,
-                                    frozenAlertEvaluations[ordinal]);
+                                    transactionEvaluations[ordinal]);
                                 if (append.Status != AlertEngineTransactionAppendStatusV2.Success)
                                 {
                                     selectedFailure = new(

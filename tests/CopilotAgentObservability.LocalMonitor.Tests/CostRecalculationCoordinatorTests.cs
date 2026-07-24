@@ -323,6 +323,65 @@ public sealed class CostRecalculationCoordinatorTests
             "github_copilot"));
     }
 
+    [Fact]
+    public void EvidenceResolver_DistinguishesExistingIdentityMismatchFromAbsentId()
+    {
+        var sessionId = Guid.NewGuid().ToString("D");
+        var otherSessionId = Guid.NewGuid().ToString("D");
+        var observedAt = new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero);
+        var estimateId = EstimateId('7');
+        var resolver = new CostAlertEvidenceResolverV1();
+        var scope = new AlertEvidenceResolutionScopeV2(
+            new CostAlertEvidenceReadViewV1(
+                new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal)
+                {
+                    [sessionId] = observedAt,
+                },
+                new Dictionary<string, (string SessionId, DateTimeOffset ObservedAtUtc)>(
+                    StringComparer.Ordinal)
+                {
+                    [estimateId] = (sessionId, observedAt),
+                }),
+            []);
+
+        Assert.Equal(
+            AlertEvidenceResolutionStatusV2.Resolved,
+            resolver.Resolve(
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    estimateId,
+                    sessionId,
+                    observedAt),
+                scope));
+        Assert.Equal(
+            AlertEvidenceResolutionStatusV2.ContractRejected,
+            resolver.Resolve(
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    estimateId,
+                    otherSessionId,
+                    observedAt),
+                scope));
+        Assert.Equal(
+            AlertEvidenceResolutionStatusV2.ContractRejected,
+            resolver.Resolve(
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    estimateId,
+                    sessionId,
+                    observedAt.AddTicks(1)),
+                scope));
+        Assert.Equal(
+            AlertEvidenceResolutionStatusV2.Unresolved,
+            resolver.Resolve(
+                new(
+                    AlertEvidenceKindV2.PricingEstimate,
+                    EstimateId('6'),
+                    sessionId,
+                    observedAt),
+                scope));
+    }
+
     private static AlertCostMemberV2 Member(
         string sessionId,
         DateTimeOffset effectiveAt,
