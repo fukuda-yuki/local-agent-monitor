@@ -405,8 +405,16 @@ public sealed class RawReplayArchiveServiceTests
             var confirmed = request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
 
             var results = await Task.WhenAll(
-                Task.Run(() => service.CreateAndPublish(snapshot, confirmed, output)),
-                Task.Run(() => service.CreateAndPublish(snapshot, confirmed, output)));
+                Task.Factory.StartNew(
+                    () => service.CreateAndPublish(snapshot, confirmed, output),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default),
+                Task.Factory.StartNew(
+                    () => service.CreateAndPublish(snapshot, confirmed, output),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default));
 
             Assert.Single(results, result => result.Success);
             var loser = Assert.Single(results, result => !result.Success);
