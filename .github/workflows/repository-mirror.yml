@@ -5,8 +5,22 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
-  # 初回実行・障害復旧用
+  # Release公開・編集・削除時にRelease本体とアセットを同期
+  release:
+    types:
+      - published
+      - edited
+      - deleted
+
+  # アセットは公開後に手動添付されることがあり、その場合releaseイベントが発火しないため
+  # 日次でフル同期して取りこぼしを補う
+  schedule:
+    - cron: '30 18 * * *'
+
+  # 初回実行・障害復旧・アセット手動添付後の即時反映用
   workflow_dispatch:
 
 permissions:
@@ -87,5 +101,195 @@ jobs:
             --tags \
             "https://x-access-token:${TARGET_TOKEN}@github.com/ls-2026-class4/github-copilot-otel-lab.git" \
             | sort > "$target_file"
+
+          diff -u "$source_file" "$target_file"
+
+  # GitHub Releaseはgit refではなくAPIオブジェクトのため、git pushでは転送されない。
+  # 非Draft Release本体とアップロード済みアセットをAPI経由でフル同期する。
+  # 毎回フル同期なので、既存Releaseのバックフィルや公開後の手動アセット添付も冪等に扱える。
+  mirror-releases:
+    needs: mirror
+    # このファイル自体がミラー先にコピーされても、そこで実行させない
+    if: github.repository == 'fukuda-yuki/local-agent-monitor'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create target GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ls-2026-class4
+          repositories: github-copilot-otel-lab
+          permission-contents: write
+
+      - name: Sync releases and assets
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPOSITORY="fukuda-yuki/local-agent-monitor"
+          TARGET_REPOSITORY="ls-2026-class4/github-copilot-otel-lab"
+
+          # ミラー元の読み取りはworkflow既定のGITHUB_TOKEN、
+          # ミラー先の書き込みはGitHub Appトークンを使う
+          src_api() { GH_TOKEN="$SOURCE_TOKEN" gh api "$@"; }
+          tgt_api() { GH_TOKEN="$TARGET_TOKEN" gh api "$@"; }
+          src_rel() { GH_TOKEN="$SOURCE_TOKEN" gh release "$@" --repo "$SOURCE_REPOSITORY"; }
+          tgt_rel() { GH_TOKEN="$TARGET_TOKEN" gh release "$@" --repo "$TARGET_REPOSITORY"; }
+
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+
+          src_api "repos/${SOURCE_REPOSITORY}/releases" --paginate > "$work_dir/source.json"
+          tgt_api "repos/${TARGET_REPOSITORY}/releases" --paginate > "$work_dir/target.json"
+
+          # 非Draft Releaseのtag一覧
+          mapfile -t source_tags < <(jq -r '.[] | select(.draft == false) | .tag_name' "$work_dir/source.json")
+          mapfile -t target_tags < <(jq -r '.[] | select(.draft == false) | .tag_name' "$work_dir/target.json")
+
+          # Release一覧APIはmake_latestを常にnullで返すため、latest指定はlatest endpointから導出する。
+          # (Releaseが無い/全てprerelease等で404の場合は空文字となり、latest無しとして扱う)
+          src_latest_tag=$(src_api "repos/${SOURCE_REPOSITORY}/releases/latest" --jq '.tag_name' || true)
+          tgt_latest_tag=$(tgt_api "repos/${TARGET_REPOSITORY}/releases/latest" --jq '.tag_name' || true)
+
+          for tag in "${source_tags[@]}"; do
+            src_obj=$(jq --arg t "$tag" '.[] | select(.draft == false and .tag_name == $t)' "$work_dir/source.json")
+            src_name=$(echo "$src_obj" | jq -r '.name // .tag_name')
+            src_body=$(echo "$src_obj" | jq -r '.body // ""')
+            src_pre=$(echo "$src_obj" | jq -r '.prerelease')
+            if [ "$tag" = "$src_latest_tag" ]; then src_latest="true"; else src_latest="false"; fi
+
+            tgt_obj=$(jq --arg t "$tag" '.[] | select(.tag_name == $t)' "$work_dir/target.json")
+
+            if [ -z "$tgt_obj" ]; then
+              # --- 同期先にReleaseが無ければ作成 ---
+              payload=$(jq -n \
+                --arg tag "$tag" \
+                --arg name "$src_name" \
+                --arg body "$src_body" \
+                --argjson pre "$src_pre" \
+                --arg latest "$src_latest" \
+                '{tag_name:$tag, name:$name, body:$body, prerelease:$pre, make_latest:$latest}')
+              tgt_api -X POST "repos/${TARGET_REPOSITORY}/releases" --input - <<< "$payload" > /dev/null
+
+              mapfile -t asset_names < <(echo "$src_obj" | jq -r '.assets[].name')
+              if [ "${#asset_names[@]}" -gt 0 ]; then
+                asset_dir="$work_dir/${tag}"
+                mkdir -p "$asset_dir"
+                for an in "${asset_names[@]}"; do
+                  src_rel download "$tag" --dir "$asset_dir" --pattern "$an"
+                done
+                files=()
+                for an in "${asset_names[@]}"; do files+=("$asset_dir/$an"); done
+                tgt_rel upload "$tag" --clobber "${files[@]}"
+              fi
+            else
+              # --- Releaseが存在すれば本文/タイトル/prerelease/latest/draftを差分更新 ---
+              tgt_id=$(echo "$tgt_obj" | jq -r '.id')
+              tgt_name=$(echo "$tgt_obj" | jq -r '.name // .tag_name')
+              tgt_body=$(echo "$tgt_obj" | jq -r '.body // ""')
+              tgt_pre=$(echo "$tgt_obj" | jq -r '.prerelease')
+              tgt_draft=$(echo "$tgt_obj" | jq -r '.draft')
+              if [ "$tag" = "$tgt_latest_tag" ]; then tgt_latest="true"; else tgt_latest="false"; fi
+
+              # 同期元は非Draftのみを同期するため、同期先のDraftは公開(draft:false)して整合させる
+              if [ "$tgt_name" != "$src_name" ] || [ "$tgt_body" != "$src_body" ] || \
+                 [ "$tgt_pre" != "$src_pre" ] || [ "$tgt_latest" != "$src_latest" ] || \
+                 [ "$tgt_draft" != "false" ]; then
+                payload=$(jq -n \
+                  --arg name "$src_name" \
+                  --arg body "$src_body" \
+                  --argjson pre "$src_pre" \
+                  --arg latest "$src_latest" \
+                  '{name:$name, body:$body, prerelease:$pre, make_latest:$latest, draft:false}')
+                tgt_api -X PATCH "repos/${TARGET_REPOSITORY}/releases/${tgt_id}" --input - <<< "$payload" > /dev/null
+              fi
+
+              # --- アセットを name + digest(sha256) で差分同期 ---
+              # 配列はtagループ反復ごとにリセットする(declare -Aだけでは既存キーが残る)
+              declare -A src_assets=() tgt_assets_by_name=() tgt_asset_id=() src_digest=() tgt_digest=()
+              while IFS=$'\t' read -r name digest size; do
+                src_assets["$name"]="${digest}|${size}"
+                src_digest["$name"]="$digest"
+              done < <(echo "$src_obj" | jq -r '.assets[] | [.name, (.digest // ""), (.size|tostring)] | @tsv')
+              while IFS=$'\t' read -r name digest size id; do
+                tgt_assets_by_name["$name"]="${digest}|${size}"
+                tgt_asset_id["$name"]="$id"
+                tgt_digest["$name"]="$digest"
+              done < <(echo "$tgt_obj" | jq -r '.assets[] | [.name, (.digest // ""), (.size|tostring), (.id|tostring)] | @tsv')
+
+              upload_names=()
+              for name in "${!src_assets[@]}"; do
+                src_v="${src_assets[$name]}"
+                tgt_v="${tgt_assets_by_name[$name]:-}"
+                # digestが未知(null)の場合は内容一致を確認できないため、必ず再アップロードする
+                if [ -z "$tgt_v" ] || [ "$src_v" != "$tgt_v" ] || \
+                   [ -z "${src_digest[$name]}" ] || [ -z "${tgt_digest[$name]:-}" ]; then
+                  upload_names+=("$name")
+                fi
+              done
+
+              if [ "${#upload_names[@]}" -gt 0 ]; then
+                asset_dir="$work_dir/${tag}"
+                mkdir -p "$asset_dir"
+                for an in "${upload_names[@]}"; do
+                  src_rel download "$tag" --dir "$asset_dir" --pattern "$an"
+                done
+                files=()
+                for an in "${upload_names[@]}"; do files+=("$asset_dir/$an"); done
+                tgt_rel upload "$tag" --clobber "${files[@]}"
+              fi
+
+              # 同期先にのみ存在するアセットは削除
+              for name in "${!tgt_assets_by_name[@]}"; do
+                if [ -z "${src_assets[$name]:-}" ]; then
+                  tgt_api -X DELETE "repos/${TARGET_REPOSITORY}/releases/assets/${tgt_asset_id[$name]}"
+                fi
+              done
+            fi
+          done
+
+          # --- 削除同期: ミラー元に無い非Draft Releaseを同期先から削除(git tagは残す) ---
+          for tag in "${target_tags[@]}"; do
+            if ! printf '%s\n' "${source_tags[@]}" | grep -Fxq "$tag"; then
+              tgt_id=$(jq --arg t "$tag" '.[] | select(.draft == false and .tag_name == $t) | .id' "$work_dir/target.json")
+              tgt_api -X DELETE "repos/${TARGET_REPOSITORY}/releases/${tgt_id}"
+            fi
+          done
+
+      - name: Verify mirrored releases
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPOSITORY="fukuda-yuki/local-agent-monitor"
+          TARGET_REPOSITORY="ls-2026-class4/github-copilot-otel-lab"
+
+          # 比較対象は非Draft Releaseの tag/name/prerelease/make_latest と
+          # アセットの name/size/digest(sha256) のみ。id等の環境依存項目は除外。
+          # 配列順序はAPI応答で変わり得るためreleaseはtag_name・assetはnameでソートする。
+          # nameはnull時に同期処理がtag_nameで埋めるため、同じ規則で正規化して突き合わせる。
+          normalize() {
+            jq -S '[.[] | select(.draft == false) | {
+              tag_name, name: (.name // .tag_name), prerelease, make_latest,
+              assets: ([.assets[] | {name, size, digest}] | sort_by(.name))
+            }] | sort_by(.tag_name)'
+          }
+
+          source_file="$(mktemp)"
+          target_file="$(mktemp)"
+          trap 'rm -f "$source_file" "$target_file"' EXIT
+
+          GH_TOKEN="$SOURCE_TOKEN" gh api "repos/${SOURCE_REPOSITORY}/releases" --paginate | normalize > "$source_file"
+          GH_TOKEN="$TARGET_TOKEN" gh api "repos/${TARGET_REPOSITORY}/releases" --paginate | normalize > "$target_file"
 
           diff -u "$source_file" "$target_file"
