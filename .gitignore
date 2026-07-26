@@ -17,6 +17,7 @@ secrets.json
 *.suo
 *.rsuser
 *.DotSettings.user
+.superpowers/*
 
 # ============================================================
 # .NET / C# build outputs
