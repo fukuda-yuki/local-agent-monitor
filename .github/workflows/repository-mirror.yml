@@ -1,0 +1,91 @@
+name: Mirror repository to ls-2026-class4
+
+on:
+  # mainへの反映時は直ちに全branch/tagを同期
+  push:
+    branches:
+      - main
+
+  # 初回実行・障害復旧用
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-repository-ls-2026-class4
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    # このファイル自体がミラー先にコピーされても、そこで実行させない
+    if: github.repository == 'fukuda-yuki/local-agent-monitor'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create target GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          owner: ls-2026-class4
+          repositories: github-copilot-otel-lab
+          permission-contents: write
+          permission-workflows: write
+
+      - name: Mirror branches and tags
+        shell: bash
+        env:
+          TARGET_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPOSITORY="fukuda-yuki/local-agent-monitor"
+          TARGET_REPOSITORY="ls-2026-class4/github-copilot-otel-lab"
+
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+
+          git clone --mirror \
+            "https://github.com/${SOURCE_REPOSITORY}.git" \
+            "${work_dir}/source.git"
+
+          cd "${work_dir}/source.git"
+
+          git remote add target \
+            "https://x-access-token:${TARGET_TOKEN}@github.com/${TARGET_REPOSITORY}.git"
+
+          # GitHub内部refではなく、branchとtagだけを正確に同期する
+          git push \
+            --force \
+            --prune \
+            target \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+
+      - name: Verify mirrored refs
+        shell: bash
+        env:
+          TARGET_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          source_file="$(mktemp)"
+          target_file="$(mktemp)"
+          trap 'rm -f "$source_file" "$target_file"' EXIT
+
+          git ls-remote \
+            --heads \
+            --tags \
+            "https://github.com/fukuda-yuki/local-agent-monitor.git" \
+            | sort > "$source_file"
+
+          git ls-remote \
+            --heads \
+            --tags \
+            "https://x-access-token:${TARGET_TOKEN}@github.com/ls-2026-class4/github-copilot-otel-lab.git" \
+            | sort > "$target_file"
+
+          diff -u "$source_file" "$target_file"
