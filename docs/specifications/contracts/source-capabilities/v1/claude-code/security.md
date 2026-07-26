@@ -43,10 +43,12 @@ never Claude `source_adapter` or provenance values.
 
 ## Content gates
 
-Claude telemetry is documented as opt-in, but the Task 7-9 inventories did not
-observe a trace, log, metric, Hook event, or content-bearing producer record.
-Accordingly, those manifest capability leaves remain `unknown`; the table below
-describes documentation-only gates and does not claim availability.
+Approved live print-mode evidence establishes the OTel trace path, and the Hook
+forwarder plus Doctor/session path are implemented and exercised. The manifest's
+`signals.trace`, `signals.hook`, OTel identity/timing leaves, and
+`content_capture_gate` therefore describe observed or implemented capability
+paths. This does not make raw content fields available: the table below keeps
+the content-specific gates and their safety boundaries explicit.
 
 | Content | Gate | Default contract state |
 | --- | --- | --- |
@@ -65,8 +67,8 @@ actually emitted allowed content-bearing field. Disabled or absent content is
 `not_captured`; explicit source redaction is `redacted`; a surface without a
 gate is `unsupported`. Documentation, a manifest declaration, or a configured
 exporter never changes these states and never grants content authority. The
-documented log, metric, and response surfaces remain unmapped until observed
-producer structure and an exact existing target are available.
+documented log, metric, response, and raw-content surfaces remain unmapped until
+observed producer structure and an exact existing target are available.
 
 ## Forbidden sensitive values
 
@@ -146,9 +148,10 @@ state, identity, binding, or authority evidence.
 
 ## Repository-safe evidence
 
-The Task 7-9 inventories contain settings labels, execution state, counts,
-blockers, and missing-capability statements only. They contain no raw producer
-values, PII, credentials, token values, or local paths. Interactive and Agent
-SDK producer capture remains unverified; the completed print run emitted no
-structural telemetry. No fixture or fingerprint may be invented to replace
-those missing live observations.
+The repository-safe evidence contains settings labels, execution state, counts,
+blockers, and capability observations only. It contains no raw producer values,
+PII, credentials, token values, or local paths. The live print-mode OTel and
+content-gate records support the promoted manifest paths without granting raw
+content authority. Interactive and Agent SDK producer capture remains
+unverified; no fixture or fingerprint may be invented to replace those missing
+live observations.

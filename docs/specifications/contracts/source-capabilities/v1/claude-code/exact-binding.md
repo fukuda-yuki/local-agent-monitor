@@ -164,11 +164,11 @@ implements the complete provenance-bearing trace-context DTO.
 
 ## Evidence status
 
-The producer field names above are documented by the official Claude Code
-monitoring, Hook, and Agent SDK observability references; they are not observed
-capability claims. Task 7 interactive and Task 9 Agent SDK execution were
-blocked, and Task 8 print execution completed without emitting structural
-telemetry. No Task 7-9 inventory observed a producer Hook envelope, OTel span
-structure, verified fingerprint, explicit link, or Hook trace context. The
-manifest therefore leaves all related capability leaves `unknown`; only the
-actually executed version detector is `available`.
+Approved live evidence now establishes the Claude print-mode OTel trace path,
+trace/span identity, parentage, timing, and the exact recognized span structure.
+The Hook forwarder and Doctor/session path are implemented and exercised as an
+input path. These observations support only the promoted manifest leaves; they
+do not promote native-session identity or complete trace-context binding. The
+complete trace-context row remains deferred, while interactive CLI and Agent
+SDK producer structure remain unverified. Other semantic leaves remain
+`unknown` until their own producer evidence and exact targets are available.

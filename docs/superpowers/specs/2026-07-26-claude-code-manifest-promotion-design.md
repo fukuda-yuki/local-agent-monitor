@@ -25,7 +25,7 @@ manifest and its semantic source of truth disagree.
 Change only these existing v1 values in
 `docs/specifications/contracts/source-capabilities/v1/manifests/claude-code.json`:
 
-- `support_status`: `planned` -> `preview`.
+- `support_status`: `planned` -> `active` (the v1-compatible support state).
 - `signals.trace`: `unknown` -> `available`.
 - `signals.hook`: `unknown` -> `available`.
 - `trace_span_identity.trace_id`: `unknown` -> `available`.

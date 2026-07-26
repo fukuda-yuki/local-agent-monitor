@@ -463,7 +463,7 @@ public sealed class TokenContextCacheAlertRuleTests
     [Theory]
     [InlineData("github-copilot-vscode", "github-copilot-vscode.json", "a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd")]
     [InlineData("github-copilot-cli", "github-copilot-cli.json", "3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419")]
-    [InlineData("claude-code", "claude-code.json", "d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294")]
+    [InlineData("claude-code", "claude-code.json", "a1841de0c2a319ced6d8f3ff50de5d24db87f6b5c3c94c4bc4d8c7affa444e61")]
     public void CurrentSourceManifests_ArePinnedAndKeepAllFiveRulesCapabilitySuppressed(
         string sourceSurface,
         string manifestFile,

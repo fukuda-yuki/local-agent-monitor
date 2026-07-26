@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The v1 schema is closed and rejects unknown fields.
-- `support_status` becomes `preview`; `stability` remains `preview`.
+- `support_status` becomes `active` (the v1-compatible support state); `stability` remains `preview`.
 - Only `signals.trace`, `signals.hook`, all three `trace_span_identity` leaves, `timing_ttft.timing`, and `content_capture_gate` become `available`.
 - All other Claude capability leaves remain `unknown`.
 - Do not change schema, mapping authority, runtime code, public interfaces, dependencies, or security boundaries.
@@ -33,7 +33,7 @@
 Change the Claude header expectation to:
 
 ```csharp
-AssertManifestHeader(manifests["claude-code"], "claude-code", "claude-code-otel+claude-code-hook", "preview", "preview");
+AssertManifestHeader(manifests["claude-code"], "claude-code", "claude-code-otel+claude-code-hook", "active", "preview");
 ```
 
 After the existing `source_version_detector` assignment, add:
@@ -77,7 +77,7 @@ newly promoted leaves are still `unknown`.
 
 - [ ] **Step 1: Update only the approved existing manifest values**
 
-Set `support_status` to `preview`; keep `stability` as `preview`. Set only the
+Set `support_status` to `active`; keep `stability` as `preview`. Set only the
 following availability leaves to `available`: `signals.trace`, `signals.hook`,
 `trace_span_identity.trace_id`, `trace_span_identity.span_id`,
 `trace_span_identity.parentage`, `timing_ttft.timing`, and

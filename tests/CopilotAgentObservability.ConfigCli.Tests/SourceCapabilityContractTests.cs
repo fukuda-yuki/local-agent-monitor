@@ -85,7 +85,7 @@ public sealed class SourceCapabilityContractTests
 
             AssertManifestHeader(manifests["github-copilot-vscode"], "github-copilot-vscode", "otel-http+copilot-compatible-hook", "active", "stable");
             AssertManifestHeader(manifests["github-copilot-cli"], "github-copilot-cli", "otel-http+copilot-compatible-hook", "active", "stable");
-            AssertManifestHeader(manifests["claude-code"], "claude-code", "claude-code-otel+claude-code-hook", "planned", "preview");
+            AssertManifestHeader(manifests["claude-code"], "claude-code", "claude-code-otel+claude-code-hook", "active", "preview");
             AssertManifestHeader(manifests["codex-app"], "codex-app", "not-implemented", "planned", "preview");
             AssertManifestHeader(manifests["codex-cli"], "codex-cli", "not-implemented", "planned", "preview");
 
@@ -93,6 +93,13 @@ public sealed class SourceCapabilityContractTests
             AssertAvailabilityMatrix(manifests["github-copilot-cli"], CopilotAvailabilityMatrix());
             var claudeAvailability = UnknownAvailabilityMatrix();
             claudeAvailability["source_version_detector"] = "available";
+            claudeAvailability["signals.trace"] = "available";
+            claudeAvailability["signals.hook"] = "available";
+            claudeAvailability["trace_span_identity.trace_id"] = "available";
+            claudeAvailability["trace_span_identity.span_id"] = "available";
+            claudeAvailability["trace_span_identity.parentage"] = "available";
+            claudeAvailability["timing_ttft.timing"] = "available";
+            claudeAvailability["content_capture_gate"] = "available";
             AssertAvailabilityMatrix(manifests["claude-code"], claudeAvailability);
             var codexAppAvailability = UnknownAvailabilityMatrix();
             codexAppAvailability["source_version_detector"] = "available";
@@ -358,6 +365,13 @@ public sealed class SourceCapabilityContractTests
 
         var availability = UnknownAvailabilityMatrix();
         availability["source_version_detector"] = "available";
+        availability["signals.trace"] = "available";
+        availability["signals.hook"] = "available";
+        availability["trace_span_identity.trace_id"] = "available";
+        availability["trace_span_identity.span_id"] = "available";
+        availability["trace_span_identity.parentage"] = "available";
+        availability["timing_ttft.timing"] = "available";
+        availability["content_capture_gate"] = "available";
         AssertAvailabilityMatrix(manifest, availability);
 
         var binding = ReadRepositoryDocument("docs/specifications/contracts/source-capabilities/v1/claude-code/exact-binding.md");

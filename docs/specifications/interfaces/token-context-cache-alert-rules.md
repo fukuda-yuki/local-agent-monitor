@@ -120,7 +120,7 @@ fixture revisions are:
 | --- | --- | --- |
 | `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd` |
 | `github-copilot-cli` | `contracts/source-capabilities/v1/manifests/github-copilot-cli.json` | `3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419` |
-| `claude-code` | `contracts/source-capabilities/v1/manifests/claude-code.json` | `d8413c8b5b33800cc5f461f9390bfe5fb39147c58188f51fcf36b6957d842294` |
+| `claude-code` | `contracts/source-capabilities/v1/manifests/claude-code.json` | `a1841de0c2a319ced6d8f3ff50de5d24db87f6b5c3c94c4bc4d8c7affa444e61` |
 
 Manifest drift fails the fixture until the changed capability declaration is
 reviewed and this rule contract is revised. Current negative fixtures derive
