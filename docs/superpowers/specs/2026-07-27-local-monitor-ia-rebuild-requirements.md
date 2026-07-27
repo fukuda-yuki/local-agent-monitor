@@ -1,74 +1,7 @@
-# Local Monitor IA Rebuild Design
+# Local Monitor IA Rebuild Requirements
 
-Revision 12 (2026-07-27). Revisions 1 through 10 were independently reviewed.
-Revision 11 is the repository owner's accepted baseline for this revision. The
-repository owner accepted the `sessions.last_seen_at` repair approach on
-2026-07-27.
-
-Revision 12 defines the required repair for the pre-existing
-`sessions.last_seen_at` defect recorded below. This revision changes
-requirements only; it does not change implementation or tests. The repair must
-compare timestamps carrying an explicit UTC designator or numeric offset as
-instants inside the existing serialized Session write transaction, retain the
-exact text of the winning value, and make no claim to reconstruct a later
-instant that an earlier TEXT `MAX` has already discarded. The target IA
-continues to exclude
-`sessions.last_seen_at` from window, ordering, and cursor semantics because
-legacy loss is not recoverable.
-
-Revision 10's review found a single remaining defect: the supersede inventory,
-which this document declares authoritative, omitted `docs/spec.md:758-760`, where
-the Alert Center Overview integration is restated as current specification.
-Revision 11 adds it.
-
-Revision 10 corrected five consistency defects from the Revision 9 review: the
-`--sanitized-only` Trace Workspace now keeps all seven tabs with Raw OTLP stating
-its unavailability rather than disappearing; the `--sanitized-only` Session
-fallback no longer reintroduces `sessions.last_seen_at`, which this design
-excludes everywhere else; `最近の実行` is described as ordered by first
-observation rather than by execution time, which is what its key actually is; the
-Session-level instruction display state is consistently one; and the required-test
-count matches the five cases enumerated.
-
-Revision 9 corrected six findings, all of them real:
-the Trace membership column still said `first_seen_at` in prose after the table
-had moved to `projected_at`; the repository premise still said "no
-`vcs.repository.name` means `Repository不明`" after the two-source derivation was
-restored; review items had no total order once a Session could carry two failing
-objective evaluations; the unbound-Trace determination cannot reuse the existing
-projection, because that projection is the bounded most-recent heuristic this
-design forbids; the new Repository, Session, and instruction-label surfaces do
-extend the closed set of raw-bearing surfaces rather than merely narrowing it; and
-the supersede inventory was still missing the `/` prompt-label restatements, the
-upper-source Canvas ownership statements, and the Alert Center Overview
-integration.
-
-Revision 8 corrected the most consequential factual error of all: SQLite maintains `sessions.last_seen_at`, `sessions.updated_at`,
-`monitor_traces.first_seen_at`, and `monitor_traces.last_seen_at` with scalar
-`MIN`/`MAX` over TEXT, so with mixed offsets those columns can discard the true
-earliest or latest instant and leave a clean-looking `+00:00` value that no
-read-time check can catch. Every such column is excluded as a window, ordering, or
-cursor key, in favour of columns that are written once or last-write-wins. It also
-removed an unreachable instruction state this design had invented and required
-exact repository membership on the nested Session routes.
-
-Revision 7 made a structural correction rather than another round of patches.
-Revisions 4 through 6 carried the full serialized wire contract for the new read
-endpoints inside this document, which made it hold two incompatible levels of
-detail and produced fresh prose-versus-table inconsistencies on every pass. The
-wire contract now moves to a named downstream interface specification, and this
-document keeps the decisions and the binding constraints on that specification.
-This matches how every other Local Monitor surface in the repository is specified.
-
-Revision 7 also corrected the factual errors found in Revision 6: the existing
-trace status filter has five values including the composite `error`, not four; a
-comparison regression has no valid `session` or `trace` subject; Session ordering
-must not use `sessions.last_seen_at`; and `last_observed_at` had no defined source
-or tie-break.
-
-Every factual claim below was verified against the repository. Where this design
-depends on a value the current implementation does not compute correctly, it says
-so and chooses a different value rather than depending on it.
+Revision 12 (2026-07-27) is the canonical requirements definition for the
+Local Monitor information-architecture extension.
 
 ## Goal
 
@@ -109,7 +42,7 @@ English, quoting Japanese UI labels verbatim where they are normative.
 
 ## Confirmed premises
 
-Decided by the repository owner on 2026-07-27. These are inputs, not derivations.
+These are binding inputs, not derivations.
 
 | Premise | Decision |
 | --- | --- |
@@ -122,7 +55,7 @@ Decided by the repository owner on 2026-07-27. These are inputs, not derivations
 | `ホーム` counts | Aggregate over the most recent 30 days, with the window stated on screen |
 | `comparison_regressed` | Token-only regressions are excluded from 要確認 and shown in `改善` instead |
 
-## Design principles carried forward unchanged
+## Design principles
 
 - quality before efficiency; exact trace fidelity; evidence provenance.
 - Never treat `unknown` or `missing` as `0` on the new display surfaces.
@@ -243,10 +176,10 @@ by the raw-bearing page routes, the existing raw event content route, and the ne
 
 ### Contract level and downstream ownership
 
-This design fixes the **decision level** of these endpoints: which endpoint owns
-what, what may not appear in a response, what the ordering and completeness must
-guarantee, and which existing contract each one succeeds. It deliberately does
-not carry the serialized wire contract.
+These requirements define which endpoint owns what, what may not appear in a
+response, which ordering and completeness guarantees apply, and which existing
+contract each endpoint succeeds. This document does not carry the serialized
+wire contract.
 
 The full request and response shapes, property names, status codes, error bodies,
 cursor encoding, filter value sets, and paging limits are authored as a new
@@ -322,7 +255,7 @@ than silently returning an empty list, so a typo is never mistaken for
 trace-list status filter exactly, including its composite value: `ok`,
 `recovered`, `unrecovered`, `unknown`, and `error`, where `unknown` selects rows
 whose nullable `monitor_traces.trace_status` is `NULL` and `error` selects
-`recovered` or `unrecovered`. The design does not narrow this set.
+`recovered` or `unrecovered`. This contract does not narrow the set.
 
 **No heuristic resolution.** `session_runs.trace_id` is nullable and not unique,
 so a Trace can resolve to more than one exact-linked Session. The response
@@ -501,16 +434,16 @@ event exists for the Session, displayed as `指示内容: 該当 event があり
 is never written to `session_events.content_state` and never rendered as any of
 the five values above.
 
-There is deliberately no "could not resolve which event is primary" state. The
-primary instruction is always resolvable when an instruction event exists:
+There is no "could not resolve which event is primary" state. The primary
+instruction is always resolvable when an instruction event exists:
 `session_events.event_id` is the primary key, `occurred_at` is `NOT NULL`, and the
 read order `occurred_at, event_id` is a total order, so a first event always
-exists. An earlier draft of this design invented such a state, which would have
-required a test for an unreachable condition.
+exists.
 
-The five wire values are the frozen Session detail contract and the design
-conforms to them rather than superseding them. `no_event` is an additive value of
-the new `instruction_state` field on `/api/workspace/v1/sessions` and
+The five wire values are the frozen Session detail contract, and these
+requirements conform to them rather than superseding them. `no_event` is an
+additive value of the new `instruction_state` field on
+`/api/workspace/v1/sessions` and
 `/sessions/{sessionId}/instruction-label` only. It is never written to
 `session_events.content_state` and never appears in the frozen
 `/api/session-workspace/*` responses.
@@ -601,8 +534,8 @@ a timestamp, or content.
 
 The second source has an accepted residual risk. It keeps only the repository
 segment and discards the owner, so `owner-a/api` and `owner-b/api` would collide
-into one row. This design does not change that behaviour, because changing it
-would alter a persisted display label outside this design's scope. The mitigation
+into one row. These requirements do not change that behaviour, because changing
+it would alter a persisted display label outside this scope. The mitigation
 is the operational one: injecting `vcs.repository.name` directly avoids the
 fallback path entirely, and that is the documented recommendation. The residual is
 stated rather than silently carried.
@@ -634,75 +567,31 @@ bounded.
 The window is the half-open UTC interval `[T - 30 days, T)`, where `T` is the
 request time and is echoed as `generated_at`.
 
-Membership is decided by **comparing UTC instants, never by comparing the stored
-text lexicographically**. The stored values are not canonically UTC: Session
-ingest accepts an explicit offset such as `+09:00`, that value reaches
-`sessions.last_seen_at`, and the Session store persists it with `ToString("O")`,
-which preserves the offset. Two ISO-8601 strings with different offsets order
-differently as text than as instants, so a text range predicate would silently
-place rows in the wrong window. Each candidate row's membership column is
-therefore parsed as an ISO-8601 value with its offset and converted to a UTC
-instant before comparison.
+Membership compares parsed UTC instants, never stored text. A null, invalid
+ISO-8601 value, or value whose parsed offset is not `+00:00` is unclassifiable
+and forces `acquisition_state=unavailable` with
+`算出不可（不足: <column>）`. The projection never guesses an offset or falls
+back to text comparison.
 
-A value that cannot be parsed as a valid ISO-8601 instant is treated exactly like
-a null: the row is unclassifiable and forces `acquisition_state=unavailable`. The
-projection never falls back to text comparison and never assumes an offset.
-
-Runtime restore installs a caller-supplied database that is validated as
-schema-valid but is not row-level canonicalized, so a restored row can carry a
-timestamp this Local Monitor never wrote, including one with a non-UTC offset.
-
-The projection therefore applies one additional rule, which needs no new producer
-and no schema change: **a membership value whose parsed offset is not `+00:00` is
-unclassifiable**, exactly like a null or an unparseable value, and the count
-reports `算出不可（不足: <column>）`.
-
-This check is sufficient only because the chosen columns are never aggregated as
-TEXT. For a single-write or last-write-wins column, a non-UTC value is still
-present to be detected. For an aggregated column it would already be gone, which
-is precisely why those columns are excluded.
-
-#### Pre-existing `sessions.last_seen_at` defect and required repair
-
-The `sessions.last_seen_at` behaviour is a pre-existing defect discovered while
-writing this design. The current Session upsert applies SQLite scalar `MAX` to
-two TEXT values. With explicit offsets, lexical order is not instant order, so
-an older observation can replace or retain precedence over a later one.
-
-The separate repair work item is constrained as follows:
+#### `sessions.last_seen_at`
 
 - On an existing Session, compare the stored value and the candidate value as
   parsed ISO-8601 instants with an explicit UTC designator or numeric offset.
-  Never compare their stored text to decide which instant is later.
-- Perform that comparison inside the same immediate transaction that serializes
-  the Session write. A read before that transaction or a compare followed by an
-  unlocked write does not preserve the concurrency guarantee that motivated the
-  current upsert.
+  Do not compare stored text.
+- Compare inside the immediate transaction that serializes the Session write.
 - Persist the exact text of the later value. If both values denote the same
-  instant, preserve the existing text so an idempotent write does not rewrite
-  timestamp representation.
-- Do not substitute SQLite scalar `MIN`/`MAX`, `julianday`, `unixepoch`, or
-  another reduced-precision representation for the parsed-instant comparison.
-  The Session domain carries round-trip timestamp precision, and the repair
-  must not weaken it.
+  instant, preserve the existing text.
+- Preserve round-trip timestamp precision. Do not use scalar TEXT `MIN`/`MAX`,
+  `julianday`, `unixepoch`, or another reduced-precision comparison.
 - If the stored value is not a valid ISO-8601 timestamp with an explicit UTC
-  designator or numeric offset, fail the Session write without changing the
-  aggregate. Do not guess an offset, silently replace the value, or fall back to
-  lexical comparison.
-- Do not normalize all Session timestamps to UTC and do not rewrite historical
-  rows. A value already discarded by the defective upsert cannot be recovered
-  from the surviving row, so a migration could make the text look canonical
-  without restoring the lost fact.
-
-The repair is limited to `sessions.last_seen_at`. The analogous existing TEXT
-aggregation on `sessions.updated_at`, `monitor_traces.first_seen_at`, and
-`monitor_traces.last_seen_at` is not silently included. Those columns require
-their own scoped work because they have different producers and consumers.
-
-Even after the repair, this IA does not use `sessions.last_seen_at` as a window,
-ordering, cursor, or completeness key. Databases written before the repair can
-already have lost the true latest instant, and no read-time validation or
-prospective write fix can recover it.
+  designator or numeric offset, fail the write without changing the aggregate.
+  Do not guess, replace, or fall back to text comparison.
+- Do not normalize all Session timestamps or rewrite historical rows.
+- This requirement applies only to `sessions.last_seen_at`. It does not include
+  `sessions.updated_at`, `monitor_traces.first_seen_at`, or
+  `monitor_traces.last_seen_at`.
+- Do not use `sessions.last_seen_at` as an IA window, ordering, cursor, or
+  completeness key. Previously discarded values cannot be recovered.
 
 Window membership uses one named column per fact:
 
@@ -719,14 +608,11 @@ TEXT does not qualify, for the reason given below.
 | Effect comparison | `effect_receipts.recorded_at` | Insert-only receipt | `NOT NULL` |
 | Proposal lifecycle | `improvement_proposals.updated_at` | Insert plus explicit status updates; never aggregated | `NOT NULL` |
 
-Every column that SQLite aggregates as TEXT is excluded: `sessions.last_seen_at`
-and `sessions.updated_at` are `MAX(...)`, and `monitor_traces.first_seen_at` and
-`monitor_traces.last_seen_at` are `MIN(...)` or `MAX(...)`. Those aggregations
-compare text, so with mixed offsets they can discard the true earliest or latest
-instant and leave a clean-looking `+00:00` value behind. A read-time check cannot
-detect that, because the evidence was destroyed at write time. Excluding those
-columns entirely is what makes the "exact or unavailable" guarantee below true
-rather than aspirational.
+Exclude every column that has been aggregated as TEXT:
+`sessions.last_seen_at`, `sessions.updated_at`,
+`monitor_traces.first_seen_at`, and `monitor_traces.last_seen_at`. Past writes
+may already have discarded the true instant, so these columns remain ineligible
+even after future writes follow the `sessions.last_seen_at` rule above.
 
 The chosen columns are first-projection and last-projection timestamps rather
 than execution times. `ホーム` therefore states its window as covering Sessions
@@ -811,26 +697,25 @@ exactness column.
 
 The **rule** is reused; the existing *query* is not. The current trace projection
 resolves a Trace's Session by fetching the most recent 200 Sessions and taking the
-first match, which is exactly the bounded most-recent heuristic this design
-forbids. Determining that a Trace has no exact-linked Session must therefore be
+first match, which is exactly the bounded most-recent heuristic these requirements
+forbid. Determining that a Trace has no exact-linked Session must therefore be
 computed over the **full** exact-link set, not over that bounded helper. This
-needs an additive query, not a reuse, and it is the one place where this design
-does not simply read an existing projection. It adds no producer, no column, and no
-new rule; it removes a bound that would otherwise let a Trace be reported as
-unbound merely because its Session fell outside the most-recent 200.
+requires an additive query but adds no producer, column, or rule. It removes a
+bound that would otherwise let a Trace be reported as unbound merely because its
+Session fell outside the most-recent 200.
 
 `unrecovered_trace_unbound` states only what the absence of an exact binding
 proves. The Trace's own spans, status, and error attributes remain reachable by
 TraceId alone, so the reason must not claim that the root cause is
 undeterminable. What is missing is the Session-level context: the instruction, the
-evaluations, and any proposal or comparison linkage. This is the design brief's
-Evidence-gap concern stated at the precision the data supports, and it is the only
+evaluations, and any proposal or comparison linkage. This is the Evidence-gap
+concern stated at the precision the data supports, and it is the only
 Evidence-gap reason in v1. An old Session whose instruction is merely
 `not_captured` is displayed honestly without becoming a 要確認 entry.
 
 `comparison_regressed` is restricted to quality regressions. The current
 comparison producer can emit `regressed` from the median of cache-inclusive
-`total_tokens` alone when quality is equal, and this design forbids
+`total_tokens` alone when quality is equal, and these requirements forbid
 cache-inclusive totals as an efficiency basis. The projection therefore inspects
 the persisted `Reasons` array and admits the entry only when a quality reason is
 present. A `regressed` verdict carrying only `tokens_regressed` or
@@ -903,7 +788,7 @@ because it has no trace rollup and its relation to `output_tokens` is undefined
 by every current source. The total renders
 `新規処理合計: 算出不可（不足: <field>）` when either component is unavailable.
 
-The "other new processing volume" line from the design brief is not implemented.
+The "other new processing volume" line is not included.
 No field and no meaning exist for it, so the line is not created rather than
 shown as permanently unavailable.
 
@@ -984,7 +869,7 @@ Sanitized fallback labels:
 - Session lists and Session Workspace headers fall back to `session_id`, source,
   first-observed time from `sessions.created_at`, `status`, `completeness`, and
   binding state. `sessions.last_seen_at` is not among them, for the same reason it
-  is excluded everywhere else in this design: with mixed offsets its TEXT `MAX`
+  is excluded everywhere else in these requirements: with mixed offsets its TEXT `MAX`
   can have discarded the true latest instant, and no read-time check recovers it.
 - Prompt Discovery and instruction display are unavailable and say so.
 
@@ -1039,8 +924,7 @@ bounds move with it unchanged.
 ### The closed set of raw-bearing surfaces
 
 The set of raw-bearing surfaces is enumerated closedly in the current
-specifications, so both the removal and the additions this design makes must be
-recorded together.
+specifications, so every removal and addition must be recorded together.
 
 **`/` stops being raw-bearing.** D032 (`docs/decisions.md:696-715`) pins `/` as a
 raw-bearing route that renders a representative prompt label. The new `ホーム`
@@ -1084,8 +968,8 @@ input plus output, and that effective input is `cache_read * 0.1`. The
 implementation aggregates with `COALESCE(SUM(...), 0)`
 (`RawTelemetryStore.Overview.cs:13-22`, `MonitorTraceRollup.cs:194-218`).
 
-This design supersedes only the "missing cache value is `0`" rule, and only for
-the new display surfaces listed in the Goal.
+These requirements supersede only the "missing cache value is `0`" rule, and
+only for the new display surfaces listed in the Goal.
 
 ### Comparison semantics
 
@@ -1094,8 +978,8 @@ the new display surfaces listed in the Goal.
 efficiency measure and can produce `regressed` from it when quality is equal.
 `EffectVerdictEngineTests.cs:129-174` pins that behaviour.
 
-This design changes neither the producer, the receipts, nor those tests. It
-constrains only what `要確認` admits.
+These requirements change neither the producer, the receipts, nor those tests.
+They constrain only what `要確認` admits.
 
 ### Session read contract
 
@@ -1118,8 +1002,8 @@ The same contract at `canvas-session-workspace.md:389` freezes `content_state` t
 `available | not_captured | redacted | unsupported | expired_pending_deletion`,
 matching the `NOT NULL` closed schema in
 `SqliteSessionStore.cs:2016` and the assertions in
-`SessionWorkspaceRouteTests.cs:48,238,323,388`. This design **conforms** to those
-five values and does not supersede them. The one Session-level display state
+`SessionWorkspaceRouteTests.cs:48,238,323,388`. These requirements **conform** to
+those five values and do not supersede them. The one Session-level display state
 introduced here, `no_event`, is an additive value of the new `instruction_state`
 field on `/api/workspace/v1/sessions` and
 `/sessions/{sessionId}/instruction-label`. It is never written to
@@ -1130,8 +1014,8 @@ field on `/api/workspace/v1/sessions` and
 
 D040 (`docs/decisions.md:1249`, `1260-1274`) defines `repository_name` as a
 nullable sanitized display label and stores no owner, full name, or unique
-identity. This design additionally uses the exact value as the grouping key of
-the display hierarchy and as a route segment. That role extension is recorded
+identity. These requirements additionally use the exact value as the grouping
+key of the display hierarchy and as a route segment. That role extension is recorded
 explicitly: the equivalence class of an exact label is treated as one repository
 for display, and it is not Session identity or merge evidence.
 
@@ -1163,13 +1047,13 @@ security boundary.
 
 ### Helper-only full diff and source display
 
-This is the single most tightly pinned permission the design extends, and it is
-pinned in six places that must all be superseded together:
+The helper-only restriction is pinned in six places that must all be superseded
+together:
 
 - `docs/specifications/interfaces/canvas-proposal-apply.md:10,60,140` — the
   canonical interface itself, which pins the full diff to the Canvas helper's
   local screen. Superseding only its downstream restatements would leave the
-  canonical specification contradicting the design.
+  canonical specification contradicting these requirements.
 
 - `docs/requirements.md:85` — Canvas is a token-gated local helper that confirms
   the full diff and selected hunks.
@@ -1203,8 +1087,8 @@ Decision: those links are retained as optional, non-authoritative affordances an
 are not removed, because removing them is a separate Canvas change with its own
 tests and no product benefit here. The new Local Monitor IA never depends on
 them, and no deep link, helper-server URL, or selected-Session handoff is a
-primary or auxiliary path in this design. Continuity comes from the shared store
-and exact identifiers.
+primary or auxiliary path. Continuity comes from the shared store and exact
+identifiers.
 
 ### Cross-cutting search
 
@@ -1229,9 +1113,8 @@ superseded.
 - A `repository_identity` contract distinct from `vcs.repository.name`.
 - Changes to the comparison producer, its receipts, or its tests.
 - Changes to `/api/monitor/*` and `/api/session-workspace/*` v1.
-- Repairs to `sessions.updated_at`, `monitor_traces.first_seen_at`, or
-  `monitor_traces.last_seen_at`, and any attempt to reconstruct timestamp facts
-  already discarded by their TEXT aggregation.
+- Changes to `sessions.updated_at`, `monitor_traces.first_seen_at`, or
+  `monitor_traces.last_seen_at`.
 - New page routes for Sources/Ingestion, Data Boundary, and Settings.
 - Dual sanitized labels across every list.
 - Full-corpus prompt search.
@@ -1245,7 +1128,7 @@ superseded.
   left failing.
 - `SessionWorkspaceRouteTests` and `EffectVerdictEngineTests` must keep passing
   unchanged. If either needs modification, the change has drifted outside this
-  design.
+  requirements scope.
 - New tests pin: the four count display forms; `acquisition_state` of `complete`
   and `unavailable` on `ホーム` and the absence of `bounded` there;
   `Repository不明` separation and last-place ordering; percent-encoded
@@ -1259,8 +1142,7 @@ superseded.
   the per-route `--sanitized-only` behaviour including `404` for
   `/sessions/{sessionId}/instruction-label`; and that `/api/workspace/v1/*`
   responses contain no instruction text.
-- Five tests must pin the exact cases earlier drafts of this design got wrong,
-  because each was a real defect rather than a wording slip:
+- Five tests must pin these boundary cases:
   - a Trace whose `session_runs.trace_id` is non-null but whose binding state is
     not `exact_linked` still produces `unrecovered_trace_unbound`;
   - a membership column carrying a non-UTC offset, as a restored database can
@@ -1269,21 +1151,17 @@ superseded.
   - a Trace resolving to more than one exact-linked Session reports the
     multiple-candidate case rather than selecting the most recent one;
   - a Trace whose only exact-linked Session lies outside the most-recent 200 is
-    **not** reported as `unrecovered_trace_unbound`, which the existing bounded
-    projection would have got wrong;
+    **not** reported as `unrecovered_trace_unbound`;
   - two failing objective evaluations on one Session produce two review items with
     a deterministic order, not one aggregated item.
 - Retention denial on `/sessions/{sessionId}/instruction-label` returns the frozen
   expiry response and never a success carrying a label.
-- The separate `sessions.last_seen_at` repair must have focused Session-store
-  regression coverage for all of the following:
+- `sessions.last_seen_at` requires focused Session-store coverage:
   - an earlier `+09:00` value followed by a later `+00:00` value whose text sorts
     lower retains the later instant and its exact candidate text;
   - two differently represented values for the same instant preserve the
     existing stored text;
   - an invalid existing timestamp fails without changing the Session aggregate.
-  These tests belong to the repair work item, not to this documentation-only
-  revision.
 - Per-endpoint error applicability, cursor encoding, filter value sets, and the
   full request and response shapes are pinned by tests belonging to the
   downstream `local-monitor-workspace` interface specification, not by tests
@@ -1305,8 +1183,3 @@ superseded.
    plan. It must be decomposed into sequenced work items before implementation.
    The navigation supersede plus its four Playwright suites is the natural first
    unit, because every later screen depends on the shell contract.
-3. The `sessions.last_seen_at` repair defined in the count-display section must
-   be implemented as a separate work item. That delivery must promote the
-   instant-comparison contract into `docs/requirements.md`, `docs/spec.md`, and
-   the owning interface specification before changing code, and it must not
-   remove this IA's exclusion of the column or claim to repair historical loss.
