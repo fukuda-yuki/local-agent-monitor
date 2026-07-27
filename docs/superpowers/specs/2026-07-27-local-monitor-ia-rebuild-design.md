@@ -1,6 +1,21 @@
 # Local Monitor IA Rebuild Design
 
-Revision 11 (2026-07-27). Revisions 1 through 10 were independently reviewed.
+Revision 12 (2026-07-27). Revisions 1 through 10 were independently reviewed.
+Revision 11 is the repository owner's accepted baseline for this revision. The
+repository owner accepted the `sessions.last_seen_at` repair approach on
+2026-07-27.
+
+Revision 12 defines the required repair for the pre-existing
+`sessions.last_seen_at` defect recorded below. This revision changes
+requirements only; it does not change implementation or tests. The repair must
+compare timestamps carrying an explicit UTC designator or numeric offset as
+instants inside the existing serialized Session write transaction, retain the
+exact text of the winning value, and make no claim to reconstruct a later
+instant that an earlier TEXT `MAX` has already discarded. The target IA
+continues to exclude
+`sessions.last_seen_at` from window, ordering, and cursor semantics because
+legacy loss is not recoverable.
+
 Revision 10's review found a single remaining defect: the supersede inventory,
 which this document declares authoritative, omitted `docs/spec.md:758-760`, where
 the Alert Center Overview integration is restated as current specification.
@@ -647,10 +662,47 @@ TEXT. For a single-write or last-write-wins column, a non-UTC value is still
 present to be detected. For an aggregated column it would already be gone, which
 is precisely why those columns are excluded.
 
-The `last_seen_at` behaviour is a pre-existing defect discovered while writing
-this design. It is recorded as a separate work item and is not fixed here,
-because changing the upsert would alter persisted values outside this design's
-scope. This design simply does not depend on it.
+#### Pre-existing `sessions.last_seen_at` defect and required repair
+
+The `sessions.last_seen_at` behaviour is a pre-existing defect discovered while
+writing this design. The current Session upsert applies SQLite scalar `MAX` to
+two TEXT values. With explicit offsets, lexical order is not instant order, so
+an older observation can replace or retain precedence over a later one.
+
+The separate repair work item is constrained as follows:
+
+- On an existing Session, compare the stored value and the candidate value as
+  parsed ISO-8601 instants with an explicit UTC designator or numeric offset.
+  Never compare their stored text to decide which instant is later.
+- Perform that comparison inside the same immediate transaction that serializes
+  the Session write. A read before that transaction or a compare followed by an
+  unlocked write does not preserve the concurrency guarantee that motivated the
+  current upsert.
+- Persist the exact text of the later value. If both values denote the same
+  instant, preserve the existing text so an idempotent write does not rewrite
+  timestamp representation.
+- Do not substitute SQLite scalar `MIN`/`MAX`, `julianday`, `unixepoch`, or
+  another reduced-precision representation for the parsed-instant comparison.
+  The Session domain carries round-trip timestamp precision, and the repair
+  must not weaken it.
+- If the stored value is not a valid ISO-8601 timestamp with an explicit UTC
+  designator or numeric offset, fail the Session write without changing the
+  aggregate. Do not guess an offset, silently replace the value, or fall back to
+  lexical comparison.
+- Do not normalize all Session timestamps to UTC and do not rewrite historical
+  rows. A value already discarded by the defective upsert cannot be recovered
+  from the surviving row, so a migration could make the text look canonical
+  without restoring the lost fact.
+
+The repair is limited to `sessions.last_seen_at`. The analogous existing TEXT
+aggregation on `sessions.updated_at`, `monitor_traces.first_seen_at`, and
+`monitor_traces.last_seen_at` is not silently included. Those columns require
+their own scoped work because they have different producers and consumers.
+
+Even after the repair, this IA does not use `sessions.last_seen_at` as a window,
+ordering, cursor, or completeness key. Databases written before the repair can
+already have lost the true latest instant, and no read-time validation or
+prospective write fix can recover it.
 
 Window membership uses one named column per fact:
 
@@ -1177,6 +1229,9 @@ superseded.
 - A `repository_identity` contract distinct from `vcs.repository.name`.
 - Changes to the comparison producer, its receipts, or its tests.
 - Changes to `/api/monitor/*` and `/api/session-workspace/*` v1.
+- Repairs to `sessions.updated_at`, `monitor_traces.first_seen_at`, or
+  `monitor_traces.last_seen_at`, and any attempt to reconstruct timestamp facts
+  already discarded by their TEXT aggregation.
 - New page routes for Sources/Ingestion, Data Boundary, and Settings.
 - Dual sanitized labels across every list.
 - Full-corpus prompt search.
@@ -1220,6 +1275,15 @@ superseded.
     a deterministic order, not one aggregated item.
 - Retention denial on `/sessions/{sessionId}/instruction-label` returns the frozen
   expiry response and never a success carrying a label.
+- The separate `sessions.last_seen_at` repair must have focused Session-store
+  regression coverage for all of the following:
+  - an earlier `+09:00` value followed by a later `+00:00` value whose text sorts
+    lower retains the later instant and its exact candidate text;
+  - two differently represented values for the same instant preserve the
+    existing stored text;
+  - an invalid existing timestamp fails without changing the Session aggregate.
+  These tests belong to the repair work item, not to this documentation-only
+  revision.
 - Per-endpoint error applicability, cursor encoding, filter value sets, and the
   full request and response shapes are pinned by tests belonging to the
   downstream `local-monitor-workspace` interface specification, not by tests
@@ -1241,3 +1305,8 @@ superseded.
    plan. It must be decomposed into sequenced work items before implementation.
    The navigation supersede plus its four Playwright suites is the natural first
    unit, because every later screen depends on the shell contract.
+3. The `sessions.last_seen_at` repair defined in the count-display section must
+   be implemented as a separate work item. That delivery must promote the
+   instant-comparison contract into `docs/requirements.md`, `docs/spec.md`, and
+   the owning interface specification before changing code, and it must not
+   remove this IA's exclusion of the column or claim to repair historical loss.
