@@ -32,7 +32,7 @@ public sealed class SqliteRuntimeBackupService
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
-        ["monitor"] = 8,
+        ["monitor"] = 9,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
@@ -1181,7 +1181,40 @@ public sealed class SqliteRuntimeBackupService
                 || monitor >= 7 && !HasColumns(connection, "raw_records", "retention_owner_token")
                 || !HasColumns(connection, "monitor_ingestions", "id", "raw_record_id", "received_at", "source", "projected_at")
                 || !HasColumns(connection, "monitor_traces", "id", "trace_id", "projected_at")
-                || !HasColumns(connection, "monitor_spans", "id", "raw_record_id", "trace_id", "span_ordinal", "projected_at"))) return false;
+                || !HasColumns(connection, "monitor_spans", "id", "raw_record_id", "trace_id", "span_ordinal", "projected_at")
+                || monitor >= 9 && !HasColumns(
+                    connection,
+                    "monitor_skill_invocations",
+                    "id",
+                    "raw_record_id",
+                    "trace_id",
+                    "span_id",
+                    "span_ordinal",
+                    "session_id",
+                    "skill_name",
+                    "skill_source",
+                    "invocation_trigger",
+                    "source_application_version",
+                    "projected_at")
+                || monitor >= 9 && !HasColumns(
+                    connection,
+                    "monitor_skill_inventories",
+                    "id",
+                    "raw_record_id",
+                    "trace_id",
+                    "session_id",
+                    "observed_name_count",
+                    "retained_name_count",
+                    "names_truncated",
+                    "source_application_version",
+                    "projected_at")
+                || monitor >= 9 && !HasColumns(
+                    connection,
+                    "monitor_skill_inventory_names",
+                    "raw_record_id",
+                    "trace_id",
+                    "name_ordinal",
+                    "skill_name"))) return false;
         if (versions.ContainsKey("retention")
             && (!HasColumns(connection, "retention_component_versions", "component", "version")
                 || !HasColumns(connection, "retention_store_instances", "id", "store_instance_id")

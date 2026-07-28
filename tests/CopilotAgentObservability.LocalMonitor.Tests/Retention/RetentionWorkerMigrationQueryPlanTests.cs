@@ -142,7 +142,17 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
         using var connection = Open(path);
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var objects = connection.CreateCommand();
-        objects.CommandText = "SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' AND tbl_name NOT LIKE 'retention_%' ORDER BY type,name;";
+        objects.CommandText = """
+            SELECT type,name,tbl_name,COALESCE(sql,'')
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+              AND name NOT LIKE 'retention_%'
+              AND tbl_name NOT LIKE 'retention_%'
+              AND name NOT LIKE 'monitor_skill_%'
+              AND name NOT LIKE 'IX_monitor_skill_%'
+              AND tbl_name NOT LIKE 'monitor_skill_%'
+            ORDER BY type,name;
+            """;
         using var reader = objects.ExecuteReader();
         while (reader.Read())
         {

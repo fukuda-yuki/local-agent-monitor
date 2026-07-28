@@ -584,6 +584,24 @@ This projection contract changes no `/api/monitor/*` or
 `/api/session-workspace/*` v1 shape, ordering, or bytes; no
 `session_events.content_state` value; and no closed raw-bearing surface.
 
+The projection pipeline evaluates the source-version gate once, when it writes
+the projection, and never re-evaluates it. A stored Skill projection therefore
+does not by itself establish that its trace still resolves to a recognised
+source version. At read time, any consumer of Skill projections must
+independently re-check the trace's current source-version resolution before
+making a Skill claim. A trace that does not currently resolve to `Resolved`
+supplies no Skill claim regardless of stored rows.
+
+A trace whose source version is unresolved when its record is projected is not
+revisited. A later resolution does not produce a projection for it.
+
+Records already span-projected before the schema version that introduced Skill
+projection are not backfilled. Skill projection applies to records projected
+after that point.
+
+Re-evaluation, re-projection, and backfill are tracked separately in Issue #154.
+A Skill read surface depends on Issue #154.
+
 ## Session Event Ingestion And Enrichment
 
 Issue #51 adds a Session event input beside, not inside, the OTLP receiver:

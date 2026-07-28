@@ -221,7 +221,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 9 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 10 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -229,11 +229,11 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(9L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(10L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
-    public void RawInitialization_PreservesV8AndFutureMonitorStamps()
+    public void RawInitialization_PreservesV9AndFutureMonitorStamps()
     {
         using var database = new TestDatabase();
         new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
@@ -242,16 +242,16 @@ public sealed class SourceCompatibilityStoreTests
         rawStore.CreateMonitorSchema();
 
         using var connection = Open(database.Path);
-        Assert.Equal(8L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(9L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 9 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 10 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
         rawStore.CreateMonitorSchema();
 
-        Assert.Equal(9L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(10L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
@@ -275,7 +275,7 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
-    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV8Stamp()
+    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV9Stamp()
     {
         using var database = new TestDatabase();
         database.CreateRawStore().CreateMonitorSchema();
@@ -340,7 +340,7 @@ public sealed class SourceCompatibilityStoreTests
         store.CreateSchema();
 
         using var verification = Open(database.Path);
-        Assert.Equal(8L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(9L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(
             ["source_observation_id", "trace_id", "resolution_state", "source_application_version"],
             Columns(verification, "source_trace_version_observations"));

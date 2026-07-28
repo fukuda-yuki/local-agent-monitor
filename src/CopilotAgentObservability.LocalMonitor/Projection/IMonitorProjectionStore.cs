@@ -47,6 +47,13 @@ internal interface IMonitorProjectionStore
         IReadOnlyList<MonitorSpanProjection> spans,
         DateTimeOffset projectedAt);
 
+    bool ApplySpanProjection(
+        long rawRecordId,
+        IReadOnlyList<MonitorSpanProjection> spans,
+        MonitorSkillProjectionBatch skills,
+        DateTimeOffset projectedAt) =>
+        ApplySpanProjection(rawRecordId, spans, projectedAt);
+
     MonitorProjectionStatus GetSpanProjectionStatus();
 
     MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit);
@@ -142,6 +149,13 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         IReadOnlyList<MonitorSpanProjection> spans,
         DateTimeOffset projectedAt) =>
         Guard(() => store.ApplySpanProjection(rawRecordId, spans, projectedAt));
+
+    public bool ApplySpanProjection(
+        long rawRecordId,
+        IReadOnlyList<MonitorSpanProjection> spans,
+        MonitorSkillProjectionBatch skills,
+        DateTimeOffset projectedAt) =>
+        Guard(() => store.ApplySpanProjection(rawRecordId, spans, skills, projectedAt));
 
     public MonitorProjectionStatus GetSpanProjectionStatus() =>
         Guard(store.GetSpanProjectionStatus);

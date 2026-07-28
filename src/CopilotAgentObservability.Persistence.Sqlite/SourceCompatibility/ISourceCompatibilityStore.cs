@@ -8,6 +8,8 @@ internal interface ISourceCompatibilityStore
 
     SourceCompatibilityRow? GetByRawRecordId(long rawRecordId);
 
+    TraceSourceVersionResolutionRow? GetTraceSourceVersionResolution(string traceId) => null;
+
     SourceCompatibilityRow? GetByObservationId(string observationId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(observationId);

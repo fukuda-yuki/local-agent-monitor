@@ -1445,7 +1445,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(result.PreRestoreBackupCreated);
         var preflight = service.PreflightForMigration(destination);
         Assert.True(preflight.Success, preflight.ErrorCode);
-        Assert.Equal(8, preflight.ComponentVersions!["monitor"]);
+        Assert.Equal(9, preflight.ComponentVersions!["monitor"]);
         Assert.Equal(13, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);

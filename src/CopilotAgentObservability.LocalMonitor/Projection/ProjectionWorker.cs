@@ -108,6 +108,7 @@ internal sealed class ProjectionWorker : BackgroundService
                 return;
             }
             var anyProjected = false;
+            var compatibilityObservations = new Dictionary<long, SourceCompatibilityRow?>();
             await using (var recordsLease = recordsResult.Lease)
             {
                 var records = recordsLease.Value;
@@ -122,7 +123,7 @@ internal sealed class ProjectionWorker : BackgroundService
                     try
                     {
                         var rawRecordId = record.Id!.Value;
-                        ValidateProjectionDisposition(rawRecordId);
+                        compatibilityObservations[rawRecordId] = ValidateProjectionDisposition(rawRecordId);
                         var disposition = store.GetProjectionDisposition(rawRecordId);
                         if (disposition is not null)
                         {
@@ -196,10 +197,17 @@ internal sealed class ProjectionWorker : BackgroundService
 
                 try
                 {
-                    var spans = MonitorSpanProjectionBuilder.Build(CreateProjectionInput(record));
+                    var projectionInput = CreateProjectionInput(record);
+                    var spans = MonitorSpanProjectionBuilder.Build(projectionInput);
+                    var skills = BuildSkillProjection(
+                        GetCompatibilityObservation(
+                            record.Id!.Value,
+                            compatibilityObservations),
+                        projectionInput);
                     var newlyProjected = store.ApplySpanProjection(
                         record.Id!.Value,
                         spans,
+                        skills,
                         timeProvider.GetUtcNow());
                     if (newlyProjected)
                     {
@@ -239,14 +247,14 @@ internal sealed class ProjectionWorker : BackgroundService
         }
     }
 
-    private void ValidateProjectionDisposition(long rawRecordId)
+    private SourceCompatibilityRow? ValidateProjectionDisposition(long rawRecordId)
     {
         var observation = compatibilityStore?.GetByRawRecordId(rawRecordId);
         if (observation is null)
         {
             // Pre-v5 raw rows have no observation. Preserve their legacy projection
             // path without inventing source compatibility evidence.
-            return;
+            return null;
         }
 
         if (observation.RawRecordId != rawRecordId)
@@ -265,8 +273,42 @@ internal sealed class ProjectionWorker : BackgroundService
                 "An adapter-failure observation cannot own a raw record."),
             _ => throw new InvalidOperationException("The stored source compatibility state is invalid."),
         };
+        return observation;
     }
 
     private static RawTelemetryRecord CreateProjectionInput(RawTelemetryRecord record)
         => record with { PayloadJson = OtlpJsonRecognizedPayloadBuilder.Build(record.PayloadJson) };
+
+    private SourceCompatibilityRow? GetCompatibilityObservation(
+        long rawRecordId,
+        IDictionary<long, SourceCompatibilityRow?> observations)
+    {
+        if (!observations.TryGetValue(rawRecordId, out var observation))
+        {
+            observation = compatibilityStore?.GetByRawRecordId(rawRecordId);
+            observations.Add(rawRecordId, observation);
+        }
+        return observation;
+    }
+
+    private MonitorSkillProjectionBatch BuildSkillProjection(
+        SourceCompatibilityRow? observation,
+        RawTelemetryRecord record)
+    {
+        if (observation is null)
+        {
+            return MonitorSkillProjectionBatch.Empty;
+        }
+
+        return MonitorSkillProjectionBuilder.Build(
+            record,
+            observation.SourceSurface,
+            traceId =>
+            {
+                var resolution = compatibilityStore!.GetTraceSourceVersionResolution(traceId);
+                return resolution is null
+                    ? null
+                    : (resolution.State, resolution.SourceApplicationVersion);
+            });
+    }
 }
