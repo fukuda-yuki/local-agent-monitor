@@ -144,9 +144,10 @@ no persisted pointer records which the user is advancing.
 ### Where the improvement cycle is cut, and why
 
 Half of the improvement cycle is in v1. Human Evaluation, Objective Evaluation,
-persisted evidence selection, and proposal creation and promotion all have
-complete stores and APIs, they complete a loop the user can actually run inside
-Local Monitor, and **nothing in them can mislead or damage**.
+and proposal creation and promotion already have complete stores and APIs.
+Persisted evidence selection does **not** exist and is new work. Together they
+complete a loop the user can actually run inside Local Monitor, and **nothing in
+them can mislead or damage**.
 
 **Applying a change and comparing its effect are not v1**, and the reason is not
 precision:
@@ -246,9 +247,10 @@ applies when it is absent. Largely supported by existing data.
 
 *Then let the user act on it*: record a Human Evaluation, record an Objective
 Evaluation, select exact Spans and Events as evidence and have that selection
-persist, and create and promote a proposal anchored to that evidence. All four
-have complete stores and APIs; what is missing is a persisted evidence selection
-and a user interface inside Local Monitor.
+persist, and create and promote a proposal anchored to that evidence. Three of
+those already have complete stores and APIs and need only a user interface inside
+Local Monitor. The fourth, a persisted evidence selection, does not exist at all
+and is new storage.
 
 The proposal is a written intention with its evidence attached. v1 does not apply
 it and does not judge whether it worked.
@@ -360,7 +362,7 @@ v1 must not promise them.
 
 ## Before the IA can be designed
 
-Two things must be settled. Neither is a capability programme.
+Three things must be settled. None is a capability programme.
 
 1. **The source-truth and claim catalogue.** An empirical field inventory for
    GitHub Copilot CLI and VS Code Copilot Chat only: what arrives, with what
@@ -372,6 +374,24 @@ Two things must be settled. Neither is a capability programme.
    selection is, how it is scoped, how several proposals for one Session are
    represented, and how promotion and abandonment work. The apply-draft pointer
    and the current-draft rule are **not** part of this; they belong to Stage 5.
+3. **A workspace read contract.** The frozen `/api/session-workspace/sessions`
+   returns `{items}` only — newest first, maximum 200, no filter, no pagination —
+   and neither it nor the frozen detail response carries an instruction label,
+   control-level observations, or a token rollup. A session list and a session
+   record screen therefore cannot be built on the existing reads without either
+   breaking a frozen contract, issuing one request per row, or inventing values.
+   An additive successor read area is required, alongside a narrow raw-bearing
+   instruction-label route, leaving `/api/monitor/*`, `/api/session-workspace/*`
+   v1 and SSE unchanged in shape, ordering and bytes.
+
+   This was the one genuinely load-bearing idea in the retired IA document, and
+   retiring that document dropped it. It is restored here.
+
+   That contract must also refuse to inherit the existing list ordering:
+   `sessions.last_seen_at` is maintained with SQLite's TEXT `MAX` and the current
+   list orders by it descending, so mixed UTC offsets can break real-time order.
+   The successor reads order by a safe instant with an exact tie-breaker and never
+   use `last_seen_at` as an ordering, cursor or window key.
 
 The IA does **not** have to wait for full manifest promotion, an active
 configuration inventory, `case_key`, or repository emission — provided those
@@ -446,19 +466,28 @@ into this product remains OpenTelemetry.
 1. Run the Skill spike described above, and measure what VS Code Copilot Chat
    actually emits.
 2. Produce the source-truth and claim catalogue for the two real sources.
-3. Design the v1 information architecture from this definition, including the
+3. Settle the evidence-and-proposal state contract and the workspace read
+   contract. These may proceed in parallel with step 2.
+4. Design the v1 information architecture from this definition, including the
    Japanese label vocabulary. Names are chosen after each surface's purpose is
    fixed, not before.
-4. Replace `docs/requirements.md`, `docs/spec.md` and the affected files under
-   `docs/specifications/` from the approved IA.
+5. **Promote the specifications before any screen is implemented.** Replace
+   `docs/requirements.md`, `docs/spec.md`, `docs/decisions.md` and the affected
+   files under `docs/specifications/` — including the closed enumeration of
+   raw-bearing surfaces and the `--sanitized-only` route matrix — from the
+   approved IA. `AGENTS.md` requires the specification to lead the implementation,
+   and those documents are higher in the source-of-truth order than this one.
+6. Implement, each change carrying its own focused tests and, where it touches
+   storage, its own additive schema bump with fixture migration coverage.
+7. Run a cross-surface validation pass over raw-default and `--sanitized-only`,
+   then sync `README.md`, the user guides and `docs/task.md`.
 
-Steps 2 and 3 can overlap: the IA may be drafted against the claim catalogue's
+Steps 2 and 4 can overlap: the IA may be drafted against the claim catalogue's
 structure while the catalogue's contents are still being measured, provided no
 screen assumes a field that has not been observed.
 
-Settling the evidence-and-proposal state contract is on this path and can proceed
-in parallel with the source audit. The apply-draft pointer and the verdict-engine
-correction are Stage 5 work and are not.
+The apply-draft pointer and the verdict-engine correction are Stage 5 work and
+are on none of these steps.
 
 Defects 1, 2, 3, 7, 9 and 11 should be fixed before the v1 IA is implemented,
 because they change what the screens can honestly show. Defects 1, 2 and 11 are
