@@ -542,6 +542,48 @@ before a breaking vocabulary or semantic change. This checklist is not an
 authorization to change the existing receiver, adapter, persistence, migration,
 HTTP, proxy, or UI DTO in Issue #61.
 
+### Copilot CLI Skill projection
+
+The Skill projection is source-scoped to `github-copilot-cli`. Its
+Skill-specific input allowlist is exactly `github.copilot.skill.name`,
+`github.copilot.skill.source`,
+`github.copilot.skill.invocation_trigger`,
+`github.copilot.tool.parameters.skill_name`, and
+`github.copilot.context.skills`. An existing `gen_ai.tool.name` value of `skill`
+may identify the dedicated tool span but does not supply a Skill identifier.
+`github-copilot-vscode` supplies none of this allowlist and has no Skill
+projection. No cross-source Skill view exists.
+
+An invoked Skill projection is positive observation only. It states that the
+carrying CLI record emitted the projected Skill identifier; it never states that
+the projection contains every Skill that ran. `github.copilot.context.skills` is
+the at-run-time available Skill-name inventory for its trace. That inventory is
+a prerequisite for a future certified absence claim and does not by itself
+license an absence claim.
+
+The Skill projection stores neither Skill file content nor absolute paths.
+Projected `name`, `source`, `invocation_trigger`, and available-name-array values
+are sanitized identifiers, not raw content. They remain outside the closed
+raw-bearing surface enumeration and remain available when `--sanitized-only` is
+active.
+
+Session binding is exact-only. A Skill projection binds to a native Session only
+when the carrying record has the exact native Session identity required by the
+existing binding contract. A record without that exact identity remains
+unbound. Time, name, path, proximity, and other contextual similarity never
+create a Session binding.
+
+Source version is resolved independently for each trace from the resource-scoped
+`service.version` attached to that trace's spans. The evidence baseline contains
+versions `1.0.74` and `1.0.75` in one capture, so capture-level version assignment
+is invalid. Traces in one ingest batch may resolve to different source versions.
+A missing, conflicting, or unrecognised source version fails closed and produces
+no Skill projection for that trace.
+
+This projection contract changes no `/api/monitor/*` or
+`/api/session-workspace/*` v1 shape, ordering, or bytes; no
+`session_events.content_state` value; and no closed raw-bearing surface.
+
 ## Session Event Ingestion And Enrichment
 
 Issue #51 adds a Session event input beside, not inside, the OTLP receiver:
