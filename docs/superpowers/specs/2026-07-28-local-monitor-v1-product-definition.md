@@ -292,7 +292,7 @@ judgement.
 
 | Want | Verdict | What v1 may say |
 | --- | --- | --- |
-| Which Skills fired | **Reachable for Copilot CLI, pending a spike; blocked for VS Code Copilot Chat** | Copilot CLI has no skill hook event, so hooks can never carry this. The `GitHub.Copilot.SDK` package this product already references exposes session enumeration plus `SkillsApi.ListAsync` and `GetInvokedAsync`, giving a non-Canvas path — unproven until the spike below. Separately, correcting the allowlist to `skill.invoked` recovers Skill names on the SDK event stream, which benefits Canvas users today. VS Code Copilot Chat has no known channel for this. |
+| Which Skills fired | **Reachable for Copilot CLI (measured); unavailable for VS Code Copilot Chat (measured)** | Copilot CLI has no skill hook event, so hooks can never carry this. The spike of 2026-07-28 (#126) proved the non-Canvas path: the invoked set survives session completion and agrees across three read paths, and `ServerSkillsApi.DiscoverAsync` supplies the available set with no session open. Separately, correcting the allowlist to `skill.invoked` recovers Skill names on the SDK event stream. For VS Code Copilot Chat this is **not a pending question but a measured absence** (#127): no attribute or span names a Skill, and loading one is indistinguishable from any `read_file`. v1 makes no Skill claim for that source. |
 | How many sub-agents, and what they were asked | **Counts partly deliverable; task text blocked** | "Observed sub-agent starts: N", with names when the payload carried them. Not "the number of sub-agents" without identity coverage. The delegated task text has no dedicated field in any source; only best-effort extraction from raw tool arguments exists. |
 | This run used abnormally more tokens than usual | **Stage 2, not v1** | Compare captured token counts against an explicitly selected cohort, or a population declared exploratory, and report delta, rank or percentile with coverage. Never "compared with the same task as usual" before `case_key`. v1 shows the run's own captured figures with their coverage, and no comparison. |
 | An AI that frankly says what to change | **Out of v1 scope** | The Copilot analysis drawer already exists over the trace screen and v1 neither extends nor removes it. When this does become a promise, it is an evidence-linked hypothesis — what to change, the observation motivating it, the expected effect, and what later result would falsify it — never "your instruction was bad" or "this tool call was wasted" as established fact. |
@@ -320,7 +320,7 @@ improvement moved out of scope.
 | 5 | Objective Evaluation has no UI anywhere | only `POST /api/session-workspace/objective-evaluations` | A documented quality signal cannot be recorded by a human | **blocks v1** |
 | 6 | Production launch does not pass `--apply-root` | `MonitorHost.cs:208` | Apply is inert in production; shipping the control without this is a false capability | Stage 5 |
 | 7 | The normalizer has no failure branch; any recognised terminal event sets the Session to `Completed` | `SessionEventNormalizer.cs:49` | Session-level failure cannot be expressed even though Run, Event and Trace carry failure signals | **blocks v1** |
-| 8 | Nothing in the product emits `vcs.repository.name`; only consumer and projection code exists | measured 0/21 | Repository grouping does not work by default | not v1 |
+| 8 | The product consumes `vcs.repository.name`, which no source sends. VS Code sends repository identity under **different keys** — `copilot_chat.repo.remote_url`, `.head_branch_name`, `.head_commit_hash`, `github.copilot.git.repository`, `.branch`, `.commit_sha` | measured 0/21 on the CLI store; VS Code keys measured present 2026-07-28 (#127) | Repository grouping does not work by default — a key mismatch, not an absence of data | not v1 |
 | 9 | All five source capability manifests are untouched defaults | five manifests, byte-identical on `agent_ownership` | Capability-gated behaviour is suppressed for reasons unrelated to the data | **blocks v1** |
 | 10 | Evidence selection is not persisted, and no pointer records the current proposal or apply draft | Canvas JavaScript state | Evidence cannot survive a reload, so a proposal cannot be built up over more than one sitting | **blocks v1** for evidence selection; the apply-draft pointer is Stage 5 |
 | 11 | The hook installer registers 7 of the 10 events Copilot CLI supports, omitting `PostToolUseFailure`, `PermissionRequest` and `SessionEnd` | `install-session-hooks.ps1:58`; bundled CLI 1.0.65 hook union | Tool failures, permission decisions and clean session ends are never captured, although the normalizer already accepts all three | **blocks v1** |
@@ -428,9 +428,24 @@ The .NET package this product already depends on
 
 - `CopilotClient.ListSessionsAsync(SessionListFilter, CancellationToken)`
 - `CopilotClient.ResumeSessionAsync(String, ResumeSessionConfig, CancellationToken)`
-- `SkillsApi.ListAsync` — the **available** Skill set
-- `SkillsApi.GetInvokedAsync` — the **invoked** Skill set
-- `ServerSessionsApi.ListAsync`, `ServerSessionsApi.GetEventFilePathAsync`
+- `SkillsApi.ListAsync` — the **available** Skill set (session-scoped)
+- `SkillsApi.GetInvokedAsync` — the **invoked** Skill set (session-scoped)
+- `ServerSkillsApi.DiscoverAsync` — skill discovery across global and project
+  sources, **server-scoped: no session required**
+- `ServerSessionsApi.ListAsync`, `ServerSessionsApi.CheckInUseAsync`
+
+**Measured correction (2026-07-28, Issue #126).** `ServerSessionsApi.GetEventFilePathAsync`
+was listed here on the strength of the SDK's XML documentation. It does **not exist**
+in the shipped 1.0.4 assembly, confirmed by reflection over the type's 23 public
+methods. `GetPersistedRemoteSteerableAsync`, `GetBoardEntryCountAsync` and
+`PollSpawnedSessionsAsync` are documented-but-absent in the same way. **The XML
+documentation of this package is not evidence that an API exists.** Verify by
+reflection before designing on anything found there.
+
+The events file is still reachable — its path is
+`<base>/session-state/<sessionId>/events.jsonl`, confirmed against real data — but
+it must be derived rather than requested, which deepens the dependency on internal
+layout.
 
 So Local Monitor can, at the API level, enumerate the user's own local Copilot CLI
 sessions and ask which Skills were available and which were invoked, in .NET,
@@ -438,28 +453,89 @@ without the GitHub Copilot App. The bundled CLI's own type definitions describe
 `getInvokedSkills()` as the list of skills invoked in a session, retained
 specifically so skill permissions survive a session resume.
 
-This is an API surface, not a proven capability. Before it is relied on, a spike
-must establish: whether `ResumeSessionAsync` can read a session another process
-owns; whether it has side effects on a session the user is actively running;
-whether the invoked set survives session completion; and what happens when the
-CLI version differs from the bundled one.
+**The spike ran on 2026-07-28 (Issue #126) and the path holds.** Measured, with
+zero detected side effects on the user's real `~/.copilot`:
 
-If the spike succeeds, `SkillsApi.ListAsync` also supplies the active
-configuration inventory that Stage 4 requires, which would bring certified
+- Server-scoped reads need **no session at all**. `StartAsync` followed by
+  `Sessions.ListAsync`, `CheckInUseAsync` and `Skills.DiscoverAsync` all succeed
+  with nothing opened.
+- The invoked-Skill set **survives session completion**. Live `GetInvokedAsync`,
+  direct `events.jsonl` reading, and post-completion resume + `GetInvokedAsync`
+  returned identical sets, compared on name, path, content digest, allowed tools
+  and invocation turn.
+- The SDK starts its **own bundled runtime** (reported 1.0.65 / protocol 3) rather
+  than the user's installed CLI (1.0.74). The SDK path therefore does not break
+  when the user updates their CLI — and equally does not follow it forward.
+
+Two things remain unproven and must not be assumed: whether `ResumeSessionAsync`
+can read a session **another process owns**, and whether `CheckInUseAsync`
+detects a session the CLI is actively holding. The spike measured that a session
+resumed by the SDK is *not* reported in use, so `CheckInUseAsync` must not be the
+sole safety guard for any adapter that resumes.
+
+The active configuration inventory Stage 4 requires comes from
+**`ServerSkillsApi.DiscoverAsync`**, not `SkillsApi.ListAsync`: it is
+server-scoped, so it needs neither a session nor a resume. This brings certified
 absence claims — "configured Skill X was not invoked" — forward for Copilot CLI
-specifically. It supplies nothing for VS Code Copilot Chat, whose only channel
-into this product remains OpenTelemetry.
+specifically.
+
+It supplies nothing for VS Code Copilot Chat. **Measured 2026-07-28 (Issue #127):
+VS Code emits no structured Skill signal of any kind.** Across 65 distinct
+attribute keys, none names a Skill; loading a Skill is recorded as an ordinary
+`read_file` tool call, and the Skill name appears only inside raw content
+attributes. Skill claims are therefore unavailable for that source at any stage,
+and the stage boundaries here are per-source rather than global.
+
+## Resolved: what VS Code Copilot Chat actually emits
+
+Measured 2026-07-28 (Issue #127) against VS Code 1.130.0 with Copilot Chat
+extension **0.58.0**, over a purpose-built empty database: 24 traces, 55 spans,
+65 distinct attribute keys.
+
+**The assumption that VS Code supplies "trace structure, timing and tokens only"
+is wrong.** VS Code emits hook execution as OTel spans — `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` — with eight dedicated
+attributes (`copilot_chat.hook_type`, `hook_command`, `hook_input`,
+`hook_output`, `hook_result_kind`, `github.copilot.hook.decision`,
+`hook.duration`, `hook.tool_names`). Hooks are not a Copilot CLI exclusive.
+
+**No Skill signal exists**, as recorded above.
+
+**`gen_ai.agent.name` is populated** (19 of 55 spans) where the CLI database
+showed 0 of 952 — but every observed value is an internal component name
+(`panel/editAgent`, `title`, `progressMessages`, `copilotLanguageModelWrapper`,
+`GitHub Copilot Chat`), never a user-configured agent. It must not be presented
+as agent identity. `invoke_agent` spans do not nest; no sub-agent structure
+appears.
+
+A prior claim in this document is corrected: a **live** VS Code capture does
+exist in this repository's ignored working data
+(`data/monitor-live-validation-vscode.db`, extension 0.54.0, 2026-06-27). It is
+not merely a conformance fixture, and comparing it against the 0.58.0 capture is
+what exposed the hook change.
+
+Two ingestion defects were found by that comparison and are filed separately:
+token usage arrives but is never projected into `monitor_spans`, and 0.58.0 no
+longer sends `client.kind`, leaving VS Code traces unattributed. Neither is a
+telemetry limitation; both are this product's own.
+
+One boundary observation needs following up before it is relied on: raw
+conversation content arrived **without** `github.copilot.chat.otel.captureContent`
+being set. If confirmed, the assumption that content is opt-in does not hold for
+this extension version.
+
+Coverage limits: one configuration, one session, four turns, default chat mode
+only; non-OTel channels were not explored; and a single user question produced
+seven traces, so a trace is **not** a user turn.
 
 ## Open questions
 
-1. **Does the Skill spike above succeed?** Until it does, the Skill row of the
-   four-wants table stands as written.
-2. **Does VS Code Copilot Chat have any channel other than OpenTelemetry?** No
-   captured artifact in this repository shows a skill-like attribute on a VS Code
-   Copilot Chat span, and the one fixture that exists is declared a
-   repository-safe conformance fixture rather than a live capture. Until measured,
-   VS Code Copilot Chat is assumed to supply trace structure, timing and tokens
-   only.
+1. **Does `ResumeSessionAsync` work against a session another process owns, and
+   does `CheckInUseAsync` detect a CLI-held session?** Both are unproven and
+   block any adapter design that resumes rather than reads.
+2. **Is raw content genuinely arriving from VS Code without an explicit capture
+   opt-in?** If so, the content-capture contract and the security boundary need
+   revision before any VS Code ingestion is promoted.
 
 ## Next steps
 
