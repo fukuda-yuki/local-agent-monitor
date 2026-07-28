@@ -128,8 +128,10 @@ no persisted pointer records which the user is advancing.
 ## Purpose
 
 > **Local Monitor v1 is the complete loopback-only application for reconstructing
-> what was actually captured from the user's AI coding-agent sessions, and
-> presenting it at the level of the controls the user owns.**
+> what was actually captured from the user's AI coding-agent sessions, presenting
+> it at the level of the controls the user owns, and letting the user record a
+> judgement, select the exact evidence behind it, and write down a proposed
+> change.**
 >
 > It presents exact record identity, parentage and timing, and presents token,
 > tool, Skill and sub-agent activity **only when positively observed**. It
@@ -139,16 +141,33 @@ no persisted pointer records which the user is advancing.
 > It does not treat missing telemetry as proof of non-use, an AI judgement as
 > evidence, or an observed pattern as proof of causation.
 
-**Improvement is out of v1 scope.** Proposal creation and promotion, apply,
-rollback and effect comparison are not v1 promises. Their stores and APIs exist
-and Canvas remains their interface; Local Monitor gains them in a later stage,
-once the internal model beneath them has been built up. This is a deliberate
-scope decision, not an oversight, and it is why the improvement-state contract is
-not a prerequisite for the v1 IA.
+### Where the improvement cycle is cut, and why
+
+Half of the improvement cycle is in v1. Human Evaluation, Objective Evaluation,
+persisted evidence selection, and proposal creation and promotion all have
+complete stores and APIs, they complete a loop the user can actually run inside
+Local Monitor, and **nothing in them can mislead or damage**.
+
+**Applying a change and comparing its effect are not v1**, and the reason is not
+precision:
+
+- **Apply writes to the user's files.** It carries snapshot, journal and
+  single-use rollback semantics, and the production launch path does not
+  configure an apply root. A rough version of this does not fail by being
+  imprecise; it fails by damaging a working tree.
+- **Effect comparison issues a verdict that is then persisted.** The existing
+  verdict engine can return `regressed` from the median of cache-inclusive
+  `total_tokens` alone. A rough version produces wrong judgements that outlive the
+  run that created them.
+
+"Ship something rough and improve the accuracy later" is a sound strategy for
+everything in v1. It is not a sound strategy for a file mutation or for a stored
+verdict, so those two wait.
 
 v1 also does not promise that the product understands the user's recurring
 practices, identifies departures from a valid baseline, or proves that a
-configuration change improved the agent.
+configuration change improved the agent. There is no automatically inferred
+"single correct next action"; the user selects which proposal they are advancing.
 
 ### The organising principle
 
@@ -174,10 +193,11 @@ post-session reflection on the session the user has just run. Overlap between
 Canvas and Local Monitor is intended and is not a defect. Revision 12's plan to
 move UI ownership away from Canvas is retired; nothing is taken from Canvas.
 
-Because improvement is out of v1 scope, the improvement cycle remains reachable
-only through Canvas during v1. That is accepted for v1 and is not accepted
-permanently: **when improvement enters scope, no capability required to complete
-it may exist only in Canvas.**
+**No capability required to complete the v1 loop may exist only in Canvas.**
+Evaluation, evidence selection and proposal authoring must all be reachable from
+Local Monitor itself. Apply and comparison remain Canvas-only during v1, which is
+accepted only because they are out of v1 scope, and the same rule binds them the
+moment they enter it.
 
 ## What the product may claim
 
@@ -215,12 +235,23 @@ leave the local UI.
 
 ## Release stages
 
-**Stage 1 — Observed-session review. This is the v1 release gate.** Reconstruct
-what was captured and present it at control level: native Session identity, the
-user's instruction, exact trace and span parentage, timing, captured hook events,
-observed tool activity, observed sub-agent starts, and positively observed token
-values — each carrying which of the four unavailability states applies when it is
-absent. Largely supported by existing data.
+**Stage 1 — Observed-session review, judgement and proposal. This is the v1
+release gate.** Two halves.
+
+*Reconstruct what was captured* and present it at control level: native Session
+identity, the user's instruction, exact trace and span parentage, timing, captured
+hook events, observed tool activity, observed sub-agent starts, and positively
+observed token values — each carrying which of the four unavailability states
+applies when it is absent. Largely supported by existing data.
+
+*Then let the user act on it*: record a Human Evaluation, record an Objective
+Evaluation, select exact Spans and Events as evidence and have that selection
+persist, and create and promote a proposal anchored to that evidence. All four
+have complete stores and APIs; what is missing is a persisted evidence selection
+and a user interface inside Local Monitor.
+
+The proposal is a written intention with its evidence attached. v1 does not apply
+it and does not judge whether it worked.
 
 **Stage 2 — Comparison against an explicitly selected population.** Opens when
 the product can present a run's captured figures against a cohort the user
@@ -245,12 +276,15 @@ For GitHub Copilot CLI specifically, `SkillsApi.ListAsync` may supply the active
 configuration inventory directly, which would open this stage earlier for that
 source alone. Stage boundaries are per-source, not global.
 
-**Stage 5 — Improvement inside Local Monitor.** Opens when the improvement-state
-contract below is settled: persisted evidence selection; an explicit rule for
-which proposal and which apply draft the user is advancing; human-reachable
-Objective Evaluation; and a production apply root or a clearly stated fail-closed
-configuration state. Deliberately last, because the internal model beneath it is
-not built up enough to promise it now.
+**Stage 5 — Apply and effect comparison inside Local Monitor.** Opens when a
+production apply root is configured or a clearly stated fail-closed configuration
+state exists; a pre-apply diff confirmation surface exists inside Local Monitor;
+an explicit rule says which apply draft the user is advancing; and the verdict
+engine no longer returns `regressed` from cache-inclusive token medians alone.
+
+Deliberately last, and for a different reason from the other stages: this is the
+only stage whose rough version can damage a working tree or persist a wrong
+judgement.
 
 ## The owner's four wants
 
@@ -280,19 +314,22 @@ improvement moved out of scope.
 | 1 | The event allowlist waits for `skill.started` / `skill.completed`, which no producer emits; the real SDK event is `skill.invoked` | `SessionEventNormalizer.cs:146`; SDK XML | Skill invocations normalize to `unsupported` and the Skill name is discarded | **blocks v1** |
 | 2 | The same allowlist omits `subagent.failed`, `subagent.selected`, `subagent.deselected` | same | Sub-agent failure and selection signals are discarded | **blocks v1** |
 | 3 | The secret filter removes every property whose key contains `token` | `SessionSecretFilter.cs:38` | Per-sub-agent `totalTokens` from SDK events is destroyed before storage | **blocks v1** |
-| 4 | Local Monitor has no UI for any part of the improvement cycle | Canvas extension is the only interface | The product's headline capability is unreachable from the product | Stage 5 |
-| 5 | Objective Evaluation has no UI anywhere | only `POST /api/session-workspace/objective-evaluations` | A documented quality signal cannot be recorded by a human | Stage 5 |
+| 4 | Local Monitor has no UI for any part of the improvement cycle | Canvas extension is the only interface | The product's headline capability is unreachable from the product | **blocks v1** for evaluation, evidence and proposal; Stage 5 for apply and comparison |
+| 5 | Objective Evaluation has no UI anywhere | only `POST /api/session-workspace/objective-evaluations` | A documented quality signal cannot be recorded by a human | **blocks v1** |
 | 6 | Production launch does not pass `--apply-root` | `MonitorHost.cs:208` | Apply is inert in production; shipping the control without this is a false capability | Stage 5 |
 | 7 | The normalizer has no failure branch; any recognised terminal event sets the Session to `Completed` | `SessionEventNormalizer.cs:49` | Session-level failure cannot be expressed even though Run, Event and Trace carry failure signals | **blocks v1** |
 | 8 | Nothing in the product emits `vcs.repository.name`; only consumer and projection code exists | measured 0/21 | Repository grouping does not work by default | not v1 |
 | 9 | All five source capability manifests are untouched defaults | five manifests, byte-identical on `agent_ownership` | Capability-gated behaviour is suppressed for reasons unrelated to the data | **blocks v1** |
-| 10 | Evidence selection is not persisted, and no pointer records the current proposal or apply draft | Canvas JavaScript state | The improvement workflow cannot be resumed, and no next-action rule is computable | Stage 5 |
+| 10 | Evidence selection is not persisted, and no pointer records the current proposal or apply draft | Canvas JavaScript state | Evidence cannot survive a reload, so a proposal cannot be built up over more than one sitting | **blocks v1** for evidence selection; the apply-draft pointer is Stage 5 |
 | 11 | The hook installer registers 7 of the 10 events Copilot CLI supports, omitting `PostToolUseFailure`, `PermissionRequest` and `SessionEnd` | `install-session-hooks.ps1:58`; bundled CLI 1.0.65 hook union | Tool failures, permission decisions and clean session ends are never captured, although the normalizer already accepts all three | **blocks v1** |
 
-Defects 1, 2, 3, 7, 9 and 11 block v1 because v1's entire promise is to present
+Defects 1, 2, 3, 7, 9 and 11 block v1 because v1's first promise is to present
 what was observed, honestly labelled. A defect that silently discards an
 observation, never subscribes to it, or suppresses a claim for a reason unrelated
 to the data, defeats that promise directly.
+
+Defects 4, 5 and 10 block v1 because v1's second promise is that the user can act
+on what they saw without leaving Local Monitor.
 
 Defects 1, 2 and 11 share a shape worth naming: **this product listens for events
 that are not sent, and does not listen for events that are.** That is the single
@@ -323,15 +360,18 @@ v1 must not promise them.
 
 ## Before the IA can be designed
 
-One thing must be settled, and it is not a capability programme.
+Two things must be settled. Neither is a capability programme.
 
-**The source-truth and claim catalogue.** An empirical field inventory for GitHub
-Copilot CLI and VS Code Copilot Chat only: what arrives, with what coverage, under
-which source and schema fingerprint, and which layer of the claim table each field
-can support. Manifest promotion follows this evidence rather than preceding it.
-
-The improvement-state contract was the second prerequisite while improvement was
-in scope. It is now a Stage 5 prerequisite and no longer blocks the v1 IA.
+1. **The source-truth and claim catalogue.** An empirical field inventory for
+   GitHub Copilot CLI and VS Code Copilot Chat only: what arrives, with what
+   coverage, under which source and schema fingerprint, and which layer of the
+   claim table each field can support. Manifest promotion follows this evidence
+   rather than preceding it.
+2. **The evidence-and-proposal state contract** — the v1 half of what was
+   previously called the improvement-state contract. What a persisted evidence
+   selection is, how it is scoped, how several proposals for one Session are
+   represented, and how promotion and abandonment work. The apply-draft pointer
+   and the current-draft rule are **not** part of this; they belong to Stage 5.
 
 The IA does **not** have to wait for full manifest promotion, an active
 configuration inventory, `case_key`, or repository emission — provided those
@@ -339,9 +379,9 @@ capabilities are excluded from v1 or carry an explicit qualification. The IA mus
 not assume that repository identity, Session-level failure, negative Skill claims,
 or same-practice baselines already work.
 
-The IA must also not design around the improvement cycle. It may reserve a place
-for it, but it may not make the v1 screens depend on a workflow that v1 does not
-deliver — which is exactly what Revision 12 did.
+The IA must not design around apply or effect comparison. It may not reserve
+visible space for them, show disabled controls for them, or make any v1 screen
+depend on a workflow v1 does not deliver — which is exactly what Revision 12 did.
 
 ## Resolved: the Copilot CLI hook set
 
@@ -416,10 +456,12 @@ Steps 2 and 3 can overlap: the IA may be drafted against the claim catalogue's
 structure while the catalogue's contents are still being measured, provided no
 screen assumes a field that has not been observed.
 
-The improvement-state contract is Stage 5 work and is not on this path.
+Settling the evidence-and-proposal state contract is on this path and can proceed
+in parallel with the source audit. The apply-draft pointer and the verdict-engine
+correction are Stage 5 work and are not.
 
 Defects 1, 2, 3, 7, 9 and 11 should be fixed before the v1 IA is implemented,
 because they change what the screens can honestly show. Defects 1, 2 and 11 are
 small, local corrections with a large effect on what is visible, and are the
-cheapest work identified anywhere in this document. Defects 5 and 6 are
-independent of everything above and can be fixed at any time.
+cheapest work identified anywhere in this document. Defects 4, 5 and 10 are the
+v1 build itself. Defect 6 belongs to Stage 5.
