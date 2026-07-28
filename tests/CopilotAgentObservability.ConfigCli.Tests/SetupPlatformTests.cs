@@ -54,6 +54,151 @@ public sealed class SetupPlatformTests
     }
 
     [Fact]
+    public void SystemPlatform_ProcessRunnerExecutesExtensionlessWindowsCommandShim()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-process-runner-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var commandStem = Path.Combine(directory, "probe");
+            File.WriteAllText(
+                commandStem + ".cmd",
+                "@echo off\r\nif not \"%~1\"==\"fixed-argument\" exit /b 7\r\necho 1.130.0\r\n");
+
+            var observation = new SystemSetupPlatform().ProcessRunner.Run(
+                commandStem,
+                ["fixed-argument"]);
+
+            Assert.Equal(SetupProcessOutcome.Completed, observation.Outcome);
+            Assert.Equal(0, observation.ExitCode);
+            Assert.Equal("1.130.0", observation.StandardOutput.Trim());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_ProcessRunnerPrefersNativeWindowsExecutableOverSameNameCommandShim()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var comSpec = Environment.GetEnvironmentVariable("ComSpec");
+        Assert.False(string.IsNullOrWhiteSpace(comSpec));
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-process-runner-native-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var commandStem = Path.Combine(directory, "probe");
+            File.Copy(comSpec!, commandStem + ".exe");
+            File.WriteAllText(commandStem + ".cmd", "@echo off\r\necho batch-shim\r\n");
+
+            var observation = new SystemSetupPlatform().ProcessRunner.Run(
+                commandStem,
+                ["/d", "/c", "echo native-executable"]);
+
+            Assert.Equal(SetupProcessOutcome.Completed, observation.Outcome);
+            Assert.Equal(0, observation.ExitCode);
+            Assert.Equal("native-executable", observation.StandardOutput.Trim());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_ProcessRunnerDoesNotFollowWindowsCommandShimReparsePoint()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-process-runner-link-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var commandStem = Path.Combine(directory, "probe");
+            var target = Path.Combine(directory, "target.cmd");
+            File.WriteAllText(target, "@echo off\r\necho unexpected\r\n");
+            File.CreateSymbolicLink(commandStem + ".cmd", target);
+
+            var observation = new SystemSetupPlatform().ProcessRunner.Run(commandStem, []);
+
+            Assert.Equal(SetupProcessOutcome.NotFound, observation.Outcome);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("%ComSpec%")]
+    [InlineData("!ComSpec!")]
+    public void SystemPlatform_ProcessRunnerRejectsWindowsCommandShimExpansionTokens(string token)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-process-runner-token-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var commandStem = Path.Combine(directory, "probe");
+            File.WriteAllText(commandStem + ".cmd", "@echo off\r\necho unexpected\r\n");
+
+            var observation = new SystemSetupPlatform().ProcessRunner.Run(commandStem, [token]);
+
+            Assert.Equal(SetupProcessOutcome.Failed, observation.Outcome);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemPlatform_ProcessRunnerReportsMissingWindowsCommandInterpreterAsFailed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), $"cao-process-runner-comspec-{Guid.NewGuid():N}");
+        var previousComSpec = Environment.GetEnvironmentVariable("ComSpec");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var commandStem = Path.Combine(directory, "probe");
+            File.WriteAllText(commandStem + ".cmd", "@echo off\r\necho unexpected\r\n");
+            Environment.SetEnvironmentVariable("ComSpec", Path.Combine(directory, "missing-cmd.exe"));
+
+            var observation = new SystemSetupPlatform().ProcessRunner.Run(commandStem, []);
+
+            Assert.Equal(SetupProcessOutcome.Failed, observation.Outcome);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ComSpec", previousComSpec);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SystemPlatform_RecognizesOnlyNativeExclusiveFileLockContention()
     {
         var contentionCodes = OperatingSystem.IsWindows()

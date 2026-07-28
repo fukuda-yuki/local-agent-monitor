@@ -70,6 +70,10 @@ public sealed class SystemSetupPlatform : ISetupPlatform
     internal static bool IsWindowsManagedRegularFile(FileAttributes attributes, uint fileType) =>
         (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0 && fileType == 1;
 
+    internal static bool IsWindowsRegularFile(string path) =>
+        System.OperatingSystem.IsWindows() &&
+        new SystemSetupFileSystem(exclusiveFileLockAttempt: null).GetPathMetadata(path).Kind == SetupPathKind.File;
+
     internal static bool IsUnixManagedRegularFile(uint mode) => (mode & 0xf000) == 0x8000;
 
     internal static bool TryClassifyMacOsManagedPreferenceKey(
@@ -578,7 +582,20 @@ public sealed class SystemSetupPlatform : ISetupPlatform
 
             try
             {
-                return RunCoreAsync(fileName, arguments).GetAwaiter().GetResult();
+                try
+                {
+                    return RunCoreAsync(fileName, arguments).GetAwaiter().GetResult();
+                }
+                catch (Exception exception) when (IsNotFound(exception))
+                {
+                    var batchShim = ResolveWindowsBatchShim(fileName);
+                    if (batchShim is null)
+                    {
+                        throw;
+                    }
+
+                    return RunWindowsBatchShimAsync(batchShim, arguments).GetAwaiter().GetResult();
+                }
             }
             catch (Win32Exception exception) when (exception.NativeErrorCode is 2 or 3)
             {
@@ -598,9 +615,83 @@ public sealed class SystemSetupPlatform : ISetupPlatform
             }
         }
 
+        private static bool IsNotFound(Exception exception) =>
+            exception is Win32Exception { NativeErrorCode: 2 or 3 } or FileNotFoundException or DirectoryNotFoundException;
+
+        private static Task<SetupProcessObservation> RunWindowsBatchShimAsync(
+            string batchShim,
+            IReadOnlyList<string> arguments)
+        {
+            var comSpec = Environment.GetEnvironmentVariable("ComSpec");
+            if (string.IsNullOrWhiteSpace(comSpec) ||
+                !Path.IsPathFullyQualified(comSpec) ||
+                !File.Exists(comSpec))
+            {
+                return Task.FromResult(Failed());
+            }
+
+            var command = string.Join(
+                ' ',
+                new[] { batchShim }
+                    .Concat(arguments)
+                    .Select(QuoteWindowsCommandToken));
+            return RunCoreAsync(
+                Path.GetFullPath(comSpec),
+                [],
+                $"/d /s /c \"{command}\"");
+        }
+
+        private static string? ResolveWindowsBatchShim(string fileName)
+        {
+            if (!System.OperatingSystem.IsWindows() || Path.GetExtension(fileName).Length != 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                var extensions = (Environment.GetEnvironmentVariable("PATHEXT") ?? string.Empty)
+                    .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(extension => extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase) ||
+                        extension.Equals(".bat", StringComparison.OrdinalIgnoreCase));
+                var stems = new[] { Path.GetFullPath(fileName) }
+                    .Concat((Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                        .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Select(path => Path.Combine(path, fileName)));
+
+                foreach (var stem in stems)
+                {
+                    foreach (var extension in extensions)
+                    {
+                        var candidate = stem + extension;
+                        if (IsWindowsRegularFile(candidate))
+                        {
+                            return Path.GetFullPath(candidate);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            return null;
+        }
+
+        private static string QuoteWindowsCommandToken(string token)
+        {
+            if (token.IndexOfAny(['\r', '\n', '\0', '%', '!']) >= 0)
+            {
+                throw new ArgumentException("windows_batch_shim_token_invalid", nameof(token));
+            }
+
+            return $"\"{token.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+        }
+
         private static async Task<SetupProcessObservation> RunCoreAsync(
             string fileName,
-            IReadOnlyList<string> arguments)
+            IReadOnlyList<string> arguments,
+            string? rawArguments = null)
         {
             using var process = new Process
             {
@@ -613,9 +704,16 @@ public sealed class SystemSetupPlatform : ISetupPlatform
                     CreateNoWindow = true,
                 },
             };
-            foreach (var argument in arguments)
+            if (rawArguments is not null)
             {
-                process.StartInfo.ArgumentList.Add(argument);
+                process.StartInfo.Arguments = rawArguments;
+            }
+            else
+            {
+                foreach (var argument in arguments)
+                {
+                    process.StartInfo.ArgumentList.Add(argument);
+                }
             }
 
             if (!process.Start())
