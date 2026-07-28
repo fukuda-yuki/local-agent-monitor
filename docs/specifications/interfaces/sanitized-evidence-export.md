@@ -57,7 +57,7 @@ contract, scanner, manifest, and size rules. Syntax-valid bytes alone never
 establish owner/store provenance.
 
 The provider opens the explicitly named existing database once in read-only,
-private-cache, non-pooled mode, enables `query_only`, and anchors monitor v7,
+private-cache, non-pooled mode, enables `query_only`, and anchors monitor v8,
 Session v13, and optional producer schemas in one deferred transaction. It runs
 a metadata-only descriptor query with a 256-row sentinel and carrier byte
 lengths before exact-ID reads. It may query only `monitor_traces`, Session

@@ -102,6 +102,31 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
+    public void GetTraceSourceVersionResolution_MissingAndResolvedObservationsDoesNotReturnResolved()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var commitStore = new SqliteIngestionCommitStore(database.Path);
+        var missing = commitStore.Commit(CreateBatch("batch-missing", BuildOverflowInventory()));
+        var resolved = commitStore.Commit(CreateBatch("batch-resolved", BuildOverflowInventory()));
+        using (var connection = Open(database.Path))
+        {
+            Execute(
+                connection,
+                $"INSERT INTO source_trace_version_observations VALUES ({missing.ObservationId}, '{traceId}', 'missing', NULL);");
+            Execute(
+                connection,
+                $"INSERT INTO source_trace_version_observations VALUES ({resolved.ObservationId}, '{traceId}', 'resolved', '1.0.74');");
+        }
+
+        var resolution = new SqliteSourceCompatibilityStore(database.Path)
+            .GetTraceSourceVersionResolution(traceId);
+
+        Assert.Equal(TraceSourceVersionResolutionState.Missing, Assert.IsType<TraceSourceVersionResolutionRow>(resolution).State);
+    }
+
+    [Fact]
     public void RecordAdapterFailure_PersistsNullableMetadataAndListUsesBoundedCursor()
     {
         using var database = new TestDatabase();
@@ -196,7 +221,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 8 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 9 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -204,11 +229,11 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(8L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(9L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
-    public void RawInitialization_PreservesV6AndFutureMonitorStamps()
+    public void RawInitialization_PreservesV8AndFutureMonitorStamps()
     {
         using var database = new TestDatabase();
         new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
@@ -217,20 +242,20 @@ public sealed class SourceCompatibilityStoreTests
         rawStore.CreateMonitorSchema();
 
         using var connection = Open(database.Path);
-        Assert.Equal(7L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(8L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 8 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 9 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
         rawStore.CreateMonitorSchema();
 
-        Assert.Equal(8L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(9L, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Fact]
-    public void CreateSchema_WhenSecondV6ObjectFails_RollsBackFirstObjectAndVersionStamp()
+    public void CreateSchema_WhenSecondSourceObjectFails_RollsBackFirstObjectAndVersionStamp()
     {
         using var database = new TestDatabase();
         database.CreateRawStore().CreateMonitorSchema();
@@ -250,7 +275,7 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
-    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV6Stamp()
+    public void CreateSchema_FocusedStoreOwnsSanitizedSourceTablesAndV8Stamp()
     {
         using var database = new TestDatabase();
         database.CreateRawStore().CreateMonitorSchema();
@@ -258,6 +283,7 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Empty(Columns(connection, "source_schema_observations"));
         Assert.Empty(Columns(connection, "source_unknown_observations"));
+        Assert.Empty(Columns(connection, "source_trace_version_observations"));
         Assert.Equal(RawTelemetryStore.MonitorSchemaVersion, Scalar(connection, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         connection.Close();
 
@@ -280,9 +306,14 @@ public sealed class SourceCompatibilityStoreTests
                 "first_observed_at", "last_observed_at", "opaque_sample_reference",
             ],
             Columns(connection, "source_unknown_observations"));
+        Assert.Equal(
+            [
+                "source_observation_id", "trace_id", "resolution_state", "source_application_version",
+            ],
+            Columns(connection, "source_trace_version_observations"));
 
         string[] forbidden = ["payload_json", "resource_attributes_json", "raw_value", "value", "user_id", "user_email", "path"];
-        foreach (var table in new[] { "source_schema_observations", "source_unknown_observations" })
+        foreach (var table in new[] { "source_schema_observations", "source_unknown_observations", "source_trace_version_observations" })
         {
             Assert.DoesNotContain(Columns(connection, table), forbidden.Contains);
         }
@@ -290,6 +321,32 @@ public sealed class SourceCompatibilityStoreTests
         Assert.Equal(
             ["IX_source_schema_observations_cursor", "IX_source_unknown_observations_cursor"],
             Indexes(connection).Where(name => name.EndsWith("_cursor", StringComparison.Ordinal)).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void CreateSchema_MigratesExistingV7FixtureDatabaseAdditively()
+    {
+        using var database = new TestDatabase();
+        var store = new SqliteSourceCompatibilityStore(database.Path);
+        store.CreateSchema();
+        store.RecordAdapterFailure(SourceAdapterFailureDraft.CreateParseFailure(
+            "fixture-observation", null, null, null, null, null, null, DateTimeOffset.UnixEpoch));
+        using (var connection = Open(database.Path))
+        {
+            Execute(connection, "DROP TABLE source_trace_version_observations;");
+            Execute(connection, "UPDATE schema_version SET version = 7 WHERE component = 'monitor';");
+        }
+
+        store.CreateSchema();
+
+        using var verification = Open(database.Path);
+        Assert.Equal(8L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(
+            ["source_observation_id", "trace_id", "resolution_state", "source_application_version"],
+            Columns(verification, "source_trace_version_observations"));
+        Assert.Equal(
+            1L,
+            Scalar(verification, "SELECT COUNT(*) FROM source_schema_observations WHERE observation_id = 'fixture-observation';"));
     }
 
     [Fact]

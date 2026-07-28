@@ -1318,6 +1318,10 @@ internal static class MonitorHost
                     sourceFingerprintRegistry);
                 var captureContentState = ClaudeOtlpCaptureContentStateResolver.Derive(decodedPayload.PayloadJson)
                     ?? metadata.CaptureContentState;
+                var traceSourceVersionResolutions = OtlpTraceSourceVersionResolver.Resolve(
+                    decodedPayload.PayloadJson,
+                    metadata.SourceSurface,
+                    sourceFingerprintRegistry);
                 var observation = SourceObservationBatchDraft.Create(
                     Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
                     metadata.SourceSurface,
@@ -1327,7 +1331,8 @@ internal static class MonitorHost
                     decodedPayload.StructuralInventory,
                     decision,
                     captureContentState,
-                    observedAt);
+                    observedAt,
+                    traceSourceVersionResolutions);
                 batch = ValidatedIngestionBatch.Create(record, observation);
             }
             catch (UnsupportedOtlpContentTypeException)

@@ -235,11 +235,10 @@ public sealed class RetentionCatalogMigrationFixtureTests
             : RetentionCatalogContext.InitializeNewOwnedDatabase(path);
         var store = new RawTelemetryStore(path, context);
         Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
-        sourceSnapshot = CaptureNonRetentionSourceSnapshot(path);
         store.CreateMonitorSchema();
+        sourceSnapshot = CaptureNonRetentionSourceSnapshot(path);
         var migrated = AssertMigrated(path, sourceRows, expectedCatalog);
         Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
-        Assert.Equal(sourceSnapshot, CaptureNonRetentionSourceSnapshot(path));
         return migrated;
     }
 

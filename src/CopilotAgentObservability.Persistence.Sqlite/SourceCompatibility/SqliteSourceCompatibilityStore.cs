@@ -99,11 +99,33 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         Execute(
             connection,
             transaction,
+            """
+            CREATE TABLE IF NOT EXISTS source_trace_version_observations (
+                source_observation_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL,
+                resolution_state TEXT NOT NULL CHECK (resolution_state IN ('resolved', 'missing', 'conflicting', 'unrecognised')),
+                source_application_version TEXT NULL CHECK (source_application_version IS NULL OR (length(source_application_version) BETWEEN 1 AND 256)),
+                PRIMARY KEY (source_observation_id, trace_id),
+                FOREIGN KEY (source_observation_id) REFERENCES source_schema_observations(id) ON DELETE CASCADE,
+                CHECK (
+                    (resolution_state = 'resolved' AND source_application_version IS NOT NULL) OR
+                    (resolution_state IN ('missing', 'conflicting') AND source_application_version IS NULL) OR
+                    resolution_state = 'unrecognised'
+                )
+            );
+            """);
+        Execute(
+            connection,
+            transaction,
             "CREATE INDEX IF NOT EXISTS IX_source_schema_observations_cursor ON source_schema_observations(id);");
         Execute(
             connection,
             transaction,
             "CREATE INDEX IF NOT EXISTS IX_source_unknown_observations_cursor ON source_unknown_observations(source_observation_id, id);");
+        Execute(
+            connection,
+            transaction,
+            "CREATE INDEX IF NOT EXISTS IX_source_trace_version_observations_trace_id ON source_trace_version_observations(trace_id, source_observation_id);");
         MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
         MonitorSchemaMigrator.EnsureRuntimeStateSchema(connection, transaction);
         migrationCheckpoint?.Invoke(connection, transaction);
@@ -285,6 +307,68 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         return List(observationId - 1, 1).Single();
     }
 
+    public TraceSourceVersionResolutionRow? GetTraceSourceVersionResolution(string traceId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(traceId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT resolution_state, source_application_version
+            FROM source_trace_version_observations
+            WHERE trace_id = $trace_id
+            ORDER BY source_observation_id;
+            """;
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        using var reader = command.ExecuteReader();
+        var observations = new List<(TraceSourceVersionResolutionState State, string? Version)>();
+        while (reader.Read())
+        {
+            observations.Add((
+                ParseTraceSourceVersionResolutionState(reader.GetString(0)),
+                NullableString(reader, 1)));
+        }
+        if (observations.Count == 0)
+        {
+            return null;
+        }
+        if (observations.Any(item => item.State == TraceSourceVersionResolutionState.Conflicting))
+        {
+            return new TraceSourceVersionResolutionRow(
+                traceId, TraceSourceVersionResolutionState.Conflicting, SourceApplicationVersion: null);
+        }
+
+        var versions = observations
+            .Where(item => item.Version is not null)
+            .Select(item => item.Version!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (versions.Length > 1)
+        {
+            return new TraceSourceVersionResolutionRow(
+                traceId, TraceSourceVersionResolutionState.Conflicting, SourceApplicationVersion: null);
+        }
+        var unrecognised = observations
+            .Where(item => item.State == TraceSourceVersionResolutionState.Unrecognised)
+            .ToArray();
+        if (unrecognised.Length > 0)
+        {
+            var version = unrecognised.All(item => item.Version is not null) && versions.Length == 1
+                ? versions[0]
+                : null;
+            return new TraceSourceVersionResolutionRow(
+                traceId, TraceSourceVersionResolutionState.Unrecognised, version);
+        }
+        if (observations.All(item => item.State == TraceSourceVersionResolutionState.Resolved)
+            && versions.Length == 1)
+        {
+            return new TraceSourceVersionResolutionRow(
+                traceId, TraceSourceVersionResolutionState.Resolved, versions.Single());
+        }
+        return new TraceSourceVersionResolutionRow(
+            traceId, TraceSourceVersionResolutionState.Missing, SourceApplicationVersion: null);
+    }
+
     internal static long InsertBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -317,6 +401,10 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         foreach (var identity in observation.Inventory.RetainedUnknownIdentities)
         {
             InsertUnknown(connection, transaction, id, SourceUnknownObservationDraft.Create(observation, identity));
+        }
+        foreach (var resolution in observation.TraceSourceVersionResolutions)
+        {
+            InsertTraceSourceVersionResolution(connection, transaction, id, resolution);
         }
         return id;
     }
@@ -409,6 +497,29 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         Add(command, "$first_observed_at", Timestamp(unknown.FirstObservedAt));
         Add(command, "$last_observed_at", Timestamp(unknown.LastObservedAt));
         Add(command, "$opaque_sample_reference", unknown.OpaqueSampleReference);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertTraceSourceVersionResolution(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long sourceObservationId,
+        TraceSourceVersionResolutionDraft resolution)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO source_trace_version_observations (
+                source_observation_id, trace_id, resolution_state, source_application_version
+            ) VALUES (
+                $source_observation_id, $trace_id, $resolution_state, $source_application_version
+            );
+            """;
+        Add(command, "$source_observation_id", sourceObservationId);
+        Add(command, "$trace_id", resolution.TraceId);
+        Add(command, "$resolution_state", TraceSourceVersionResolutionStateWire(resolution.State));
+        Add(command, "$source_application_version", resolution.SourceApplicationVersion);
         command.ExecuteNonQuery();
     }
 
@@ -575,6 +686,24 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         "event" => SourceUnknownKind.Event,
         "attribute" => SourceUnknownKind.Attribute,
         _ => throw new InvalidOperationException("Stored source unknown kind is invalid."),
+    };
+
+    private static string TraceSourceVersionResolutionStateWire(TraceSourceVersionResolutionState state) => state switch
+    {
+        TraceSourceVersionResolutionState.Resolved => "resolved",
+        TraceSourceVersionResolutionState.Missing => "missing",
+        TraceSourceVersionResolutionState.Conflicting => "conflicting",
+        TraceSourceVersionResolutionState.Unrecognised => "unrecognised",
+        _ => throw new ArgumentOutOfRangeException(nameof(state)),
+    };
+
+    private static TraceSourceVersionResolutionState ParseTraceSourceVersionResolutionState(string state) => state switch
+    {
+        "resolved" => TraceSourceVersionResolutionState.Resolved,
+        "missing" => TraceSourceVersionResolutionState.Missing,
+        "conflicting" => TraceSourceVersionResolutionState.Conflicting,
+        "unrecognised" => TraceSourceVersionResolutionState.Unrecognised,
+        _ => throw new InvalidOperationException("Stored trace source-version resolution state is invalid."),
     };
 
     private sealed record ParentRow(

@@ -4,11 +4,290 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SourceCompatibilityIngestionTests
 {
+    [Fact]
+    public async Task PostTraces_ResolvesResourceScopedSourceVersionIndependentlyForEachTrace()
+    {
+        const string firstTraceId = "11111111111111111111111111111111";
+        const string secondTraceId = "22222222222222222222222222222222";
+        const string payload =
+            """
+            {"resourceSpans":[{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"1.0.74"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"1111111111111111"}]}]
+            },{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"1.0.75"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"22222222222222222222222222222222","spanId":"2222222222222222"}]}]
+            }]}
+            """;
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(payload)).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [
+                VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.74", inventory.SchemaFingerprint),
+                VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.75", inventory.SchemaFingerprint),
+            ],
+            [],
+            []);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "github-copilot-cli",
+            "batch-metadata-version",
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var store = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(firstTraceId, TraceSourceVersionResolutionState.Resolved, "1.0.74"),
+            store.GetTraceSourceVersionResolution(firstTraceId));
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(secondTraceId, TraceSourceVersionResolutionState.Resolved, "1.0.75"),
+            store.GetTraceSourceVersionResolution(secondTraceId));
+        Assert.Equal(
+            "batch-metadata-version",
+            Assert.Single(store.List(after: null, limit: 200)).SourceApplicationVersion);
+    }
+
+    [Fact]
+    public async Task PostTraces_SameTraceWithMissingAndRecognisedResourceVersionsResolvesMissing()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string payload =
+            """
+            {"resourceSpans":[{
+              "resource":{"attributes":[]},
+              "scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"1111111111111111"}]}]
+            },{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"1.0.74"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"2222222222222222"}]}]
+            }]}
+            """;
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(payload)).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.74", inventory.SchemaFingerprint)],
+            [],
+            []);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "github-copilot-cli",
+            "1.0.74",
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(traceId, TraceSourceVersionResolutionState.Missing, null),
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).GetTraceSourceVersionResolution(traceId));
+    }
+
+    [Fact]
+    public async Task PostTraces_SameTraceWithMissingAndUnrecognisedResourceVersionsResolvesUnrecognised()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string payload =
+            """
+            {"resourceSpans":[{
+              "resource":{"attributes":[]},
+              "scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"1111111111111111"}]}]
+            },{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"9.9.9"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"11111111111111111111111111111111","spanId":"2222222222222222"}]}]
+            }]}
+            """;
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(payload)).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.74", inventory.SchemaFingerprint)],
+            [],
+            []);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "github-copilot-cli",
+            "9.9.9",
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(traceId, TraceSourceVersionResolutionState.Unrecognised, "9.9.9"),
+            new SqliteSourceCompatibilityStore(temp.DatabasePath).GetTraceSourceVersionResolution(traceId));
+    }
+
+    [Fact]
+    public async Task PostTraces_PersistsMissingConflictingAndUnrecognisedAsDistinctFailClosedStates()
+    {
+        const string missingTraceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string conflictingTraceId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const string unrecognisedTraceId = "cccccccccccccccccccccccccccccccc";
+        const string invalidTraceId = "dddddddddddddddddddddddddddddddd";
+        var invalidVersion = new string('v', 257);
+        var payload =
+            $$$"""
+            {"resourceSpans":[{
+              "resource":{"attributes":[]},
+              "scopeSpans":[{"spans":[{"traceId":"{{{missingTraceId}}}","spanId":"1111111111111111"}]}]
+            },{
+              "resource":{"attributes":[
+                {"key":"service.version","value":{"stringValue":"1.0.74"}},
+                {"key":"service.version","value":{"stringValue":"1.0.75"}}
+              ]},
+              "scopeSpans":[{"spans":[{"traceId":"{{{conflictingTraceId}}}","spanId":"2222222222222222"}]}]
+            },{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"9.9.9"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"{{{unrecognisedTraceId}}}","spanId":"4444444444444444"}]}]
+            },{
+              "resource":{"attributes":[{"key":"service.version","value":{"stringValue":"{{{invalidVersion}}}"}}]},
+              "scopeSpans":[{"spans":[{"traceId":"{{{invalidTraceId}}}","spanId":"5555555555555555"}]}]
+            }]}
+            """;
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(payload)).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [
+                VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.74", inventory.SchemaFingerprint),
+                VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.75", inventory.SchemaFingerprint),
+            ],
+            [],
+            []);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "github-copilot-cli",
+            sourceApplicationVersion: null,
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var store = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(missingTraceId, TraceSourceVersionResolutionState.Missing, null),
+            store.GetTraceSourceVersionResolution(missingTraceId));
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(conflictingTraceId, TraceSourceVersionResolutionState.Conflicting, null),
+            store.GetTraceSourceVersionResolution(conflictingTraceId));
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(unrecognisedTraceId, TraceSourceVersionResolutionState.Unrecognised, "9.9.9"),
+            store.GetTraceSourceVersionResolution(unrecognisedTraceId));
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(invalidTraceId, TraceSourceVersionResolutionState.Unrecognised, null),
+            store.GetTraceSourceVersionResolution(invalidTraceId));
+    }
+
+    [Fact]
+    public async Task TraceSourceVersionPersistence_DoesNotChangeMonitorApiResponseBytes()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(EquivalentJson()));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var worker = new ProjectionWorker(
+            projectionStore,
+            health,
+            new SqliteSourceCompatibilityStore(temp.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter));
+        await worker.RunProjectionPassAsync();
+        string[] paths =
+        [
+            "/api/monitor/ingestions",
+            "/api/monitor/source-diagnostics",
+            "/api/monitor/traces",
+            $"/api/monitor/traces/{traceId}/spans",
+            $"/api/monitor/traces/{traceId}/agent-graph",
+            "/api/monitor/summary",
+            "/api/monitor/overview",
+            "/api/monitor/trace-list",
+        ];
+        var before = await CaptureResponses(host.Client, paths);
+
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                UPDATE source_trace_version_observations
+                SET resolution_state = 'unrecognised', source_application_version = 'safe-unknown'
+                WHERE trace_id = $trace_id;
+                """;
+            command.Parameters.AddWithValue("$trace_id", traceId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        var after = await CaptureResponses(host.Client, paths);
+        for (var index = 0; index < paths.Length; index++)
+        {
+            Assert.Equal(before[index].StatusCode, after[index].StatusCode);
+            Assert.Equal(before[index].Body, after[index].Body);
+        }
+
+        static async Task<(HttpStatusCode StatusCode, byte[] Body)[]> CaptureResponses(
+            HttpClient client,
+            IEnumerable<string> paths)
+        {
+            var responses = new List<(HttpStatusCode StatusCode, byte[] Body)>();
+            foreach (var path in paths)
+            {
+                using var response = await client.GetAsync(path);
+                responses.Add((response.StatusCode, await response.Content.ReadAsByteArrayAsync()));
+            }
+            return responses.ToArray();
+        }
+    }
+
     [Fact]
     public async Task PostTraces_DefaultReceiverCommitsRawAndObservationBeforeAcknowledging()
     {

@@ -577,6 +577,52 @@ public sealed class SourceStructuralInventory
 
 public sealed record DecodedOtlpTracePayload(string PayloadJson, SourceStructuralInventory StructuralInventory);
 
+public enum TraceSourceVersionResolutionState
+{
+    Resolved,
+    Missing,
+    Conflicting,
+    Unrecognised,
+}
+
+public sealed class TraceSourceVersionResolutionDraft
+{
+    private TraceSourceVersionResolutionDraft(
+        string traceId,
+        TraceSourceVersionResolutionState state,
+        string? sourceApplicationVersion)
+    {
+        TraceId = traceId;
+        State = state;
+        SourceApplicationVersion = sourceApplicationVersion;
+    }
+
+    public string TraceId { get; }
+    public TraceSourceVersionResolutionState State { get; }
+    public string? SourceApplicationVersion { get; }
+
+    public static TraceSourceVersionResolutionDraft Create(
+        string traceId,
+        TraceSourceVersionResolutionState state,
+        string? sourceApplicationVersion)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(traceId);
+        if (!Enum.IsDefined(state))
+        {
+            throw new ArgumentOutOfRangeException(nameof(state));
+        }
+        SourceMetadata.ValidateOptional(sourceApplicationVersion, nameof(sourceApplicationVersion));
+        if ((state == TraceSourceVersionResolutionState.Resolved && sourceApplicationVersion is null)
+            || (state is TraceSourceVersionResolutionState.Missing or TraceSourceVersionResolutionState.Conflicting
+                && sourceApplicationVersion is not null))
+        {
+            throw new ArgumentException("The trace source-version state and value are inconsistent.", nameof(sourceApplicationVersion));
+        }
+
+        return new TraceSourceVersionResolutionDraft(traceId, state, sourceApplicationVersion);
+    }
+}
+
 public sealed class SourceObservationBatchDraft
 {
     private SourceObservationBatchDraft(
@@ -588,7 +634,8 @@ public sealed class SourceObservationBatchDraft
         SourceStructuralInventory inventory,
         SourceCompatibilityDecision decision,
         SourceCaptureContentState captureContentState,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        TraceSourceVersionResolutionDraft[] traceSourceVersionResolutions)
     {
         IngestBatchId = ingestBatchId;
         SourceSurface = sourceSurface;
@@ -599,6 +646,7 @@ public sealed class SourceObservationBatchDraft
         Decision = decision;
         CaptureContentState = captureContentState;
         ObservedAt = observedAt;
+        TraceSourceVersionResolutions = Array.AsReadOnly(traceSourceVersionResolutions);
     }
 
     public string IngestBatchId { get; }
@@ -615,6 +663,7 @@ public sealed class SourceObservationBatchDraft
     public string NextAction => Decision.NextAction;
     public SourceCaptureContentState CaptureContentState { get; }
     public DateTimeOffset ObservedAt { get; }
+    public IReadOnlyList<TraceSourceVersionResolutionDraft> TraceSourceVersionResolutions { get; }
 
     public static SourceObservationBatchDraft Create(
         string ingestBatchId,
@@ -625,7 +674,8 @@ public sealed class SourceObservationBatchDraft
         SourceStructuralInventory inventory,
         SourceCompatibilityDecision decision,
         SourceCaptureContentState captureContentState,
-        DateTimeOffset observedAt)
+        DateTimeOffset observedAt,
+        IEnumerable<TraceSourceVersionResolutionDraft>? traceSourceVersionResolutions = null)
     {
         SourceMetadata.ValidateRequired(ingestBatchId, nameof(ingestBatchId));
         SourceMetadata.ValidateRequired(sourceSurface, nameof(sourceSurface));
@@ -642,9 +692,15 @@ public sealed class SourceObservationBatchDraft
         {
             throw new ArgumentException("Successful batch observations cannot carry adapter failure decisions.", nameof(decision));
         }
+        var traceResolutions = traceSourceVersionResolutions?.ToArray() ?? [];
+        if (traceResolutions.Any(item => item is null)
+            || traceResolutions.Select(item => item.TraceId).Distinct(StringComparer.Ordinal).Count() != traceResolutions.Length)
+        {
+            throw new ArgumentException("Trace source-version resolutions must be non-null and unique by trace ID.", nameof(traceSourceVersionResolutions));
+        }
         return new SourceObservationBatchDraft(
             ingestBatchId, sourceSurface, sourceApplicationVersion, sourceAdapter, adapterVersion,
-            inventory, decision, captureContentState, observedAt);
+            inventory, decision, captureContentState, observedAt, traceResolutions);
     }
 }
 
@@ -774,6 +830,11 @@ public sealed class SourceAdapterFailureDraft
 
 internal static class SourceMetadata
 {
+    public static bool IsValidToken(string? value) =>
+        value is not null
+        && value.Length is > 0 and <= 256
+        && value.All(character => !char.IsControl(character));
+
     public static void ValidateRequired(string value, string parameterName)
     {
         if (!IsValid(value))
@@ -790,8 +851,7 @@ internal static class SourceMetadata
         }
     }
 
-    private static bool IsValid(string value) =>
-        value.Length is > 0 and <= 256 && value.All(character => !char.IsControl(character));
+    private static bool IsValid(string value) => IsValidToken(value);
 }
 
 internal static class SourceStructuralVocabulary

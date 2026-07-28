@@ -33,3 +33,8 @@ internal sealed record SourceUnknownObservationRow(
     DateTimeOffset FirstObservedAt,
     DateTimeOffset LastObservedAt,
     string OpaqueSampleReference);
+
+internal sealed record TraceSourceVersionResolutionRow(
+    string TraceId,
+    TraceSourceVersionResolutionState State,
+    string? SourceApplicationVersion);

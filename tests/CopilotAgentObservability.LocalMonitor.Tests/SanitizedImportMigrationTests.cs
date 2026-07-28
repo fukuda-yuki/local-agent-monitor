@@ -30,11 +30,11 @@ public sealed class SanitizedImportMigrationTests
     {
         using var temp = new MonitorTempDirectory();
         var database = Path.Combine(temp.Path, "supported-vector.sqlite");
-        Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('monitor',7),('session',13); CREATE TABLE kept(value TEXT NOT NULL); INSERT INTO kept VALUES('same');");
+        Execute(database, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('monitor',8),('session',13); CREATE TABLE kept(value TEXT NOT NULL); INSERT INTO kept VALUES('same');");
 
         new SqliteSanitizedImportStore(database).CreateSchema();
 
-        Assert.Equal(["historical_import:1", "monitor:7", "sanitized_import:1", "session:13"], Rows(database, "SELECT component || ':' || version FROM schema_version ORDER BY component;"));
+        Assert.Equal(["historical_import:1", "monitor:8", "sanitized_import:1", "session:13"], Rows(database, "SELECT component || ':' || version FROM schema_version ORDER BY component;"));
         Assert.Equal("same", Rows(database, "SELECT value FROM kept;").Single());
     }
 

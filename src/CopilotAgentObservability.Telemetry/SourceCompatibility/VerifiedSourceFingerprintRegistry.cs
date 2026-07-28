@@ -136,6 +136,15 @@ public sealed class VerifiedSourceFingerprintRegistry
             StringComparer.Ordinal.Equals(item.SchemaFingerprint, schemaFingerprint));
     }
 
+    public bool RecognisesSourceVersion(string sourceSurface, string sourceApplicationVersion)
+    {
+        SourceMetadata.ValidateRequired(sourceSurface, nameof(sourceSurface));
+        SourceMetadata.ValidateRequired(sourceApplicationVersion, nameof(sourceApplicationVersion));
+        return fingerprints.Any(item =>
+            StringComparer.Ordinal.Equals(item.SourceSurface, sourceSurface)
+            && StringComparer.Ordinal.Equals(item.SourceApplicationVersion, sourceApplicationVersion));
+    }
+
     public bool IsExplicitlyIncompatible(string sourceSurface, string? sourceApplicationVersion)
     {
         SourceMetadata.ValidateRequired(sourceSurface, nameof(sourceSurface));

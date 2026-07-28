@@ -194,7 +194,7 @@ Issue #86 owns the independent SQLite schema component
 `schema_version.component = 'sanitized_import'`, version 1. It owns only the
 `sanitized_import_*` tables and indexes. A commit adds or validates the component
 inside the same immediate transaction as archive reinspection and import. Fresh
-databases and databases with the supported monitor v7 / Session v13 version
+databases and databases with the supported monitor v8 / Session v13 version
 vector add this component without changing those component versions or data.
 A CreateSchema, preview, or commit transaction ensures and validates
 `historical_import` v1 immediately before `sanitized_import` v1. This is a

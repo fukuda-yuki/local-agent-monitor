@@ -1967,7 +1967,7 @@ public sealed class RuntimeBackupArchiveTests
                     manifest = Encoding.UTF8.GetBytes(ReplaceRequired(Encoding.UTF8.GetString(manifest), "\"retention_file_capture_reservations\":0", "\"retention_file_capture_reservations\":1"));
             }
             if (attack == "duplicate-manifest-key")
-                manifest = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(manifest).Replace("\"monitor\":7", "\"monitor\":7,\"monitor\":7", StringComparison.Ordinal));
+                manifest = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(manifest).Replace("\"monitor\":8", "\"monitor\":8,\"monitor\":8", StringComparison.Ordinal));
             if (attack == "invalid-journal-mode")
                 manifest = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(manifest).Replace("\"source_journal_mode\":\"wal\"", "\"source_journal_mode\":\"other\"", StringComparison.Ordinal));
             if (attack == "invalid-external-state")

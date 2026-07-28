@@ -840,7 +840,7 @@ updated, skipped, rejected, duplicate, conflict, and graph-state-update values
 under the invariant defined by the detailed interface.
 
 The independent `sanitized_import` schema component is version 1 and leaves
-monitor v7, Session v13, raw stores, alert/finding owner tables, and the
+monitor v8, Session v13, raw stores, alert/finding owner tables, and the
 retention catalog unchanged. Imported evidence is a retained sanitized output,
 not a raw item. The UI/HTTP/CLI are bounded and no-store; loopback HTTP uses
 Host, same-origin, and CSRF controls and renders source values as inert text.
@@ -927,6 +927,12 @@ application versions are evidence labels, an unverified version with a known
 fingerprint remains processable, and a new fingerprint is retained and
 reported as `schema_drift_detected`. A source version is unsupported only when
 it is known incompatible or lacks a required signal.
+
+Monitor schema v8 additively associates each trace with the resource-scoped
+`service.version` carried by its spans. Resolution is independent of the
+batch-level source-version label and distinguishes resolved, missing,
+conflicting, and unrecognised states. No unresolved state falls back to the
+batch label.
 
 Issues #63-#65 add Claude Code through a source-specific adapter without
 changing source identifiers. OTel owns trace/span identity, parentage, and

@@ -32,7 +32,7 @@ public sealed class SqliteRuntimeBackupService
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
-        ["monitor"] = 7,
+        ["monitor"] = 8,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
@@ -2117,6 +2117,7 @@ public sealed class SqliteRuntimeBackupService
             transaction.Commit();
         }
 
+        new SqliteSourceCompatibilityStore(path).CreateSchema();
         EnsureAlertSchemaV2(path);
 
         using (var connection = Open(path, SqliteOpenMode.ReadWrite))

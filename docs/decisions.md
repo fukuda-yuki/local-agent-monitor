@@ -2494,7 +2494,7 @@ duplicate, conflict, and graph-state-update outcomes.
 
 The data belongs to an independent `sanitized_import` schema component v1.
 Using Session v14 was rejected because the frozen carriers do not create or
-change Session identity, and a Session bump would break #85's monitor v7 /
+change Session identity, and a Session bump would break #85's monitor v8 /
 Session v13 capture anchor. Imported rows are retained sanitized outputs, not
 raw store kinds, create no retention catalog items, and are not Issue #90
 mutation targets. Raw replay, backup restore, heuristic conflict resolution,

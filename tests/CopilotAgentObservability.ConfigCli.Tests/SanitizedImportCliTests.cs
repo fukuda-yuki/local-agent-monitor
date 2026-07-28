@@ -112,7 +112,7 @@ public sealed class SanitizedImportCliTests
         Execute(database, """
             PRAGMA foreign_keys=OFF;
             CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
-            INSERT INTO schema_version VALUES('monitor',7),('session',13);
+            INSERT INTO schema_version VALUES('monitor',8),('session',13);
             CREATE TABLE parent(id INTEGER PRIMARY KEY);
             CREATE TABLE child(parent_id INTEGER NOT NULL REFERENCES parent(id));
             INSERT INTO child VALUES(42);

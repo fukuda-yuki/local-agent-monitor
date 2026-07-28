@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class MonitorSchemaMigrator
 {
-    public const int BaseSchemaVersion = 7;
+    public const int BaseSchemaVersion = 8;
 
     public static void EnsureRawRecordsSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
