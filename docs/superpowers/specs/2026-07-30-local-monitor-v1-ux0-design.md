@@ -1,135 +1,106 @@
-# Local Monitor v1 UX0 — 統合設計
+# Local Monitor v1 UX0 — Accepted Design
 
-Status: **Product Owner visual review pending**  
+Status: **Accepted**  
 Issue: #153  
-Date: 2026-07-30
+Date: 2026-07-30  
+Final IA specification: [`docs/specifications/interfaces/local-monitor-v1-ia.md`](../../specifications/interfaces/local-monitor-v1-ia.md)
 
-## 1. 製品境界
+## Review outcome
 
-Local Monitor v1 は、次の二層構造とする。
+The seven visual layouts are accepted as structural references. The images are not regenerated.
 
-1. **AIなしで完全に利用できる観測・調査基盤**
-   - Repository と Session を見つける
-   - Token / cache / Skill / Tool / Sub-agent / error / retry / timing / parent-child relation を確認する
-   - Tool入力・結果、Sub-agent入力、Skill本文などの raw-local 情報を必要時に確認する
-   - exact Session / Run / Trace / Span / Event / raw record へドリルダウンする
-2. **任意のAI分析・AI改善提案**
-   - v1 provider は GitHub Copilot SDK
-   - 利用者の明示操作でのみ実行
-   - 未設定・未認証・失敗・timeoutでもコア機能は影響を受けない
-   - AI出力は観測事実と分離し、exact evidenceへ戻れる
+The literal Japanese text inside the mockups is not copy authority. Key terminology is fixed here and sentence-level microcopy is completed after the first integrated implementation in #169.
 
-人が空のフォームへ改善案を書くworkflow、manual evidence selection、candidate/recommended中心のproposal lifecycleは、Local Monitor v1の主要導線にしない。
+The Repository Compare mockup is accepted only for overall layout. Its `主要な差`, `比較上の注意` and `品質証拠` areas are superseded by #165/#166 and are not implemented.
 
-## 2. 全体IA
+## Product boundary
 
-恒久サイドバーは置かない。主要導線は次の階層とする。
+Local Monitor v1 has:
+
+1. an AI-independent Repository/Session observation, investigation and comparison core;
+2. optional GitHub Copilot SDK analysis and improvement suggestions.
+
+The core works without an LLM, API key or provider authentication.
+
+Manual proposal authoring, manual evidence selection, Candidate/Recommended workflow, apply, rollback and effect verdict are not primary Local Monitor v1 journeys.
+
+## IA
 
 ```text
-Repositoryを選ぶ
-  -> Repository内のSessionを探す
-      -> Session詳細を開く
+リポジトリを選ぶ
+  -> セッションを探す
+      -> セッション詳細を開く
+      -> 比較対象を選ぶ -> 比較する
 ```
 
-共通ヘッダは次だけを持つ。
+There is no permanent sidebar.
 
 ```text
 [パンくず]                                      [受信状態] [設定]
 ```
 
-- パンくずが上位階層へ戻る主導線
-- AI状態は常設しない
-- global searchは置かず、検索はRepository/Session文脈内に置く
-- `受信状態` と `設定` は統合Settings modalを開く
+Breadcrumbs are the primary back-navigation. AI status is not persistent. Search is contextual.
 
-## 3. Repository選択
+## Repository selection
 
-- Repositoryはカード表示
-- カードに表示するもの
-  - 表示名
-  - 割り当てられたSession件数
-  - 最終観測時刻
-- `すべてのSession` は補助入口
-- `Repository未割り当て` は該当時だけ表示
-- `Repositoryを追加` を提供
-- `アーカイブ済みRepository` へ再訪可能
-- Repository identityはLocal Monitor生成のopaque UUIDv7。表示名・URL・pathをidentityにしない
+- card layout;
+- display name;
+- assigned active Session count;
+- last observed instant;
+- all Sessions virtual scope;
+- unassigned Session virtual scope;
+- add/edit/assignment/archive entry;
+- opaque local UUIDv7 identity.
 
-## 4. Session Explorer
+## Session Explorer
 
-Repositoryを選ぶと、密度の高いSession一覧を表示する。汎用KPI/利用状況Dashboardは作らない。
+- dense direct-open rows;
+- no preview pane;
+- no generic KPI/usage dashboard;
+- contextual search and filters;
+- columns: セッション / 状態 / 要約 / トークン合計 / 開始;
+- compare checkboxes only after `比較を作成`;
+- archive actions.
 
-表示項目:
+## Repository Session Compare
 
-- 最初に記録された指示の短縮表示。取得できない場合は日時ベースの一般ラベル
-- Source / model / capture note
-- 状態
-- 正に観測されたSkill / Tool / Sub-agent / Error / Retry
-- 記録Tokenとcache-read ratio（利用可能な場合のみ）
-- 開始時刻と所要時間
+Compare is deterministic and AI-independent.
 
-操作:
+Fixed sections, in order:
 
-- 指示・Skill・Tool検索
-- 期間 / Source / model / activity filter
-- 行選択でSession詳細を直接開く。preview paneは置かない
-- row overflowからarchive
-- `比較を作成` でselection modeへ入る。通常時はcheckboxを表示しない
+1. 対象
+2. トークン
+3. 入力トークンの内訳
+4. 時間・実行量
+5. スキル
+6. ツール
+7. サブエージェント
+8. エラー・再試行
+9. 比較条件
 
-## 5. Repository Session Compare
+It displays all predeclared facts, not LLM-selected “important” differences.
 
-汎用集計Dashboardではなく、利用者が明示した2 cohortの比較を提供する。
+- no `主要な差` section;
+- no natural-language `比較上の注意` section;
+- no `品質証拠`;
+- no improvement/effect verdict;
+- missing is not zero;
+- per-Session median/range/available denominator are primary;
+- exact Skill digest may define a before/after boundary;
+- optional AI may interpret, but not recalculate, the deterministic receipt.
 
-```text
-基準 cohort A  vs  変更後 cohort B
-```
+## Session detail
 
-主な利用例:
+Session detail is an execution workspace plus contextual inspector.
 
-- Skill変更前後
-- AGENTS.md / instruction変更前後
-- Agent / Tool構成変更前後
+### Fixed top summary
 
-原則:
+- instruction/status/source/time;
+- `トークン合計`: input/output horizontal bar;
+- `入力トークンの内訳`: cache-read/new-input horizontal bar and optional cache write;
+- Skill/Tool/Sub-agent/Error-Retry summary.
 
-- exact Session IDsまたは明示filter snapshotで選択
-- Skill変更境界はSession時点のexact Skill snapshot digestがある場合だけ候補化
-- name/time/prompt similarityからbefore/afterを推測しない
-- archived Sessionはdefault exclusion
-- simple totalではなくper-Session median、range/distribution、available denominatorを主役にする
-- Token / cache / duration / Tool / Error / Retry / Sub-agent / Skill / coverageを比較
-- 基本結論は`観測された差`。quality-first条件が揃わない限り`改善`/`悪化`と呼ばない
-- AIなしで比較可能。provider ready時だけ`この比較をAIで分析`を追加
-- permanent saved comparison indexはv1で作らない
-
-## 6. Session Workspace
-
-Session詳細は、**実行ワークスペース + 詳細インスペクター**とする。
-
-### 上部
-
-- 最初に記録された指示
-- status / source / start-end / duration
-- capture warning（問題がある場合だけ）
-- Session全体の固定サマリー
-  - 記録Token: input/output横バー
-  - cache: cache-read/new-input横バー、cache creationは値がある場合に補足
-  - Skill / Tool / Sub-agent / Error-Retry
-
-Tokenとcacheを同じ階層で混ぜない。
-
-```text
-記録Token
-  -> input / output
-
-キャッシュ利用
-  -> cache read / new input
-  -> cache creation（補足）
-```
-
-### 実行の流れ
-
-階層型タイムラインを使う。
+### Hierarchical timeline
 
 ```text
 Session
@@ -137,130 +108,80 @@ Session
       -> Agent / Skill / Tool / Sub-agent / Event / Error / Retry
 ```
 
-- 左: exactまたは明示された親子関係
-- 右: 開始位置・duration・並列性
-- 単純treeとwaterfallの別タブは作らない
-- 複数実行では最新だけdefault展開
-- 折りたたみ中もError / Retry等の要約を残す
-- parent/timeが不明な項目は推測配置しない
+Semantic hierarchy and timing share one row. There are no separate tree/waterfall tabs. Latest execution opens by default. Unknown parent/time remains explicit.
 
-### 右インスペクター
+### Inspector
 
-共通骨格を持ち、対象に応じて主要情報を切り替える。
+- Tool: input/result/exit/retry/children;
+- Skill: invocation/source/trigger/historical body/definition/current file distinction;
+- Sub-agent: exact input/lifecycle/activity/children;
+- Error/permission/event: exact state/content/relation;
+- technical IDs and OTLP under `技術情報`;
+- no page-level formatted/raw tabs.
 
-- Tool: input / result / exit / retry / child activity
-- Skill: invocation / source / trigger / available inventory / body / definition location
-- Sub-agent: exact input / activity / lifecycle / child activity
-- Error / permission / event: status / message / exact relation
-- raw IDsとraw OTLPは`技術情報`に折りたたむ
-- page-level `整形/raw` tabは作らない
+## Optional AI
 
-Skill本文と絶対パスはsanitized projectionへ混ぜず、raw-defaultで明示展開した場合だけ表示する。Session時点snapshotとcurrent fileを混同しない。
+- whole Session report: durable immutable history;
+- exact node analysis: transient;
+- Repository selection and Compare analysis: bounded operational result, no permanent history;
+- AI never receives the SQLite file or arbitrary SQL access;
+- exact evidence links return to the selected timeline node;
+- AI output is separate from observed facts.
 
-## 7. AI分析
+## Archive
 
-### Session全体
+Session and Repository archive are reversible local metadata.
 
-- Session headerの`AIで分析`
-- immutable Session snapshotへbind
-- primary reportを永続保存
-- 再分析はnew run。過去結果を上書きしない
-- 最新結果をdefault表示し、`再分析` / `過去の分析`を同じsurfaceに置く
-- follow-up Q&Aはv1では履歴保存しない
+- default list/Compare/Repository AI exclusion;
+- direct Session access remains;
+- explicit single-Session AI remains;
+- Repository archive does not cascade Session archive;
+- incoming data does not restore automatically;
+- archive is not delete, retention or pin.
 
-### 詳細対象
+## Unified Settings
 
-- inspectorの`この項目をAIで分析`
-- selected exact nodeをanchorにし、必要なSession contextだけを追加
-- 利用者向けのdurable historyには追加しない
-- current UI session内の一時結果・follow-upとして扱う
-
-### Repository範囲
-
-- Session Explorerのcurrent filterまたはexplicit selectionをscopeにする
-- previewでincluded/excluded/archive/completeness/content/truncationを確認
-- 200件超をsilent truncateしない
-- existing #72–#75 backendを再配置し、別engineを作らない
-- permanent Repository analysis historyは作らない
-
-### Data boundary
-
-- SQLite fileをAIへ渡さない
-- arbitrary SQL権限を与えない
-- Local Monitorがbounded read-only snapshot/process-internal toolsを提供
-- AI結果: scope/snapshot、summary、findings、improvement suggestions、evidence、limitations、provider/model/template provenance
-- AI結果をtimelineの観測ノードとして混ぜない
-
-## 8. Archive
-
-Session / Repositoryの可逆archiveを提供する。
-
-- archiveは削除・retention・pinではない
-- archived Sessionはdefault list / Compare candidate / Repository-range AIから除外
-- direct deep linkで開ける。明示単一Session AI分析は可能
-- Repository archiveはSession archiveをcascadeしない
-- new event/assignmentが来ても自動restoreしない
-- Settings内からarchived itemsを管理・restoreできる
-
-## 9. Unified Settings modal
-
-設定は独立dashboardではなく、headerの`受信状態`/`設定`から開く960×640程度のmodalに集約する。
-
-左ナビ:
+One modal, approximately 960×640 at 1366×768:
 
 - 状態
 - 受信
 - AI設定
-- Repository
+- リポジトリ
 - アーカイブ
 - 保存・バックアップ
 - 診断
 
-原則:
+Complex/destructive actions may open focused details or confirmations. Normal pages do not display persistent AI, backup, retention or diagnostic panels.
 
-- 状態と主要操作を同じ画面で確認
-- 難しい操作は詳細画面/確認dialogへ進む
-- 通常画面にAI status、backup、retention、diagnosticsを常設しない
-- page contextはmodal背後に残す
+## `--sanitized-only`
 
-## 10. `--sanitized-only`
+Raw-default is the only human UI posture. Sanitized-only is receiver/health/machine-API-only and does not provide per-screen fallback UI.
 
-raw-default UIと`--sanitized-only`縮退UIを二重実装しない。`--sanitized-only`ではLocal Monitorの人間向けUIを提供しない方向を#159で契約化する。
+## Binding key labels
 
-既存frozen API/SSE、ingest、health等のterminal behaviorは#159で確定する。
+| Old/internal | UI |
+|---|---|
+| Repository | リポジトリ |
+| Session | セッション |
+| Source | 取得元 |
+| 観測された動き | 要約 |
+| 記録Token | トークン合計 |
+| cache read | キャッシュから読み込み |
+| new input | 新規入力 |
+| cache creation | キャッシュ書き込み |
+| Repository未割り当て | リポジトリ未設定のセッション |
+| technical information | 技術情報 |
 
-## 11. 欠落状態の日本語
+All other sentence-level Japanese remains #169 work and does not block initial implementation.
 
-内部用語をそのまま表示しない。
-
-- 値あり: `1件を記録`
-- 今回の記録で見つからない: `今回の記録にはありません`
-- Sourceが提供しない: `この取得元では記録できません`
-- capture gap: `記録が一部欠けています`
-- 値は表示できるが安定性未確認: `安定して取得できるか未確認です`
-
-`0件`はcoverageがcompleteと証明できる場合だけ使用する。
-
-## 12. Visual review set
+## Accepted visual set
 
 1. Repository selection
 2. Session Explorer
-3. Session Explorer compare-selection mode
-4. Repository Compare
-5. Session Workspace + Tool inspector
+3. Compare selection mode
+4. Repository Compare — layout only; content corrected by #165/#166
+5. Session Workspace and inspector
 6. Session AI result
 7. Unified Settings modal
 
-すべて1366×768、恒久サイドバーなし、page-level horizontal scrollなしで確認する。
-
-## 13. 実装前ゲート
-
-```text
-#153 UX0 visual approval / close
-  -> contract Issues (#155/#157/#159/#160/#162/#165 等)
-  -> #132 C3 final IA spec
-  -> #118 S0 canonical docs
-  -> implementation Issues
-  -> #147 validation
-  -> #148 user docs
-```
+All are validated structurally for 1366×768, without a permanent sidebar or page-level horizontal scrolling.
