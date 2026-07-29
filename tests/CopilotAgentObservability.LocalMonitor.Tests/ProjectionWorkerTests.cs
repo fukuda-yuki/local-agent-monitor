@@ -124,6 +124,43 @@ public class ProjectionWorkerTests
     }
 
     [Fact]
+    public async Task Pass_ObservedNumericIntValuesPreserveUsageTokens()
+    {
+        const string payload = """
+        {
+          "resourceSpans": [{
+            "scopeSpans": [{
+              "spans": [{
+                "traceId": "t1",
+                "spanId": "s1",
+                "attributes": [
+                  {"key":"gen_ai.usage.input_tokens","value":{"intValue":101}},
+                  {"key":"gen_ai.usage.output_tokens","value":{"intValue":47}},
+                  {"key":"gen_ai.usage.cache_read.input_tokens","value":{"intValue":29}},
+                  {"key":"gen_ai.usage.reasoning.output_tokens","value":{"intValue":13}}
+                ]
+              }]
+            }]
+          }]
+        }
+        """;
+        var store = new FakeProjectionStore();
+        store.Seed(1, T(1), payload);
+        var compatibility = new FakeCompatibilityStore();
+        compatibility.Seed(Observation(1, SourceCompatibilityState.Supported));
+        var worker = new ProjectionWorker(store, ReadyHealth(), compatibilityStore: compatibility);
+
+        await worker.RunProjectionPassAsync();
+
+        var span = Assert.Single(store.AppliedSpanProjections[1]);
+        Assert.Equal(101, span.InputTokens);
+        Assert.Equal(47, span.OutputTokens);
+        Assert.Equal(148, span.TotalTokens);
+        Assert.Equal(29, span.CacheReadTokens);
+        Assert.Equal(13, span.ReasoningTokens);
+    }
+
+    [Fact]
     public void RecognizedView_DescriptorValidNumericKindMapsExactly()
     {
         var payload = OneSpanPayload("unknown-operation").Replace(

@@ -77,7 +77,7 @@ public class SourceCompatibilityTests
             "KeyValue|value|Object|2|LengthDelimited|key_value.value|AnyValue|-|Object|ChildEnvelope",
             "AnyValue|stringValue|String|1|LengthDelimited|any_value.string|-|-|String|Value",
             "AnyValue|boolValue|Bool|2|Varint|any_value.bool|-|-|Boolean|Value",
-            "AnyValue|intValue|Int|3|Varint|any_value.int|-|-|DecimalString|Value",
+            "AnyValue|intValue|Int|3|Varint|any_value.int|-|-|IntegerDecimalStringOrNumber|Value",
             "AnyValue|doubleValue|Double|4|Fixed64|any_value.double|-|-|Number|Value",
             "AnyValue|arrayValue|Object|5|LengthDelimited|any_value.array|ArrayValue|-|Object|ChildEnvelope",
             "AnyValue|kvlistValue|Object|6|LengthDelimited|any_value.kvlist|KeyValueList|-|Object|ChildEnvelope",
@@ -204,6 +204,22 @@ public class SourceCompatibilityTests
         Assert.Contains(boundaries.StructuralOccurrences, item => item.Name.Value == "span.end_time_unix_nano" && item.Count.Value == 1);
         Assert.Contains(boundaries.StructuralOccurrences, item => item.Name.Value == "event.time_unix_nano" && item.Count.Value == 1);
         Assert.Contains(boundaries.StructuralOccurrences, item => item.Name.Value == "any_value.int" && item.Count.Value == 2);
+    }
+
+    [Fact]
+    public void Build_AnyValueIntegralJsonNumber_IsRecognizedAsInt()
+    {
+        const string payload =
+            """{"resourceSpans":[{"scopeSpans":[{"spans":[{"attributes":[{"value":{"intValue":300}}]}]}]}]}""";
+
+        var inventory = OtlpJsonStructuralWalker.Build(payload, DateTimeOffset.UnixEpoch);
+
+        Assert.False(inventory.HasUnknownFields);
+        Assert.Contains(
+            inventory.StructuralOccurrences,
+            occurrence => occurrence.Name.Value == "any_value.int"
+                && occurrence.Unknown is null
+                && occurrence.Count.Value == 1);
     }
 
     [Fact]

@@ -157,13 +157,13 @@ public class OtlpJsonRecognizedPayloadBuilderTests
     public void ApprovedCaseCounts_AreExactlyPinned()
     {
         Assert.Equal(59, ValidRepresentationCases.Count());
-        Assert.Equal(295, WrongKindCases.Count());
+        Assert.Equal(294, WrongKindCases.Count());
         Assert.Equal(28, MalformedDecimalCases.Count());
         Assert.Equal(225, RepeatedElementCases.Count());
         Assert.Equal(84, UnknownPropertyCases.Count());
         Assert.Equal(118, DuplicateOrderCases.Count());
         Assert.Equal(14, AnyValueConsumerCases.Count());
-        Assert.Equal(823,
+        Assert.Equal(822,
             ValidRepresentationCases.Count() +
             WrongKindCases.Count() +
             MalformedDecimalCases.Count() +
@@ -359,17 +359,48 @@ public class OtlpJsonRecognizedPayloadBuilderTests
         Assert.Equal(["-9223372036854775808", "9223372036854775807"], values);
     }
 
+    [Theory]
+    [InlineData("\"300\"", true)]
+    [InlineData("300", true)]
+    [InlineData("3.5", false)]
+    [InlineData("3e0", false)]
+    [InlineData("9223372036854775808", false)]
+    public void Build_AnyValueInt_PreservesOnlyBoundedSupportedRepresentations(
+        string encodedValue,
+        bool expectedPreserved)
+    {
+        var input =
+            """{"resourceSpans":[{"scopeSpans":[{"spans":[{"attributes":[{"value":{"intValue":""" +
+            encodedValue +
+            """}}]}]}]}]}""";
+
+        var actual = OtlpJsonRecognizedPayloadBuilder.Build(input);
+
+        using var document = JsonDocument.Parse(actual);
+        var value = document.RootElement.GetProperty("resourceSpans")[0]
+            .GetProperty("scopeSpans")[0]
+            .GetProperty("spans")[0]
+            .GetProperty("attributes")[0]
+            .GetProperty("value");
+        Assert.Equal(expectedPreserved, value.TryGetProperty("intValue", out var intValue));
+        if (expectedPreserved)
+        {
+            Assert.Equal(encodedValue, intValue.GetRawText());
+        }
+    }
+
     public static IEnumerable<object[]> ValidRepresentationCases =>
         Fields.Select(descriptor => new object[] { descriptor.Key });
 
     public static IEnumerable<object[]> WrongKindCases =>
         from descriptor in Fields
         from kind in Enum.GetValues<TestJsonKind>()
-        where kind != AcceptedKind(descriptor)
+        where !IsAcceptedKind(descriptor, kind)
         select new object[] { descriptor.Key, kind.ToString() };
 
     public static IEnumerable<object[]> MalformedDecimalCases =>
-        from descriptor in Fields.Where(candidate => candidate.Representation == TestRepresentation.DecimalString)
+        from descriptor in Fields.Where(candidate => candidate.Representation
+            is TestRepresentation.DecimalString or TestRepresentation.IntegerDecimalStringOrNumber)
         from malformed in MalformedDecimals(descriptor)
         select new object[] { descriptor.Key, malformed };
 
@@ -443,7 +474,7 @@ public class OtlpJsonRecognizedPayloadBuilderTests
         Child(TestEnvelope.KeyValue, "value", TestRepresentation.Object, TestEnvelope.AnyValue),
         Value(TestEnvelope.AnyValue, "stringValue", TestRepresentation.String),
         Value(TestEnvelope.AnyValue, "boolValue", TestRepresentation.Boolean),
-        Value(TestEnvelope.AnyValue, "intValue", TestRepresentation.DecimalString),
+        Value(TestEnvelope.AnyValue, "intValue", TestRepresentation.IntegerDecimalStringOrNumber),
         Value(TestEnvelope.AnyValue, "doubleValue", TestRepresentation.Number),
         Child(TestEnvelope.AnyValue, "arrayValue", TestRepresentation.Object, TestEnvelope.ArrayValue),
         Child(TestEnvelope.AnyValue, "kvlistValue", TestRepresentation.Object, TestEnvelope.KeyValueList),
@@ -496,6 +527,7 @@ public class OtlpJsonRecognizedPayloadBuilderTests
         TestRepresentation.Boolean => "true",
         TestRepresentation.Number => "7",
         TestRepresentation.DecimalString => field.Key == "AnyValue.intValue" ? "\"-7\"" : "\"7\"",
+        TestRepresentation.IntegerDecimalStringOrNumber => "\"-7\"",
         _ => throw new ArgumentOutOfRangeException(nameof(field.Representation)),
     };
 
@@ -539,17 +571,24 @@ public class OtlpJsonRecognizedPayloadBuilderTests
     {
         TestRepresentation.Object => TestJsonKind.Object,
         TestRepresentation.Array => TestJsonKind.Array,
-        TestRepresentation.String or TestRepresentation.DecimalString => TestJsonKind.String,
+        TestRepresentation.String
+            or TestRepresentation.DecimalString
+            or TestRepresentation.IntegerDecimalStringOrNumber => TestJsonKind.String,
         TestRepresentation.Boolean => TestJsonKind.Boolean,
         TestRepresentation.Number => TestJsonKind.Number,
         _ => throw new ArgumentOutOfRangeException(nameof(field.Representation)),
     };
 
+    private static bool IsAcceptedKind(TestField field, TestJsonKind kind) =>
+        kind == AcceptedKind(field)
+        || field.Representation == TestRepresentation.IntegerDecimalStringOrNumber
+            && kind == TestJsonKind.Number;
+
     private static TestJsonKind RepeatedElementKind(TestField field) =>
         field.ChildEnvelope is null ? TestJsonKind.String : TestJsonKind.Object;
 
     private static TestJsonKind FirstWrongKind(TestField field) =>
-        Enum.GetValues<TestJsonKind>().First(kind => kind != AcceptedKind(field));
+        Enum.GetValues<TestJsonKind>().First(kind => !IsAcceptedKind(field, kind));
 
     private static string JsonForKind(TestJsonKind kind) => kind switch
     {
@@ -775,6 +814,7 @@ public class OtlpJsonRecognizedPayloadBuilderTests
         Boolean,
         Number,
         DecimalString,
+        IntegerDecimalStringOrNumber,
     }
 
     private enum TestDisposition

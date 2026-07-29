@@ -144,8 +144,12 @@ The versioned OTLP descriptor owns both
 inventory classification and view filtering. The view recursively excludes
 unknown properties, wrong representations, invalid repeated elements, and
 Trace-ignored fields while preserving valid siblings and descriptor-valid
-numeric enum/status values. It is built without `JsonNode`, is never stored or
-logged, and cannot change the original-input inventory or hashes.
+numeric enum/status values. For `any_value.int`, the view preserves either the
+canonical bounded decimal string or a bounded integral JSON number whose source
+token contains neither a decimal point nor an exponent; fractional, exponent,
+out-of-Int64, and `doubleValue` substitutions remain drift. It is built without
+`JsonNode`, is never stored or logged, and cannot change the original-input
+inventory or hashes.
 
 For monitor ingestion, a valid JSON object is inventoried before normalization.
 Wrong hierarchy or field representations therefore produce an atomically
@@ -296,9 +300,10 @@ Rules:
   the agent graph honestly reports no detected agents.
 - Classification is independent of `compatibility_state`; a
   `schema_drift_detected` batch still classifies recognized names. Token
-  extraction remains governed by the descriptor's representation rules, so
-  the open `any_value.int`-as-`double` drift question does not change this
-  table.
+  extraction follows the descriptor's dual `any_value.int` rule: canonical
+  bounded decimal strings and bounded integral JSON numbers are recognized,
+  while fractional, exponent, out-of-Int64, and `doubleValue` forms remain
+  drift.
 - `claude_code.hook` classification is documentation-backed
   (`hook` spans were not present in the observed print-mode traces) and keeps
   a null operation until live evidence records the emitted shape.

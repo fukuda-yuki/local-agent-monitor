@@ -431,6 +431,35 @@ public class MonitorSpanProjectionBuilderTests
     }
 
     [Fact]
+    public void Build_NativeOtlpFinishReasonArray_ExtractsStringToken()
+    {
+        const string payload = """
+        {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[
+          {"traceId":"finish-native","spanId":"1111","name":"chat gpt-4o",
+           "startTimeUnixNano":"1710000000000000000","endTimeUnixNano":"1710000001000000000",
+           "attributes":[
+             {"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},
+             {
+               "key":"gen_ai.response.finish_reasons",
+               "value":{
+                 "arrayValue":{
+                   "values":[
+                     {"stringValue":"stop"}
+                   ]
+                 }
+               }
+             }
+           ]}
+        ]}]}]}
+        """;
+        var record = Record("finish-native", payload);
+
+        var span = Assert.Single(MonitorSpanProjectionBuilder.Build(record));
+
+        Assert.Equal("stop", span.FinishReasons);
+    }
+
+    [Fact]
     public void Build_UnsafeFinishReason_GuardedOut()
     {
         var payload = """

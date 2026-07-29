@@ -18,6 +18,7 @@ internal enum OtlpJsonRepresentation
     Boolean,
     Number,
     DecimalString,
+    IntegerDecimalStringOrNumber,
 }
 
 internal enum OtlpTraceFieldDisposition
@@ -94,7 +95,7 @@ internal static class OtlpTraceSchema
         Child(SourceStructuralEnvelope.KeyValue, "value", SourceStructuralType.Object, 2, OtlpProtobufWireType.LengthDelimited, "key_value.value", SourceStructuralEnvelope.AnyValue, OtlpJsonRepresentation.Object),
         Value(SourceStructuralEnvelope.AnyValue, "stringValue", SourceStructuralType.String, 1, OtlpProtobufWireType.LengthDelimited, "any_value.string", OtlpJsonRepresentation.String),
         Value(SourceStructuralEnvelope.AnyValue, "boolValue", SourceStructuralType.Bool, 2, OtlpProtobufWireType.Varint, "any_value.bool", OtlpJsonRepresentation.Boolean),
-        Value(SourceStructuralEnvelope.AnyValue, "intValue", SourceStructuralType.Int, 3, OtlpProtobufWireType.Varint, "any_value.int", OtlpJsonRepresentation.DecimalString),
+        Value(SourceStructuralEnvelope.AnyValue, "intValue", SourceStructuralType.Int, 3, OtlpProtobufWireType.Varint, "any_value.int", OtlpJsonRepresentation.IntegerDecimalStringOrNumber),
         Value(SourceStructuralEnvelope.AnyValue, "doubleValue", SourceStructuralType.Double, 4, OtlpProtobufWireType.Fixed64, "any_value.double", OtlpJsonRepresentation.Number),
         Child(SourceStructuralEnvelope.AnyValue, "arrayValue", SourceStructuralType.Object, 5, OtlpProtobufWireType.LengthDelimited, "any_value.array", SourceStructuralEnvelope.ArrayValue, OtlpJsonRepresentation.Object),
         Child(SourceStructuralEnvelope.AnyValue, "kvlistValue", SourceStructuralType.Object, 6, OtlpProtobufWireType.LengthDelimited, "any_value.kvlist", SourceStructuralEnvelope.KeyValueList, OtlpJsonRepresentation.Object),
@@ -137,6 +138,11 @@ internal static class OtlpTraceSchema
             OtlpJsonRepresentation.Array => value.ValueKind == JsonValueKind.Array,
             OtlpJsonRepresentation.String => value.ValueKind == JsonValueKind.String,
             OtlpJsonRepresentation.DecimalString => IsCanonicalDecimalString(field, value),
+            OtlpJsonRepresentation.IntegerDecimalStringOrNumber => value.ValueKind == JsonValueKind.String
+                ? IsCanonicalDecimalString(field, value)
+                : value.ValueKind == JsonValueKind.Number
+                    && value.TryGetInt64(out _)
+                    && value.GetRawText().IndexOfAny('.', 'e', 'E') < 0,
             OtlpJsonRepresentation.Boolean => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
             OtlpJsonRepresentation.Number => value.ValueKind == JsonValueKind.Number,
             _ => throw new ArgumentOutOfRangeException(nameof(field.JsonRepresentation)),

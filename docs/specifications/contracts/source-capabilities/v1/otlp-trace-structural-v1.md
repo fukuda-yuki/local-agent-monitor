@@ -55,14 +55,15 @@ protobuf:<envelope>:field:<positive-decimal>:wire:<varint|fixed64|length_delimit
 
 `message` means a length-delimited child message. Repeated message fields use
 JSON arrays. The type column is the transport-independent `structural_type`.
-Its accepted JSON representation is: `object`/`array`/`string`/`bool` map to the
-same JSON kind; `double` is a JSON number; `bytes` is a JSON string; and `int`
-is a decimal JSON string for `start_time_unix_nano`, `end_time_unix_nano`,
-`event.time_unix_nano`, and `any_value.int`, but a JSON number for counts,
-enums, status code, flags, `any_value.string_strindex`, and
-`key_value.key_strindex`. Any other JSON kind is a known-wrong-type unknown.
-Known fields produce transport-independent `known_field` identities using the
-field code and semantic type shown here.
+Its canonical JSON representation is: `object`/`array`/`string`/`bool` map to
+the same JSON kind; `double` is a JSON number; `bytes` is a JSON string; and
+`int` is a decimal JSON string for `start_time_unix_nano`,
+`end_time_unix_nano`, `event.time_unix_nano`, and `any_value.int`, but a JSON
+number for counts, enums, status code, flags, `any_value.string_strindex`, and
+`key_value.key_strindex`. The bounded compatibility representation for
+`any_value.int` is defined after the table. Any other JSON kind is a
+known-wrong-type unknown. Known fields produce transport-independent
+`known_field` identities using the field code and semantic type shown here.
 
 Identity emission is exact:
 
@@ -150,6 +151,13 @@ Identity emission is exact:
 | `entity_ref` | `idKeys` | array | 3/length_delimited | `entity_ref.id_keys` / hashed `attribute_key` items |
 | `entity_ref` | `descriptionKeys` | array | 4/length_delimited | `entity_ref.description_keys` / hashed `attribute_key` items |
 
+For OTLP/JSON `any_value.int`, the canonical decimal-string representation and
+an observed-producer compatibility representation as a JSON integral number
+are both recognized as the same semantic `Int` field. The numeric form is
+accepted only when `JsonElement.TryGetInt64` succeeds; fractional, exponent,
+and out-of-Int64 values remain wrong representations. This compatibility form
+does not change protobuf identity, canonical hashes, or any other integer field.
+
 The two `*strindex` fields are defined by pinned common.proto for Profiles only.
 For Trace input they are descriptor-known, ignored nonfatally exactly as the
 upstream comment requires, and are never dereferenced or treated as unknown.
@@ -175,9 +183,11 @@ The inventory walker and recognized-view builder consume the same descriptor
 representation predicates. A decimal-string field is accepted only when its
 entire value is ASCII decimal digits within `ulong` range, except
 `any_value.int`, which additionally accepts one leading `-` and must fit in
-`long`; `+`, whitespace, empty strings, embedded signs, decimals, exponents,
-and overflow are rejected. The builder recursively preserves only known fields
-with an accepted representation. It omits unknown properties, wrong-typed known
+`long`. `any_value.int` also accepts an integral JSON number only when it fits
+in `long` and its source token contains no decimal point or exponent. `+`,
+whitespace, empty strings, embedded signs, decimals, exponents, and overflow
+are rejected. The builder recursively preserves only known fields with an
+accepted representation. It omits unknown properties, wrong-typed known
 fields, invalid repeated elements, and Trace-ignored fields. Valid siblings are
 preserved in original order. Repeated message fields contain only valid object
 elements; `EntityRef.idKeys` and `descriptionKeys` contain only valid string

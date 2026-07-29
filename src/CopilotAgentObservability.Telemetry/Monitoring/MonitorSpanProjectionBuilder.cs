@@ -231,39 +231,66 @@ internal static class MonitorSpanProjectionBuilder
 
     private static string? SanitizeFinishReasons(JsonObject attributes)
     {
-        var raw = OtlpSpanReader.ReadFirstString(attributes, FinishReasonKeys);
-        if (raw is null)
+        JsonNode? value = null;
+        foreach (var key in FinishReasonKeys)
+        {
+            if (attributes.TryGetPropertyValue(key, out var candidate) && candidate is not null)
+            {
+                value = candidate;
+                break;
+            }
+        }
+        if (value is null)
         {
             return null;
         }
 
-        // finish_reasons can be a JSON array (e.g. ["stop"]) or a plain string
         var tokens = new List<string>();
-        if (raw.StartsWith('['))
+        if (value is JsonArray array)
         {
-            try
+            foreach (var item in array)
             {
-                using var doc = JsonDocument.Parse(raw);
-                foreach (var item in doc.RootElement.EnumerateArray())
+                if (item is not JsonValue jsonValue
+                    || !jsonValue.TryGetValue<string>(out var token))
                 {
-                    if (item.ValueKind == JsonValueKind.String)
+                    return null;
+                }
+                tokens.Add(token);
+            }
+        }
+        else if (value is JsonValue jsonValue
+            && jsonValue.TryGetValue<string>(out var raw))
+        {
+            if (raw.StartsWith('['))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(raw);
+                    foreach (var item in doc.RootElement.EnumerateArray())
                     {
-                        var token = item.GetString();
-                        if (token is not null)
+                        if (item.ValueKind == JsonValueKind.String)
                         {
-                            tokens.Add(token);
+                            var token = item.GetString();
+                            if (token is not null)
+                            {
+                                tokens.Add(token);
+                            }
                         }
                     }
                 }
+                catch (JsonException)
+                {
+                    return null;
+                }
             }
-            catch (JsonException)
+            else
             {
-                return null;
+                tokens.AddRange(raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
             }
         }
         else
         {
-            tokens.AddRange(raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            return null;
         }
 
         var sanitized = new List<string>();
