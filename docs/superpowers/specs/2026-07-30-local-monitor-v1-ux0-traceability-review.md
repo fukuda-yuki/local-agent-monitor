@@ -77,3 +77,19 @@ Visual review is ready.
 Contract/spec work is not yet complete.
 UI implementation is not yet authorized.
 ```
+
+## Existing telemetry prerequisites retained in the graph
+
+These are not new UX requirements, but the approved screens depend on their capture truth:
+
+- #119: accept the real optional SDK `skill.invoked` event. This is distinct from the primary OTel Skill projection and may support #157 acquisition; it does not own sanitized Skill reads.
+- #121: retain `subagent.failed / selected / deselected` lifecycle events.
+- #122: preserve exact numeric `totalTokens` without weakening the secret filter.
+- #123: install the missing failure / permission / clean-end Copilot CLI hooks.
+- #124: define and project terminal Session failure without treating every child failure as terminal.
+- #125: promote source capability claims only from accepted evidence.
+- #151: resolve producer-source identification after `client.kind` disappeared.
+
+#120 was closed as `not planned`: #128 + #154 provide the one structured Skill projection authority and #133/#134 provide the successor Workspace read. A second Session-component Skill-name store would create conflicting authorities.
+
+These prerequisites can be delegated independently where their own specs are complete; they do not authorize the blocked UI implementation.
