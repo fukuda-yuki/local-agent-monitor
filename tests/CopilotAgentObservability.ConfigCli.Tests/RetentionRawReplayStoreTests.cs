@@ -15,7 +15,7 @@ public sealed class RetentionRawReplayStoreTests
     {
         using var fixture = new Fixture();
         var archive = Archive(1, "trace-one");
-        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
 
         var first = await store.ReplayAsync("replay-one", archive, CancellationToken.None);
 
@@ -39,11 +39,11 @@ public sealed class RetentionRawReplayStoreTests
     public async Task ReplayAsync_IsDurablyIdempotentAndRejectsSameIdWithDifferentArchive()
     {
         using var fixture = new Fixture();
-        var firstStore = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        var firstStore = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
         var archive = Archive(1, "trace-one");
         Assert.True((await firstStore.ReplayAsync("replay-stable", archive, CancellationToken.None)).Success);
 
-        var reopened = new RetentionRawReplayStore(fixture.Reopen(), fixture.BundleParent);
+        var reopened = new RetentionRawReplayStore(fixture.Reopen(), fixture.BundleParent, fixture.TimeProvider);
         var retry = await reopened.ReplayAsync("replay-stable", archive, CancellationToken.None);
         var conflict = await reopened.ReplayAsync("replay-stable", Archive(2, "trace-two"), CancellationToken.None);
 
@@ -62,7 +62,7 @@ public sealed class RetentionRawReplayStoreTests
     {
         using var fixture = new Fixture();
         const string replayId = "replay-locked";
-        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
         Assert.True((await store.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
         var before = fixture.CatalogState();
         var memberPath = Path.Combine(
@@ -90,7 +90,7 @@ public sealed class RetentionRawReplayStoreTests
     {
         using var fixture = new Fixture();
         const string replayId = "replay-db-locked";
-        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
         Assert.True((await store.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
         var before = fixture.CatalogState();
         using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -123,7 +123,7 @@ public sealed class RetentionRawReplayStoreTests
     public async Task ReadAsync_DoesNotRecreateAMissingCatalog()
     {
         using var fixture = new Fixture();
-        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent);
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
         SqliteConnection.ClearAllPools();
         File.Delete(fixture.DatabasePath);
 
@@ -160,16 +160,18 @@ public sealed class RetentionRawReplayStoreTests
             Directory.CreateDirectory(Root);
             DatabasePath = Path.Combine(Root, "retention.db");
             BundleParent = Path.Combine(Root, "bundles");
-            Context = RetentionCatalogContext.InitializeNewOwnedDatabase(DatabasePath, new FixedTimeProvider(Now));
-            Catalog = new RetentionCatalogStore(Context, new FixedTimeProvider(Now));
+            TimeProvider = new FixedTimeProvider(Now);
+            Context = RetentionCatalogContext.InitializeNewOwnedDatabase(DatabasePath, TimeProvider);
+            Catalog = new RetentionCatalogStore(Context, TimeProvider);
         }
 
         public string Root { get; }
         public string DatabasePath { get; }
         public string BundleParent { get; }
+        public TimeProvider TimeProvider { get; }
         public RetentionCatalogContext Context { get; }
         public RetentionCatalogStore Catalog { get; }
-        public RetentionCatalogStore Reopen() => new(RetentionCatalogContext.AdoptExistingCatalogV1(DatabasePath), new FixedTimeProvider(Now));
+        public RetentionCatalogStore Reopen() => new(RetentionCatalogContext.AdoptExistingCatalogV1(DatabasePath), TimeProvider);
 
         public IReadOnlyList<string> CatalogState()
         {
