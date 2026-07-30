@@ -237,6 +237,21 @@ Each v1 event has these fields:
 `hook-unknown`. Adapter/surface mismatch is
 `400` / `invalid_session_event_request`.
 
+Event-type support uses exact ordinal matching. The supported v1 set is:
+`capture.started`, `assistant.usage`, `session.usage_info`, `session.start`,
+`session.started`, `session.shutdown`, `session.task_complete`, `user.message`,
+`assistant.message`, `assistant.turn_end`, `tool.execution_start`,
+`tool.execution_complete`, `subagent.started`, `subagent.completed`,
+`skill.invoked`, `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`,
+`SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd`. The producer-less
+`skill.started` and `skill.completed` types are unsupported.
+
+Supported non-usage events are stored with `content_state=available`, and their
+payload is secret-filtered into `session_event_content`. `assistant.usage` and
+`session.usage_info` are stored with `content_state=not_captured` and no content
+row. The existing five-value `content_state` vocabulary is unchanged.
+
 An unknown but syntactically valid event `type` is stored with normalized status
 `unsupported`, increments `unsupported_event_version_count`, and prevents
 `full` completeness. The normalizer must not guess a mapping. Event `payload`

@@ -97,7 +97,7 @@ internal sealed class SessionEventNormalizer
             envelope.AdapterVersion,
             envelope.SchemaFingerprint,
             envelope.NormalizationVersion)).ToArray();
-        var contents = persistedInputEvents.Where(item => !IsUsage(item.Type!) && IsSupported(item.Type!)).Select(item => new SessionEventContent(
+        var contents = persistedInputEvents.Where(item => !existingSourceIds.Contains(item.SourceEventId!) && !IsUsage(item.Type!) && IsSupported(item.Type!)).Select(item => new SessionEventContent(
             knownEventIds[item.SourceEventId!],
             "application/json",
             SessionSecretFilter.Filter(item.Payload),
@@ -143,7 +143,7 @@ internal sealed class SessionEventNormalizer
         or "session.start" or "session.started" or "session.shutdown" or "session.task_complete"
         or "user.message" or "assistant.message" or "assistant.turn_end"
         or "tool.execution_start" or "tool.execution_complete"
-        or "subagent.started" or "subagent.completed" or "skill.started" or "skill.completed"
+        or "subagent.started" or "subagent.completed" or "skill.invoked"
         or "SessionStart" or "UserPromptSubmit" or "PreToolUse" or "PermissionRequest"
         or "PostToolUse" or "PostToolUseFailure" or "SubagentStart" or "SubagentStop"
         or "Stop" or "StopFailure" or "SessionEnd";
