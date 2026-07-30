@@ -86,14 +86,12 @@ public class MonitorUiTests
         Assert.DoesNotContain("leak-marker@example.com", diagnostics);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Diagnostics_RepositoryMetadataInventoryIsKeyOnly(bool sanitizedOnly)
+    [Fact]
+    public async Task Diagnostics_RepositoryMetadataInventoryIsKeyOnly()
     {
         using var temp = new MonitorTempDirectory();
         SeedRepositoryMetadataDiagnostics(temp);
-        await using var host = await StartHostAsync(temp, sanitizedOnly);
+        await using var host = await StartHostAsync(temp);
 
         var diagnostics = await host.Client.GetStringAsync("/diagnostics");
 
@@ -186,26 +184,18 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task Overview_ShowsPromptByDefault_HidesItUnderSanitizedOnly()
+    public async Task Overview_ShowsPromptByDefault()
     {
         // D032/D042: the overview's prompt labels are server-rendered raw-bearing
-        // content; --sanitized-only falls back to a shortened TraceId. (The raw
-        // record link moved off this page in the Sprint18 redesign — the raw-detail
-        // route is reached from the trace-detail page.)
+        // content. The raw record link moved off this page in the Sprint18 redesign
+        // and is reached from the trace-detail page.
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
 
-        await using (var defaultHost = await StartHostAsync(temp))
-        {
-            var defaultOverview = await defaultHost.Client.GetStringAsync("/");
-            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
-            Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
-        }
-
-        await using var sanitizedHost = await StartHostAsync(temp, sanitizedOnly: true);
-        var sanitizedOverview = await sanitizedHost.Client.GetStringAsync("/");
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", sanitizedOverview);
-        Assert.Contains("trace-ui", sanitizedOverview);
+        await using var defaultHost = await StartHostAsync(temp);
+        var defaultOverview = await defaultHost.Client.GetStringAsync("/");
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", defaultOverview);
+        Assert.DoesNotContain("leak-marker@example.com", defaultOverview);
     }
 
     [Fact]
@@ -226,17 +216,17 @@ public class MonitorUiTests
     }
 
     [Fact]
-    public async Task TracesPage_OmitsPromptUnderSanitizedOnly()
+    public async Task TracesPage_IsClosedUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         SeedRawWithSensitiveMarkers(temp);
         await using var host = await StartHostAsync(temp, sanitizedOnly: true);
 
-        var traces = await host.Client.GetStringAsync("/traces?period=all");
+        using var response = await host.Client.GetAsync("/traces?period=all");
 
-        Assert.Contains("trace-ui", traces);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", traces);
-        Assert.DoesNotContain("leak-marker@example.com", traces);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
     }
 
     [Theory]

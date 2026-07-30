@@ -15,8 +15,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// + cache-column shells that monitor-flow.js / monitor-waterfall.js /
 /// monitor-cache-panel.js fill from the sanitized spans API. By default the
 /// page inlines the raw OTLP payload. It enforces same-origin + no-store.
-/// Under --sanitized-only, the sanitized shell remains available and the raw
-/// section is absent.
+/// Under --sanitized-only, the human page is not registered.
 /// </summary>
 public class MonitorTraceDetailTests
 {
@@ -158,7 +157,7 @@ public class MonitorTraceDetailTests
     }
 
     [Fact]
-    public async Task TraceDetail_UnderSanitizedOnly_RendersSanitizedTabsWithoutRaw()
+    public async Task TraceDetail_UnderSanitizedOnly_IsClosedWithoutFallbackShell()
     {
         using var temp = new MonitorTempDirectory();
         SeedProjectedTrace(temp);
@@ -167,18 +166,9 @@ public class MonitorTraceDetailTests
         var response = await host.Client.GetAsync($"/traces/{TraceId}");
         var body = await response.Content.ReadAsStringAsync();
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.True(response.Headers.CacheControl?.NoStore);
-        Assert.Contains("実行の流れ", body);
-        Assert.Contains("キャッシュの観点", body);
-        Assert.Contains("data-trace-id=\"trace-detail\"", body);
-        Assert.Contains("data-raw-available=\"false\"", body);
-        Assert.DoesNotContain("Raw OTLP ペイロード", body);
-        Assert.DoesNotContain("copilot-drawer", body);
-        Assert.DoesNotContain("Copilot で解析", body);
-        Assert.DoesNotContain("/raw", body);
-        Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", body);
-        Assert.DoesNotContain("leak-marker@example.com", body);
+        Assert.Equal(string.Empty, body);
     }
 
     [Fact]

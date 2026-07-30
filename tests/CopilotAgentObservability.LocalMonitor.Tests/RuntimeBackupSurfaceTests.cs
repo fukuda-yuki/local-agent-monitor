@@ -35,19 +35,29 @@ public sealed class RuntimeBackupSurfaceTests
         };
         oversizedPreviewRequest.Headers.Add("x-monitor-csrf", "local-monitor");
         using var ui = await host.Client.GetAsync("/backup-restore");
-        using var invalidHostRequest = new HttpRequestMessage(HttpMethod.Get, "/backup-restore");
-        invalidHostRequest.Headers.Host = "monitor.example.invalid";
-        using var invalidHost = await host.Client.SendAsync(invalidHostRequest);
+        using var invalidHostApiRequest = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/api/runtime-backup/v1/backups/missing");
+        invalidHostApiRequest.Headers.Host = "monitor.example.invalid";
+        using var invalidHostApi = await host.Client.SendAsync(invalidHostApiRequest);
+        using var invalidHostUiRequest = new HttpRequestMessage(HttpMethod.Get, "/backup-restore");
+        invalidHostUiRequest.Headers.Host = "monitor.example.invalid";
+        using var invalidHostUi = await host.Client.SendAsync(invalidHostUiRequest);
         using var oversizedPreview = await host.Client.SendAsync(oversizedPreviewRequest);
 
         Assert.All(
-            new[] { create, invalidCreate, result, download, oversizedPreview, ui, invalidHost },
+            new[] { create, invalidCreate, result, download, oversizedPreview, ui },
             response => Assert.Equal(HttpStatusCode.NotFound, response.StatusCode));
+        Assert.All(
+            new[] { create, invalidCreate, result, download, oversizedPreview, ui },
+            response => Assert.True(response.Headers.CacheControl?.NoStore));
+        await AssertErrorAsync(invalidHostApi, HttpStatusCode.BadRequest, "invalid_host");
+        await AssertErrorAsync(invalidHostUi, HttpStatusCode.BadRequest, "invalid_host");
         Assert.False(Directory.Exists(Path.Combine(temp.Path, "runtime-backups")));
     }
 
     [Fact]
-    public async Task Overview_exposes_raw_mode_backup_affordance_without_expanding_sidebar_information_architecture()
+    public async Task Overview_exposes_raw_mode_backup_affordance_and_sanitized_mode_has_no_page()
     {
         using var rawTemp = new MonitorTempDirectory();
         await using var rawHost = await MonitorTestHost.StartAsync(rawTemp, testOptions: DisabledWorkers());
@@ -61,13 +71,11 @@ public sealed class RuntimeBackupSurfaceTests
             sanitizedTemp,
             sanitizedOnly: true,
             testOptions: DisabledWorkers());
-        var sanitizedHtml = await sanitizedHost.Client.GetStringAsync("/");
+        using var sanitizedPage = await sanitizedHost.Client.GetAsync("/");
 
-        Assert.DoesNotContain("id=\"runtime-backup-link\"", sanitizedHtml, StringComparison.Ordinal);
-        Assert.DoesNotContain("href=\"/backup-restore\"", sanitizedHtml, StringComparison.Ordinal);
-        Assert.Equal(
-            CountOccurrences(sanitizedHtml, "class=\"sidebar-link"),
-            CountOccurrences(rawHtml, "class=\"sidebar-link"));
+        Assert.Equal(HttpStatusCode.NotFound, sanitizedPage.StatusCode);
+        Assert.True(sanitizedPage.Headers.CacheControl?.NoStore);
+        Assert.Equal(string.Empty, await sanitizedPage.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -509,18 +517,6 @@ public sealed class RuntimeBackupSurfaceTests
             Assert.True(response.Headers.CacheControl?.NoStore);
             Assert.Equal($"{{\"error\":\"{code}\"}}", await response.Content.ReadAsStringAsync());
         }
-    }
-
-    private static int CountOccurrences(string value, string search)
-    {
-        var count = 0;
-        var offset = 0;
-        while ((offset = value.IndexOf(search, offset, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            offset += search.Length;
-        }
-        return count;
     }
 
     private sealed class ForbiddenReadStream : Stream

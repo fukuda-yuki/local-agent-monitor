@@ -155,14 +155,16 @@ and require process restart for already-running clients.
 ## Sanitized-Only Mode
 
 Use `-SanitizedOnly` when installing or starting the task if the always-on
-process should omit raw-bearing routes and PII:
+process should expose only receiver, health, and machine APIs:
 
 ```powershell
 .\scripts\local-monitor\install-startup-task.ps1 -SanitizedOnly -StartNow
 ```
 
 Without `-SanitizedOnly`, LocalMonitor keeps its normal raw-default local UI
-posture.
+posture. With `-SanitizedOnly`, it registers no Razor Pages, human static
+assets, human routes, or `/api/local-monitor/v1/*`; there is no per-screen
+metadata-only fallback.
 
 ## Security Boundary
 

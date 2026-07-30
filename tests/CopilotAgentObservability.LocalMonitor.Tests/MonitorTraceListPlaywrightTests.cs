@@ -6,20 +6,18 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 /// <summary>
 /// Sprint18 trace list master-detail (§6.2): row selection drives the preview
-/// panel, filters refetch the sanitized trace-list endpoint, and prompt labels
-/// stay out of sanitized contexts.
+/// panel, filters refetch the sanitized trace-list endpoint, and raw-default
+/// prompt labels remain available.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorTraceListPlaywrightTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TraceList_ClaudeSourceEvidenceUsesDtoFactsAndContentDisabledHidesRaw(bool sanitizedOnly)
+    [Fact]
+    public async Task TraceList_ClaudeSourceEvidenceUsesDtoFactsAndContentDisabledHidesRaw()
     {
         using var temp = new MonitorTempDirectory();
         Seed(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -51,14 +49,12 @@ public class MonitorTraceListPlaywrightTests
         await Expect(page.Locator("#preview-body .preview-raw")).ToHaveCountAsync(0);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TraceList_SelectionPreviewAndFilters_RespectSanitizedBoundary(bool sanitizedOnly)
+    [Fact]
+    public async Task TraceList_SelectionPreviewAndFilters_UseRawDefaultEvidence()
     {
         using var temp = new MonitorTempDirectory();
         Seed(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -80,16 +76,8 @@ public class MonitorTraceListPlaywrightTests
         await Expect(page.Locator("#preview-body")).ToBeVisibleAsync();
         await Expect(page.Locator("#preview-body .preview-kpis")).ToContainTextAsync("5K");
 
-        if (sanitizedOnly)
-        {
-            Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", await page.ContentAsync());
-        }
-        else
-        {
-            await Expect(page.Locator("#preview-body .preview-title")).ToContainTextAsync("SECRET_PROMPT_TEXT_MARKER");
-            // The preview offers the raw record link only in the raw-default posture.
-            await Expect(page.Locator("#preview-body .preview-raw")).ToHaveCountAsync(1);
-        }
+        await Expect(page.Locator("#preview-body .preview-title")).ToContainTextAsync("SECRET_PROMPT_TEXT_MARKER");
+        await Expect(page.Locator("#preview-body .preview-raw")).ToHaveCountAsync(1);
 
         // Selecting the second row swaps the preview without navigation.
         await page.Locator("#trace-rows .trace-row").Nth(1).ClickAsync();
@@ -102,12 +90,6 @@ public class MonitorTraceListPlaywrightTests
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/trace-list?", StringComparison.Ordinal) && url.Contains("status=unrecovered", StringComparison.Ordinal));
         Assert.Contains("status=unrecovered", page.Url);
 
-        if (sanitizedOnly)
-        {
-            // Sanitized context: the client never touches raw-bearing routes.
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("prompt-label", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
-        }
     }
 
     private static void Seed(MonitorTempDirectory temp)

@@ -1137,10 +1137,11 @@ reclaimed. Thus dormant bytes cannot regain authority or be used after the
 five-minute lifetime.
 
 The current workflow accepts only `metadata_only`. `--sanitized-only` remains
-the Local Monitor display posture and is not a substitute for probe consent;
-the historical-import page and sanitized workflow routes remain available in
-that mode because they expose no source body. Both current adapters read no
-content, return `content_risk = not_read`, and cannot issue confirmation.
+the Local Monitor receiver-only host posture and is not a substitute for probe
+consent. The historical-import page is not registered in that posture; accepted
+metadata-only workflow machine routes remain available because they expose no
+source body. Both current adapters read no content, return
+`content_risk = not_read`, and cannot issue confirmation.
 `include_content` is rejected before a source probe. A later content profile
 must be specified separately, secret-filter into existing
 `session_event_content`, and register through #89; it may not create an import
@@ -1404,8 +1405,9 @@ It never performs heuristic history lookup and never returns a raw body.
 
 Raw-default is a validation profile, not authorization to return raw content.
 Both raw-default and `--sanitized-only` responses are repository-safe;
-sanitized-only retains safe preview/status/navigation and preserves unavailable
-or expired state. A `--sanitized-only` host accepts only an exact
+sanitized-only retains the frozen preview/status/resolution machine APIs and
+preserves unavailable or expired state, but does not register the standalone
+human page. A `--sanitized-only` host accepts only an exact
 `selection.sanitized_only=true` historical-analysis preview; `false` is
 rejected as `400 invalid_historical_analysis_request` before the #72 owner
 opens a snapshot or reads descriptors and is never silently rewritten.
@@ -1712,8 +1714,9 @@ All cost responses are `Cache-Control: no-store`; CORS remains off. Every
 request passes loopback Host validation and same-origin checks. Writes require
 strict JSON, fixed size/cardinality bounds, and the existing CSRF header.
 Errors use fixed codes without rejected identifiers or values. Sanitized-only
-mode keeps metadata-only cost views and actions available but grants no raw
-read and does not enable a provider adapter.
+mode keeps metadata-only cost machine reads and actions available, but the
+`/costs` human page is absent; the posture grants no raw read and does not
+enable a provider adapter.
 
 The current Issue #61 manifests do not authorize a complete positive production
 estimate. The default adapter therefore returns an explicit unavailable state.

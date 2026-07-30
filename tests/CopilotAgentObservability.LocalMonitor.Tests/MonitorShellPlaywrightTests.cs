@@ -12,16 +12,14 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorShellPlaywrightTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Shell_SidebarNavAndStatusPopover_WorkWithoutRawFetches(bool sanitizedOnly)
+    [Fact]
+    public async Task Shell_SidebarNavAndStatusPopover_WorkWithoutRawFetches()
     {
         using var temp = new MonitorTempDirectory();
         var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -72,7 +70,7 @@ public class MonitorShellPlaywrightTests
         await page.WaitForURLAsync($"{host.Url}/diagnostics#ingestion-history");
         await Expect(page.Locator("#ingestion-history")).ToHaveAttributeAsync("open", "");
 
-        // The shell never fetches raw-bearing routes, in either posture.
+        // The raw-default shell does not fetch raw-bearing routes during this flow.
         Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(requestedUrls, url => url.Contains("prompt-label", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(requestedUrls, url => url.Contains("/health/ready", StringComparison.Ordinal));

@@ -25,7 +25,7 @@ public sealed class HistoricalAnalysisPlaywrightTests
     public async Task PreviewAndIndependentStarts_AreSemanticKeyboardOperableAndBounded()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: QuietHostOptions());
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
@@ -75,7 +75,7 @@ public sealed class HistoricalAnalysisPlaywrightTests
         await Expect(page.GetByLabel("Task label")).ToBeVisibleAsync();
         await Expect(page.GetByLabel("Experiment label")).ToBeVisibleAsync();
         await Expect(page.GetByLabel("最大 Session 数")).ToHaveValueAsync("50");
-        await Expect(page.GetByLabel("sanitized-only")).ToBeCheckedAsync();
+        await Expect(page.GetByLabel("sanitized-only")).Not.ToBeCheckedAsync();
         Assert.Equal(0, await page.EvaluateAsync<int>("() => localStorage.length + sessionStorage.length"));
 
         await page.GetByLabel("Repository").FillAsync("repo-safe");
@@ -197,7 +197,7 @@ public sealed class HistoricalAnalysisPlaywrightTests
     public async Task EvidenceResolution_SeparatesExpiredMissingAndUnresolvedAndKeepsMarkupInert()
     {
         using var temp = new MonitorTempDirectory();
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: QuietHostOptions());
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });

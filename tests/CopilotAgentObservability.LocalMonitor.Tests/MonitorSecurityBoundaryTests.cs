@@ -135,7 +135,7 @@ public class MonitorSecurityBoundaryTests
     }
 
     [Fact]
-    public async Task DashboardAndTraceList_OmitPromptUnderSanitizedOnly()
+    public async Task DashboardAndTraceList_AreClosedUnderSanitizedOnly()
     {
         using var temp = new MonitorTempDirectory();
         SeedSensitiveProjectedRecord(temp);
@@ -143,11 +143,10 @@ public class MonitorSecurityBoundaryTests
 
         foreach (var path in new[] { "/", "/traces" })
         {
-            var body = await host.Client.GetStringAsync(path);
-            foreach (var marker in Markers)
-            {
-                Assert.DoesNotContain(marker, body);
-            }
+            using var response = await host.Client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.True(response.Headers.CacheControl?.NoStore);
+            Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
         }
     }
 

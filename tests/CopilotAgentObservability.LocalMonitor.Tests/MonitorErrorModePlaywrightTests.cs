@@ -14,14 +14,12 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorErrorModePlaywrightTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ErrorMode_UnrecoveredTrace_ShowsStripPanelAndTrend(bool sanitizedOnly)
+    [Fact]
+    public async Task ErrorMode_UnrecoveredTrace_ShowsStripPanelAndTrend()
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp, unrecovered: true);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -60,17 +58,7 @@ public class MonitorErrorModePlaywrightTests
         await Expect(page.Locator("#error-panel .token-trend-bar")).ToHaveCountAsync(3);
         await Expect(page.Locator("#error-panel .token-limit-line")).ToHaveCountAsync(1);
 
-        // Error detail: raw exception message only in the raw-default posture.
-        if (sanitizedOnly)
-        {
-            await Expect(page.Locator("#error-message-block")).ToContainTextAsync("--sanitized-only では表示できません");
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/detail", StringComparison.Ordinal));
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
-        }
-        else
-        {
-            Assert.Contains(requestedUrls, url => url.Contains("/spans/f201/detail", StringComparison.Ordinal));
-        }
+        Assert.Contains(requestedUrls, url => url.Contains("/spans/f201/detail", StringComparison.Ordinal));
 
         // Selecting the unrecovered error highlights its span in the flow.
         await page.Locator("#error-panel .error-row", new PageLocatorOptions { HasTextString = "未回復" }).ClickAsync();

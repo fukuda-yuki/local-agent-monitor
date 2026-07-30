@@ -71,8 +71,9 @@ raw body（tool arguments / results、sub-agent instructions / responses、syste
 不透明な TraceId ではなく入力プロンプトで識別できるよう、**概要とトレース一覧でも
 代表プロンプトを既定で表示**します（D032。raw store の OTLP から server 側で抽出した、実行されない text。
 same-origin / `Cache-Control: no-store` を強制）。`--sanitized-only` を付けて起動すると
-metadata-only モードになり、raw 由来の表示（プロンプト、インスペクタの raw タブ、
-Copilot 解析ドロワー、raw route）を除外して短縮 TraceId に切り替えます。
+receiver / health / machine API 専用になり、Razor Pages、human static assets、
+人向け画面、`/api/local-monitor/v1/*` は登録されません。画面ごとの metadata-only
+表示や短縮 TraceId への切り替えはありません。
 
 ## 必要なもの
 
@@ -144,7 +145,7 @@ dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\mon
 |---|---|---|
 | `--db` | `data/raw-store.db` | SQLite raw store のパス |
 | `--url` | `http://127.0.0.1:4320` | ループバック bind URL（非ループバックは拒否） |
-| `--sanitized-only` | off | metadata-only モード。raw 由来の表示（プロンプト、インスペクタ raw タブ、Copilot 解析ドロワー、raw route）と PII を除外する任意 opt-out。 |
+| `--sanitized-only` | off | receiver / health / machine API 専用モード。Razor Pages、human static assets、人向け画面、raw-local route、`/api/local-monitor/v1/*` を登録しない任意 opt-out。 |
 | `--pricing-registry-override <absolute-file>` | なし | estimated-cost 用の trusted local override registry。最大8回まで指定でき、指定順で bundled registry の後へ追加します。 |
 | `--apply-root user_config=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル user-config root |
 | `--apply-root skill=<absolute-directory>` | なし | proposal apply で使う明示登録済みのローカル Skill root |
@@ -220,7 +221,7 @@ Windows では、Task Scheduler の user-level task として LocalMonitor を�
 
 既定では `http://127.0.0.1:4320` で起動し、DB / logs / state は
 `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下に保存します。
-metadata-only の常時起動にしたい場合は `-SanitizedOnly` を付けます。
+receiver / health / machine API 専用で常時起動したい場合は `-SanitizedOnly` を付けます。
 
 ```powershell
 .\scripts\local-monitor\install-startup-task.ps1 -SanitizedOnly -StartNow
@@ -446,8 +447,9 @@ eligible な Session の coverage denominator に残ります。ineligible Sessi
 分離し、partial の既知 component subtotal は provisional であって lower bound や
 actual cost ではありません。
 
-Cost の catalog/configuration/estimate/analytics API と `/costs` は metadata-only で、
-`--sanitized-only` でも利用できます。すべて valid loopback Host、same-origin、
+Cost の catalog/configuration/estimate/analytics API は metadata-only で、
+`--sanitized-only` でも利用できます。人向けの `/costs` 画面は raw-default だけです。
+API はすべて valid loopback Host、same-origin、
 `Cache-Control: no-store` を要求し、POST は strict JSON と
 `x-monitor-csrf: local-monitor` が必要です。sanitized export v1 は pricing と alert-v2
 を含めません。private runtime backup は pricing/alert-v2、および override から生成して
@@ -683,8 +685,7 @@ trace を開くと、パンくず・プロンプト見出し・状態ピル（�
 - **raw タブ**: `GET /traces/{traceId}/spans/{spanId}/detail` から取得した
   OTLP span JSON 全文を表示します（「JSON をコピー」付き）。整形抽出が
   できないスパンでも raw タブは常に機能します。
-- `--sanitized-only` では raw 由来の詳細は表示されず、sanitized なスパン情報のみに
-  なります（detail route 自体が 404）。
+- `--sanitized-only` では画面自体を登録せず、detail route も 404 です。
 
 <p align="center">
   <img width="900" alt="Local Ingestion Monitor スパンインスペクタ" src="../assets/screenshots/local-monitor-span-inspector.png">
@@ -719,7 +720,7 @@ trace をローカルの .NET GitHub Copilot SDK で解析し、所見を表示�
 server に永続化されることはありません。
 
 ドロワーには「ローカル SDK 経由 · raw はローカルから出ません」というデータ境界の
-表示が常にあります。`--sanitized-only` ではボタンとドロワー自体が存在しません。
+表示が常にあります。`--sanitized-only` では画面、ボタン、ドロワーを登録しません。
 
 <p align="center">
   <img width="900" alt="Local Ingestion Monitor Copilot 解析ドロワー" src="../assets/screenshots/local-monitor-copilot-drawer.png">
@@ -755,8 +756,8 @@ migration / writer / projection worker / ingestion queue）、readiness しき�
 取り込み履歴（raw record と trace の対応、sanitized metadata のみ）を確認できます。
 「リポジトリメタデータ診断」では、最近の受信データに含まれる属性キー、件数、
 `resource` / `span` / `event` のスコープ、分類だけを確認できます。属性値、リポジトリ名、
-URL、owner、ローカルパス、ユーザー情報は表示されません。このキー専用一覧は
-`--sanitized-only` でも利用できます。
+URL、owner、ローカルパス、ユーザー情報は表示されません。`--sanitized-only` では
+診断画面を登録しませんが、対応する sanitized machine API は利用できます。
 
 状態は `metadata_present`、`url_fallback_used`、`metadata_not_present`、
 `unsupported_candidate_present`、`unsafe_value_rejected` の 5 種類です。
@@ -800,9 +801,10 @@ workflow v1 は content import を受け付けません。将来 content を扱�
 対応契約と同意を経て既存の `session_event_content` / retention workflow を使う必要があり、
 履歴インポート専用の raw store や別の pin / delete 経路は追加しません。
 
-`--sanitized-only` でも metadata-only のページ/API は利用できます。選択したローカルパス、
-raw source、候補 / source-record key、confirmation / idempotency 値は、preview、結果、
-履歴、ログ、スクリーンショットに表示されません。
+`--sanitized-only` でも metadata-only の machine API は利用できますが、履歴 import
+ページは登録されません。選択したローカルパス、raw source、候補 / source-record key、
+confirmation / idempotency 値は、preview、結果、履歴、ログ、スクリーンショットに
+表示されません。
 
 ### Claude Code の source diagnostics
 
@@ -877,11 +879,11 @@ raw を表示する全ページ（概要 / trace 一覧 / trace 詳細 / raw rou
 - `Cache-Control: no-store`
 - HTML エスケープされた、実行されない text として描画（スクリプト実行なし）
 
-`--sanitized-only` を付けて起動すると raw body と PII、プロンプト表示は非表示になります。
-概要 / 一覧 / 見出しのプロンプトは短縮 TraceId に切り替わり、スパンインスペクタの
-raw タブは sanitized なスパン情報のみになり、Copilot 解析ドロワーは表示されず、
-`GET /traces/{rawRecordId}/raw` と `GET /traces/{traceId}/spans/{spanId}/detail` は
-`404` です。metadata-only 表示が必要な場合に使用できます。
+`--sanitized-only` を付けて起動すると receiver / health / machine API 専用になり、
+概要 / 一覧 / trace 詳細を含む Razor Pages、human static assets、Copilot 解析ドロワー、
+raw-local route、`/api/local-monitor/v1/*` は登録されません。既知の人向け GET / HEAD は
+空 body の `404` と `Cache-Control: no-store` を返します。画面ごとの metadata-only
+fallback はありません。
 
 raw store や表示内容には prompt / response / tool 情報が含まれる場合があります。
 raw store ファイル（`data\monitor.db` 等）を repository に commit しないでください。
@@ -958,7 +960,7 @@ $startScript = '.\scripts\start.ps1'
 $monitorUrl = 'http://127.0.0.1:4320'
 $db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-store.db'
 $installRoot = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\app'
-$sanitizedOnly = $false # metadata-only instance を復元するときだけ $true
+$sanitizedOnly = $false # receiver-only instance を復元するときだけ $true
 $startParameters = @{
     Mode = 'Published'
     Url = $monitorUrl
@@ -1002,7 +1004,7 @@ Local Monitor release を先に install し、restore 後に setup を再実行�
 
 - `data\monitor.db`、`data\monitor-*.db` は local runtime artifact です。repository に commit しないでください。
 - Task Scheduler 起動時の既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下に保存されます。これらも repository に commit しないでください。
-- 既定で raw body（prompt / response / tool arguments / results）と PII が表示されます。metadata-only 表示が必要な場合は `--sanitized-only` を付けて起動できます。
+- 既定で raw body（prompt / response / tool arguments / results）と PII が表示されます。画面を持たない receiver / health / machine API 専用運用が必要な場合は `--sanitized-only` を付けて起動できます。
 - モニターはループバックにのみバインドします。非ループバック URL は起動時に拒否されます。
 - ログに raw prompt / response / tool arguments / results は出力しません。
 
@@ -1089,9 +1091,9 @@ Copilot CLI から参照できます。Canvas extension は
 ### Local Monitor 姿勢
 
 Canvas adapter は通常起動の raw default Local Monitor と併用できます。
-`--sanitized-only` は Canvas 用の必須設定ではなく、metadata-only にしたい場合の
-任意モードです。このモードでも sanitized な画面（概要 / 一覧 / 詳細の sanitized
-表示）は使えますが、raw 由来の表示と raw route は非表示になります。
+`--sanitized-only` は Canvas 用の必須設定ではなく、receiver / health / machine API
+専用にしたい場合の任意モードです。このモードでは Local Monitor の人向け画面は
+登録されませんが、Canvas adapter が使用する sanitized machine API は利用できます。
 
 ### 必要なもの
 
@@ -1106,8 +1108,8 @@ Canvas adapter は通常起動の raw default Local Monitor と併用できま�
    dotnet run --project src\CopilotAgentObservability.LocalMonitor -- --db data\monitor.db --url http://127.0.0.1:4320
    ```
 
-   必要に応じて `--sanitized-only` を追加すると raw 由来の表示 / raw route / PII は
-   除外されます。
+   必要に応じて `--sanitized-only` を追加すると人向け画面と raw-local route を
+   登録しない receiver / health / machine API 専用ホストになります。
 
    `/health/ready` が `200 ready` を返すことを確認してください。
 

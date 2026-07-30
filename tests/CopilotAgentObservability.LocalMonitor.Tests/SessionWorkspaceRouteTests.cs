@@ -280,6 +280,10 @@ public sealed class SessionWorkspaceRouteTests
         await using var sanitized = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true);
         using var absent = await sanitized.Client.GetAsync($"/sessions/{sessionId}/events/{eventId}/content");
         Assert.Equal(HttpStatusCode.NotFound, absent.StatusCode);
+        Assert.Equal("application/json", absent.Content.Headers.ContentType?.ToString());
+        Assert.Equal(
+            """{"accepted":false,"error":"unsupported_endpoint","message":"Only /v1/traces is supported."}""",
+            await absent.Content.ReadAsStringAsync());
     }
 
     [Fact]

@@ -165,7 +165,7 @@ public sealed class AlertCenterPlaywrightTests
             [Coverage(), ExactCoverage()],
             snapshotState: "incomplete",
             omittedReceiptCount: null));
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: Options(readModel));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readModel));
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
@@ -173,7 +173,7 @@ public sealed class AlertCenterPlaywrightTests
 
         await page.GotoAsync($"{host.Url}/alerts", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator("#alert-sanitized-state")).ToContainTextAsync("sanitized-only");
+        await Expect(page.Locator("#alert-sanitized-state")).ToContainTextAsync("raw-default · sanitized DTO");
         await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(4);
         await Expect(page.Locator("#alert-detail-heading")).ToContainTextAsync("High tool failure ratio");
         await Expect(page.Locator("#alert-count")).ToContainTextAsync("incomplete");
@@ -417,7 +417,6 @@ public sealed class AlertCenterPlaywrightTests
         _ = AlertCenterRouteTests.AppendPersistedAlert(temp, sessionId, "raw-browser-boundary");
         await using var host = await MonitorTestHost.StartAsync(
             temp,
-            sanitizedOnly: true,
             testOptions: AlertCenterRouteTests.OptionsForProductionStore());
 
         using (var apiResponse = await host.Client.GetAsync("/api/alert-center/v1/alerts?period=30d"))

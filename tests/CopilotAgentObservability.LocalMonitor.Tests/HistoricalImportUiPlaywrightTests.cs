@@ -14,7 +14,6 @@ public sealed class HistoricalImportUiPlaywrightTests
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(
             temp,
-            sanitizedOnly: true,
             testOptions: QuietHostOptions());
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();

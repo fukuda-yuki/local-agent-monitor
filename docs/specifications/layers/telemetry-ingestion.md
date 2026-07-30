@@ -803,7 +803,8 @@ by VS Code and Copilot CLI.
 The startup wrapper must preserve the Local Monitor run boundary:
 
 - only loopback HTTP URLs are accepted (`127.0.0.1`, `localhost`, or `::1`).
-- `--sanitized-only` remains available for metadata-only always-on runs.
+- `--sanitized-only` remains available for receiver/health/machine-API-only
+  always-on runs without a human UI.
 - wrapper logs record only operational facts such as start/stop time, process id,
   exit code, configured URL, health result, and deterministic error code.
 - wrapper logs and state files do not contain raw monitor content, credentials,

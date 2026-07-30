@@ -746,6 +746,8 @@ public class LocalMonitorScriptTests
             var command = Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
             Assert.Contains("-PricingRegistryOverride", command, StringComparison.Ordinal);
             Assert.Contains("@('C:\\private registry\\one; $(not-a-command).json','C:\\private registry\\two''s value.json')", command, StringComparison.Ordinal);
+            Assert.Contains("-NoBrowser", command, StringComparison.Ordinal);
+            Assert.Contains("-WaitReady", command, StringComparison.Ordinal);
 
             var decoded = RunBoundedProcess(
                 PowerShellExecutablePath(),
@@ -1089,6 +1091,50 @@ public class LocalMonitorScriptTests
             Assert.Contains("pricing registry overrides: unknown", result.Output, StringComparison.Ordinal);
             Assert.DoesNotContain(locator, result.Output, StringComparison.Ordinal);
             Assert.DoesNotContain(locator, result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StatusProbesOnlyLiveAndReadyWithoutUiFallback()
+    {
+        var root = CreateTemporaryDirectory("cao-status-health-only-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var observedPaths = Path.Combine(root, "health-paths.txt");
+            File.Copy(ScriptPath("status.ps1"), Path.Combine(scripts, "status.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                function Get-LocalMonitorState { $null }
+                function Get-LocalMonitorTask { [pscustomobject]@{ State = 'Ready'; Actions = @() } }
+                function Test-LocalMonitorProcess { $false }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    if ($Path -notin @('/health/live', '/health/ready')) { throw "unexpected_health_path:$Path" }
+                    [System.IO.File]::AppendAllText('{{observedPaths.Replace("'", "''", StringComparison.Ordinal)}}', "$Path`n")
+                    if ($Path -eq '/health/live') { return [pscustomobject]@{ StatusCode = 200; Content = '{}' } }
+                    return [pscustomobject]@{
+                        StatusCode = 200
+                        Content = '{"status":"ready","checks":{"projection_lag_seconds":0,"projection_backlog":0},"degraded_reasons":[]}'
+                    }
+                }
+                function Get-LocalMonitorPublishedExePath { 'C:\safe\missing.exe' }
+                function Get-LocalMonitorAppVersion { '' }
+                """);
+
+            var result = RunPowerShellScript(Path.Combine(scripts, "status.ps1"));
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Empty(result.Error);
+            Assert.Equal(
+                ["/health/live", "/health/ready"],
+                File.ReadAllLines(observedPaths));
         }
         finally
         {
@@ -1863,6 +1909,7 @@ public class LocalMonitorScriptTests
                         if ($script:LiveProbeCount -eq 1) { return $null }
                         return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
                     }
+                    if ($Path -ne '/health/ready') { throw "unexpected_health_path:$Path" }
                     [System.IO.File]::WriteAllText('{{readyProbeMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'probed')
                     if ('{{readyStatus}}' -eq 'unreachable') { return $null }
                     return [pscustomobject]@{ StatusCode = 200; Content = '{{readyContent.Replace("'", "''", StringComparison.Ordinal)}}' }

@@ -7,8 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// <summary>
 /// Sprint18 Copilot drawer (§6.6, D045) with a fake completing runner: open via
 /// the standing header button, run an analysis, follow-up chat resends the
-/// client-held history, Esc closes, and the drawer is absent under
-/// --sanitized-only.
+/// client-held history, and Esc closes.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorDrawerPlaywrightTests
@@ -69,27 +68,6 @@ public class MonitorDrawerPlaywrightTests
         await page.Keyboard.PressAsync("Escape");
         await Expect(page.Locator("#copilot-drawer")).ToBeHiddenAsync();
         await Expect(page.Locator("#flow-card")).Not.ToHaveClassAsync(new System.Text.RegularExpressions.Regex("dimmed-behind-drawer"));
-    }
-
-    [Fact]
-    public async Task Drawer_IsAbsentUnderSanitizedOnly()
-    {
-        using var temp = new MonitorTempDirectory();
-        MonitorRichTrace.Seed(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: new MonitorHostTestOptions
-        {
-            StartWriter = false,
-            StartProjectionWorker = false,
-        });
-        PlaywrightBrowserPath.ConfigureDefault();
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
-        var page = await browser.NewPageAsync();
-
-        await page.GotoAsync($"{host.Url}/traces/{MonitorRichTrace.TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-
-        await Expect(page.Locator("#copilot-drawer")).ToHaveCountAsync(0);
-        await Expect(page.Locator("#copilot-open")).ToHaveCountAsync(0);
     }
 
     private sealed class RecordingRunner : IMonitorAnalysisRunner
