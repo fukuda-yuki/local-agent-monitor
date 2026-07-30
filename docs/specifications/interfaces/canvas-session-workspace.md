@@ -242,7 +242,8 @@ Event-type support uses exact ordinal matching. The supported v1 set is:
 `session.started`, `session.shutdown`, `session.task_complete`, `user.message`,
 `assistant.message`, `assistant.turn_end`, `tool.execution_start`,
 `tool.execution_complete`, `subagent.started`, `subagent.completed`,
-`skill.invoked`, `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`subagent.failed`, `subagent.selected`, `subagent.deselected`, `skill.invoked`,
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`,
 `SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd`. The producer-less
 `skill.started` and `skill.completed` types are unsupported.

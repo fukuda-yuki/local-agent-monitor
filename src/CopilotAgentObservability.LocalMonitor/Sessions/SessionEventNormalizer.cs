@@ -143,7 +143,8 @@ internal sealed class SessionEventNormalizer
         or "session.start" or "session.started" or "session.shutdown" or "session.task_complete"
         or "user.message" or "assistant.message" or "assistant.turn_end"
         or "tool.execution_start" or "tool.execution_complete"
-        or "subagent.started" or "subagent.completed" or "skill.invoked"
+        or "subagent.started" or "subagent.completed" or "subagent.failed"
+        or "subagent.selected" or "subagent.deselected" or "skill.invoked"
         or "SessionStart" or "UserPromptSubmit" or "PreToolUse" or "PermissionRequest"
         or "PostToolUse" or "PostToolUseFailure" or "SubagentStart" or "SubagentStop"
         or "Stop" or "StopFailure" or "SessionEnd";
