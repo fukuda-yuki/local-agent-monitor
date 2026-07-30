@@ -487,6 +487,11 @@ Consequences:
 
 ## D023: Raw body を既定表示し `--sanitized-only` 安全弁を設ける（D020 更新）
 
+**Status: partly superseded by D075.** Raw-default display and frozen machine
+contracts remain. The metadata-only human UI described here is retired:
+`--sanitized-only` is receiver-only and registers no Razor Pages, human static
+assets or `/api/local-monitor/v1/*`.
+
 Status: Accepted
 
 Sprint8 の姿勢（raw は `--enable-raw-view` opt-in）を反転する。単一ローカル利用者ツール
@@ -694,6 +699,11 @@ Consequences:
   として扱う。
 
 ## D032: ダッシュボード / トレース一覧をプロンプト識別の raw-bearing 面に拡張（D023 更新）
+
+**Status: narrowed by D075.** The prompt-label/raw-route security contract
+remains frozen technical compatibility. The dashboard and `/traces` list are no
+longer current Local Monitor v1 primary IA; `/` becomes Repository selection and
+the list retires when Session Explorer ships.
 
 Status: Accepted
 
@@ -1305,6 +1315,11 @@ Sprint17 では Canvas helper の既存 `POST /analyze` → `session.send({ prom
 
 ## D042: Local Monitor UI は Sprint18 デザインハンドオフの Console 型 IA / hex トークン / 7 画面へ再設計する
 
+**Status: superseded for current product IA by D075.** This section is retained
+as implementation history. Its permanent sidebar, Overview/KPI surface,
+trace-first master-detail list and split flow/waterfall structure are not
+current Local Monitor v1 authority.
+
 Status: Accepted
 
 Sprint18 では Local Ingestion Monitor の UI を
@@ -1398,6 +1413,11 @@ Sprint18 の概要 KPI（実効入力換算、キャッシュ読取率）とト�
   `AddColumnIfMissing` による additive-only とする。
 
 ## D045: Copilot ドロワーの追い質問は履歴再送（history resend）方式とする
+
+**Status: narrowed by D075.** The installed trace-analysis transport remains a
+frozen technical contract. Local Monitor v1 optional AI is Session-first; only
+whole-Session reports have durable immutable history, while node,
+Repository/Compare results and follow-up chat are non-permanent under #162.
 
 Status: Accepted
 
@@ -2241,9 +2261,9 @@ The complete public contract is [retention mutation](specifications/interfaces/r
 Status: Accepted (2026-07-21)
 
 Issue #105 integrates GitHub Copilot and Claude Code first-trace journeys
-without expanding D042's seven-screen, two-navigation-item Local Monitor IA.
-Doctor controls, exact Session summary, and source-diagnostic targeting live in
-the existing `/diagnostics` screen. No independent Doctor or Session-detail
+without adding a Local Monitor v1 primary destination. Doctor controls, exact
+Session summary, and source-diagnostic targeting live in the focused
+`/diagnostics` flow opened from Unified Settings. No independent Doctor or Session-detail
 screen is added.
 
 - The stable source registry is `github-copilot-vscode`,
@@ -2349,11 +2369,11 @@ timestamp. An exact binding may add only a relationship and navigation target
 to an existing Session. Date and new Session/Event counts remain explicitly
 unavailable without authoritative evidence. Metadata-only creates no retention
 item, and content remains blocked in workflow v1 pending an existing
-`session_event_content`/#89 mapping. The two-item D042 sidebar remains; an
-explicit diagnostics/integration card links to the dedicated import page,
+`session_event_content`/#89 mapping. Unified Settings diagnostics/integration
+links explicitly to the dedicated import page,
 whose live and historical tabs use separate read models and never union
 identity. This supersedes only the pre-#79 seven-screen count in D064; D064's
-Doctor-in-diagnostics placement and D042's two-navigation-item rule remain.
+Doctor-in-diagnostics ownership remains while D075 owns current navigation.
 
 ## D067: Alert evaluation uses capability-gated deterministic receipts
 
@@ -2718,11 +2738,61 @@ pricing privately; no archive member, Retention kind, or raw store is added.
 The Local Monitor exposes bounded no-store cost projections and explicit
 same-origin/CSRF-protected configuration/recalculation actions at `/costs` and
 `/api/costs/v1/*`. It does not accept canonical bytes or local overrides over
-HTTP. The D042 two-item primary sidebar remains unchanged; cost navigation is
-contextual. The legacy `sprint4-m2-v1` dashboard cost fields remain frozen and
-non-authoritative rather than receiving an implicit projection.
+HTTP. Under D075 this remains a focused detail flow opened contextually from
+Unified Settings, not a permanent primary destination. The legacy
+`sprint4-m2-v1` dashboard cost fields remain frozen and non-authoritative rather
+than receiving an implicit projection.
 
 Estimated cost is not invoice reconciliation, billing/chargeback, currency
 conversion, purchase/quota mutation, notification, quality improvement,
 verified effect, or automatic model recommendation. Content-enabled capture
 remains separately unauthorized.
+
+## D075: Local Monitor v1 is Repository-first, AI-independent at core, and receiver-only when sanitized
+
+Status: Accepted (2026-07-30)
+
+Local Monitor v1 is organized around Repository selection, Session Explorer,
+Session detail and deterministic two-cohort Repository Session Compare. It has
+no permanent sidebar and no generic aggregate/KPI dashboard. Breadcrumbs and
+contextual search own normal navigation; receiver state and Settings open one
+Unified Settings modal. The route, page, state, dimensions and binding
+terminology authority is
+`docs/specifications/interfaces/local-monitor-v1-ia.md`.
+
+The core works without an LLM, provider authentication or API key. Compare is
+fully deterministic and delegates all formula/snapshot semantics to #165; it
+has no quality-evidence section, score, ranking, anomaly judgement or
+improvement/effect verdict. Optional v1 AI uses GitHub Copilot SDK only after an
+explicit user action and delegates snapshot/tool/storage/history semantics to
+#162. Whole-Session reports alone have durable immutable history. Node,
+Repository-selection and Compare results are transient or bounded operational
+state, and follow-up chat is not persisted.
+
+Repository and Session archive are reversible local visibility/selection
+metadata. Archive is neither deletion, retention nor pin; it does not cascade,
+extend retention or auto-restore on new ingest. Complex backup, restore,
+retention, diagnostics and historical-import operations remain focused detail
+flows reachable from Unified Settings rather than permanent navigation.
+
+`--sanitized-only` is receiver-only under #159. In that posture the host keeps
+ingestion, health and accepted frozen machine APIs but does not register Razor
+Pages, human static assets or `/api/local-monitor/v1/*`; there is no
+per-screen metadata-only fallback. Raw-default human surfaces are loopback,
+Host-validated, same-origin, no-store, retention-authorized, bounded and inert
+text. Provider egress is a separate explicit boundary.
+
+The raw-local closed set includes authorized instruction labels/content; Tool
+input/result/error; exact Sub-agent input; historical Skill body/path and the
+separately validated current file; canonical Repository locator management;
+Session AI reports and transient AI results; and exact raw technical detail.
+The complete closed enumeration is
+`docs/specifications/security-data-boundaries.md`.
+
+D075 supersedes D042 as current product IA and supersedes D023's metadata-only
+human UI. It narrows D032 and D045 to frozen installed technical contracts.
+Existing `/api/monitor/*`, `/api/session-workspace/*` v1, SSE, Canvas
+stores/behavior, raw ingestion, export/import, replay, backup, retention and
+technical evidence routes remain unchanged. Historical records are retained;
+they do not regain current product authority. Sentence-level Japanese copy is
+deferred to #169.

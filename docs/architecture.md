@@ -124,6 +124,24 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
 - Raw prompt、response、tool arguments、tool results、local path、identity attributes、credential-like values を受け取り得るため、出力は local runtime data とし repository に commit しない。
 - Normalized measurement、candidate、dashboard dataset の schema は変更しない。
 
+### Local Monitor v1 Application
+
+- One loopback-only, single-user raw-default human application over the existing
+  receiver, Session, Retention and frozen machine-contract owners.
+- Primary composition is Repository selection → Session Explorer → Session
+  detail or deterministic Repository Session Compare. Unified Settings owns
+  receiver, AI, Repository, archive, storage/backup and diagnostics entry.
+- `/api/local-monitor/v1/*` is the human-UI composition namespace. It reuses the
+  #155/#156 Repository owner, #133/#134 Workspace reads, #157/#158 Skill raw
+  detail, #160/#161 archive, #165/#166 Compare and #162/#163/#164 AI owners. It
+  does not duplicate their readers or widen `/api/monitor/*`,
+  `/api/session-workspace/*` v1 or SSE.
+- AI-independent observation/investigation/Compare remains complete without an
+  LLM. Optional GitHub Copilot SDK execution crosses an explicit bounded
+  provider-egress boundary and never receives SQLite or arbitrary SQL access.
+- `--sanitized-only` composes receiver/health/frozen-machine-API only; no Razor
+  Pages, human static assets or `/api/local-monitor/v1/*` are registered.
+
 ### Config CLI
 
 Config CLI は repository-local な中核ツールである。
@@ -603,6 +621,28 @@ Canvas capture begins at first open. Missed earlier events are not reconstructed
 and lower completeness. Ephemeral usage is aggregated; reasoning and deltas are
 not persisted. OTel enrichment runs after existing projection and leaves the
 OTLP receiver, trace/span schema, and readiness contract unchanged.
+
+### Local Monitor v1 Investigation Loop
+
+```text
+exact Repository catalog/assignment
+  -> Repository selection
+  -> bounded Session Explorer read
+  -> exact Session snapshot
+  -> fixed Session summary + hierarchical timeline + contextual inspector
+  -> exact raw technical detail under Retention lease
+
+two explicit Session cohorts
+  -> immutable bounded Compare snapshot
+  -> deterministic #165 formulas and exact drill-down
+  -> optional AI interpretation of the accepted receipt
+```
+
+Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
+exact. Missing facts remain missing. Archive changes default eligibility only;
+it is not Retention, pin or deletion. Whole-Session AI reports alone have
+durable immutable history; node/Repository/Compare results are transient or
+bounded operational state under #162.
 
 ### Canvas Effect Verification Loop
 

@@ -80,6 +80,71 @@ summaries, and non-secret endpoint shapes instead of raw payload content.
 
 ## Local Ingestion Monitor Boundary
 
+### Local Monitor v1 accepted boundary
+
+This subsection is the current closed enumeration for the Local Monitor v1
+human product. It incorporates
+[the accepted security supplement](interfaces/local-monitor-v1-security.md)
+and supersedes conflicting UI-posture statements in the later implementation
+history. Later route-specific controls remain binding for installed frozen
+technical surfaces.
+
+The human UI exists only in raw-default posture for one trusted local user.
+Every raw-local read is loopback-only, Host-header validated, same-origin,
+`Cache-Control: no-store`, retention-authorized, bounded by a closed route and
+payload contract, and rendered as escaped inert text. Raw values do not enter
+URLs, normal logs, repository artifacts, sanitized machine APIs or SSE.
+
+The v1 raw-local set is closed to:
+
+- first-instruction label/search index and full authorized instruction/Event
+  content;
+- Tool input, result and error;
+- exact Sub-agent input and Event/error/permission content when captured;
+- historical Skill body and definition path captured by the exact
+  `skill.invoked` event, plus a separately labelled current file after explicit
+  POST and current inventory/path/root/reparse validation;
+- canonical Repository locator only in the dedicated management read;
+- immutable Session AI report content and transient node/Repository/Compare AI
+  results;
+- exact raw record/span/event technical detail; and
+- the separately authorized runtime-backup and raw-replay surfaces.
+
+Historical Skill snapshot and current file are never substituted. Standard
+Repository cards and Session rows do not return the raw locator. Derived
+instruction labels cannot outlive source content. Skill digest/provenance may
+outlive content only with an explicit expired state. Archive does not extend
+retention. Session AI reports use analysis retention; node/Repository/Compare
+AI operational content and deterministic Compare snapshots expire after 24
+hours and are not backed up.
+
+`/api/local-monitor/v1/*` is raw-default human-UI support, not a sanitized
+public API. Responses are no-store; mutations require same-origin and CSRF;
+bodies are closed and bounded; fixed errors never echo raw input or inner
+exceptions; identities in URLs are opaque. The entire namespace is absent in
+`--sanitized-only`.
+
+`--sanitized-only` is receiver-only under #159. Ingestion, health and accepted
+frozen machine APIs remain available, but Razor Pages, human static assets and
+`/api/local-monitor/v1/*` are not registered. Unmatched human GET/HEAD receives
+an empty no-store 404. There is no route-by-route metadata-only fallback UI.
+Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE
+shape/order/bytes/availability remain under their existing contracts.
+
+AI provider execution is an explicit egress from the local-only boundary.
+GitHub Copilot SDK is the sole v1 provider; actions appear only when ready and
+each run requires a user action. Settings permanently explains the egress and
+Repository selection requires a scope preview. The provider receives one
+bounded immutable snapshot and process-internal evidence-index tools only. It
+never receives the SQLite file, arbitrary SQL, scope-external identifiers,
+credentials or secrets. Provider request/response bodies, paths and content are
+not logged or emitted in diagnostics or repository artifacts.
+
+No raw value is stored in browser storage, reusable cache or URL state.
+Comparison and AI URLs carry opaque snapshot/run IDs only; draft cohort
+checkboxes and follow-up transcripts stay in the current page. Generated
+Markdown/HTML is not executed and color is never the sole signal.
+
 The Local Ingestion Monitor (Sprint8) receives the same raw telemetry as the
 `raw-local-receiver` profile and may surface it under an explicit opt-in.
 Because the raw store and OTLP payloads can contain raw prompt / response /
@@ -105,17 +170,15 @@ Defended (in scope):
   never written to repository-safe outputs, the static dashboard, or CI
   artifacts.
 
-Default posture:
+Installed pre-v1 route record (raw-route controls remain frozen; UI composition
+is superseded by the accepted boundary above):
 
 - raw body (tool call arguments / results, sub-agent instructions / responses,
   system prompt) and PII (`user.id` / `user.email`) are shown **by default**
   (server-rendered, inert text) on raw-bearing surfaces.
-- `--sanitized-only` restores metadata-only mode: the full raw route returns
-  `404`, TraceDetail's raw section and full raw links are omitted, the dashboard
-  and trace-list prompt labels are omitted (a shortened TraceId is shown
-  instead), PII is excluded, and the sanitized TraceDetail tab shell remains
-  available. This is an optional compatibility / opt-out mode, not a Canvas
-  requirement.
+- `--sanitized-only` now composes a receiver-only host: the installed raw routes
+  are absent together with all Razor Pages and human static assets. The prior
+  metadata-only TraceDetail/dashboard/list shell is not registered.
 - API responses (`/api/monitor/*`), list endpoints, and the SSE stream carry
   sanitized metadata only — they **never** return raw / PII, regardless of
   `--sanitized-only`.
@@ -175,8 +238,9 @@ Raw-bearing surfaces:
     server-side from the trace's raw OTLP payload, truncated, escaped inert
     text) so a trace is identifiable by what the user asked rather than by an
     opaque id (D032). Only this short prompt label is raw; all other columns
-    stay sanitized metadata. Under `--sanitized-only` the prompt label is
-    omitted and a shortened TraceId is shown instead.
+  stay sanitized metadata. This is installed raw-default pre-v1 behavior; the
+  receiver-only host registers neither page and provides no shortened-TraceId
+  fallback.
 - there is **no full-payload JSON raw API**; `/api/monitor/*` and the SSE
   stream **never** return raw / PII. The short prompt label route is the narrow
   raw-bearing JSON exception outside `/api/monitor/*` and may be fetched by
@@ -188,11 +252,11 @@ Raw-bearing surfaces:
   Full raw payloads still are not fetched by client-side JS, and
   `/api/monitor/*` plus SSE remain prompt-free.
 - **default-on**: raw-bearing routes are active by default (no launch flag
-  required). `--sanitized-only` removes raw-bearing surfaces: the raw-detail
-  route returns `404`, the trace-detail page omits its raw section and full raw
-  links while retaining the sanitized tab shell, the dashboard and trace-list
-  pages omit their per-trace prompt labels (showing a shortened TraceId), PII is
-  excluded, and no cacheable raw response is generated.
+  required). Under Local Monitor v1, `--sanitized-only` composes a receiver-only
+  host: Razor Pages, human static assets, human routes, and
+  `/api/local-monitor/v1/*` are not registered. It does not retain the
+  installed sanitized tab shell, dashboard, trace list, or shortened-TraceId
+  fallback. Accepted frozen machine APIs retain their contract.
 - **every raw-bearing route or page variant** enforces:
   - same-origin: a request whose `Sec-Fetch-Site` is cross-site / cross-origin
     (or whose `Origin` is foreign) is rejected with `403`.
@@ -245,14 +309,13 @@ Additional monitor web-security requirements:
 Mandatory negative tests:
 
 - non-loopback bind rejected; `Host`-header validation enforced.
-- with `--sanitized-only`, the full raw route returns `404`, the trace-detail
-  raw section and full raw links are absent, the dashboard and trace-list
-  per-trace prompt labels are absent, PII is excluded, and no cacheable raw
-  response is generated.
-- the dashboard (`/`) and trace-list (`/traces`) pages render the per-trace
-  user-prompt label **by default**, omit it under `--sanitized-only` (showing a
-  shortened TraceId instead), and the prompt label never appears in
-  `/api/monitor/*` or the SSE stream (D032).
+- with `--sanitized-only`, Razor Pages, human static assets and
+  `/api/local-monitor/v1/*` are not registered; human GET/HEAD receives empty
+  no-store `404`, PII/raw values are excluded, and no cacheable raw response is
+  generated.
+- the installed raw-default dashboard and trace list may retain their frozen
+  prompt-label route until replacement, but the label never appears in
+  `/api/monitor/*` or SSE and those pages are not a sanitized-only fallback.
 - a cross-site / cross-origin request to any raw-bearing route / page variant is rejected with
   `403`.
 - `Cache-Control: no-store` is present on **all** raw-bearing routes / page
@@ -262,18 +325,17 @@ Mandatory negative tests:
 - raw / PII never appears in logs or repository-committed outputs.
 - per-field sanitization: email / path / secret-like values injected into
   free-form attributes (`tool_name`, `mcp_tool_name`, `agent_name`,
-  `error_type`) are guarded out of the projection tables, the `/api/monitor/*`
-  JSON, and the SSE-driven default UI — including under `--sanitized-only`.
+  `error_type`) are guarded out of the projection tables, `/api/monitor/*`
+  JSON, and SSE. A receiver-only host has no default human UI.
 
 Sprint10 design views (client-side presentation, boundary unchanged):
 
-- the Sprint10 design views (Flow Chart, Cache Explorer, timeline filter/sort,
-  themed trace-detail UI) are **client-side rendering over the sanitized
-  `/api/monitor/*` JSON and SSE only**. They never read a raw-bearing route, add
-  no raw-bearing route, and add no new endpoint / field. The raw-bearing
-  surfaces, the default-on posture, and `--sanitized-only` raw removal are
-  unchanged; the new views work identically under `--sanitized-only` because
-  they were sanitized to begin with.
+- the installed pre-v1 Sprint10 design views (Flow Chart, Cache Explorer,
+  timeline filter/sort, themed trace-detail UI) are **client-side rendering over
+  the sanitized `/api/monitor/*` JSON and SSE only**. They never read a
+  raw-bearing route, add no raw-bearing route, and add no new endpoint / field.
+  They are raw-default compatibility pages and are not registered by the
+  receiver-only host.
 - **vendored, no CDN.** Noto Sans JP / Noto Sans Mono (D028) are vendored
   locally under `wwwroot/vendor/`; no Content-Delivery-Network or external font
   fetch is introduced, so offline / loopback-only operation is preserved and no
@@ -1468,8 +1530,9 @@ bytes, private locators, or absolute paths.
 The backup API and UI are raw-bearing surfaces. Under `--sanitized-only`, the
 entire `/api/runtime-backup/v1/*` family and `/backup-restore` page are absent
 and return `404` before request-body handling or backup-store access. The
-overview omits its backup/restore entry, and this feature does not add a third
-permanent sidebar item to the canonical two-item Local Monitor navigation.
+installed pre-v1 overview omits its backup/restore entry. Local Monitor v1 has
+no permanent sidebar; backup and restore remain a focused Unified Settings flow
+and do not become primary navigation.
 
 Archive input is untrusted. Validation is bounded and precedes extraction:
 exact two-member stored ZIP, no traversal/absolute/duplicate/reparse-attributed/

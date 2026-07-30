@@ -18,6 +18,9 @@
 
 | Interface | Spec |
 | --- | --- |
+| Local Monitor v1 contract authority index | [interfaces/local-monitor-v1-contract-index.md](interfaces/local-monitor-v1-contract-index.md) |
+| Local Monitor v1 IA, routes and states | [interfaces/local-monitor-v1-ia.md](interfaces/local-monitor-v1-ia.md) |
+| Local Monitor v1 security supplement | [interfaces/local-monitor-v1-security.md](interfaces/local-monitor-v1-security.md) |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |
 | Configuration setup | [interfaces/configuration-setup.md](interfaces/configuration-setup.md) |
@@ -29,7 +32,7 @@
 | Pricing estimation | [interfaces/pricing-estimation.md](interfaces/pricing-estimation.md) |
 | Cost analytics and budget alerts | [interfaces/cost-analytics.md](interfaces/cost-analytics.md) |
 | Instruction diagnosis analysis | [interfaces/instruction-diagnosis-analysis.md](interfaces/instruction-diagnosis-analysis.md) |
-| Canvas Session workspace | [interfaces/canvas-session-workspace.md](interfaces/canvas-session-workspace.md) |
+| Frozen Canvas Session workspace v1 | [interfaces/canvas-session-workspace.md](interfaces/canvas-session-workspace.md) |
 | Canvas Session workspace UI | [interfaces/canvas-session-workspace-ui.md](interfaces/canvas-session-workspace-ui.md) |
 | Canvas Session Evidence | [interfaces/canvas-session-evidence.md](interfaces/canvas-session-evidence.md) |
 | Canvas Improvement Proposals | [interfaces/canvas-improvement-proposals.md](interfaces/canvas-improvement-proposals.md) |
@@ -39,7 +42,7 @@
 | Historical source import | [interfaces/historical-source-import.md](interfaces/historical-source-import.md) |
 | Historical evidence extraction | [interfaces/historical-evidence-extraction.md](interfaces/historical-evidence-extraction.md) |
 | Historical instruction analysis | [interfaces/historical-instruction-analysis.md](interfaces/historical-instruction-analysis.md) |
-| Historical analysis | [interfaces/historical-analysis.md](interfaces/historical-analysis.md) |
+| Frozen historical-analysis backend and retiring page | [interfaces/historical-analysis.md](interfaces/historical-analysis.md) |
 | Alert rule engine | [interfaces/alert-rule-engine.md](interfaces/alert-rule-engine.md) |
 | Tool/retry/permission alert rules | [interfaces/tool-alert-rules.md](interfaces/tool-alert-rules.md) |
 | Token/context/cache alert rules | [interfaces/token-context-cache-alert-rules.md](interfaces/token-context-cache-alert-rules.md) |

@@ -1,5 +1,11 @@
 # Canvas Session Workspace Interface
 
+Local Monitor v1 disposition: this v1 wire contract remains byte-frozen for
+Canvas and existing consumers. It is not the reader for the new
+`/api/local-monitor/v1/*` human UI; #133/#134 own that composition and must
+reuse these exact identities without widening this schema or adding fallback
+binding.
+
 ## Scope
 
 This specification freezes the Issue #51 Session foundation for the installed

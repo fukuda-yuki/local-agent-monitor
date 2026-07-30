@@ -130,8 +130,8 @@ canonical FirstTrace/Doctor code and is authoritative; HTTP status never turns
 a failure into success.
 
 The Doctor section lives in the existing `/diagnostics` page and adds no Doctor
-screen. D042's two-navigation-item sidebar remains unchanged. Issue #79 adds
-the separate `/historical-import` page through an explicit diagnostics card;
+screen or primary destination; Unified Settings opens this focused flow. Issue
+#79 adds the separate `/historical-import` page through an explicit diagnostics card;
 that page is outside this Doctor interface. The Doctor section shows source
 selection, empty/detected state, the returned current state, severity, source,
 evidence references, next action, retryability and active/expired/cancelled/

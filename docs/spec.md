@@ -45,7 +45,36 @@ Profile selector は `CAO_COLLECTION_PROFILE` とし、詳細は
 
 `raw-local-receiver` は Langfuse なしで VS Code からこの repository の local receiver へ直接 telemetry を送信する profile であり、Sprint7 の実装対象とする。
 
-Local Ingestion Monitor は、`raw-local-receiver` の telemetry をローカルで確認するための単一 ASP.NET Core プロセス（loopback-only）であり、Sprint8 で実装した。Sprint7 の Config CLI receiver（`127.0.0.1:4319`）と並存し、別 loopback port（既定 `127.0.0.1:4320`、Collector の `4317`/`4318` と Sprint7 CLI receiver の `4319` を回避）で動作する。OTLP HTTP/protobuf を受信して SQLite raw store に永続化し、sanitized monitor projection、ローカル UI、health endpoint を提供する。Sprint9 で受信済み OTel テレメトリから per-span の sanitized projection（`monitor_spans`）を追加し、agent-execution view としてツール / MCP 呼び出し名、成否、sub-agent のモデル / トークン、turn 単位トークンを表示する。Sprint10 で TraceDetail ページに4つの設計ビュー（Summary / Timeline / Flow Chart / Cache）をタブ UI として追加し、Flow Chart は当初 vendored Cytoscape.js + dagre（MIT、`wwwroot/vendor/`、CDN 不使用）でレンダリングした（Sprint12 で素の DOM へ置換。後述）。全ビューは既存の sanitized spans API（`GET /api/monitor/traces/{traceId}/spans`）のみを消費し、raw 境界・PII 境界の変更はない。ビジュアルテーマは VS Code Dark+ を基盤とし（D027）、タイポグラフィは vendored Noto Sans JP / Noto Sans Mono（D028、`wwwroot/vendor/fonts/`、OFL）。raw body と PII は既定で表示する（server-rendered、inert text）。`--sanitized-only` フラグで metadata-only モードを復元できる。Sprint12 で UI を刷新し、ダッシュボード（`/`）とトレース一覧（`/traces`）に各トレースの代表ユーザープロンプトを server-rendered 表示してトレースをプロンプトで識別できるようにした（raw-bearing 拡張。same-origin / `Cache-Control: no-store` / `--sanitized-only` 除去を強制し、`/api/monitor/*`・SSE の sanitized 不変条件は維持。D032）。Flow Chart は Cytoscape を廃し、Span Tree（インデント + ウォーターフォールバー）と DOM フローの toggle 切替として素の DOM で再実装した（D033）。`/ingestions` ページは廃止してダッシュボードへ統合し、UI は日本語化、ナビは3項目（ダッシュボード / トレース / 診断）に集約した。Windows では `scripts/local-monitor/` の PowerShell scripts により user-level Windows Task Scheduler の logon startup を任意登録できる。Sprint14 で Windows x64 self-contained folder publish の Release ZIP 配布面を追加し、利用者端末では source build や .NET SDK / Runtime 事前導入を要求しない。Sprint18 で UI をデザインハンドオフ準拠の Console 型 IA へ全面再設計した（D042）: 208px 左サイドバー + 2 項目ナビ（概要 / トレース）、診断はステータスバッジ → ポップオーバー経由、概要ダッシュボード（期間別 token KPI / モデル別内訳 / キャッシュ効率 / 高コスト TOP5 / 時間帯分布 / 最近のトレース）、トレース一覧の master-detail 化（テーブル + 右プレビュー）、トレース詳細のタブ廃止（フロー | waterfall セグメント切替 + 常設キャッシュ列）、スパンインスペクタ（整形 / raw タブ、新規 raw-bearing route。D043）、エラー解析モード、Copilot 解析ドロワー（履歴再送チャット。D045）。デザイントークンはハンドオフ §10 の hex 値を正とする。これを支えるため monitor projection schema v4 で trace 単位 cache token rollup と `trace_status` を additive に追加し（D044）、sanitized 集計 endpoint `GET /api/monitor/overview` と `GET /api/monitor/trace-list` を新設した。既存 public routes の shape / ordering は変更していない。詳細は [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) と [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) を正本とする。
+Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
+
+Human page route ownership:
+
+| Route | Owner |
+|---|---|
+| `/` | Repository selection |
+| `/repositories/{repositoryId}/sessions` | Repository-scoped Session Explorer |
+| `/sessions` | All active Sessions virtual scope |
+| `/sessions/unassigned` | Unassigned Sessions virtual scope |
+| `/sessions/{sessionId}` | Session detail workspace |
+| `/repositories/{repositoryId}/comparisons/{comparisonId}` | deterministic Repository Session Compare |
+| any primary page with `settings=<section>` | Unified Settings modal state |
+
+The bounded Settings values are `state`, `receiver`, `ai`, `repositories`,
+`archive`, `storage` and `diagnostics`. Session detail uses only validated
+opaque `execution={executionId}`, `node={nodeId}` and `analysis={runId}` query
+state; `node` resolves its exact execution and `analysis` never names a mutable
+`latest`. Session Explorer filter/search/pagination state uses the closed
+`q/from/to/source/model/status/activity/archive_scope/cursor/mode=compare`
+contract from the IA. Draft cohort checkboxes remain transient until the server
+creates an opaque comparison snapshot ID.
+
+`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository reads are owned by #155/#156, Workspace reads by #133/#134, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+
+Old human-route disposition is exact: `/` changes from Overview to Repository selection; `/traces` retires when Session Explorer ships; `/traces/{traceId}` remains low-level technical evidence; raw record/span/event routes remain focused technical evidence; `/historical-analysis` retires when #164 integrates its backend into Repository-local AI while `/api/historical-analysis/v1/*` remains frozen; diagnostics, historical import, backup/restore and retention remain focused detail flows opened from Settings. No indefinite redirect, dual page path or permissive fallback is added.
+
+Execution order is the contract-index graph: telemetry prerequisites and #154; then #156/#158/#161/#168; then #134; then shell/routes/Repository/Session detail/Settings/Compare/AI implementations; then #169; #147; #148. Compare formula is delegated only to #165, AI persistence only to #162, and sanitized-only composition only to #159.
+
+The installed pre-v1 Console/trace-first UI and its additive monitor projection/routes remain implementation history and frozen compatibility surfaces until their owning replacement Issue ships. Their existence does not make them current product IA or authorize a second reader. Windows startup, self-contained Release ZIP distribution, raw OTLP ingestion, SQLite persistence, health/readiness, retention, export/import, replay, backup and Canvas contracts remain unchanged by Issue #118.
 
 Issue #90 adds the versioned retention mutation/read surface under
 `/api/retention/v1/*`. It is an additive Local Monitor application service
@@ -260,10 +289,10 @@ source-specific states, reorder precedence, fill missing facts, or substitute
 an evaluation preview for the persisted evaluation.
 
 The UI proxy provides ordered source discovery and begin/status/complete/cancel
-operations. Existing five `/api/doctor` routes, D051 readiness, and D042's
-two-navigation-item information architecture remain unchanged. Issue #105
-itself adds no screen: Doctor controls, exact Session summary, and source-
-diagnostic targeting are sections of `/diagnostics`. The separate Issue #79
+operations. Existing five `/api/doctor` routes and D051 readiness remain
+unchanged. Issue #105 itself adds no primary screen: Doctor controls, exact
+Session summary, and source-diagnostic targeting are sections of the focused
+`/diagnostics` flow opened from Unified Settings. The separate Issue #79
 `/historical-import` page described below is outside that Doctor closeout.
 
 Evidence navigation is an additive sanitized projection over exact persisted
@@ -662,9 +691,10 @@ support evidence. Codex App therefore remains
 `unavailable/codex_adapter_unavailable` on the current production path; the
 frozen #94 `not-estimable/subscription_or_contract_unknown` result is only the
 hypothetical domain outcome for a separately authorized exact fact set.
-`/api/costs/v1/*` and
-`/costs` expose metadata-only, no-store, same-origin/CSRF-protected views and
-actions. The page is contextual and does not add a third primary sidebar item.
+`/api/costs/v1/*` and the installed pre-v1 `/costs` page expose metadata-only,
+no-store, same-origin/CSRF-protected views and actions. Local Monitor v1 has no
+permanent sidebar; any future cost presentation must enter through its accepted
+repository-first IA without creating a second reader.
 Estimated cost is not an invoice, chargeback, quality improvement, effect
 verdict, or model recommendation.
 
@@ -765,9 +795,10 @@ the receipt evidence ID is an independent opaque value. Browser loads use
 monotonic generations so an older filter, page,
 lifecycle, period, or SSE response cannot replace newer state; custom dates are
 validated as two ordered inclusive endpoints spanning at most 366 days. The
-metadata-only surface remains available under `--sanitized-only`. D042's
-two-item sidebar remains unchanged; Overview, trace detail, and exact Session
-diagnostics provide contextual links.
+metadata-only machine surface remains available under `--sanitized-only`.
+This paragraph records the installed pre-v1 navigation only: D042's two-item
+sidebar is superseded by the Local Monitor v1 repository-first IA. Alert Center
+is retained as a focused compatibility flow and is not permanent v1 navigation.
 
 ## Sanitized evidence export
 
@@ -955,6 +986,9 @@ sanitized. The canonical contract is
 | Dashboard publishing | [specifications/layers/dashboard-publishing.md](specifications/layers/dashboard-publishing.md) |
 | Security and data boundaries | [specifications/security-data-boundaries.md](specifications/security-data-boundaries.md) |
 | Validation and release matrix | [specifications/validation-release-matrix.md](specifications/validation-release-matrix.md) |
+| Local Monitor v1 authority index | [specifications/interfaces/local-monitor-v1-contract-index.md](specifications/interfaces/local-monitor-v1-contract-index.md) |
+| Local Monitor v1 IA, routes and states | [specifications/interfaces/local-monitor-v1-ia.md](specifications/interfaces/local-monitor-v1-ia.md) |
+| Local Monitor v1 security supplement | [specifications/interfaces/local-monitor-v1-security.md](specifications/interfaces/local-monitor-v1-security.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
 | Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
@@ -1010,7 +1044,13 @@ Publicly documented interfaces are:
 - Dashboard dataset JSON and CSV logical tables。
 - Static dashboard artifact layout: `index.html` and `dashboard-data.json`。
 - Data safety boundary for repository-stored files。
-- Local Ingestion Monitor loopback endpoints: `POST /v1/traces`、`GET /api/monitor/ingestions`、`GET /api/monitor/traces`、`GET /api/monitor/traces/{traceId}/spans`、`GET /api/monitor/summary`、`GET /api/monitor/overview?period=today|7d|30d`（期間別 token KPI / モデル別集計 / 時間帯分布。D042/D044）、`GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`（offset paging のトレース一覧 + cache 集計 + `trace_status`。`q` は TraceId 部分一致のみで prompt 本文は検索・返却しない。D042/D044）、`GET /health/live`、`GET /health/ready`、および SSE notification stream。`/api/monitor/*` と SSE は raw / PII を返さない（sanitized のみ）。`/health/ready` は飽和継続時に `503`（瞬間的 backpressure は `degraded` の `2xx`）を返し、`status` / `checks` / `degraded_reasons` を持つ機械可読 body を伴う。既定しきい値は ingestion-stall `10s` / projection-lag `60s`（設定可能）。
+- Local Monitor v1 raw-default human-UI support namespace:
+  `/api/local-monitor/v1/*`. Its readers and mutations are defined only by the
+  accepted Local Monitor v1 contract owners; all routes are no-store, closed and
+  bounded, mutations require same-origin plus CSRF, and the entire namespace is
+  absent in `--sanitized-only`. It does not widen or duplicate frozen
+  `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE.
+- Frozen Local Ingestion Monitor machine endpoints: `POST /v1/traces`, `GET /api/monitor/ingestions`, `GET /api/monitor/traces`, `GET /api/monitor/traces/{traceId}/spans`, `GET /api/monitor/summary`, `GET /api/monitor/overview?period=today|7d|30d`, `GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`, `GET /health/live`, `GET /health/ready`, and the SSE notification stream. Issue #118 does not change their shape, ordering, bytes or availability. `/api/monitor/*` and SSE remain sanitized and contain no raw/PII. `/health/ready` returns `503` for sustained saturation (transient backpressure is `degraded` with `2xx`) with the machine-readable `status` / `checks` / `degraded_reasons` body; default thresholds remain ingestion-stall `10s` and projection-lag `60s` where configurable. These endpoints are compatibility inputs, not an alternate Local Monitor v1 page reader or IA authority.
 - Historical import CLI commands:
   `historical-import preview --database <monitor.db> --request <request.json>`,
   `historical-import confirm --database <monitor.db> --request <request.json>`,
@@ -1032,8 +1072,8 @@ Publicly documented interfaces are:
   `GET /api/historical-import/v1/history?limit=<1..100>`,
   `GET /api/historical-import/v1/observations?limit=<1..100>&cursor=<hoc_...>`, and
   `GET /api/historical-import/v1/observations/{observation_id}`. The page is
-  discoverable from the existing diagnostics/integration area without adding
-  a third sidebar destination. It keeps live Session and historical
+  discoverable from Unified Settings diagnostics/integration without becoming
+  permanent navigation. It keeps live Session and historical
   observation tabs separate, reuses existing Session workspace v1 reads for
   the live tab, and never unions their identities. All API responses are
   sanitized/no-store; writes require same-origin, CSRF, strict JSON, and the
@@ -1071,8 +1111,9 @@ Publicly documented interfaces are:
   closed `alert.center.evaluation-request.v1`, requires same-origin plus
   `x-monitor-csrf: local-monitor`, and returns only evaluation ID, ordered
   receipt IDs, suppressions, and rejected matches. All three use
-  `Cache-Control: no-store`; `/alerts` remains metadata-only under
-  `--sanitized-only`, and Issue #95 adds no separate public Alert Center
+  `Cache-Control: no-store`. The machine contracts remain frozen under the
+  receiver-only posture, while the `/alerts` human page is not registered by a
+  `--sanitized-only` host. Issue #95 adds no separate public Alert Center
   cost-evaluation route. Budget evaluation occurs only through explicit budget
   scopes on `POST /api/costs/v1/recalculations`.
 - Local Monitor estimated-cost endpoints:
@@ -1087,9 +1128,11 @@ Publicly documented interfaces are:
   `GET /api/costs/v1/sessions/{session_id}/estimates?after=<estimate_id>&limit=<1..100>`,
   `GET /api/costs/v1/sessions/{session_id}/estimates/{estimate_id}`, and
   `GET /api/costs/v1/analytics?from=<UTC>&to=<UTC>&after=<cursor>&limit=<1..100>`.
-  `GET /costs` is the separate result-oriented browser page, always reachable
-  from fixed Overview and Diagnostics context entries and optionally narrowed
-  by exact Session/estimate links. Every API/page request requires a valid
+  `GET /costs` is the installed pre-v1 result-oriented browser page, reached
+  from its legacy Overview/Diagnostics entries or exact Session/estimate links.
+  Local Monitor v1 does not retain those fixed entries as permanent navigation;
+  any future cost presentation integrates through the accepted repository-first
+  IA without a parallel reader. Every API/page request requires a valid
   loopback Host and same-origin context. The API accepts bounded strict
   JSON/query input, GET is mutation-free, POST additionally requires JSON plus
   `x-monitor-csrf: local-monitor`, and every response is
@@ -1144,17 +1187,17 @@ Publicly documented interfaces are:
   supported component migration, authoritative tombstone reconciliation,
   default pre-restore backup, atomic swap/rollback, and post-install
   readiness/Doctor checks.
-- Local Ingestion Monitor raw-bearing routes（既定表示）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および ダッシュボード（`/`）と トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。`--sanitized-only` 起動時は raw-bearing route / raw section を除去（raw-detail route は `404`、dashboard / traces の prompt ラベルは省略し短縮 TraceId にフォールバック）、PII は除外。prompt ラベルは `/api/monitor/*` と SSE には含めない。full-payload JSON raw API は提供しない。Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
-- Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（metadata-only モード。raw-bearing route を `404` にし PII を除外）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）、および最大8回の optional `--pricing-registry-override <absolute-file>`。pricing override は trusted local regular registry document を caller order で bundled document の後へ追加し、private path/bytes を API、UI、log、または repository-safe evidence へ出さない。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
+- Local Ingestion Monitor raw-bearing routes（raw-default installed pre-v1 compatibility）: trace-detail page（agent-execution view、bounded raw preview inline + full raw record link）、`GET /traces/{rawRecordId}/raw`（server-rendered HTML）、`GET /traces/{traceId}/prompt-label`（JSON、D039）、`GET /traces/{traceId}/spans/{spanId}/detail`（スパンインスペクタ用 JSON: tool 呼出引数 / 結果末尾、llm メッセージ構成 / プレビュー、raw span JSON。D043）、および旧ダッシュボード（`/`）と旧トレース一覧（`/traces`）。後者2つは各トレースの代表ユーザープロンプトを server-rendered または same-origin prompt-label route fetch で表示する（raw store の OTLP payload から抽出、truncated、escaped inert text。prompt ラベルのみ raw でその他列は sanitized metadata。D032 / D039 / D042）。raw-bearing route set の全 route で same-origin 強制（cross-site は `403`）、`Cache-Control: no-store`。Local Monitor v1 の `--sanitized-only` は receiver-only host であり、Razor Pages、human static assets、human routes、`/api/local-monitor/v1/*` を登録せず、短縮 TraceId や metadata-only shell へフォールバックしない。凍結した `/api/monitor/*` と SSE は shape / ordering / bytes を変えず prompt-free のままとする。full-payload JSON raw API は提供しない。raw-default Canvas helper は、拡張所有 loopback server の token-gated local screen として、既存 raw-bearing span detail route から選択 trace の prompt / response preview を server-to-server 取得して表示してよく（D050）、同じ token-gated helper screen の `/api/traces` と `/api/summary` highlight trace label でも prompt label を表示してよい（D039 / D050）。Canvas action responses、`session.send()` prompts、logs、repository-safe outputs、static artifacts には raw prompt / response / prompt label を含めない。
+- Local Ingestion Monitor run interface: loopback port（既定 `http://127.0.0.1:4320`）、`--port` / `--url`、`--sanitized-only`（Local Monitor v1 receiver-only posture）、リクエスト本文サイズ上限 `--max-request-body-bytes`（既定 `31457280` bytes = 30 MiB、env `CAO_MONITOR_MAX_REQUEST_BODY_BYTES`）、および最大8回の optional `--pricing-registry-override <absolute-file>`。pricing override は trusted local regular registry document を caller order で bundled document の後へ追加し、private path/bytes を API、UI、log、または repository-safe evidence へ出さない。`POST /v1/traces` は本文が上限を超えると `413` / `request_too_large` を返し raw を書かない。
 
-  Update (D039 / D042 / D050): Local Monitor の client-side overview / trace-list と Canvas helper は、same-origin / token-gated local screen 上で `GET /traces/{traceId}/prompt-label` を `fetch` し、prompt label を `textContent` 相当の inert text として表示してよい。これは full raw payload の client-side fetch 許可ではなく、`/api/monitor/*` と SSE は prompt-free のまま。
+  Installed pre-v1 compatibility (D039 / D042 / D050): raw-default の client-side overview / trace-list と Canvas helper は、same-origin / token-gated local screen 上で `GET /traces/{traceId}/prompt-label` を `fetch` し、prompt label を `textContent` 相当の inert text として表示してよい。この route は新しい Repository/Session reader authority ではなく、`--sanitized-only` receiver host には登録しない。これは full raw payload の client-side fetch 許可ではなく、`/api/monitor/*` と SSE は prompt-free のまま。
 - Local Ingestion Monitor Windows startup scripts: `scripts/local-monitor/start.ps1`、`stop.ps1`、`status.ps1`、`set-startup-task.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`、`install-user-env.ps1`、`uninstall-user-env.ps1`。`start.ps1 -PricingRegistryOverride <string[]>` は0..8個の absolute file を caller order の repeated host `--pricing-registry-override` として渡し、one-shot start では path を永続化しない。`install-startup-task.ps1 -PricingRegistryOverride <string[]>` は利用者が明示した場合だけ同じ順序の private absolute path を current-user Task Scheduler action arguments に保存する。この OS-owned task argument は同一ユーザーまたは管理者の OS tooling から見えるため、利用者へ登録前に明示する一方、script/app は path を log、state、API、UI、repository-safe evidence へ複製しない。dry-run/status/error は override の有無と件数だけを示し、path を表示しない。`set-startup-task.ps1` の enable/disable は arguments を変更しない。Task Scheduler task の既定名は `CopilotAgentObservability LocalMonitor`、trigger は current user logon、既定 URL は `http://127.0.0.1:4320`、既定 DB / logs / state は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\` 配下。Task 登録 script は client routing 設定を書き換えない。user env script は別の明示操作として current user の永続環境変数に raw-local-receiver / monitor 向け OTLP routing を設定・解除する。pricing override locator は DB/runtime backup に含めず、restore 後も同じ reviewed file set/order を起動時に再指定するか、新しい catalog で configuration を preview/commit する。startup 登録、enable / disable、今すぐ起動、user env install / uninstall は利用者が明示実行した場合のみ行う。
 - Local Ingestion Monitor Release ZIP interface: `.github/workflows/local-monitor-release.yml` と `scripts/local-monitor/package-release.ps1` は Windows x64 self-contained folder publish を `local-monitor-win-x64.zip` として生成する。ZIP layout は `app/`、`scripts/`、`README.md`、`manifest.json`、notices を含む。ZIP scripts は `install.ps1`、`start.ps1`、`stop.ps1`、`status.ps1`、`set-startup-task.ps1`、`install-startup-task.ps1`、`uninstall-startup-task.ps1`、`install-user-env.ps1`、`uninstall-user-env.ps1` を含む。install root 既定は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\app\`、runtime root 既定は `%LOCALAPPDATA%\CopilotAgentObservability\LocalMonitor\`。uninstall は DB / logs を既定保持し、`-RemoveData` 明示時のみ runtime data を削除する。
 - Local Ingestion Monitor Copilot raw analysis routes（raw-default only）: `POST /traces/{traceId}/analysis`（CSRF header required; creates a queued local analysis run and dispatches the .NET GitHub Copilot SDK analysis service without embedding raw in the request。Sprint18 で optional `question` / `history`（過去 Q&A turns）を受け付け、runner が prompt に履歴ブロックを追記する history-resend 追い質問に対応。server 側に会話 session 状態は持たない。D045）、`GET /traces/{traceId}/analysis/runs/{runId}`（local raw-derived result; same-origin + `Cache-Control: no-store`）、`GET /traces/{traceId}/analysis/runs/{runId}/safe-summary`（repository-safe allowlist summary）。These routes are not under `/api/monitor/*`; `/api/monitor/*` and SSE remain sanitized-only. `--sanitized-only` removes the analysis routes.
 - Local Monitor Copilot raw analysis configuration: `CopilotAnalysis:Enabled`（未設定時は enabled; `false` で local analysis runner を明示無効化）、`CopilotAnalysis:Model`（既定 `gpt-5`）、`CopilotAnalysis:TimeoutSeconds`（raw analysis runner が 1 回の SDK send/wait に許容する実行タイムアウト秒。正の整数。未設定・不正値は既定 `60`。Canvas options の timeout hint とは独立）、`CopilotAnalysis:BaseDirectory`（writable な SDK runtime state parent。未設定時は writable temp-local LocalMonitor parent。Local Monitor は run ごとに catalog-owned opaque child を作成し、その child だけを SDK に渡す。parent や sibling は cleanup target ではない。詳細は [Raw Store And Normalization Specification](specifications/layers/raw-store-normalization.md#analysis-sdk-directory-capture-and-cleanup-d3)）、and optional BYOK provider keys `CopilotAnalysis:Provider:Type`、`BaseUrl`、`WireApi`（`completions` or `responses`）、`ApiKey`。These may be supplied through user-secrets or equivalent local configuration. `ApiKey` must not be logged, persisted in analysis events, or emitted to repository-safe outputs.
 - Local Ingestion Monitor Canvas analysis options endpoint: `GET /api/analysis/options` returns sanitized profile/model metadata for the Canvas helper. Initial profiles are `fast` (60s timeout hint, default reasoning `low`), `standard` (180s, `medium`), and `deep` (600s, `high`). Models come from `CopilotAnalysis:Models:*` configuration, with `CopilotAnalysis:DefaultModel` / `CopilotAnalysis:Model` fallback. Returned model fields are id, display name, provider display name, reasoning-effort support, and default marker. Provider secrets, API keys, base URLs, local paths, raw telemetry, and PII are never returned. Timeout values are Canvas requested wait/display hints, not Local Monitor raw runner execution timeouts.
 - Local Ingestion Monitor client config: `config-cli profile-vscode-env --profile raw-local-receiver --target monitor`（または `--endpoint`）が monitor endpoint（既定 `http://127.0.0.1:4320`）向けの VS Code env を出力。`--target receiver` 既定は `4319` のまま。
-- Canvas adapter は raw default の Local Monitor と併用できる。`--sanitized-only` は Canvas の必須起動条件ではなく、Local Monitor の任意 metadata-only opt-out である。Canvas actions は引き続き既存 sanitized `/api/monitor/*` と readiness を読む bounded DTO surface であり、action responses / logs / committed outputs に raw / PII を返さない。
+- Canvas adapter は installed pre-v1 の raw-default Local Monitor と併用できる。Local Monitor v1 の `--sanitized-only` は receiver-only posture であり、Canvas helper を含む human UI を登録しない。Canvas actions の凍結した bounded DTO contract は既存 sanitized `/api/monitor/*` と readiness を読み、action responses / logs / committed outputs に raw / PII を返さない。
 - Canvas helper analysis trigger: extension-owned `POST /analyze` remains a token-gated `session.send({ prompt })` fire-and-forget trigger. Payload includes `traceId`、optional `spanId`、`focus`、`profile`、`requestedModel`、`requestedReasoningEffort`、`requestedTimeoutSeconds`; response includes dispatch metadata (`analysis_trigger_id`、requested values、`prompt_template_version`、`dispatched_at`、and message id when the SDK exposes one). It does not call `/traces/{traceId}/analysis`, does not wait for a model response, and does not store final analysis result metadata.
 - Canvas cross-repo metadata fields: `repository_name` は resource-scoped `vcs.repository.name` を authoritative source とし、その key が absent の場合だけ allowlisted canonical GitHub HTTPS `vcs.repository.url.full` の sanitized repository segment を fallback にできる。`workspace_label` と `repo_snapshot` はそれぞれ `workspace.name` と `repo.snapshot` から生成する sanitized nullable projection fields である。`repo.name` は repository label source として扱わない。raw URL / owner は保存・送出せず、unsafe authoritative name は fallback しない。`/diagnostics` の key-only inventory / fixed 5-state reason は Retention-gated で、既存 `/api/monitor/*`、SSE、Canvas DTO shape を変えない。既存 projected rows は自動 backfill しない。
 - Canvas Session workspace: `POST /api/session-ingest/v1/events`（schema/header version 1、batch 1..100、1 MiB、commit 後のみ `204`、固定 `400/413/415/503/504`）、sanitized `GET /api/session-workspace/sessions` / session detail / `resolve` / `status`、same-origin/no-store の `GET /sessions/{id}/events/{eventId}/content`、および installed `hook-forward --endpoint <loopback-url> --timeout-ms 250 [--source claude-code [--source-version <metadata-token>] [--schema-fingerprint <64-lowercase-hex>]]`。`--source` 省略は既存 Copilot mode、exact `--source claude-code` は Claude mode とする。provenance 引数は Claude mode だけで有効であり、Claude は out-of-band の信頼できる version または承認済み fingerprint を少なくとも一方要求する。Claude invocation の selector/provenance 欠落または不正時は payload shape で source を推測せず fail-open/silent で転送しない。完全な identity、merge、completeness、retention、response shape は [Canvas Session workspace interface](specifications/interfaces/canvas-session-workspace.md) を正本とする。

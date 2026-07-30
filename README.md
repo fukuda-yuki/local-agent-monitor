@@ -44,6 +44,14 @@ Copilot は内部で多くのステップを踏んでいます。LLM の呼び�
 VS Code Copilot Chat からテレメトリを直接受信し、ローカル DB に蓄積してブラウザで確認する  
 **観測 UI** です（`http://127.0.0.1:4320`）。外部サーバーは不要です。
 
+> [!IMPORTANT]
+> Local Monitor v1 の採用済み製品形は Repository → Session Explorer →
+> Session detail / deterministic Compare です。詳細は
+> [製品定義](docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)
+> と [IA 仕様](docs/specifications/interfaces/local-monitor-v1-ia.md) を参照してください。
+> 以下の画面説明と画像は、置換 Issue の完了まで残るインストール済み pre-v1 UI の
+> 操作ガイドです。#148 が統合実装後のガイドを更新します。
+
 > [!NOTE]
 > 画面キャプションに掲載されているスクリーンショット画像は表示例（デモデータセット）です。実際の観測時は、画面右上等の受信ステータスバッジ（`受信中` / `未接続`）でリアルタイム接続状態を確認できます。
 

@@ -354,9 +354,11 @@ Raw access (default-on):
   server-side from the trace's raw OTLP payload, truncated, inert text) so a
   trace is identifiable by what the user asked (D032); only this short label is
   raw, all other columns stay sanitized metadata.
-- `--sanitized-only` restores metadata-only mode: raw-bearing routes return
-  `404`, the dashboard / trace-list prompt label is omitted (a shortened TraceId
-  is shown), PII is excluded. No cacheable raw response is generated.
+- the installed metadata-only dashboard / trace-list fallback is pre-v1
+  history. Local Monitor v1 `--sanitized-only` composes a receiver-only host:
+  no Razor Pages, human static assets, human routes, or
+  `/api/local-monitor/v1/*` are registered. Accepted frozen machine APIs retain
+  their contracts, PII is excluded, and no cacheable raw response is generated.
 - raw-bearing routes enforce same-origin (`Origin` / `Sec-Fetch-Site` ⇒
   cross-site `403`) and `Cache-Control: no-store`.
 - raw / PII is never part of the projection tables, list responses, SSE

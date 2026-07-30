@@ -33,7 +33,7 @@ public sealed class Issue91ValidationContractTests
     }
 
     [Fact]
-    public void FutureRegistryContainsOnlyIssue91FutureOwners()
+    public void FutureRegistryPinsRequiredLocalMonitorV1Surfaces()
     {
         using var registry = JsonDocument.Parse(File.ReadAllText(
             Path.Combine(ContractRoot, "future-surface-registry.json")));
@@ -42,8 +42,24 @@ public sealed class Issue91ValidationContractTests
         Assert.Equal("validation-future-surfaces.v1", registry.RootElement.GetProperty("schema_version").GetString());
 
         var entries = registry.RootElement.GetProperty("entries").EnumerateArray().ToArray();
-        Assert.Equal([93],
-            entries.Select(entry => entry.GetProperty("owner_issue").GetInt32()));
+        var ownersBySurface = entries.ToDictionary(
+            entry => entry.GetProperty("surface_id").GetString()!,
+            entry => entry.GetProperty("owner_issue").GetInt32(),
+            StringComparer.Ordinal);
+        var requiredSurfaces = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["local-monitor-v1-shell"] = 135,
+            ["local-monitor-v1-repository-selection"] = 167,
+            ["local-monitor-v1-session-explorer"] = 138,
+            ["local-monitor-v1-session-detail"] = 140,
+            ["local-monitor-v1-compare"] = 166,
+            ["local-monitor-v1-session-ai"] = 163,
+            ["local-monitor-v1-repository-compare-ai"] = 164,
+            ["local-monitor-v1-sanitized-host"] = 168,
+            ["local-monitor-v1-settings-lifecycle"] = 146
+        };
+        Assert.All(requiredSurfaces, expected =>
+            Assert.Equal(expected.Value, ownersBySurface[expected.Key]));
         Assert.All(entries, entry =>
         {
             Assert.Equal("not_available", entry.GetProperty("state").GetString());

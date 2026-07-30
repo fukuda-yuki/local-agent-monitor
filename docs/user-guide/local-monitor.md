@@ -7,6 +7,15 @@ Copilot Chat や GitHub Copilot CLI から送られてくる OTLP HTTP/protobuf 
 Langfuse、Docker Desktop、外部ネットワークは不要です。
 ループバック（`127.0.0.1`）にバインドし、同一マシン内でのみ動作します。
 
+> [!IMPORTANT]
+> このガイドの画面説明は、置換 Issue の完了まで残るインストール済み pre-v1 UI
+> を対象にしています。採用済み Local Monitor v1 は Repository → Session Explorer
+> → Session detail / deterministic Compare の構成で、permanent sidebar や汎用 KPI
+> dashboard を持ちません。現行 authority は
+> [製品定義](../superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md) と
+> [IA 仕様](../specifications/interfaces/local-monitor-v1-ia.md) です。統合後の操作手順は
+> #148 で更新します。
+
 ## 何が確認できるか
 
 画面は左にサイドバー（**概要 / トレース** の 2 項目）、下部に受信ステータスバッジが

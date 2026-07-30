@@ -458,8 +458,9 @@ Issue #51 further supersedes the no-new-input/schema statement only for the
 separate Session ingest, Session storage, workspace reads, and exact-link OTel
 enrichment defined in
 [Canvas Session workspace](../interfaces/canvas-session-workspace.md).
-`--sanitized-only` remains an optional Local Monitor metadata-only mode, not a
-Canvas requirement.
+Local Monitor v1 supersedes the installed metadata-only screen behavior:
+`--sanitized-only` is the receiver-only posture from Issue #159, not a Canvas
+requirement, and registers no human UI.
 
 Sprint11 M5 adds an optional UI-to-Copilot analysis trigger (D029). `open()`
 returns an extension-owned loopback helper page (per-launch token) that proxies
@@ -488,11 +489,11 @@ inert text) so a trace is identifiable by what the user asked (D032); only that
 short label is raw and `/api/monitor/*` / SSE still never carry it. The Sprint12
 Flow Chart / Span Tree views are plain DOM over the sanitized spans API (the
 Cytoscape / dagre vendored dependency is removed, D033). `/api/monitor/*` and SSE
-never carry raw / PII. The `--sanitized-only` flag restores metadata-only mode:
-the trace-detail page still returns the sanitized tab shell, omits the raw
-section and full raw links, the dashboard / trace-list prompt label is omitted (a
-shortened TraceId is shown), `GET /traces/{rawRecordId}/raw` returns `404`, and
-PII is excluded. Raw / PII is never logged or committed.
+never carry raw / PII. The installed metadata-only tab shell and shortened
+TraceId fallback are pre-v1 history. Under Local Monitor v1,
+`--sanitized-only` composes a receiver-only host with no Razor Pages, human
+static assets, human routes, or `/api/local-monitor/v1/*`; accepted frozen
+machine APIs retain their contracts. Raw / PII is never logged or committed.
 
 Live validation for the monitor records the same evidence as the
 `raw-local-receiver` profile, plus the monitor port, the VS Code / GitHub

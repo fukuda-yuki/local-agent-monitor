@@ -744,8 +744,9 @@ The Local Monitor surface is:
 All JSON routes return `Cache-Control: no-store`. POST routes require loopback
 Host validation, same-origin, `x-monitor-csrf: local-monitor`, and
 `application/json`; cross-site writes are rejected before parsing. GET routes
-are sanitized. `--sanitized-only` keeps the page and all metadata-only routes
-available.
+are sanitized. Under `--sanitized-only`, accepted metadata-only machine routes
+retain their frozen contract, but the receiver-only host does not register the
+human page.
 
 Config CLI exposes `historical-import preview`, `confirm`, `commit`, `status`,
 `result`, `history`, and `observations` over the same application DTOs. The
@@ -756,9 +757,10 @@ must not implement a second parser, decision engine, serializer, or store.
 
 ## UI contract
 
-The existing two-item D042 sidebar is unchanged. `/diagnostics` contains an
-explicit historical-import/integration card linking to `/historical-import`;
-nothing is discovered or probed by page load. The page presents named source
+Unified Settings diagnostics opens the focused `/diagnostics` flow, whose
+explicit historical-import/integration card links to `/historical-import`.
+Neither flow is permanent navigation, and nothing is discovered or probed by
+page load. The page presents named source
 cards and fixed source badges for live OTel, saved raw, Hook/SDK, historical,
 and unsupported inputs. Selecting a historical card shows its exact probe
 scope, current support, metadata-only posture, and risk before enabling the

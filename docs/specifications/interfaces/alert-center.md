@@ -4,6 +4,11 @@ Status: Issue #84 v1 implementation contract plus Issue #95 compatibility
 Owner: Issue #84
 Schemas: `alert.center.v1`, additive `alert.center.v2`
 
+Local Monitor v1 disposition: the machine contracts remain frozen. The human
+page is a raw-default focused compatibility flow reached from Unified Settings
+or exact context; it is not permanent navigation and is not registered by a
+sanitized-only host.
+
 ## Purpose and authority
 
 The Alert Center is a sanitized local read surface over accepted alert-domain

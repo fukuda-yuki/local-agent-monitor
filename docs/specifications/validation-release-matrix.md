@@ -11,6 +11,16 @@ Future owners extend
 [`future-surface-registry.json`](contracts/validation-matrix/v1/future-surface-registry.json)
 when their surface becomes active.
 
+Local Monitor v1 replacement surfaces remain `not_available` until their owning
+implementation Issues satisfy the accepted
+[contract index](interfaces/local-monitor-v1-contract-index.md). They are
+registered separately by shell, Repository selection, Session Explorer,
+Session detail, deterministic Compare, optional AI, sanitized-only host and
+Unified Settings/lifecycle ownership. The cross-cutting #147 candidate may move
+them into active validation only after the declared owner implementation and
+executable tests exist at the same SHA. Installed Console/trace-first pages do
+not count as evidence for these replacement surfaces.
+
 ## Candidate And Inventory Contract
 
 Every work item records `matrix_prep_sha` before preparing fixtures. A final

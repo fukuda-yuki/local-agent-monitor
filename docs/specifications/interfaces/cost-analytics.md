@@ -1795,10 +1795,12 @@ The closed public error mapping is:
 
 No route substitutes one code for another or reflects an internal exception.
 
-`/costs` is a separate result-oriented page. The accepted two-item primary
-sidebar remains unchanged. A fixed contextual Cost entry on Overview and
-Diagnostics always opens `/costs`, including when no adapter/estimate/receipt
-exists; exact Session and Alert Center links may open a narrower context. Its
+`/costs` is the frozen pre-v1 result-oriented page. Its installed fixed
+contextual entry on Overview and Diagnostics opens `/costs`, including when no
+adapter/estimate/receipt exists; exact Session and Alert Center links may open
+a narrower context. Local Monitor v1 has no permanent sidebar, and any future
+cost presentation must integrate through the accepted repository-first IA
+without creating a parallel reader. Its
 initial query is closed to
 `session_id` followed by optional `estimate_id`; estimate requires Session.
 Session is one accepted canonical local UUID and estimate is one exact #94

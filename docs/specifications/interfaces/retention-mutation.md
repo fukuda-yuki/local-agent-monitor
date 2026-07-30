@@ -6,6 +6,11 @@ contract for `pin`, `unpin`, and `delete_now`. It is additive to the frozen
 Session workspace v1 surface and does not create a second lifecycle, catalog,
 worker, queue entity, or physical-delete path.
 
+Local Monitor v1 presents retention as a focused flow opened from Unified
+Settings. Repository/Session archive is separate reversible metadata: it does
+not pin, delete, extend expiry, create a retention item or change this
+lifecycle.
+
 ## Contract foundation and fixed values
 
 Every mutation uses the one catalog instance for the Local Monitor database

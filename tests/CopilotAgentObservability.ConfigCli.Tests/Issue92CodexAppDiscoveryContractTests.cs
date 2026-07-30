@@ -269,7 +269,9 @@ public sealed class Issue92CodexAppDiscoveryContractTests
             RepositoryRoot,
             "docs", "specifications", "contracts", "validation-matrix", "v1",
             "future-surface-registry.json")));
-        var entry = Assert.Single(registry.RootElement.GetProperty("entries").EnumerateArray());
+        var entry = Assert.Single(
+            registry.RootElement.GetProperty("entries").EnumerateArray(),
+            candidate => String(candidate, "surface_id") == "codex-app");
         Assert.Equal("codex-app", String(entry, "surface_id"));
         Assert.Equal(93, entry.GetProperty("owner_issue").GetInt32());
         Assert.Equal("not_available", String(entry, "state"));

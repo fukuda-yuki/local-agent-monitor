@@ -2,6 +2,10 @@
 
 ## Scope
 
+Status: frozen pre-v1 UI contract. Local Monitor v1 uses the accepted
+repository-first Session detail and deterministic Compare IA; this Canvas shell
+is not a second current reader or navigation authority.
+
 This specification defines the Issue #52 Canvas Session Workspace: the
 session sidebar, the four-tab shell (Review / Evidence / Improve / Compare),
 the Review workspace, and the human-evaluation write path. It builds on the

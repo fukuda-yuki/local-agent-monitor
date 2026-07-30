@@ -6,6 +6,13 @@ This specification defines the Local Monitor runtime backup and restore v1
 contract. It is independent from the repository-safe sanitized evidence export
 defined by Issue #85.
 
+Local Monitor v1 presents this as a focused flow opened from Unified Settings,
+not permanent navigation. Archive is separate reversible metadata and never a
+backup/restore operation. Node/Repository/Compare AI operational content and
+deterministic Compare snapshots are 24-hour non-backed-up state under their
+own accepted contracts; this interface does not create alternate ownership for
+them.
+
 ## 1. Scope and profile
 
 The fixed bundle profile is `local-runtime-backup`. A bundle contains the
@@ -619,9 +626,10 @@ restore or upload elsewhere.
 
 Because this surface reads or downloads raw-bearing runtime data, all four API
 routes and `/backup-restore` are absent (`404`) in `--sanitized-only` mode. The
-gate runs before request-body reads and backup-store access. Raw mode exposes
-the page only through an existing overview/diagnostics affordance; it does not
-add a third permanent navigation item.
+gate runs before request-body reads and backup-store access. The installed
+pre-v1 host exposes the page through its legacy overview/diagnostics
+affordance. Local Monitor v1 instead opens this focused flow from Unified
+Settings and has no permanent sidebar.
 
 All routes are loopback/Host-header validated, same-origin, `Cache-Control:
 no-store`; POST requires `x-monitor-csrf: local-monitor`. Backup create accepts

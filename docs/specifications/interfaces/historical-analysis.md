@@ -1,5 +1,11 @@
 # Historical Analysis Interface
 
+Local Monitor v1 disposition: the `/api/historical-analysis/v1/*` machine API
+and its stores remain frozen. The standalone `GET /historical-analysis` page is
+an installed compatibility surface that retires when #164 integrates the
+backend into Repository-local optional AI. This interface does not own a
+parallel v1 reader, AI history model or permanent navigation destination.
+
 ## Authority and scope
 
 Issue #75 defines the installed Local Monitor historical-analysis presentation
@@ -347,9 +353,10 @@ All routes retain loopback bind, Host-header validation, no CORS, same-origin
 reads, `Cache-Control: no-store`, JSON-only bounded bodies, and strict
 unknown-field rejection. Raw-default is a validation profile, not authorization
 to return raw content: responses are repository-safe in raw-default and
-sanitized-only postures. `--sanitized-only` keeps safe page/preview/status/
-resolution reads while retaining explicit unavailable/expired state; it cannot
-enable the #73 provider runner. It also rejects a raw-capable
+sanitized-only postures. Accepted preview/status/resolution machine APIs retain
+their frozen contract under `--sanitized-only`, but the receiver-only host does
+not register the standalone human page. The posture cannot enable the #73
+provider runner. It also rejects a raw-capable
 `selection.sanitized_only=false` preview before #72 owner access rather than
 silently changing the caller's closed selection.
 

@@ -7,6 +7,14 @@
 
 現在の中心は Local-first な Agent workflow observability である。
 
+- Local Monitor v1 の primary product は Repository selection → Session
+  Explorer → Session detail / deterministic two-cohort Compare とする。
+- core は AI-independent とし、GitHub Copilot SDK の Session/node/
+  Repository/Compare analysis は明示実行の optional layer とする。
+- archive、Unified Settings、receiver-only `--sanitized-only` と
+  `/api/local-monitor/v1/*` ownership は
+  [accepted contract index](specifications/interfaces/local-monitor-v1-contract-index.md)
+  の実装順に従う。
 - Copilot clients から OTel を収集する。
 - collection profile で telemetry routing mode を切り替える。
 - `raw-only` を最小必須 profile、`docker-desktop-langfuse` を標準 full profile とする。
