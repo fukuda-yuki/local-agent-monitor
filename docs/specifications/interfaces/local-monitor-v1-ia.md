@@ -451,8 +451,8 @@ Hard validation viewport: **1366×768**.
 
 ### Shared
 
-- header: 56px;
-- page outer padding: 20px;
+- header: 48px;
+- page outer padding: 24px;
 - major gap: 16px;
 - compact gap: 8px;
 - no page-level horizontal scroll.

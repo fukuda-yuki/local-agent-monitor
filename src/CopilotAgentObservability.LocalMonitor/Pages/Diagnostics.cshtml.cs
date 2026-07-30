@@ -10,8 +10,7 @@ namespace CopilotAgentObservability.LocalMonitor.Pages;
 /// Diagnostics (Sprint18 §6.7): readiness heading, the 4-stage pipeline
 /// summary, the component table, the configured readiness thresholds, and the
 /// collapsible ingestion-history section (C5) that client-fetches the sanitized
-/// `GET /api/monitor/ingestions`. Reached from the sidebar status popover; the
-/// direct URL keeps working (D042 C1).
+/// `GET /api/monitor/ingestions`. The direct URL remains available (D042 C1).
 /// </summary>
 public sealed class DiagnosticsModel : PageModel
 {

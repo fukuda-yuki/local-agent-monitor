@@ -768,7 +768,7 @@ public sealed class HistoricalImportUiPlaywrightTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task Diagnostics_ProvidesContextualEntryWithoutChangingTwoItemSidebar()
+    public async Task Diagnostics_ProvidesContextualEntryWithoutPermanentNavigation()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHostOptions());
@@ -781,7 +781,8 @@ public sealed class HistoricalImportUiPlaywrightTests
 
         var link = page.GetByRole(AriaRole.Link, new() { Name = "履歴インポートを開く" });
         await Expect(link).ToHaveAttributeAsync("href", "/historical-import");
-        await Expect(page.Locator(".sidebar-nav > a")).ToHaveCountAsync(2);
+        await Expect(page.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
+        await Expect(page.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
     }
 
     [Fact(Timeout = 60_000)]

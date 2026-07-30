@@ -34,7 +34,7 @@ public sealed class CostPagePlaywrightTests
             $"{host.Url}/costs?session_id={SessionId}&estimate_id={EstimateId}",
             new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        await Expect(page.Locator(".sidebar-nav .sidebar-link")).ToHaveCountAsync(2);
+        await Expect(page.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
         await Expect(page.Locator("#cost-overall")).ToContainTextAsync("2 / 4");
         await Expect(page.Locator("section[aria-labelledby='cost-overall-heading'] #cost-overall-heading")).ToHaveCountAsync(1);
         await Expect(page.Locator("#cost-overall")).ToContainTextAsync("50.00%");
@@ -374,7 +374,7 @@ public sealed class CostPagePlaywrightTests
     }
 
     [Fact(Timeout = 60_000)]
-    public async Task ContextualCostLinks_DoNotChangeTheTwoItemPrimaryNavigation()
+    public async Task ContextualCostLinks_DoNotAddPermanentProductNavigation()
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp);
@@ -387,7 +387,8 @@ public sealed class CostPagePlaywrightTests
             $"{host.Url}/traces/{MonitorRichTrace.TraceId}",
             new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(tracePage.Locator("#trace-cost-link")).ToHaveAttributeAsync("href", "/costs");
-        await Expect(tracePage.Locator(".sidebar-nav .sidebar-link")).ToHaveCountAsync(2);
+        await Expect(tracePage.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
+        await Expect(tracePage.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
         await tracePage.CloseAsync();
 
         var diagnosticsPage = await browser.NewPageAsync();
@@ -398,13 +399,15 @@ public sealed class CostPagePlaywrightTests
         await Expect(diagnosticsPage.Locator("#doctor-session-cost-link")).ToHaveAttributeAsync(
             "href",
             $"/costs?session_id={SessionId}");
-        await Expect(diagnosticsPage.Locator(".sidebar-nav .sidebar-link")).ToHaveCountAsync(2);
+        await Expect(diagnosticsPage.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
+        await Expect(diagnosticsPage.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
         await diagnosticsPage.CloseAsync();
 
         var overviewPage = await browser.NewPageAsync();
         await overviewPage.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         await Expect(overviewPage.Locator("#overview-cost-link")).ToHaveAttributeAsync("href", "/costs");
-        await Expect(overviewPage.Locator(".sidebar-nav .sidebar-link")).ToHaveCountAsync(2);
+        await Expect(overviewPage.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
+        await Expect(overviewPage.Locator(".monitor-shell-header a")).ToHaveCountAsync(0);
     }
 
     [Fact(Timeout = 60_000)]

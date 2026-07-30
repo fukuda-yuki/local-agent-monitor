@@ -51,6 +51,7 @@
   closeButton?.addEventListener("click", () => setOpen(false));
 
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.querySelector("#settings-modal[open]")) return;
     if (event.key === "Escape" && !drawer.hidden) {
       // The drawer owns Esc while open (the flow's deselect must not also fire).
       event.stopImmediatePropagation();

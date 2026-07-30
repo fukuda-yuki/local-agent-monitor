@@ -70,6 +70,123 @@ public class MonitorDrawerPlaywrightTests
         await Expect(page.Locator("#flow-card")).Not.ToHaveClassAsync(new System.Text.RegularExpressions.Regex("dimmed-behind-drawer"));
     }
 
+    [Fact]
+    public async Task Drawer_NarrowViewportUsesAvailableWidthWithoutSidebarReservation()
+    {
+        using var temp = new MonitorTempDirectory();
+        MonitorRichTrace.Seed(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions
+        {
+            ViewportSize = new ViewportSize { Width = 360, Height = 640 },
+        });
+
+        await page.GotoAsync(
+            $"{host.Url}/traces/{MonitorRichTrace.TraceId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.Locator("#copilot-open").ClickAsync();
+
+        var drawer = page.Locator("#copilot-drawer");
+        await Expect(drawer).ToBeVisibleAsync();
+        var bounds = await drawer.EvaluateAsync<float[]>(
+            """
+            element => {
+              const rect = element.getBoundingClientRect();
+              return [rect.left, rect.right, rect.width, element.clientWidth, element.scrollWidth];
+            }
+            """);
+        Assert.Equal(24f, bounds[0]);
+        Assert.Equal(336f, bounds[1]);
+        Assert.Equal(312f, bounds[2]);
+        Assert.True(bounds[4] <= bounds[3], $"Drawer content overflows horizontally: {bounds[4]} > {bounds[3]}.");
+        await Expect(page.Locator("#drawer-focus")).ToBeVisibleAsync();
+        await Expect(page.Locator("#drawer-question")).ToBeVisibleAsync();
+        await page.Locator("#drawer-close").ClickAsync();
+        await Expect(drawer).ToBeHiddenAsync();
+    }
+
+    [Fact]
+    public async Task SettingsEscape_ClosesOnlyTopmostModalBeforeTraceInteractions()
+    {
+        using var temp = new MonitorTempDirectory();
+        MonitorRichTrace.Seed(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync();
+
+        await page.GotoAsync(
+            $"{host.Url}/traces/{MonitorRichTrace.TraceId}",
+            new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        var selectedSpan = page.Locator("#flow-view [data-span-id='f201']").First;
+        await Expect(selectedSpan).ToBeVisibleAsync();
+        await selectedSpan.ClickAsync();
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex(@"[?&]span=f201(?:&|$)"));
+
+        await page.Locator("#copilot-open").ClickAsync();
+        await Expect(page.Locator("#copilot-drawer")).ToBeVisibleAsync();
+        await page.Locator("#settings-action").EvaluateAsync("button => button.click()");
+        await page.Locator("[data-settings-content-host]").EvaluateAsync(
+            """
+            host => {
+              const child = document.createElement("dialog");
+              child.id = "settings-extension-child-dialog";
+              child.setAttribute("aria-label", "Extension confirmation");
+
+              const action = document.createElement("button");
+              action.type = "button";
+              action.textContent = "Confirm";
+              child.append(action);
+              host.append(child);
+
+              window.__settingsChildCancelCount = 0;
+              child.addEventListener("cancel", () => {
+                window.__settingsChildCancelCount += 1;
+              });
+              child.showModal();
+              action.focus();
+            }
+            """);
+
+        var childDialog = page.Locator("#settings-extension-child-dialog");
+        await Expect(page.Locator("#settings-modal")).ToBeVisibleAsync();
+        await Expect(childDialog).ToBeVisibleAsync();
+
+        await page.Keyboard.PressAsync("Escape");
+
+        await Expect(childDialog).ToBeHiddenAsync();
+        await Expect(page.Locator("#settings-modal")).ToBeVisibleAsync();
+        Assert.Equal(1, await page.EvaluateAsync<int>("() => window.__settingsChildCancelCount"));
+        await Expect(page.Locator("#copilot-drawer")).ToBeVisibleAsync();
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex(@"[?&]span=f201(?:&|$)"));
+
+        await page.Keyboard.PressAsync("Escape");
+
+        await Expect(page.Locator("#settings-modal")).ToBeHiddenAsync();
+        await Expect(page.Locator("#settings-action")).ToBeFocusedAsync();
+        await Expect(page.Locator("#copilot-drawer")).ToBeVisibleAsync();
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex(@"[?&]span=f201(?:&|$)"));
+
+        await page.Keyboard.PressAsync("Escape");
+        await Expect(page.Locator("#copilot-drawer")).ToBeHiddenAsync();
+        await Expect(page).ToHaveURLAsync(new System.Text.RegularExpressions.Regex(@"[?&]span=f201(?:&|$)"));
+
+        await page.Keyboard.PressAsync("Escape");
+        await Expect(page).Not.ToHaveURLAsync(new System.Text.RegularExpressions.Regex(@"[?&]span=f201(?:&|$)"));
+    }
+
     private sealed class RecordingRunner : IMonitorAnalysisRunner
     {
         private readonly IMonitorAnalysisStore analysisStore;

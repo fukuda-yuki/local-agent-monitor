@@ -195,8 +195,8 @@ public sealed class AlertCenterPlaywrightTests
         await Expect(page.Locator("#alert-rows .alert-row").First).ToContainTextAsync("最終");
         await Expect(page.Locator("#alert-recurring")).Not.ToContainTextAsync("mixed completeness");
         await Expect(page.Locator("#alert-action-comment")).ToHaveAttributeAsync("maxlength", "256");
-        await Expect(page.Locator(".sidebar-nav a")).ToHaveCountAsync(2);
-        await Expect(page.Locator(".sidebar-nav a[href='/alerts']")).ToHaveCountAsync(0);
+        await Expect(page.Locator(".monitor-sidebar, .sidebar-nav")).ToHaveCountAsync(0);
+        await Expect(page.Locator(".monitor-shell-header a[href='/alerts']")).ToHaveCountAsync(0);
         Assert.Equal(0, await page.Locator("#alert-detail script").CountAsync());
 
         var second = page.Locator("#alert-rows .alert-row").Nth(1);
@@ -284,6 +284,44 @@ public sealed class AlertCenterPlaywrightTests
         await page.Locator("#alert-filter-source").SelectOptionAsync("claude-code");
         await Expect(page.Locator("#alert-empty")).ToBeVisibleAsync();
         await Expect(page.Locator("#alert-filter-source")).ToHaveValueAsync("claude-code");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AlertCenter_ScrolledDetailClearsHeaderAndStaysWithinViewport()
+    {
+        using var temp = NewTemp();
+        var readModel = new PagingFixtureReadModel();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(readModel));
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions
+        {
+            ViewportSize = new ViewportSize { Width = 1366, Height = 768 },
+        });
+
+        await page.GotoAsync($"{host.Url}/alerts", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#alert-rows .alert-row")).ToHaveCountAsync(100);
+        await page.EvaluateAsync("window.scrollTo(0, 1200)");
+        await page.WaitForFunctionAsync("window.scrollY >= 1200");
+
+        var detail = page.Locator("#alert-detail");
+        await Expect(detail).ToHaveCSSAsync("top", "64px");
+        await Expect(detail).ToHaveCSSAsync("max-height", "688px");
+        var bounds = await page.EvaluateAsync<float[]>(
+            """
+            () => {
+              const header = document.querySelector(".monitor-shell-header").getBoundingClientRect();
+              const detail = document.querySelector("#alert-detail").getBoundingClientRect();
+              return [header.bottom, detail.top, detail.bottom, window.innerHeight];
+            }
+            """);
+        Assert.True(
+            bounds[1] >= bounds[0] + 16f,
+            $"Alert detail top {bounds[1]} did not clear header bottom {bounds[0]} plus its 16px gutter.");
+        Assert.True(
+            bounds[2] <= bounds[3] - 16f,
+            $"Alert detail bottom {bounds[2]} did not preserve its 16px viewport gutter.");
     }
 
     [Fact(Timeout = 60_000)]

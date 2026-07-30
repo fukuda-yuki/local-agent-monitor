@@ -50,6 +50,44 @@ public class MonitorTraceListPlaywrightTests
     }
 
     [Fact]
+    public async Task TraceList_ScrolledPreviewClearsSharedHeader()
+    {
+        using var temp = new MonitorTempDirectory();
+        Seed(temp);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartWriter = false,
+            StartProjectionWorker = false,
+        });
+        PlaywrightBrowserPath.ConfigureDefault();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+        var page = await browser.NewPageAsync(new BrowserNewPageOptions
+        {
+            ViewportSize = new ViewportSize { Width = 1366, Height = 768 },
+        });
+
+        await page.GotoAsync($"{host.Url}/traces?period=all", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await Expect(page.Locator("#trace-preview")).ToBeVisibleAsync();
+        await page.Locator(".tracelist-main").EvaluateAsync("element => element.style.minHeight = '1800px'");
+        await page.EvaluateAsync("window.scrollTo(0, 900)");
+        await page.WaitForFunctionAsync("window.scrollY >= 900");
+
+        await Expect(page.Locator("#trace-preview")).ToHaveCSSAsync("top", "72px");
+        var bounds = await page.EvaluateAsync<float[]>(
+            """
+            () => {
+              const header = document.querySelector(".monitor-shell-header").getBoundingClientRect();
+              const preview = document.querySelector("#trace-preview").getBoundingClientRect();
+              return [header.bottom, preview.top];
+            }
+            """);
+        Assert.True(
+            bounds[1] >= bounds[0] + 24f,
+            $"Trace preview top {bounds[1]} did not clear header bottom {bounds[0]} plus the 24px page gutter.");
+    }
+
+    [Fact]
     public async Task TraceList_SelectionPreviewAndFilters_UseRawDefaultEvidence()
     {
         using var temp = new MonitorTempDirectory();
