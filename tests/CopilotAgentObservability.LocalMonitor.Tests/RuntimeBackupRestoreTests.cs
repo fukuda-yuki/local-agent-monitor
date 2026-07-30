@@ -465,6 +465,105 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Monitor_v9_archive_preview_and_restore_migrate_retained_trace_source_attribution_once()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "monitor-v9-source", includeRaw: true);
+        temp.ConvertToMonitorV9WithRetainedTraceSourceEvidence(traceId);
+        var bundle = Path.Combine(temp.Root, "monitor-v9-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        var preview = service.Preview(bundle, temp.Target);
+        var restored = service.Restore(
+            bundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(9, preview.SourceComponentVersions["monitor"]);
+        Assert.Contains("monitor:9->10", preview.MigrationSteps);
+        Assert.True(restored.Success, restored.ErrorCode);
+        using (var verification = temp.Open(temp.Target))
+        {
+            Assert.Equal(10L, temp.Scalar<long>(
+                verification,
+                "SELECT version FROM schema_version WHERE component='monitor';"));
+            Assert.Equal("copilot-cli", temp.Scalar<string>(
+                verification,
+                $"SELECT client_kind FROM monitor_traces WHERE trace_id='{traceId}';"));
+            Assert.Equal("copilot-cli", temp.Scalar<string>(
+                verification,
+                "SELECT client_kind FROM monitor_ingestions WHERE raw_record_id=1;"));
+            Assert.Equal(1L, temp.Scalar<long>(
+                verification,
+                $"SELECT COUNT(*) FROM source_trace_attribution_observations WHERE raw_record_id=1 AND trace_id='{traceId}' AND cli_candidate_observed=1 AND vscode_candidate_observed=0 AND unknown_candidate_observed=0 AND relevant_evidence_observed=1;"));
+            Assert.Equal(0L, temp.Scalar<long>(
+                verification,
+                "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+            Assert.Equal(1L, temp.Scalar<long>(
+                verification,
+                "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1' AND state='expiring' AND read_denied_at IS NULL AND expires_at='9999-12-31T23:59:59.9999999+00:00';"));
+        }
+        var firstStartupHash = temp.CanonicalDatabaseHash(temp.Target);
+
+        new SqliteSourceCompatibilityStore(temp.Target).CreateSchema();
+
+        Assert.Equal(
+            firstStartupHash,
+            temp.CanonicalDatabaseHash(temp.Target));
+        using var secondStartup = temp.Open(temp.Target);
+        Assert.Equal(1L, temp.Scalar<long>(
+            secondStartup,
+            "SELECT COUNT(*) FROM source_trace_attribution_observations;"));
+        Assert.Equal(0L, temp.Scalar<long>(
+            secondStartup,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+    }
+
+    [Fact]
+    public void Current_monitor_v10_backup_and_restore_preserve_pending_trace_source_reconciliation()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "monitor-v10-pending-source", includeRaw: false);
+        using (var source = temp.Open(temp.Source))
+        {
+            temp.Execute(
+                source,
+                $"INSERT INTO source_trace_attribution_reconciliation_queue(trace_id) VALUES('{traceId}');");
+            temp.Execute(source, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var bundle = Path.Combine(temp.Root, "monitor-v10-pending-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        var inspection = service.Inspect(bundle);
+        var preview = service.Preview(bundle, temp.Target);
+        var restored = service.Restore(
+            bundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(inspection.Success, inspection.ErrorCode);
+        Assert.Equal(
+            1L,
+            inspection.RowCounts["source_trace_attribution_reconciliation_queue"]);
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(
+            1L,
+            preview.RowCounts!["source_trace_attribution_reconciliation_queue"]);
+        Assert.True(restored.Success, restored.ErrorCode);
+        using var verification = temp.Open(temp.Target);
+        Assert.Equal(traceId, temp.Scalar<string>(
+            verification,
+            "SELECT trace_id FROM source_trace_attribution_reconciliation_queue;"));
+    }
+
+    [Fact]
     public void Pre_retention_archive_cannot_bypass_current_terminal_lineage()
     {
         using var temp = new RestoreTemp();
@@ -1285,6 +1384,133 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
     }
 
+    [Theory]
+    [InlineData("source_trace_attribution_observations")]
+    [InlineData("source_trace_attribution_reconciliation_queue")]
+    public void Read_only_preflight_rejects_monitor_v10_without_trace_source_attribution_authority(
+        string table)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "missing-attribution-authority", includeRaw: false);
+        using (var connection = temp.Open(temp.Source))
+        {
+            temp.Execute(connection, $"DROP TABLE {table};");
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Theory]
+    [InlineData("wrong-pk")]
+    [InlineData("wrong-check")]
+    [InlineData("missing-index")]
+    [InlineData("wrong-index")]
+    [InlineData("wrong-queue-pk")]
+    public void Read_only_preflight_rejects_monitor_v10_with_malformed_trace_source_attribution_authority(
+        string corruption)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "malformed-attribution-authority", includeRaw: false);
+        using (var connection = temp.Open(temp.Source))
+        {
+            if (corruption is "wrong-pk" or "wrong-check")
+            {
+                temp.Execute(
+                    connection,
+                    """
+                    DROP INDEX IX_source_trace_attribution_observations_trace_id;
+                    DROP TABLE source_trace_attribution_observations;
+                    """);
+                var tableSql = corruption switch
+                {
+                    "wrong-pk" => SqliteSourceCompatibilityStore.TraceSourceAttributionTableSql.Replace(
+                        "PRIMARY KEY (raw_record_id, trace_id)",
+                        "PRIMARY KEY (raw_record_id)",
+                        StringComparison.Ordinal),
+                    "wrong-check" => SqliteSourceCompatibilityStore.TraceSourceAttributionTableSql.Replace(
+                        "cli_candidate_observed IN (0, 1)",
+                        "cli_candidate_observed IN (0, 1, 2)",
+                        StringComparison.Ordinal),
+                    _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+                };
+                temp.Execute(connection, tableSql);
+                temp.Execute(
+                    connection,
+                    SqliteSourceCompatibilityStore.TraceSourceAttributionIndexSql);
+            }
+            else if (corruption is "missing-index" or "wrong-index")
+            {
+                temp.Execute(
+                    connection,
+                    "DROP INDEX IX_source_trace_attribution_observations_trace_id;");
+                if (corruption == "wrong-index")
+                {
+                    temp.Execute(
+                        connection,
+                        """
+                        CREATE INDEX IX_source_trace_attribution_observations_trace_id
+                        ON source_trace_attribution_observations(raw_record_id, trace_id);
+                        """);
+                }
+            }
+            else if (corruption == "wrong-queue-pk")
+            {
+                temp.Execute(
+                    connection,
+                    "DROP TABLE source_trace_attribution_reconciliation_queue;");
+                temp.Execute(
+                    connection,
+                    SqliteSourceCompatibilityStore.TraceSourceReconciliationQueueTableSql.Replace(
+                        "trace_id TEXT NOT NULL PRIMARY KEY",
+                        "trace_id TEXT NOT NULL",
+                        StringComparison.Ordinal));
+            }
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock)
+            .PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Preflight_and_preview_reject_monitor_v9_with_v10_owned_authority_without_mutation()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "current-source", includeRaw: false);
+        var bundle = Path.Combine(temp.Root, "current-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        temp.CreateDatabase(temp.Target, "colliding-v9-target", includeRaw: false);
+        using (var connection = temp.Open(temp.Target))
+        {
+            temp.Execute(
+                connection,
+                "UPDATE schema_version SET version=9 WHERE component='monitor';");
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
+
+        var preflight = service.PreflightForMigration(temp.Target);
+        var preview = service.Preview(bundle, temp.Target);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
+    }
+
     [Fact]
     public void Read_only_preflight_accepts_the_current_wave_3_component_vector()
     {
@@ -1445,7 +1671,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(result.PreRestoreBackupCreated);
         var preflight = service.PreflightForMigration(destination);
         Assert.True(preflight.Success, preflight.ErrorCode);
-        Assert.Equal(9, preflight.ComponentVersions!["monitor"]);
+        Assert.Equal(10, preflight.ComponentVersions!["monitor"]);
         Assert.Equal(13, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
@@ -1506,6 +1732,86 @@ public sealed class RuntimeBackupRestoreTests
             var token = SHA256.HashData([7]);
             using (var raw = connection.CreateCommand()) { raw.CommandText = "INSERT INTO raw_records(id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token) VALUES(1,'raw-otlp',NULL,'2026-01-01T00:00:00.0000000+00:00','{}','{\"secret\":\"private\"}',1,$token);"; raw.Parameters.AddWithValue("$token", token); raw.ExecuteNonQuery(); }
             Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        internal void ConvertToMonitorV9WithRetainedTraceSourceEvidence(
+            string traceId)
+        {
+            const string spanId = "2222222222222222";
+            new SqliteSourceCompatibilityStore(Source).CreateSchema();
+            using var connection = Open(Source);
+            var payload =
+                """
+                {"resourceSpans":[{"resource":{"attributes":[
+                  {"key":"service.name","value":{"stringValue":"github-copilot"}}
+                ]},"scopeSpans":[{"spans":[
+                  {"traceId":"TRACE_ID","spanId":"SPAN_ID","name":"chat gpt-4o"}
+                ]}]}]}
+                """
+                .Replace("TRACE_ID", traceId, StringComparison.Ordinal)
+                .Replace("SPAN_ID", spanId, StringComparison.Ordinal);
+            using (var raw = connection.CreateCommand())
+            {
+                raw.CommandText =
+                    """
+                    UPDATE raw_records
+                    SET trace_id=$trace_id,
+                        payload_json=$payload
+                    WHERE id=1;
+                    """;
+                raw.Parameters.AddWithValue("$trace_id", traceId);
+                raw.Parameters.AddWithValue("$payload", payload);
+                raw.ExecuteNonQuery();
+            }
+            Execute(
+                connection,
+                $"""
+                UPDATE retention_items
+                SET expires_at='9999-12-31T23:59:59.9999999+00:00',
+                    state='expiring',
+                    read_denied_at=NULL,
+                    queued_at=NULL
+                WHERE store_kind='raw_record' AND source_item_id='1';
+                INSERT INTO monitor_ingestions(
+                    raw_record_id,received_at,source,trace_id,client_kind,span_count,
+                    projected_at,span_projected_at)
+                VALUES(
+                    1,'2026-01-01T00:00:00.0000000+00:00','raw-otlp','{traceId}',
+                    'legacy-family',1,'2026-01-01T00:00:01.0000000+00:00',
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_traces(
+                    trace_id,client_kind,span_count,projected_at)
+                VALUES(
+                    '{traceId}','legacy-family',1,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_spans(
+                    raw_record_id,trace_id,span_id,span_ordinal,projected_at)
+                VALUES(
+                    1,'{traceId}','{spanId}',0,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_projection_dispositions(
+                    raw_record_id,state,revision,updated_at)
+                VALUES(
+                    1,'completed',1,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                DROP INDEX IX_source_trace_attribution_observations_trace_id;
+                DROP TABLE source_trace_attribution_observations;
+                DROP TABLE source_trace_attribution_reconciliation_queue;
+                UPDATE schema_version
+                SET version=9
+                WHERE component='monitor';
+                PRAGMA wal_checkpoint(TRUNCATE);
+                """);
+        }
+
+        internal byte[] CanonicalDatabaseHash(string path)
+        {
+            using (var connection = Open(path))
+            {
+                Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+                Execute(connection, "PRAGMA journal_mode=DELETE;");
+            }
+            return SHA256.HashData(File.ReadAllBytes(path));
         }
 
         internal void DeleteRawAndTombstone(string path)

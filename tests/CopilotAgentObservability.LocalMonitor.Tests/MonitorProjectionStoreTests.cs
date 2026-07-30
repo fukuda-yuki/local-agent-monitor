@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
@@ -107,7 +108,7 @@ public class MonitorProjectionStoreTests
         var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, new MutableTimeProvider(T(0)), RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
-        Assert.Equal(9, RawTelemetryStore.MonitorSchemaVersion);
+        Assert.Equal(10, RawTelemetryStore.MonitorSchemaVersion);
         var trace = Assert.Single(store.ListMonitorTraces(0, 100).Items);
         Assert.Equal("legacy-trace", trace.TraceId);
         Assert.Null(trace.RepositoryName);
@@ -212,10 +213,22 @@ public class MonitorProjectionStoreTests
     {
         using var temp = new MonitorTempDirectory();
         var store = NewStore(temp);
-        var oldest = store.Insert(Raw("oldest", T(1), new string('a', 40)));
-        store.Insert(Raw("oversized", T(2), new string('b', 101)));
-        var newer = store.Insert(Raw("newer", T(3), new string('c', 70)));
-        var newest = store.Insert(Raw("newest", T(4), new string('d', 40)));
+        var oldest = store.Insert(Raw(
+            "oldest",
+            T(1),
+            JsonSerializer.Serialize(new string('a', 40))));
+        store.Insert(Raw(
+            "oversized",
+            T(2),
+            JsonSerializer.Serialize(new string('b', 101))));
+        var newer = store.Insert(Raw(
+            "newer",
+            T(3),
+            JsonSerializer.Serialize(new string('c', 70))));
+        var newest = store.Insert(Raw(
+            "newest",
+            T(4),
+            JsonSerializer.Serialize(new string('d', 40))));
 
         var perRecordBounded = store.ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
             limit: 50,

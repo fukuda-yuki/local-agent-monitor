@@ -223,6 +223,10 @@ byte-preserving v1-to-v2 migration; exact v2 is validated. It then ensures
 `runtime_backup` v1 and `pricing` v1 in their fixed order before snapshot
 capture. A partial/malformed/future engine or pricing-without-engine vector is
 rejected, not repaired.
+Declared Monitor v10 additionally requires the source-attribution evidence
+authority and durable reconciliation queue minimum shapes. The online snapshot,
+manifest table counts, inspection, preview, and restore preserve every pending
+queue row; backup never consumes reconciliation work.
 It opens the source with pooling
 disabled and a bounded busy timeout, creates a same-directory private temporary
 SQLite file, and invokes `SqliteConnection.BackupDatabase`. It never copies a
@@ -276,7 +280,7 @@ describes.
 unchanged runtime-backup owner. The fixed migration tail is
 `historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
 -> `runtime_backup` -> `pricing`, preserving #79 -> #86 -> #88 as an unchanged
-subsequence before #95. It does not reserve or change Session 13, Monitor 7,
+subsequence before #95. It does not reserve or change Session 13, Monitor 10,
 Retention 1, or a Retention store kind.
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
@@ -428,6 +432,21 @@ unchanged; in particular, restore does not call Retention initialization first
 and allow its Monitor DDL to mutate a rejected candidate. Missing older
 supported components are created only in staging after this gate. Preview never
 mutates the destination.
+
+An exact Monitor v9 archive contains none of the three v10-owned attribution
+names: the evidence table, its named trace index, and the durable queue. Any
+empty, populated, exact-shaped, or malformed collision is
+`restore_incompatible` during read-only preflight and is never advertised as a
+supported migration. For an exact v9 source, staging creates the evidence
+authority and durable queue. Source-attribution evidence may be persisted from
+a raw payload only when its canonical Retention entry still authorizes reading
+and its ownership receipt matches; this includes authorized unprojected backlog
+so its first v10 projection can use that evidence. Rewriting existing projected
+Monitor attribution additionally requires complete, exact ordinal/trace/span
+projection membership. Historical migration leaves the queue empty.
+Incomplete, missing, expired, or read-denied evidence retains the archived
+projection values. A restored v10 database must pass the current
+authority-shape gate, and a repeated current startup is state/byte idempotent.
 
 Retention v1 preflight requires the production ancillary reservation, member,
 capture/legacy journal, and blocker column sets. Staging then runs the

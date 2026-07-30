@@ -915,7 +915,11 @@ identity is `(source_adapter, source_event_id)`, and nested trace contributions
 are canonical-sorted. HTTP transient archive/preview bytes have fixed
 count/byte/TTL limits with idle sweeping, provider errors cross a closed mapping,
 and unsupported request media types return HTTP 415 with the serialized JSON
-error code `unsupported_media_type`.
+error code `unsupported_media_type`. D069's pinned v1 normalization,
+projection, dashboard identifiers and hashes retain their pre-Issue-151
+record-local source derivation; adopting current cross-record source
+attribution requires separately accepted new target versions.
+
 ## Runtime backup and restore
 
 Issue #88 defines the raw-bearing `local-runtime-backup` profile separately from
@@ -964,6 +968,30 @@ Monitor schema v8 additively associates each trace with the resource-scoped
 batch-level source-version label and distinguishes resolved, missing,
 conflicting, and unrecognised states. No unresolved state falls back to the
 batch label.
+
+Monitor schema v10 adds a private per-raw-record/per-trace source-attribution
+evidence authority and a durable trace reconciliation queue. The shared
+trace-scoped resolver recognizes only the four exact mappings pinned in the
+measurement and ingestion specifications and aggregates evidence as
+conflicting before unrecognised before one resolved family before missing.
+Validated adapter ingestion persists evidence and its queue entry atomically
+with raw, Retention, and source-schema rows. Supported direct raw-store writers
+persist the same evidence and queue atomically with raw and Retention without
+fabricating source-schema rows. Every projection pass reconciles only queued
+trace, contributing-ingestion, and exact OTel Session source-surface rows,
+removes queue entries only in the same successful transaction, and retries an
+aborted pass without projecting new raw rows. A pass emits at most one
+projection SSE notification. Startup may transition existing attribution only
+from Retention-authorized, fully represented raw/span evidence; incomplete,
+read-denied, or partially retained contributing records leave prior
+attribution untouched. That historical transition changes only
+`monitor_ingestions.client_kind` and `monitor_traces.client_kind`, creates no
+queue work, and is state/byte idempotent. A database already declaring v10 must
+have the exact evidence table, named index, and queue authority or startup
+fails before mutation. A database declaring an older Monitor version must have
+none of those v10-owned names; any exact-shaped, populated, or malformed
+collision fails before journal-mode or schema mutation and is likewise rejected
+by runtime-backup preflight.
 
 Issues #63-#65 add Claude Code through a source-specific adapter without
 changing source identifiers. OTel owns trace/span identity, parentage, and

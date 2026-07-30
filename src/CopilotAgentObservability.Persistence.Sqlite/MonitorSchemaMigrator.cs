@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class MonitorSchemaMigrator
 {
-    public const int BaseSchemaVersion = 9;
+    public const int BaseSchemaVersion = 10;
 
     public static void EnsureRawRecordsSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -29,6 +29,7 @@ internal static class MonitorSchemaMigrator
 
     public static void ApplyBaseSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
+        var existingVersion = ValidateBeforeInitialization(connection, transaction);
         EnsureRawRecordsSchema(connection, transaction);
         Execute(
             connection,
@@ -202,10 +203,62 @@ internal static class MonitorSchemaMigrator
 
         EnsureRawRecordsRetentionOwnerToken(connection, transaction);
         EnsureAnalysisRetentionSchema(connection, transaction);
+        SqliteSourceCompatibilityStore.EnsureTraceSourceAttributionSchema(connection, transaction);
+        ValidateCurrentTraceSourceAttributionSchema(connection, transaction);
+        if (existingVersion is null or < 10)
+        {
+            SqliteSourceCompatibilityStore.TransitionRetainedTraceSourceAttribution(connection, transaction);
+        }
 
-        if (ReadMonitorSchemaVersion(connection, transaction) is not { } currentVersion || currentVersion <= BaseSchemaVersion)
+        if (existingVersion is null or < BaseSchemaVersion)
         {
             SetMonitorSchemaVersion(connection, transaction, BaseSchemaVersion);
+        }
+    }
+
+    public static long? ValidateBeforeInitialization(
+        SqliteConnection connection,
+        SqliteTransaction? transaction = null)
+    {
+        var existingVersion = ReadMonitorSchemaVersion(connection, transaction);
+        if (existingVersion > BaseSchemaVersion)
+        {
+            throw new InvalidOperationException(
+                $"Unsupported newer monitor schema version {existingVersion.Value}.");
+        }
+
+        if (existingVersion == BaseSchemaVersion)
+        {
+            ValidateCurrentTraceSourceAttributionSchema(connection, transaction);
+        }
+        else
+        {
+            RejectPreexistingTraceSourceAttributionAuthority(connection, transaction);
+        }
+
+        return existingVersion;
+    }
+
+    private static void RejectPreexistingTraceSourceAttributionAuthority(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE name COLLATE NOCASE IN (
+                'source_trace_attribution_observations',
+                'IX_source_trace_attribution_observations_trace_id',
+                'source_trace_attribution_reconciliation_queue'
+            );
+            """;
+        if ((long)command.ExecuteScalar()! != 0)
+        {
+            throw new InvalidOperationException(
+                $"Unsupported incomplete monitor schema version {BaseSchemaVersion}.");
         }
     }
 
@@ -306,7 +359,9 @@ internal static class MonitorSchemaMigrator
             """);
     }
 
-    public static long? ReadMonitorSchemaVersion(SqliteConnection connection, SqliteTransaction transaction)
+    public static long? ReadMonitorSchemaVersion(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
     {
         using var tableCommand = connection.CreateCommand();
         tableCommand.Transaction = transaction;
@@ -321,6 +376,62 @@ internal static class MonitorSchemaMigrator
         versionCommand.CommandText = "SELECT version FROM schema_version WHERE component = 'monitor';";
         var value = versionCommand.ExecuteScalar();
         return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+    }
+
+    internal static void ValidateCurrentTraceSourceAttributionSchema(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        RequireExactSchemaSql(
+            connection,
+            transaction,
+            "table",
+            "source_trace_attribution_observations",
+            SqliteSourceCompatibilityStore.TraceSourceAttributionTableSql);
+        RequireExactSchemaSql(
+            connection,
+            transaction,
+            "index",
+            "IX_source_trace_attribution_observations_trace_id",
+            SqliteSourceCompatibilityStore.TraceSourceAttributionIndexSql);
+        RequireExactSchemaSql(
+            connection,
+            transaction,
+            "table",
+            "source_trace_attribution_reconciliation_queue",
+            SqliteSourceCompatibilityStore.TraceSourceReconciliationQueueTableSql);
+    }
+
+    private static void RequireExactSchemaSql(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string type,
+        string name,
+        string expectedSql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT sql FROM sqlite_master WHERE type=$type AND name=$name;";
+        command.Parameters.AddWithValue("$type", type);
+        command.Parameters.AddWithValue("$name", name);
+        if (command.ExecuteScalar() is not string actualSql
+            || !string.Equals(
+                NormalizeSchemaSql(actualSql),
+                NormalizeSchemaSql(expectedSql),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Unsupported incomplete monitor schema version {BaseSchemaVersion}.");
+        }
+    }
+
+    private static string NormalizeSchemaSql(string sql)
+    {
+        var compact = string.Concat(sql.Where(static character => !char.IsWhiteSpace(character)))
+            .Replace("IFNOTEXISTS", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .TrimEnd(';');
+        return compact.ToUpperInvariant();
     }
 
     public static void SetMonitorSchemaVersion(

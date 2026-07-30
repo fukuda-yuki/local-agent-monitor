@@ -31,6 +31,38 @@ public class MonitorProjectionBuilderTests
         Assert.Equal("sprint16-m2", contribution.RepoSnapshot);
     }
 
+    [Theory]
+    [InlineData("github-copilot", "copilot-cli")]
+    [InlineData("copilot-chat", "vscode-copilot-chat")]
+    public void Build_ProjectsServiceNameOnlySourceFamily(string serviceName, string expectedFamily)
+    {
+        var payload = """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"service.name","value":{"stringValue":"SERVICE_NAME"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"trace-service","spanId":"1111111111111111","name":"chat gpt-4o"}
+        ]}]}]}
+        """.Replace("SERVICE_NAME", serviceName, StringComparison.Ordinal);
+
+        var measurement = Assert.Single(RawMeasurementNormalizer.Normalize(payload));
+        var projection = MonitorProjectionBuilder.Build(Record("trace-service", payload));
+
+        Assert.Equal(measurement.ClientKind, projection.ClientKind);
+        Assert.Equal(expectedFamily, projection.ClientKind);
+        Assert.Equal(expectedFamily, Assert.Single(projection.TraceContributions).ClientKind);
+    }
+
+    [Fact]
+    public void Build_AggregateAuthorityCanClearRecordLocalRecognisedEvidence()
+    {
+        var projection = MonitorProjectionBuilder.Build(
+            Record("trace-a", ChatToolErrorPayload),
+            resolveTraceSource: _ => null);
+
+        Assert.Null(projection.ClientKind);
+        Assert.Null(Assert.Single(projection.TraceContributions).ClientKind);
+    }
+
     [Fact]
     public void Build_MissingRepositoryMetadataProjectsNulls()
     {

@@ -667,6 +667,45 @@ public sealed partial class RetentionCatalogStore
     internal static void ValidateRestorableCoverage(SqliteConnection connection, SqliteTransaction transaction)
         => ValidateCoverage(connection, transaction, allowMissingCatalogSources: true);
 
+    internal static bool IsRawRecordReadAuthorizedForMigration(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId,
+        DateTimeOffset now)
+    {
+        if (!TableExists(connection, transaction, "retention_store_instances")
+            || !TableExists(connection, transaction, "retention_items"))
+        {
+            return false;
+        }
+
+        RetentionOwnershipKey key;
+        try
+        {
+            key = new(
+                StoreId(connection, transaction),
+                RetentionStoreKind.RawRecord,
+                rawRecordId.ToString(CultureInfo.InvariantCulture));
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or FormatException
+                or InvalidOperationException
+                or SqliteException)
+        {
+            return false;
+        }
+
+        var item = FindForUpdate(connection, transaction, key);
+        return item is not null
+            && item.ReadDeniedAt is null
+            && item.State is (
+                RetentionItemLifecycle.Expiring
+                or RetentionItemLifecycle.RetainedByPolicy)
+            && now < item.ExpiresAt
+            && SourceProof(connection, transaction, key) == SourceReceiptProof.Match;
+    }
+
     private static void ValidateCoverage(SqliteConnection connection, SqliteTransaction transaction, bool allowMissingCatalogSources)
     {
         foreach (var kind in new[] { RetentionStoreKind.SessionEventContent, RetentionStoreKind.RawRecord, RetentionStoreKind.AnalysisRunRaw })

@@ -32,7 +32,7 @@ public sealed class SqliteRuntimeBackupService
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
-        ["monitor"] = 9,
+        ["monitor"] = 10,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
@@ -1214,7 +1214,31 @@ public sealed class SqliteRuntimeBackupService
                     "raw_record_id",
                     "trace_id",
                     "name_ordinal",
-                    "skill_name"))) return false;
+                    "skill_name")
+                || monitor >= 10 && !HasColumns(
+                    connection,
+                    "source_trace_attribution_observations",
+                    "raw_record_id",
+                    "trace_id",
+                    "cli_candidate_observed",
+                    "vscode_candidate_observed",
+                    "unknown_candidate_observed",
+                    "relevant_evidence_observed")
+                || monitor >= 10 && !HasColumns(
+                    connection,
+                    "source_trace_attribution_reconciliation_queue",
+                    "trace_id"))) return false;
+        if (versions.ContainsKey("monitor"))
+        {
+            try
+            {
+                MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
         if (versions.ContainsKey("retention")
             && (!HasColumns(connection, "retention_component_versions", "component", "version")
                 || !HasColumns(connection, "retention_store_instances", "id", "store_instance_id")

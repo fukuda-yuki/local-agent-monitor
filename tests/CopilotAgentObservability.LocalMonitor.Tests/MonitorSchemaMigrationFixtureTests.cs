@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class MonitorSchemaMigrationFixtureTests
 {
-    private const int CurrentMonitorSchemaVersion = 9;
+    private const int CurrentMonitorSchemaVersion = 10;
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
 
     public static TheoryData<int, string> HistoricalSchemas => new()
@@ -64,7 +64,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v9_state_across_two_restarts(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v10_state_across_two_restarts(int version, string sourceCommit)
     {
         Assert.Equal(CurrentMonitorSchemaVersion, SqliteSourceCompatibilityStore.MonitorSchemaVersion);
 
@@ -272,6 +272,8 @@ public sealed class MonitorSchemaMigrationFixtureTests
         Assert.Empty(ReadRows(connection, "source_schema_observations"));
         Assert.Empty(ReadRows(connection, "source_unknown_observations"));
         Assert.Empty(ReadRows(connection, "source_trace_version_observations"));
+        Assert.Empty(ReadRows(connection, "source_trace_attribution_observations"));
+        Assert.Empty(ReadRows(connection, "source_trace_attribution_reconciliation_queue"));
         Assert.Empty(ReadRows(connection, "monitor_skill_invocations"));
         Assert.Empty(ReadRows(connection, "monitor_skill_inventories"));
         Assert.Empty(ReadRows(connection, "monitor_skill_inventory_names"));

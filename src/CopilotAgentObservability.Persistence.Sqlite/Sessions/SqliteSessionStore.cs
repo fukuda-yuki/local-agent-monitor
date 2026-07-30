@@ -417,6 +417,26 @@ public sealed class SqliteSessionStore : ISessionStore
         ValidateBatch(connection, transaction, batch);
         var orderedRuns = OrderRuns(batch.Detail.Runs);
         var orderedEvents = OrderEvents(batch.Detail.Events);
+        var exactOtelSurfaceByTrace = orderedEvents
+            .Where(IsExactOtelEvent)
+            .Select(item => item.TraceId)
+            .Where(static traceId => !string.IsNullOrWhiteSpace(traceId))
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(
+                traceId => traceId!,
+                traceId => ReadExactOtelSourceSurface(
+                    connection,
+                    transaction,
+                    traceId!),
+                StringComparer.Ordinal);
+        var exactOtelSurfaceByRun = orderedEvents
+            .Where(item => IsExactOtelEvent(item)
+                && item.RunId is not null
+                && !string.IsNullOrWhiteSpace(item.TraceId))
+            .GroupBy(item => item.RunId!.Value)
+            .ToDictionary(
+                group => group.Key,
+                group => exactOtelSurfaceByTrace[group.First().TraceId!]);
         var canonicalEventIds = ResolveCanonicalEventIds(connection, transaction, batch.Detail.Events);
         WriteSession(connection, transaction, batch.Detail.Session);
 
@@ -440,7 +460,9 @@ public sealed class SqliteSessionStore : ISessionStore
                 ON CONFLICT(run_id) DO NOTHING;
                 """,
                 ("$run_id", Id(run.RunId)), ("$session_id", Id(run.SessionId)),
-                ("$source_surface", run.SourceSurface is null ? null : SessionWire.ToWire(run.SourceSurface.Value)),
+                ("$source_surface", exactOtelSurfaceByRun.TryGetValue(run.RunId, out var exactSurface)
+                    ? exactSurface
+                    : run.SourceSurface is null ? null : SessionWire.ToWire(run.SourceSurface.Value)),
                 ("$native_run_id", run.NativeRunId), ("$trace_id", run.TraceId), ("$parent_run_id", run.ParentRunId is null ? null : Id(run.ParentRunId.Value)),
                 ("$model", run.Model), ("$started_at", Timestamp(run.StartedAt)), ("$ended_at", Timestamp(run.EndedAt)),
                 ("$input_tokens", run.InputTokens), ("$output_tokens", run.OutputTokens), ("$total_tokens", run.TotalTokens),
@@ -459,7 +481,9 @@ public sealed class SqliteSessionStore : ISessionStore
                 ON CONFLICT(source_adapter,source_event_id) DO NOTHING;
                 """,
                 ("$event_id", Id(eventId)), ("$session_id", Id(item.SessionId)), ("$run_id", item.RunId is null ? null : Id(item.RunId.Value)),
-                ("$source_surface", item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value)),
+                ("$source_surface", IsExactOtelEvent(item) && !string.IsNullOrWhiteSpace(item.TraceId)
+                    ? exactOtelSurfaceByTrace[item.TraceId!]
+                    : item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value)),
                 ("$parent_event_id", parentEventId is null ? null : Id(parentEventId.Value)), ("$trace_id", item.TraceId), ("$status", item.Status),
                 ("$source_adapter", item.SourceAdapter), ("$source_event_id", item.SourceEventId), ("$type", item.Type),
                 ("$occurred_at", Timestamp(item.OccurredAt)), ("$content_state", SessionWire.ToWire(item.ContentState)),
@@ -497,6 +521,37 @@ public sealed class SqliteSessionStore : ISessionStore
         }
 
         transaction.Commit();
+    }
+
+    private static bool IsExactOtelEvent(ObservedSessionEvent item) =>
+        string.Equals(item.SourceAdapter, "otel-exact", StringComparison.Ordinal)
+        && string.Equals(item.Type, "otel.span", StringComparison.Ordinal);
+
+    private static string? ReadExactOtelSourceSurface(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string traceId)
+    {
+        if (!TableExists(connection, transaction, "monitor_traces"))
+        {
+            return null;
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT client_kind
+            FROM monitor_traces
+            WHERE trace_id=$trace_id;
+            """;
+        Add(command, "$trace_id", traceId);
+        return command.ExecuteScalar() switch
+        {
+            "vscode-copilot-chat" => "vscode",
+            "copilot-cli" => "copilot-cli",
+            _ => null,
+        };
     }
 
     private static bool IsClaudeOtelReplay(

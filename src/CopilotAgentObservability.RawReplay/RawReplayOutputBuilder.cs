@@ -15,8 +15,11 @@ internal static class RawReplayOutputBuilder
     internal static RawReplayOutputs Build(IReadOnlyList<RawReplayRecord> records)
     {
         var ordered = records.OrderBy(record => record.RawRecordId).ToArray();
+        // D069 freezes these v1 target bytes. Live source-resolution semantics
+        // require a separately accepted target version before raw replay can use them.
         var rows = ordered
-            .SelectMany(record => RawMeasurementNormalizer.Normalize(record.PayloadJson))
+            .SelectMany(record =>
+                RawMeasurementNormalizer.NormalizeRawReplayV1(record.PayloadJson))
             .Select(row => new CanonicalMeasurement(row, RawReplayJson.SerializeCanonical(row)))
             .OrderBy(item => item.Row.TraceId, StringComparer.Ordinal)
             .ThenBy(item => Convert.ToHexString(item.Bytes), StringComparer.Ordinal)
@@ -30,7 +33,7 @@ internal static class RawReplayOutputBuilder
         var projections = ordered.Select(record =>
         {
             var raw = ToTelemetry(record);
-            var monitor = MonitorProjectionBuilder.Build(raw);
+            var monitor = MonitorProjectionBuilder.BuildRawReplayV1(raw);
             var contributions = monitor.TraceContributions
                 .Select(contribution => new CanonicalContribution(
                     contribution,

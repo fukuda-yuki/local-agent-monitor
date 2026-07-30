@@ -228,6 +228,85 @@ public class RawNormalizationTests
         Assert.Equal("vscode-copilot-chat", rows[1].GetProperty("client_kind").GetString());
     }
 
+    [Theory]
+    [InlineData("github-copilot", "copilot-cli")]
+    [InlineData("copilot-chat", "vscode-copilot-chat")]
+    public void NormalizeRaw_ResolvesServiceNameOnlyAndConsumesMappedEvidence(
+        string serviceName,
+        string expectedFamily)
+    {
+        var payload = MinimalRawJsonWithSource(
+            "cccccccccccccccccccccccccccccccc",
+            "service.name",
+            serviceName);
+
+        var row = Assert.Single(RawMeasurementNormalizer.Normalize(payload));
+
+        Assert.Equal(expectedFamily, row.ClientKind);
+        Assert.Null(row.UnknownAttributesJson);
+    }
+
+    [Fact]
+    public void NormalizeRaw_AggregatesCrossRecordTraceEvidenceBeforeEmission()
+    {
+        const string traceId = "dddddddddddddddddddddddddddddddd";
+        var records = new[]
+        {
+            RawRecord(1, traceId, MinimalRawJsonWithSource(traceId, "service.name", "github-copilot")),
+            RawRecord(2, traceId, MinimalRawJsonWithSource(traceId, "service.name", "copilot-chat")),
+        };
+
+        var forward = Assert.Single(RawMeasurementNormalizer.Normalize(records));
+        var reverse = Assert.Single(RawMeasurementNormalizer.Normalize(records.Reverse().ToArray()));
+
+        Assert.Null(forward.ClientKind);
+        Assert.Equal(forward.ClientKind, reverse.ClientKind);
+        Assert.Equal(2, forward.TurnCount);
+        Assert.Equal(forward.TurnCount, reverse.TurnCount);
+    }
+
+    [Fact]
+    public void NormalizeRaw_SourceResolutionIsInvariantToRecordPartitionAndOrder()
+    {
+        const string traceId = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        var cliPayload = MinimalRawJsonWithSource(
+            traceId,
+            "service.name",
+            "github-copilot");
+        var vsCodePayload = MinimalRawJsonWithSource(
+            traceId,
+            "service.name",
+            "copilot-chat");
+        using var cliDocument = JsonDocument.Parse(cliPayload);
+        using var vsCodeDocument = JsonDocument.Parse(vsCodePayload);
+        var combinedPayload = JsonSerializer.Serialize(new
+        {
+            resourceSpans = new[]
+            {
+                cliDocument.RootElement.GetProperty("resourceSpans")[0].Clone(),
+                vsCodeDocument.RootElement.GetProperty("resourceSpans")[0].Clone(),
+            },
+        });
+        var partitioned = new[]
+        {
+            RawRecord(1, traceId, cliPayload),
+            RawRecord(2, traceId, vsCodePayload),
+        };
+
+        var combined = Assert.Single(RawMeasurementNormalizer.Normalize(combinedPayload));
+        var forward = Assert.Single(RawMeasurementNormalizer.Normalize(partitioned));
+        var reverse = Assert.Single(
+            RawMeasurementNormalizer.Normalize(partitioned.Reverse().ToArray()));
+
+        Assert.Null(combined.ClientKind);
+        Assert.Equal(combined.ClientKind, forward.ClientKind);
+        Assert.Equal(combined.ClientKind, reverse.ClientKind);
+        Assert.Equal(combined.TurnCount, forward.TurnCount);
+        Assert.Equal(combined.TurnCount, reverse.TurnCount);
+        Assert.Equal(combined.ToolCallCount, forward.ToolCallCount);
+        Assert.Equal(combined.ToolCallCount, reverse.ToolCallCount);
+    }
+
     [Fact]
     public void NormalizeRaw_ReturnsNonZeroWithoutOutputOption()
     {
@@ -393,6 +472,34 @@ public class RawNormalizationTests
             }
             """;
     }
+
+    private static string MinimalRawJsonWithSource(string traceId, string key, string value) =>
+        """
+        {
+          "resourceSpans": [{
+            "resource": {"attributes": [
+              {"key": "__KEY__", "value": {"stringValue": "__VALUE__"}}
+            ]},
+            "scopeSpans": [{"spans": [{
+              "traceId": "__TRACE_ID__",
+              "spanId": "aaaaaaaaaaaaaaaa",
+              "name": "chat gpt-4o"
+            }]}]
+          }]
+        }
+        """
+        .Replace("__KEY__", key, StringComparison.Ordinal)
+        .Replace("__VALUE__", value, StringComparison.Ordinal)
+        .Replace("__TRACE_ID__", traceId, StringComparison.Ordinal);
+
+    private static RawTelemetryRecord RawRecord(long id, string traceId, string payloadJson) =>
+        new(
+            Id: id,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: traceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch,
+            ResourceAttributesJson: null,
+            PayloadJson: payloadJson);
 
     private static string UnsafeAuxiliaryRawJson()
     {

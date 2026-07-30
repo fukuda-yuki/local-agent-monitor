@@ -879,6 +879,41 @@ copilot-cli
 codex-app
 ```
 
+### Trace source attribution
+
+Current GitHub Copilot producers may omit `client.kind`. The receiver therefore
+uses one trace-scoped resolver shared with measurement normalization. It walks
+each `resourceSpans` block and assigns that block's evidence to every trace in
+the block. Only these ordinal, case-sensitive pairs are recognized:
+
+| Evidence | Family |
+| --- | --- |
+| `client.kind=vscode-copilot-chat` | `vscode-copilot-chat` |
+| `client.kind=copilot-cli` | `copilot-cli` |
+| `service.name=copilot-chat` | `vscode-copilot-chat` |
+| `service.name=github-copilot` | `copilot-cli` |
+
+The persisted aggregate preserves whether each recognized family, an unknown
+exact candidate, and any relevant key were observed. Both families conflict;
+otherwise unknown evidence is unrecognised; otherwise one family resolves;
+otherwise attribution is missing. No unresolved state falls back to a
+record-global trace/resource value or to source version, agent, model,
+Repository, path, Session, or time. Source-version resolution remains a
+separate trace-scoped authority.
+
+Validated adapter ingestion commits the per-raw/per-trace evidence and an
+idempotent durable trace-reconciliation queue entry in the same transaction as
+raw, Retention catalog, and source-compatibility rows. The supported
+`ingest-raw` and `raw-local-receiver` direct raw-store paths call the same
+evidence writer and atomically commit raw, Retention, evidence, and queue work;
+they create no source-compatibility row without a validated adapter batch. A
+later conflicting record therefore clears the trace, every contributing
+ingestion owner, and only exact OTel-derived Session event/run source surfaces.
+Reconciliation runs before each projection pass, is scoped to queued
+identities, retains queue entries on rollback, and may publish only the pass's
+single existing projection-change SSE notification. Native Session bindings
+and non-source identity fields are never rewritten.
+
 Recommended:
 
 ```text

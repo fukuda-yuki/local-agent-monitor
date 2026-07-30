@@ -147,6 +147,36 @@ public class MeasurementAggregationTests
         Assert.Contains(",5,7,12,,,50,,not-evaluated", lines[3]);
     }
 
+    [Theory]
+    [InlineData("""{"service.name":"github-copilot"}""", "copilot-cli")]
+    [InlineData("""{"client.kind":"copilot-cli","service.name":"copilot-chat"}""", null)]
+    [InlineData("""{"client.kind":"COPILOT-CLI"}""", null)]
+    public void AggregateMeasurements_UsesExactTraceScopedSourceResolver(
+        string resourceAttributes,
+        string? expectedClientKind)
+    {
+        using var tempDirectory = new TempDirectory();
+        var inputPath = Path.Combine(tempDirectory.Path, "source-resolution.json");
+        File.WriteAllText(
+            inputPath,
+            $$"""
+            {
+              "traces": [{
+                "id": "trace-source-resolution",
+                "metadata": {
+                  "resourceAttributes": {{resourceAttributes}}
+                },
+                "observations": []
+              }]
+            }
+            """);
+
+        var row = Assert.Single(MeasurementAggregator.Aggregate(inputPath));
+
+        Assert.Equal(expectedClientKind, row.ClientKind);
+        Assert.Null(row.UnknownAttributesJson);
+    }
+
     [Fact]
     public void AggregateMeasurements_ReturnsNonZeroWithoutOutputOption()
     {

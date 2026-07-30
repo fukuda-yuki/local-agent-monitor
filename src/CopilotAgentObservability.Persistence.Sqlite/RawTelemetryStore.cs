@@ -1,6 +1,11 @@
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal enum RawTelemetryStoreWritePhase { AfterSourceInsert, AfterCatalogRegistration }
+internal enum RawTelemetryStoreWritePhase
+{
+    AfterSourceInsert,
+    AfterCatalogRegistration,
+    AfterTraceSourceAttribution,
+}
 
 internal sealed partial class RawTelemetryStore
 {
@@ -45,6 +50,7 @@ internal sealed partial class RawTelemetryStore
         EnsureParentDirectory();
 
         using var connection = OpenConnection();
+        MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.EnsureRawRecordsSchema(connection, transaction);
@@ -65,6 +71,7 @@ internal sealed partial class RawTelemetryStore
         EnsureParentDirectory();
 
         using var connection = OpenConnection();
+        MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
@@ -83,6 +90,8 @@ internal sealed partial class RawTelemetryStore
 
     public long Insert(RawTelemetryRecord record)
     {
+        ArgumentNullException.ThrowIfNull(record);
+        var traceSourceResolutions = OtlpTraceSourceResolver.Resolve(record.PayloadJson);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
         var catalog = new Retention.RetentionCatalogStore(databasePath, timeProvider);
@@ -93,6 +102,12 @@ internal sealed partial class RawTelemetryStore
         writeFailureInjector?.Invoke(RawTelemetryStoreWritePhase.AfterSourceInsert);
         catalog.RegisterRawRecord(connection, transaction, rawRecordId, record.ReceivedAt, record.SchemaVersion, ownerToken);
         writeFailureInjector?.Invoke(RawTelemetryStoreWritePhase.AfterCatalogRegistration);
+        SqliteSourceCompatibilityStore.InsertTraceSourceResolutions(
+            connection,
+            transaction,
+            rawRecordId,
+            traceSourceResolutions);
+        writeFailureInjector?.Invoke(RawTelemetryStoreWritePhase.AfterTraceSourceAttribution);
         transaction.Commit();
         return rawRecordId;
     }
@@ -210,7 +225,7 @@ internal sealed partial class RawTelemetryStore
                     error_count = COALESCE(error_count, 0) + excluded.error_count,
                     first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
                     last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
-                    client_kind = COALESCE(client_kind, excluded.client_kind),
+                    client_kind = excluded.client_kind,
                     experiment_id = COALESCE(experiment_id, excluded.experiment_id),
                     task_id = COALESCE(task_id, excluded.task_id),
                     task_category = COALESCE(task_category, excluded.task_category),

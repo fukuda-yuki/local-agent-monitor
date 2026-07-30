@@ -18,60 +18,90 @@ internal static class RawMeasurementNormalizer
 
     public static IReadOnlyList<MeasurementRow> Normalize(string payloadJson)
     {
-        using var document = JsonDocument.Parse(payloadJson);
-        return Normalize(document.RootElement);
+        ArgumentNullException.ThrowIfNull(payloadJson);
+        return NormalizePayloads([payloadJson], frozenRawReplayV1: false);
     }
 
     public static IReadOnlyList<MeasurementRow> Normalize(IReadOnlyList<RawTelemetryRecord> records)
     {
-        var rows = new List<MeasurementRow>();
-        foreach (var record in records)
-        {
-            rows.AddRange(Normalize(record.PayloadJson));
-        }
-
-        return rows;
+        ArgumentNullException.ThrowIfNull(records);
+        return NormalizePayloads(
+            records.Select(record => record.PayloadJson).ToArray(),
+            frozenRawReplayV1: false);
     }
 
-    private static IReadOnlyList<MeasurementRow> Normalize(JsonElement root)
+    internal static IReadOnlyList<MeasurementRow> NormalizeRawReplayV1(
+        string payloadJson)
     {
-        if (!root.TryGetProperty("resourceSpans", out var resourceSpans)
-            || resourceSpans.ValueKind != JsonValueKind.Array)
-        {
-            throw new InvalidDataException("raw OTLP JSON must contain a top-level resourceSpans array.");
-        }
+        ArgumentNullException.ThrowIfNull(payloadJson);
+        return NormalizePayloads([payloadJson], frozenRawReplayV1: true);
+    }
 
+    private static IReadOnlyList<MeasurementRow> NormalizePayloads(
+        IReadOnlyList<string> payloadJsons,
+        bool frozenRawReplayV1)
+    {
         var groups = new Dictionary<string, RawTraceGroup>(StringComparer.Ordinal);
         var missingTraceIdIndex = 0;
-
-        foreach (var resourceSpan in resourceSpans.EnumerateArray())
+        foreach (var payloadJson in payloadJsons)
         {
-            var resourceAttributes = OtlpSpanReader.ReadResourceAttributes(resourceSpan);
-            foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
+            using var document = JsonDocument.Parse(payloadJson);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("resourceSpans", out var resourceSpans)
+                || resourceSpans.ValueKind != JsonValueKind.Array)
             {
-                foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
+                throw new InvalidDataException("raw OTLP JSON must contain a top-level resourceSpans array.");
+            }
+
+            foreach (var resourceSpan in resourceSpans.EnumerateArray())
+            {
+                var resourceAttributes = OtlpSpanReader.ReadResourceAttributes(resourceSpan);
+                foreach (var scopeSpan in OtlpSpanReader.EnumerateArrayProperty(resourceSpan, "scopeSpans"))
                 {
-                    var traceId = OtlpSpanReader.ReadString(span, "traceId");
-                    var key = string.IsNullOrWhiteSpace(traceId)
-                        ? $"__missing_trace_id_{missingTraceIdIndex++}"
-                        : traceId!;
-
-                    if (!groups.TryGetValue(key, out var group))
+                    foreach (var span in OtlpSpanReader.EnumerateArrayProperty(scopeSpan, "spans"))
                     {
-                        group = new RawTraceGroup(traceId);
-                        groups.Add(key, group);
-                    }
+                        var traceId = OtlpSpanReader.ReadString(span, "traceId");
+                        var key = string.IsNullOrWhiteSpace(traceId)
+                            ? $"__missing_trace_id_{missingTraceIdIndex++}"
+                            : traceId!;
 
-                    OtlpSpanReader.MergeResourceAttributes(group.ResourceAttributes, resourceAttributes);
-                    group.Spans.Add(OtlpSpanReader.CreateSpan(span));
+                        if (!groups.TryGetValue(key, out var group))
+                        {
+                            group = new RawTraceGroup(traceId);
+                            groups.Add(key, group);
+                        }
+
+                        OtlpSpanReader.MergeResourceAttributes(group.ResourceAttributes, resourceAttributes);
+                        group.Spans.Add(OtlpSpanReader.CreateSpan(span));
+                    }
                 }
             }
         }
 
-        return groups.Values.Select(CreateRow).ToArray();
+        var sourceResolutions = frozenRawReplayV1
+            ? null
+            : OtlpTraceSourceResolver.Resolve(payloadJsons)
+                .ToDictionary(item => item.TraceId, StringComparer.Ordinal);
+        return groups.Values
+            .Select(group => CreateRow(
+                group,
+                frozenRawReplayV1
+                    ? OtlpSpanReader.ReadString(
+                        group.ResourceAttributes,
+                        "client.kind")
+                    : group.TraceId is not null
+                    && sourceResolutions!.TryGetValue(group.TraceId, out var resolution)
+                    && resolution.State == TraceSourceResolutionState.Resolved
+                        ? resolution.SourceFamily
+                        : null,
+                frozenRawReplayV1))
+            .ToArray();
     }
 
-    private static MeasurementRow CreateRow(RawTraceGroup group)
+    private static MeasurementRow CreateRow(
+        RawTraceGroup group,
+        string? sourceFamily,
+        bool frozenRawReplayV1)
     {
         var explicitTurnCount = OtlpSpanReader.ReadFirstInt(group.ResourceAttributes, TurnCountKeys);
         var explicitToolCallCount = OtlpSpanReader.ReadFirstInt(group.ResourceAttributes, ToolCallCountKeys);
@@ -187,7 +217,7 @@ internal static class RawMeasurementNormalizer
         return new MeasurementRow(
             TraceId: group.TraceId,
             ExperimentId: OtlpSpanReader.ReadString(group.ResourceAttributes, "experiment.id"),
-            ClientKind: OtlpSpanReader.ReadString(group.ResourceAttributes, "client.kind"),
+            ClientKind: sourceFamily,
             TaskId: OtlpSpanReader.ReadString(group.ResourceAttributes, "task.id"),
             TaskCategory: OtlpSpanReader.ReadString(group.ResourceAttributes, "task.category"),
             TaskRunIndex: OtlpSpanReader.ReadInt(group.ResourceAttributes, "task.run_index"),
@@ -207,7 +237,9 @@ internal static class RawMeasurementNormalizer
             EvaluationNotes: null,
             EvaluatedAt: null,
             UnknownSpansJson: unknownSpans.Count == 0 ? null : unknownSpans,
-            UnknownAttributesJson: CreateUnknownAttributesNode(group.ResourceAttributes),
+            UnknownAttributesJson: CreateUnknownAttributesNode(
+                group.ResourceAttributes,
+                frozenRawReplayV1),
             AggregationNotes: CreateAggregationNotes(unknownSpans));
     }
 
@@ -220,10 +252,15 @@ internal static class RawMeasurementNormalizer
         return node;
     }
 
-    private static JsonObject? CreateUnknownAttributesNode(JsonObject resourceAttributes)
+    private static JsonObject? CreateUnknownAttributesNode(
+        JsonObject resourceAttributes,
+        bool frozenRawReplayV1)
     {
         var unknown = new JsonObject();
-        MeasurementSanitizer.AddUnknownResourceAttributes(unknown, resourceAttributes);
+        MeasurementSanitizer.AddUnknownResourceAttributes(
+            unknown,
+            resourceAttributes,
+            serviceNameIsMapped: !frozenRawReplayV1);
         return unknown.Count == 0 ? null : unknown;
     }
 

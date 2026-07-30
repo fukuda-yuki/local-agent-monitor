@@ -40,6 +40,35 @@ public class ProjectionWorkerTests
         Assert.Equal(1, store.ApplyCalls[1]);
         Assert.Equal(0, store.GetProjectionStatus().Backlog);
         Assert.Equal([1L], compatibility.LookupRawRecordIds);
+        Assert.Equal(2, compatibility.ReconcileTraceSourceAttributionCallCount);
+    }
+
+    [Fact]
+    public async Task Pass_ReconciliationFailureRetriesBeforeProjectionAndIdlePassDoesNotReproject()
+    {
+        var store = new FakeProjectionStore();
+        store.Seed(1, T(1), OneSpanPayload("recognized-operation"));
+        var compatibility = new FakeCompatibilityStore
+        {
+            ReconciliationFailuresRemaining = 1,
+        };
+        compatibility.Seed(Observation(1, SourceCompatibilityState.Supported));
+        var worker = new ProjectionWorker(
+            store,
+            ReadyHealth(),
+            compatibilityStore: compatibility);
+
+        await worker.RunProjectionPassAsync();
+
+        Assert.False(store.IsProjected(1));
+        Assert.Equal(1, compatibility.ReconcileTraceSourceAttributionCallCount);
+
+        await worker.RunProjectionPassAsync();
+        await worker.RunProjectionPassAsync();
+
+        Assert.True(store.IsProjected(1));
+        Assert.Equal(1, store.ApplyCalls[1]);
+        Assert.Equal(3, compatibility.ReconcileTraceSourceAttributionCallCount);
     }
 
     [Fact]
@@ -304,6 +333,10 @@ public class ProjectionWorkerTests
         store.Seed(1, T(1), payload);
         var compatibility = new FakeCompatibilityStore();
         compatibility.Seed(Observation(1, SourceCompatibilityState.Supported));
+        compatibility.SeedTraceSource(new TraceSourceResolutionRow(
+            "t1",
+            TraceSourceResolutionState.Resolved,
+            "vscode-copilot-chat"));
         var worker = new ProjectionWorker(store, ReadyHealth(), compatibilityStore: compatibility);
 
         await worker.RunProjectionPassAsync();
@@ -402,14 +435,22 @@ public class ProjectionWorkerTests
     }
 
     [Fact]
-    public async Task Pass_PublishesOneProjectionEventWhenRecordsNewlyProjected()
+    public async Task Pass_PublishesOneProjectionEventWhenReconciliationAndRecordsChange()
     {
         var store = new FakeProjectionStore();
         store.Seed(1, T(1));
         store.Seed(2, T(2));
+        var compatibility = new FakeCompatibilityStore
+        {
+            ReconciliationChanged = true,
+        };
         var broker = new MonitorEventBroker();
         using var subscription = broker.Subscribe();
-        var worker = new ProjectionWorker(store, ReadyHealth(), eventBroker: broker);
+        var worker = new ProjectionWorker(
+            store,
+            ReadyHealth(),
+            eventBroker: broker,
+            compatibilityStore: compatibility);
 
         await worker.RunProjectionPassAsync();
 
@@ -887,8 +928,13 @@ public class ProjectionWorkerTests
     {
         private readonly Dictionary<long, SourceCompatibilityRow> observationsByRawRecordId = new();
         private readonly List<SourceCompatibilityRow> observations = new();
+        private readonly Dictionary<string, TraceSourceResolutionRow> traceSources =
+            new(StringComparer.Ordinal);
 
         public List<long> LookupRawRecordIds { get; } = new();
+        public int ReconcileTraceSourceAttributionCallCount { get; private set; }
+        public int ReconciliationFailuresRemaining { get; set; }
+        public bool ReconciliationChanged { get; set; }
 
         public int CreateSchemaCallCount { get; private set; }
 
@@ -902,6 +948,9 @@ public class ProjectionWorkerTests
                 observationsByRawRecordId.Add(rawRecordId, observation);
             }
         }
+
+        public void SeedTraceSource(TraceSourceResolutionRow resolution) =>
+            traceSources.Add(resolution.TraceId, resolution);
 
         public void CreateSchema() => CreateSchemaCallCount++;
 
@@ -917,6 +966,20 @@ public class ProjectionWorkerTests
         {
             LookupRawRecordIds.Add(rawRecordId);
             return observationsByRawRecordId.GetValueOrDefault(rawRecordId);
+        }
+
+        public TraceSourceResolutionRow? GetTraceSourceResolution(string traceId) =>
+            traceSources.GetValueOrDefault(traceId);
+
+        public bool ReconcileProjectedTraceSourceAttribution()
+        {
+            ReconcileTraceSourceAttributionCallCount++;
+            if (ReconciliationFailuresRemaining > 0)
+            {
+                ReconciliationFailuresRemaining--;
+                throw new InvalidOperationException("Injected reconciliation failure.");
+            }
+            return ReconciliationChanged;
         }
     }
 }

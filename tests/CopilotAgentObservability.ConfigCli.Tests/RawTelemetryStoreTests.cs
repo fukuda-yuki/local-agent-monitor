@@ -185,6 +185,7 @@ public class RawTelemetryStoreTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
+    [InlineData(2)]
     public void Insert_InjectedFailureRollsBackSourceAndCatalog(int phaseValue)
     {
         using var tempDirectory = new TempDirectory();
@@ -200,6 +201,12 @@ public class RawTelemetryStoreTests
         using var connection = OpenConnection(tempDirectory.DatabasePath);
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items;"));
+        Assert.Equal(0L, Scalar<long>(
+            connection,
+            "SELECT COUNT(*) FROM source_trace_attribution_observations;"));
+        Assert.Equal(0L, Scalar<long>(
+            connection,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
     }
 
     [Fact]
@@ -215,7 +222,7 @@ public class RawTelemetryStoreTests
             command.ExecuteNonQuery();
         }
 
-        var exception = Assert.Throws<RetentionMigrationBlockedException>(() => store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", DateTimeOffset.UnixEpoch, null, "raw-payload")));
+        var exception = Assert.Throws<RetentionMigrationBlockedException>(() => store.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "trace-1", DateTimeOffset.UnixEpoch, null, """{"marker":"raw-payload"}""")));
         Assert.Equal("retention_migration_blocked", exception.Message);
         Assert.DoesNotContain("raw-token", exception.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("raw-payload", exception.Message, StringComparison.Ordinal);

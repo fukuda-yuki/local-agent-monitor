@@ -331,6 +331,23 @@ copilot-cli
 codex-app
 ```
 
+GitHub Copilot の trace source attribution は trace ごとに Resource block の
+evidence を集約する。`client.kind=vscode-copilot-chat` と
+`service.name=copilot-chat` は `vscode-copilot-chat`、
+`client.kind=copilot-cli` と `service.name=github-copilot` は
+`copilot-cli` に exact・case-sensitive で対応する。同一 trace で両 family が
+観測された場合は conflicting、未知の exact 値が観測された場合は
+unrecognised、relevant evidence がない場合は missing とし、いずれも
+`client_kind` を推測しない。source version、agent/model、Repository、path、
+timestamp、record-global first value は source family evidence に使用しない。
+同一 resolver と集約状態を normalized measurement と Local Monitor projection
+が使用する。
+後続 record が trace の解決状態を変えた場合、Local Monitor は durable retry
+から該当 trace とその contributing ingestion を再調整し、unresolved なら
+既存の推測値を null に戻す。履歴 raw を読む schema transition は Retention
+が読み取りを許可し、raw と projected span の完全な同一性を証明できる場合に
+限る。
+
 推奨 Resource Attributes:
 
 ```text

@@ -1,6 +1,7 @@
 using CopilotAgentObservability.ConfigCli;
 using CopilotAgentObservability.ConfigCli.Setup.Cli;
 using CopilotAgentObservability.ConfigCli.Setup.Contracts;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -389,6 +390,30 @@ public class CliApplicationTests
         Assert.Equal("11111111111111111111111111111111", record.TraceId);
         Assert.Contains("\"client.kind\":\"copilot-cli\"", record.ResourceAttributesJson);
         Assert.Equal(File.ReadAllText(FixturePath()), record.PayloadJson);
+        using var connection = new SqliteConnection(
+            $"Data Source={tempDirectory.DatabasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+                (SELECT COUNT(*)
+                 FROM source_trace_attribution_observations
+                 WHERE raw_record_id=$raw_record_id
+                   AND trace_id='11111111111111111111111111111111'
+                   AND cli_candidate_observed=1
+                   AND vscode_candidate_observed=0
+                   AND unknown_candidate_observed=0
+                   AND relevant_evidence_observed=1),
+                (SELECT COUNT(*)
+                 FROM source_trace_attribution_reconciliation_queue
+                 WHERE trace_id='11111111111111111111111111111111');
+            """;
+        command.Parameters.AddWithValue("$raw_record_id", record.Id);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(1L, reader.GetInt64(0));
+        Assert.Equal(1L, reader.GetInt64(1));
     }
 
     [Fact]

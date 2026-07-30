@@ -570,7 +570,11 @@ Copilot client
 
 - OTel emit の確認。
 - span tree、prompt、response、tool arguments、tool results、token usage、duration、error の確認。
-- `client.kind` と `experiment.id` による識別。
+- trace-scoped exact `client.kind` / `service.name` source attribution と
+  `experiment.id` による識別。source version、agent/model、Repository、path、
+  time は source-family fallback に使用しない。raw と同時に evidence /
+  durable reconciliation identity を保存し、後続 conflict は対象 trace と
+  contributing ingestion の source 表示を再調整する。
 
 ### Raw Data Loop
 

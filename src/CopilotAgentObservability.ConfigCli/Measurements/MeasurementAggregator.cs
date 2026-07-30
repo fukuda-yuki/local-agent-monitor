@@ -32,6 +32,10 @@ internal static class MeasurementAggregator
         var resourceAttributes = TryGetObject(metadata, "resourceAttributes", out var resourceAttributesElement)
             ? resourceAttributesElement
             : default;
+        var traceId = ReadString(traceElement, "id") ?? ReadString(traceElement, "traceId");
+        var sourceResolution = OtlpTraceSourceResolver.ResolveResourceAttributes(
+            traceId ?? "__missing_trace_id",
+            resourceAttributes);
 
         var inputTokens = ReadInt(traceElement, "usage", "input")
             ?? ReadInt(traceElement, "usage", "inputTokens")
@@ -96,9 +100,11 @@ internal static class MeasurementAggregator
         var aggregationNotes = CreateAggregationNotes(observations, unknownSpans);
 
         return new MeasurementRow(
-            TraceId: ReadString(traceElement, "id") ?? ReadString(traceElement, "traceId"),
+            TraceId: traceId,
             ExperimentId: ReadString(resourceAttributes, "experiment.id"),
-            ClientKind: ReadString(resourceAttributes, "client.kind"),
+            ClientKind: sourceResolution.State == TraceSourceResolutionState.Resolved
+                ? sourceResolution.SourceFamily
+                : null,
             TaskId: ReadString(resourceAttributes, "task.id"),
             TaskCategory: ReadString(resourceAttributes, "task.category"),
             TaskRunIndex: ReadInt(resourceAttributes, "task.run_index"),

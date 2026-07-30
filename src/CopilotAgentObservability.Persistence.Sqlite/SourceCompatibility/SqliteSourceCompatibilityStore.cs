@@ -2,7 +2,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
+internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
 {
     private const int MaximumListLimit = 200;
     public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
@@ -31,13 +31,9 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
     {
         EnsureParentDirectory();
         using var connection = OpenConnection();
+        var existingVersion = MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
-        var existingVersion = MonitorSchemaMigrator.ReadMonitorSchemaVersion(connection, transaction);
-        if (existingVersion > MonitorSchemaVersion)
-        {
-            ThrowNewerVersion(existingVersion.Value);
-        }
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
 
         Execute(
@@ -129,7 +125,13 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
         MonitorSchemaMigrator.EnsureRuntimeStateSchema(connection, transaction);
         migrationCheckpoint?.Invoke(connection, transaction);
-        MonitorSchemaMigrator.SetMonitorSchemaVersion(connection, transaction, MonitorSchemaVersion);
+        if (existingVersion != MonitorSchemaVersion)
+        {
+            MonitorSchemaMigrator.SetMonitorSchemaVersion(
+                connection,
+                transaction,
+                MonitorSchemaVersion);
+        }
         transaction.Commit();
     }
 
@@ -369,6 +371,125 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
             traceId, TraceSourceVersionResolutionState.Missing, SourceApplicationVersion: null);
     }
 
+    public TraceSourceResolutionRow? GetTraceSourceResolution(string traceId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(traceId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+                MAX(cli_candidate_observed),
+                MAX(vscode_candidate_observed),
+                MAX(unknown_candidate_observed),
+                MAX(relevant_evidence_observed)
+            FROM source_trace_attribution_observations
+            WHERE trace_id = $trace_id;
+            """;
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(0))
+        {
+            return null;
+        }
+        var resolution = TraceSourceResolutionDraft.FromEvidence(
+            traceId,
+            reader.GetInt64(0) != 0,
+            reader.GetInt64(1) != 0,
+            reader.GetInt64(2) != 0,
+            reader.GetInt64(3) != 0);
+        return new TraceSourceResolutionRow(
+            resolution.TraceId,
+            resolution.State,
+            resolution.SourceFamily);
+    }
+
+    public bool ReconcileProjectedTraceSourceAttribution()
+    {
+        using var connection = OpenConnection();
+        if (!HasPendingTraceSourceReconciliation(connection))
+        {
+            return false;
+        }
+        using var transaction = connection.BeginTransaction();
+        var pendingTraceIds = ReadPendingTraceSourceReconciliationIds(
+            connection,
+            transaction);
+        if (pendingTraceIds.Count == 0)
+        {
+            transaction.Commit();
+            return false;
+        }
+
+        var changed = 0;
+        var resolutions = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var traceId in pendingTraceIds)
+        {
+            var sourceFamily = ResolveTraceSourceFamily(
+                connection,
+                transaction,
+                traceId);
+            resolutions.Add(traceId, sourceFamily);
+            changed += UpdateClientKind(
+                connection,
+                transaction,
+                """
+                UPDATE monitor_traces
+                SET client_kind=$client_kind
+                WHERE trace_id=$identity AND client_kind IS NOT $client_kind;
+                """,
+                traceId,
+                sourceFamily);
+            changed += ReconcileExactOtelSessionSurface(
+                connection,
+                transaction,
+                traceId,
+                sourceFamily);
+        }
+
+        foreach (var rawRecordId in ReadAffectedRawRecordIds(
+                     connection,
+                     transaction))
+        {
+            var families = ReadTraceIdsForRawRecord(
+                    connection,
+                    transaction,
+                    rawRecordId)
+                .Select(traceId =>
+                {
+                    if (!resolutions.TryGetValue(traceId, out var family))
+                    {
+                        family = ResolveTraceSourceFamily(
+                            connection,
+                            transaction,
+                            traceId);
+                        resolutions.Add(traceId, family);
+                    }
+                    return family;
+                })
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            var sourceFamily = families.Length == 1 ? families[0] : null;
+            changed += UpdateClientKind(
+                connection,
+                transaction,
+                """
+                UPDATE monitor_ingestions
+                SET client_kind=$client_kind
+                WHERE raw_record_id=$identity AND client_kind IS NOT $client_kind;
+                """,
+                rawRecordId,
+                sourceFamily);
+        }
+
+        DeletePendingTraceSourceReconciliations(
+            connection,
+            transaction,
+            pendingTraceIds);
+        transaction.Commit();
+        return changed != 0;
+    }
+
     internal static long InsertBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -406,7 +527,31 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         {
             InsertTraceSourceVersionResolution(connection, transaction, id, resolution);
         }
+        InsertTraceSourceResolutions(
+            connection,
+            transaction,
+            rawRecordId,
+            observation.TraceSourceResolutions);
         return id;
+    }
+
+    internal static void InsertTraceSourceResolutions(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId,
+        IReadOnlyList<TraceSourceResolutionDraft> resolutions)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(resolutions);
+        foreach (var resolution in resolutions)
+        {
+            InsertTraceSourceResolution(
+                connection,
+                transaction,
+                rawRecordId,
+                resolution);
+        }
     }
 
     private static long InsertParent(
@@ -523,6 +668,305 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         command.ExecuteNonQuery();
     }
 
+    private static void InsertTraceSourceResolution(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId,
+        TraceSourceResolutionDraft resolution)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO source_trace_attribution_observations (
+                raw_record_id, trace_id, cli_candidate_observed, vscode_candidate_observed,
+                unknown_candidate_observed, relevant_evidence_observed
+            ) VALUES (
+                $raw_record_id, $trace_id, $cli_candidate_observed, $vscode_candidate_observed,
+                $unknown_candidate_observed, $relevant_evidence_observed
+            );
+            """;
+        Add(command, "$raw_record_id", rawRecordId);
+        Add(command, "$trace_id", resolution.TraceId);
+        Add(command, "$cli_candidate_observed", resolution.CliCandidateObserved ? 1 : 0);
+        Add(command, "$vscode_candidate_observed", resolution.VsCodeCandidateObserved ? 1 : 0);
+        Add(command, "$unknown_candidate_observed", resolution.UnknownCandidateObserved ? 1 : 0);
+        Add(command, "$relevant_evidence_observed", resolution.RelevantEvidenceObserved ? 1 : 0);
+        command.ExecuteNonQuery();
+        using var queue = connection.CreateCommand();
+        queue.Transaction = transaction;
+        queue.CommandText =
+            """
+            INSERT OR IGNORE INTO source_trace_attribution_reconciliation_queue(trace_id)
+            VALUES($trace_id);
+            """;
+        Add(queue, "$trace_id", resolution.TraceId);
+        queue.ExecuteNonQuery();
+    }
+
+    private static IReadOnlyList<string> ReadPendingTraceSourceReconciliationIds(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT trace_id
+            FROM source_trace_attribution_reconciliation_queue
+            ORDER BY trace_id;
+            """;
+        using var reader = command.ExecuteReader();
+        var traceIds = new List<string>();
+        while (reader.Read())
+        {
+            traceIds.Add(reader.GetString(0));
+        }
+        return traceIds;
+    }
+
+    private static bool HasPendingTraceSourceReconciliation(
+        SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM source_trace_attribution_reconciliation_queue
+                LIMIT 1
+            );
+            """;
+        return Convert.ToInt64(
+            command.ExecuteScalar(),
+            CultureInfo.InvariantCulture) != 0;
+    }
+
+    private static IReadOnlyList<long> ReadAffectedRawRecordIds(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT DISTINCT evidence.raw_record_id
+            FROM source_trace_attribution_observations AS evidence
+            JOIN source_trace_attribution_reconciliation_queue AS pending
+              ON pending.trace_id=evidence.trace_id
+            ORDER BY evidence.raw_record_id;
+            """;
+        using var reader = command.ExecuteReader();
+        var rawRecordIds = new List<long>();
+        while (reader.Read())
+        {
+            rawRecordIds.Add(reader.GetInt64(0));
+        }
+        return rawRecordIds;
+    }
+
+    private static IReadOnlyList<string> ReadTraceIdsForRawRecord(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rawRecordId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT trace_id
+            FROM source_trace_attribution_observations
+            WHERE raw_record_id=$raw_record_id
+            ORDER BY trace_id;
+            """;
+        Add(command, "$raw_record_id", rawRecordId);
+        using var reader = command.ExecuteReader();
+        var traceIds = new List<string>();
+        while (reader.Read())
+        {
+            traceIds.Add(reader.GetString(0));
+        }
+        return traceIds;
+    }
+
+    private static string? ResolveTraceSourceFamily(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string traceId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT
+                MAX(cli_candidate_observed),
+                MAX(vscode_candidate_observed),
+                MAX(unknown_candidate_observed),
+                MAX(relevant_evidence_observed)
+            FROM source_trace_attribution_observations
+            WHERE trace_id=$trace_id;
+            """;
+        Add(command, "$trace_id", traceId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(0))
+        {
+            return null;
+        }
+        var resolution = TraceSourceResolutionDraft.FromEvidence(
+            traceId,
+            reader.GetInt64(0) != 0,
+            reader.GetInt64(1) != 0,
+            reader.GetInt64(2) != 0,
+            reader.GetInt64(3) != 0);
+        return resolution.State == TraceSourceResolutionState.Resolved
+            ? resolution.SourceFamily
+            : null;
+    }
+
+    private static int ReconcileExactOtelSessionSurface(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string traceId,
+        string? sourceFamily)
+    {
+        if (!SchemaObjectExists(connection, transaction, "table", "session_events")
+            || !SchemaObjectExists(connection, transaction, "table", "session_runs"))
+        {
+            return 0;
+        }
+
+        var sessionSurface = sourceFamily switch
+        {
+            "vscode-copilot-chat" => "vscode",
+            "copilot-cli" => "copilot-cli",
+            _ => null,
+        };
+        var changed = 0;
+        using (var runs = connection.CreateCommand())
+        {
+            runs.Transaction = transaction;
+            runs.CommandText =
+                """
+                UPDATE session_runs
+                SET source_surface=$source_surface
+                WHERE trace_id=$trace_id
+                  AND source_surface IS NOT $source_surface
+                  AND EXISTS(
+                    SELECT 1
+                    FROM session_events AS event
+                    WHERE event.run_id=session_runs.run_id
+                      AND event.trace_id=$trace_id
+                      AND event.source_adapter='otel-exact'
+                      AND event.type='otel.span'
+                  );
+                """;
+            Add(runs, "$source_surface", sessionSurface);
+            Add(runs, "$trace_id", traceId);
+            changed += runs.ExecuteNonQuery();
+        }
+        using (var events = connection.CreateCommand())
+        {
+            events.Transaction = transaction;
+            events.CommandText =
+                """
+                UPDATE session_events
+                SET source_surface=$source_surface
+                WHERE trace_id=$trace_id
+                  AND source_adapter='otel-exact'
+                  AND type='otel.span'
+                  AND source_surface IS NOT $source_surface;
+                """;
+            Add(events, "$source_surface", sessionSurface);
+            Add(events, "$trace_id", traceId);
+            changed += events.ExecuteNonQuery();
+        }
+        return changed;
+    }
+
+    private static void DeletePendingTraceSourceReconciliations(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<string> traceIds)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            DELETE FROM source_trace_attribution_reconciliation_queue
+            WHERE trace_id=$trace_id;
+            """;
+        var parameter = command.Parameters.Add("$trace_id", SqliteType.Text);
+        foreach (var traceId in traceIds)
+        {
+            parameter.Value = traceId;
+            command.ExecuteNonQuery();
+        }
+    }
+
+    private static bool SchemaObjectExists(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string type,
+        string name)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type=$type AND name=$name
+            );
+            """;
+        Add(command, "$type", type);
+        Add(command, "$name", name);
+        return Convert.ToInt64(
+            command.ExecuteScalar(),
+            CultureInfo.InvariantCulture) != 0;
+    }
+
+    private static IReadOnlyList<StoredTraceSourceEvidence> ReadAllTraceSourceEvidence(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT raw_record_id, trace_id, cli_candidate_observed, vscode_candidate_observed,
+                   unknown_candidate_observed, relevant_evidence_observed
+            FROM source_trace_attribution_observations
+            ORDER BY raw_record_id, trace_id;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<StoredTraceSourceEvidence>();
+        while (reader.Read())
+        {
+            rows.Add(new StoredTraceSourceEvidence(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetInt64(2) != 0,
+                reader.GetInt64(3) != 0,
+                reader.GetInt64(4) != 0,
+                reader.GetInt64(5) != 0));
+        }
+        return rows;
+    }
+
+    private static int UpdateClientKind(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql,
+        object identity,
+        string? clientKind)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        Add(command, "$client_kind", clientKind);
+        Add(command, "$identity", identity);
+        return command.ExecuteNonQuery();
+    }
+
     private static IReadOnlyList<SourceUnknownObservationRow> ListUnknowns(SqliteConnection connection, long sourceObservationId)
     {
         using var command = connection.CreateCommand();
@@ -612,10 +1056,6 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         command.CommandText = sql;
         command.ExecuteNonQuery();
     }
-
-    private static void ThrowNewerVersion(long version) =>
-        throw new InvalidOperationException(
-            $"Monitor schema version {version.ToString(CultureInfo.InvariantCulture)} is newer than supported version {MonitorSchemaVersion.ToString(CultureInfo.InvariantCulture)}.");
 
     private static string Timestamp(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
@@ -727,4 +1167,12 @@ internal sealed class SqliteSourceCompatibilityStore : ISourceCompatibilityStore
         int OverflowDistinctCount,
         int OverflowOccurrenceCount,
         DateTimeOffset ObservedAt);
+
+    private sealed record StoredTraceSourceEvidence(
+        long RawRecordId,
+        string TraceId,
+        bool CliCandidateObserved,
+        bool VsCodeCandidateObserved,
+        bool UnknownCandidateObserved,
+        bool RelevantEvidenceObserved);
 }
