@@ -1,0 +1,12 @@
+@model CopilotAgentObservability.LocalMonitor.Presentation.FactStatePresentation
+
+<div class="fact-state">
+    <span class="fact-state-primary">@Model.PrimaryText</span>
+    @if (Model.DetailText is { } detail)
+    {
+        <details class="fact-state-explanation">
+            <summary>表示の理由</summary>
+            <p>@detail</p>
+        </details>
+    }
+</div>
