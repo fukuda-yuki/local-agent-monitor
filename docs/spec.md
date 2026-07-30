@@ -368,10 +368,22 @@ contract major with matching schema and manifests. A manifest/schema version
 match and unknown field rejection are mandatory; a consumer must not silently
 accept a mismatched or extended document.
 
-This is a documentation and committed-contract release only. It does not
-change the Issue #51 Session / Run / Event identity, the Issue #49 Agent
-ownership interpretation, or any receiver, adapter, database, migration, HTTP,
-proxy, or UI DTO. The semantic rules and canonical locations are defined by
+The original Issue #61 work was a documentation and committed-contract release
+only. Issue #125 revises exactly four observed values inside the existing v1
+shape: GitHub Copilot CLI source-version detection and TTFT become `available`,
+GitHub Copilot VS Code TTFT becomes `available`, and the unverified VS Code
+content-capture gate becomes `unknown`. All other manifest leaves remain
+unchanged. Runtime selection consumes the exact Issue #151 trace-source
+resolution: only a resolved `copilot-cli` or `vscode-copilot-chat` family maps
+to its corresponding manifest; missing, conflicting, unrecognised, or absent
+resolution selects none. No source guess, default, first-record choice,
+compatibility shim, fallback, or duplicate resolver is permitted, and Issue
+#152 remains the separate owner of unknown attribute-key drift.
+
+These revisions do not change the Issue #51 Session / Run / Event identity,
+the Issue #49 Agent ownership interpretation, or any receiver, adapter,
+database, migration, HTTP, proxy, or UI DTO. The semantic rules and canonical
+locations are defined by
 [telemetry ingestion](specifications/layers/telemetry-ingestion.md),
 [raw-store normalization](specifications/layers/raw-store-normalization.md),
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),

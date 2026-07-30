@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 
@@ -36,6 +37,16 @@ internal static class SourceCapabilityManifestLoader
         GitHubCopilotSetupTarget.Cli => LoadForSurface(CliSurface),
         GitHubCopilotSetupTarget.AppSdk => null,
         _ => throw new InvalidDataException("Unsupported GitHub Copilot setup target."),
+    };
+
+    public static SourceCapabilityManifest? LoadForTraceSourceResolution(
+        TraceSourceResolutionDraft? resolution) => resolution switch
+    {
+        { State: TraceSourceResolutionState.Resolved, SourceFamily: OtlpTraceSourceResolver.CopilotCliFamily }
+            => LoadForSurface(CliSurface),
+        { State: TraceSourceResolutionState.Resolved, SourceFamily: OtlpTraceSourceResolver.VsCodeCopilotChatFamily }
+            => LoadForSurface(VsCodeSurface),
+        _ => null,
     };
 
     public static SourceCapabilityManifest LoadForSurface(string sourceSurface)

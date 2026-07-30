@@ -543,6 +543,40 @@ before a breaking vocabulary or semantic change. This checklist is not an
 authorization to change the existing receiver, adapter, persistence, migration,
 HTTP, proxy, or UI DTO in Issue #61.
 
+### GitHub Copilot observed-leaf promotion
+
+Issue #125 promotes only evidence-supported leaves inside the existing v1
+manifest shape. The controlled evidence and bounded claims are:
+
+| Surface and leaf | Exact producer/capture/acquisition evidence | Bounded manifest claim |
+| --- | --- | --- |
+| `github-copilot-cli` `source_version_detector` | Raw OTLP scan of `data/issue-129-cli-capture.db`: 4 traces / 14 spans. Resource `service.version` is present per trace and resolves to `1.0.74` or `1.0.75`; this is trace-scoped evidence, not a capture-wide version assignment. | `available` |
+| `github-copilot-cli` `timing_ttft.ttft` | The same raw OTLP capture contains `gen_ai.response.time_to_first_chunk` on 1 / 14 spans. | `available`; carrying-span evidence only, not a general per-run latency guarantee. |
+| `github-copilot-vscode` `timing_ttft.ttft` | Raw OTLP scan of the current `data/issue-127-vscode-capture.db` from extension `0.58.0`: 24 traces / 55 spans, with `copilot_chat.time_to_first_token` and `gen_ai.response.time_to_first_chunk` each on 15 / 55 spans. The extraction supplied no producer version, so producer `service.version` was not supplied. An older raw-only `data/monitor-live-validation-vscode.db` capture from extension `0.54.0` has 18 raw OTLP spans, zero monitor projection, and both fields on 9 / 18 spans. | `available`; carrying-span evidence only, not a general per-run latency guarantee. |
+| `github-copilot-vscode` `content_capture_gate` | In the current extension `0.58.0` capture, `copilot_chat.user_request` occurs on 18 / 55 raw OTLP spans even though `captureContent` was not enabled. | `unknown`; content was observed but gate behavior was not verified. |
+
+These are leaf-scoped observations. Model/token, retry/attempt, tool-call,
+permission, error, Agent ownership, prompt/response, file/diff, and every other
+uncited leaf retain their prior value. No Skill category is added to the
+manifest schema. Issue #116 used Claude-specific adapter evidence from live
+print-mode OTel and an exercised Hook path; it is a different evidence
+authority, none of its evidence is copied here, and the Claude manifest remains
+byte-identical. Unknown relevant attribute values continue to fail closed under
+Issue #151, while detection of unknown attribute keys remains open in Issue
+#152.
+
+Runtime selection consumes Issue #151's exact `TraceSourceResolutionDraft`;
+there is no second resolver or database reader:
+
+| Resolution | Selected manifest |
+| --- | --- |
+| `Resolved` with family `copilot-cli` | `github-copilot-cli` |
+| `Resolved` with family `vscode-copilot-chat` | `github-copilot-vscode` |
+| missing, conflicting, unrecognised, absent, or any other family | selects no manifest |
+
+Selection is fail closed: there is no guess, default, first-record choice,
+compatibility shim, or fallback.
+
 ### Copilot CLI Skill projection
 
 The Skill projection is source-scoped to `github-copilot-cli`. Its

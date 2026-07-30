@@ -68,6 +68,72 @@ public sealed class SourceCapabilityRuntimeTests
         Assert.Null(SourceCapabilityManifestLoader.LoadForTarget(GitHubCopilotSetupTarget.AppSdk));
     }
 
+    [Theory]
+    [InlineData("service.name", "github-copilot", "github-copilot-cli")]
+    [InlineData("client.kind", "copilot-cli", "github-copilot-cli")]
+    [InlineData("service.name", "copilot-chat", "github-copilot-vscode")]
+    [InlineData("client.kind", "vscode-copilot-chat", "github-copilot-vscode")]
+    public void LoadForTraceSourceResolution_MapsOnlyExactResolvedFamilies(
+        string attributeKey,
+        string attributeValue,
+        string expectedSurface)
+    {
+        var resolution = Assert.Single(OtlpTraceSourceResolver.Resolve(
+            SourcePayload("trace-resolved", (attributeKey, attributeValue))));
+
+        Assert.Equal(TraceSourceResolutionState.Resolved, resolution.State);
+        var manifest = SourceCapabilityManifestLoader.LoadForTraceSourceResolution(resolution);
+        Assert.NotNull(manifest);
+        Assert.Equal(expectedSurface, manifest.SourceSurface);
+        Assert.True(SemanticallyEqual(ReadCommittedCanonicalManifest(expectedSurface).RootElement, manifest.CanonicalJson));
+    }
+
+    [Theory]
+    [InlineData("irrelevant.key", "copilot-cli", "Missing")]
+    [InlineData("client.kind", "Copilot-Cli", "Unrecognised")]
+    [InlineData("service.name", "unknown-producer", "Unrecognised")]
+    public void LoadForTraceSourceResolution_RejectsMissingOrUnrecognisedEvidence(
+        string attributeKey,
+        string attributeValue,
+        string expectedState)
+    {
+        var resolution = Assert.Single(OtlpTraceSourceResolver.Resolve(
+            SourcePayload("trace-unresolved", (attributeKey, attributeValue))));
+
+        Assert.Equal(expectedState, resolution.State.ToString());
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTraceSourceResolution(resolution));
+    }
+
+    [Fact]
+    public void LoadForTraceSourceResolution_RejectsConflictInsteadOfSelectingTheFirstRecord()
+    {
+        var resolution = Assert.Single(OtlpTraceSourceResolver.Resolve(
+        [
+            SourcePayload("trace-conflict", ("client.kind", "copilot-cli")),
+            SourcePayload("trace-conflict", ("client.kind", "vscode-copilot-chat")),
+        ]));
+
+        Assert.Equal(TraceSourceResolutionState.Conflicting, resolution.State);
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTraceSourceResolution(resolution));
+    }
+
+    [Fact]
+    public void LoadForTraceSourceResolution_RejectsAbsentOrUnsupportedFamily()
+    {
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTraceSourceResolution(null));
+
+        var unsupported = new TraceSourceResolutionDraft(
+            "trace-unsupported",
+            TraceSourceResolutionState.Resolved,
+            "unsupported-family",
+            CliCandidateObserved: false,
+            VsCodeCandidateObserved: false,
+            UnknownCandidateObserved: false,
+            RelevantEvidenceObserved: true);
+
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTraceSourceResolution(unsupported));
+    }
+
     [Fact]
     public void AggregateAdapter_AttachesCanonicalManifestsForWritableSurfacesAndNullForGuidance()
     {
@@ -188,6 +254,32 @@ public sealed class SourceCapabilityRuntimeTests
         return JsonDocument.Parse(File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts", "source-capabilities", "v1", "manifests", fileName)));
     }
+
+    private static string SourcePayload(string traceId, params (string Key, string Value)[] attributes) =>
+        JsonSerializer.Serialize(new
+        {
+            resourceSpans = new[]
+            {
+                new
+                {
+                    resource = new
+                    {
+                        attributes = attributes.Select(attribute => new
+                        {
+                            key = attribute.Key,
+                            value = new { stringValue = attribute.Value },
+                        }),
+                    },
+                    scopeSpans = new[]
+                    {
+                        new
+                        {
+                            spans = new[] { new { traceId } },
+                        },
+                    },
+                },
+            },
+        });
 
     private static string ReverseObjectProperties(JsonElement element)
     {
