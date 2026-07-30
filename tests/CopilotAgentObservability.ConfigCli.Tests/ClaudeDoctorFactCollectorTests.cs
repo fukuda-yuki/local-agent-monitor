@@ -20,6 +20,7 @@ public sealed class ClaudeDoctorFactCollectorTests
     private const string TraceId = "0123456789abcdef0123456789abcdef";
     private const string SecondTraceId = "fedcba9876543210fedcba9876543210";
     private const string SpanId = "0123456789abcdef";
+    private const string SecondSpanId = "fedcba9876543210";
     private const string FirstSessionId = "00000000-0000-7000-8000-000000000001";
     private const string SecondSessionId = "00000000-0000-7000-8000-000000000002";
 
@@ -388,12 +389,13 @@ public sealed class ClaudeDoctorFactCollectorTests
 
         var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
         var window = Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
 
         Assert.True(window.AcceptedIngestExists);
         Assert.False(window.RejectedIngestExists);
         Assert.True(window.RawPersistenceCandidateExists);
         Assert.True(window.ProjectionCandidateExists);
-        Assert.Equal(ClaudeProjectionEvidence.NotStarted, window.ProjectionEvidence);
+        Assert.Equal(ProjectionOutcome.Completed, snapshot.Projection!.Outcome);
         Assert.True(window.ExactSessionBindingCandidateExists);
         Assert.Equal(ClaudeBoundSessionCompleteness.Full, window.BoundSessionCompleteness);
         Assert.Equal(ClaudeAgreedContentState.Available, window.AgreedContentState);
@@ -475,7 +477,8 @@ public sealed class ClaudeDoctorFactCollectorTests
         using var database = new TestDatabase();
         var verification = database.StartVerification();
         database.InsertRejectedObservation(Now.AddMinutes(1));
-        database.InsertAcceptedRecord(Now.AddMinutes(2), "not-json");
+        var rawId = database.InsertAcceptedRecord(Now.AddMinutes(2), ValidPayload());
+        database.InsertProjectionDisposition(rawId, "failed");
         database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
         var platform = CreatePlatform(database, supportedVersion: true);
 
@@ -496,7 +499,7 @@ public sealed class ClaudeDoctorFactCollectorTests
         var verification = database.StartVerification();
         var rawId = database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
         database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
-        database.InsertPendingIngestion(rawId, Now.AddMinutes(1));
+        database.InsertProjectionDisposition(rawId, "pending");
         var platform = CreatePlatform(database, supportedVersion: true);
 
         var withWindow = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
@@ -505,6 +508,121 @@ public sealed class ClaudeDoctorFactCollectorTests
         var window = Assert.IsType<ClaudeDoctorVerificationWindow>(withWindow.VerificationWindow);
         Assert.Equal(ClaudeProjectionEvidence.Pending, window.ProjectionEvidence);
         Assert.Null(withoutWindow.VerificationWindow);
+    }
+
+    [Fact]
+    public void Collect_MissingProjectionDispositionMapsToUnknown()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
+        database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+    }
+
+    [Theory]
+    [InlineData("not_started", ProjectionOutcome.NotStarted)]
+    [InlineData("pending", ProjectionOutcome.Pending)]
+    [InlineData("failed", ProjectionOutcome.Failed)]
+    [InlineData("completed", ProjectionOutcome.Unknown)]
+    public void Collect_MapsExactProjectionDispositionWithoutFabricatingCompletion(
+        string disposition,
+        ProjectionOutcome expected)
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var rawId = database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
+        database.InsertProjectionDisposition(rawId, disposition);
+        database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(expected, snapshot.Projection!.Outcome);
+    }
+
+    [Fact]
+    public void Collect_UsesProjectionDispositionOnlyFromCandidateSelectedRecords()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var selectedRawId = database.InsertAcceptedRecord(
+            Now.AddMinutes(1),
+            ValidPayload(TraceId, SpanId));
+        var otherRawId = database.InsertAcceptedRecord(
+            Now.AddMinutes(2),
+            ValidPayload(SecondTraceId, SecondSpanId));
+        database.InsertProjectionDisposition(selectedRawId, "pending");
+        database.InsertProjectionDisposition(otherRawId, "failed");
+        database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(ProjectionOutcome.Pending, snapshot.Projection!.Outcome);
+    }
+
+    [Fact]
+    public void Collect_UnmatchedRawCandidateDoesNotUseUnrelatedProjectionDisposition()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var unrelatedRawId = database.InsertAcceptedRecord(
+            Now.AddMinutes(1),
+            ValidPayload(SecondTraceId, SecondSpanId));
+        database.InsertProjectionDisposition(unrelatedRawId, "failed");
+        database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+    }
+
+    [Fact]
+    public void Collect_InvalidProjectionDispositionUsesUnreadableWindow()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var rawId = database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
+        database.InsertProjectionDisposition(rawId, "not_started");
+        database.CorruptProjectionDisposition(rawId, "invalid");
+        database.InsertCandidate(verification, "raw_persistence", $"claude-otel-raw-{TraceId}-{SpanId}");
+        database.InsertCandidate(verification, "projection", $"claude-otel-projection-{TraceId}-{SpanId}");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var window = Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(ClaudeDoctorVerificationWindowReadability.Unreadable, window.Readability);
+        Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
+    }
+
+    [Fact]
+    public void Collect_WithoutRawPersistenceCandidateDoesNotReadProjectionDisposition()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        var rawId = database.InsertAcceptedRecord(Now.AddMinutes(1), ValidPayload());
+        database.InsertProjectionDisposition(rawId, "not_started");
+        database.CorruptProjectionDisposition(rawId, "invalid");
+        var platform = CreatePlatform(database, supportedVersion: true);
+
+        var inputs = Collect(platform, database.Path, new TestHttpProbe(LiveResponse), verification);
+        var window = Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow);
+        var snapshot = ClaudeDoctorFactMapper.Map(inputs, Now, verification.VerificationId);
+
+        Assert.Equal(ClaudeDoctorVerificationWindowReadability.Readable, window.Readability);
+        Assert.Equal(ProjectionOutcome.Unknown, snapshot.Projection!.Outcome);
     }
 
     [Theory]
@@ -709,8 +827,11 @@ public sealed class ClaudeDoctorFactCollectorTests
         System.Text.Json.JsonSerializer.Serialize(value);
 
     private static string ValidPayload() =>
+        ValidPayload(TraceId, SpanId);
+
+    private static string ValidPayload(string traceId, string spanId) =>
         "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"" +
-        TraceId + "\",\"spanId\":\"" + SpanId + "\"}]}]}]}";
+        traceId + "\",\"spanId\":\"" + spanId + "\"}]}]}]}";
 
     private static byte[] ClaudeAppliedLedger()
     {
@@ -956,19 +1077,34 @@ public sealed class ClaudeDoctorFactCollectorTests
                 sanitizedOnly ? MonitorRawAccessMode.SanitizedOnly : MonitorRawAccessMode.Available,
                 Now);
 
-        public long InsertPendingIngestion(long rawRecordId, DateTimeOffset receivedAt)
+        public void InsertProjectionDisposition(long rawRecordId, string state)
         {
             using var connection = Open();
             using var command = connection.CreateCommand();
             command.CommandText =
-                "INSERT INTO monitor_ingestions(raw_record_id,received_at,source,trace_id,client_kind," +
-                "span_count,projected_at,span_projected_at) VALUES($raw,$received,'raw-otlp',$trace, NULL,1,$projected,NULL);";
+                "INSERT INTO monitor_projection_dispositions(raw_record_id,state,revision,updated_at) " +
+                "VALUES($raw,$state,1,$updated);";
             command.Parameters.AddWithValue("$raw", rawRecordId);
-            command.Parameters.AddWithValue("$received", Timestamp(receivedAt));
-            command.Parameters.AddWithValue("$trace", TraceId);
-            command.Parameters.AddWithValue("$projected", Timestamp(receivedAt));
+            command.Parameters.AddWithValue("$state", state);
+            command.Parameters.AddWithValue("$updated", Timestamp(Now.AddMinutes(1)));
             command.ExecuteNonQuery();
-            return rawRecordId;
+        }
+
+        public void CorruptProjectionDisposition(long rawRecordId, string state)
+        {
+            using var connection = Open();
+            using (var constraints = connection.CreateCommand())
+            {
+                constraints.CommandText = "PRAGMA ignore_check_constraints=ON;";
+                constraints.ExecuteNonQuery();
+            }
+
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "UPDATE monitor_projection_dispositions SET state=$state WHERE raw_record_id=$raw;";
+            command.Parameters.AddWithValue("$state", state);
+            command.Parameters.AddWithValue("$raw", rawRecordId);
+            Assert.Equal(1, command.ExecuteNonQuery());
         }
 
         public void Dispose()

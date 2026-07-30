@@ -151,6 +151,10 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
               AND name NOT LIKE 'monitor_skill_%'
               AND name NOT LIKE 'IX_monitor_skill_%'
               AND tbl_name NOT LIKE 'monitor_skill_%'
+              AND name NOT IN (
+                  'source_trace_attribution_observations',
+                  'IX_source_trace_attribution_observations_trace_id',
+                  'source_trace_attribution_reconciliation_queue')
             ORDER BY type,name;
             """;
         using var reader = objects.ExecuteReader();

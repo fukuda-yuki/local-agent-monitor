@@ -457,7 +457,9 @@ internal sealed class ClaudeDoctorFactCollector
             {
                 return UnreadableWindow;
             }
-            var records = eligible.Select(item => new WindowRecord(item.Id, item.ReceivedAt, rawById[item.Id].PayloadJson)).ToArray();
+            var records = eligible
+                .Select(item => new WindowRecord(item.Id, item.ReceivedAt, rawById[item.Id].PayloadJson))
+                .ToArray();
             var accepted = records.Length != 0;
             var rejected = ReadRejectedIngestExists(connection, verification);
             var raw = candidates.Any(candidate => candidate.EvidenceKind == DoctorEvidenceKind.RawPersistence);
@@ -473,7 +475,7 @@ internal sealed class ClaudeDoctorFactCollector
                 rejected,
                 raw,
                 projection,
-                projection ? ClaudeProjectionEvidence.NotStarted : ReadProjectionEvidence(connection, records, candidates),
+                raw ? ReadProjectionEvidence(rawStore, records, candidates) : ClaudeProjectionEvidence.NotStarted,
                 bindingCandidates.Length != 0,
                 completeness,
                 content);
@@ -569,8 +571,8 @@ internal sealed class ClaudeDoctorFactCollector
         return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
-    private ClaudeProjectionEvidence ReadProjectionEvidence(
-        SqliteConnection connection,
+    private static ClaudeProjectionEvidence ReadProjectionEvidence(
+        RawTelemetryStore rawStore,
         IReadOnlyList<WindowRecord> records,
         IReadOnlyList<DoctorEvidenceCandidate> candidates)
     {
@@ -586,71 +588,38 @@ internal sealed class ClaudeDoctorFactCollector
         var selected = records
             .Where(record => ContainsCandidateIdentity(record.PayloadJson, rawCandidates))
             .ToArray();
-        if (selected.Length == 0)
-        {
-            selected = records.ToArray();
-        }
 
-        var evidence = selected.Select(record => ReadRecordProjectionEvidence(connection, record)).ToArray();
+        var evidence = selected
+            .Select(record => ReadRecordProjectionEvidence(rawStore, record.Id))
+            .ToArray();
         return evidence.Any(item => item == ClaudeProjectionEvidence.Failed)
             ? ClaudeProjectionEvidence.Failed
             : evidence.Any(item => item == ClaudeProjectionEvidence.Pending)
                 ? ClaudeProjectionEvidence.Pending
-                : ClaudeProjectionEvidence.NotStarted;
+                : evidence.Any(item => item == ClaudeProjectionEvidence.NotStarted)
+                    ? ClaudeProjectionEvidence.NotStarted
+                    : ClaudeProjectionEvidence.Unknown;
     }
 
     private static ClaudeProjectionEvidence ReadRecordProjectionEvidence(
-        SqliteConnection connection,
-        WindowRecord record)
+        RawTelemetryStore rawStore,
+        long rawRecordId)
     {
-        if (!TableExists(connection, "monitor_ingestions"))
+        var disposition = rawStore.GetProjectionDisposition(rawRecordId);
+        if (disposition is null)
         {
-            return ClaudeProjectionEvidence.NotStarted;
+            return ClaudeProjectionEvidence.Unknown;
         }
 
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT span_projected_at FROM monitor_ingestions WHERE raw_record_id=$id;";
-        Add(command, "$id", record.Id);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
+        return disposition.State switch
         {
-            return CanBuildRecordProjection(record)
-                ? ClaudeProjectionEvidence.NotStarted
-                : ClaudeProjectionEvidence.Failed;
-        }
-
-        if (!reader.IsDBNull(0))
-        {
-            return ClaudeProjectionEvidence.NotStarted;
-        }
-
-        try
-        {
-            _ = MonitorSpanProjectionBuilder.Build(ToProjectionRecord(record));
-            return ClaudeProjectionEvidence.Pending;
-        }
-        catch (Exception)
-        {
-            return ClaudeProjectionEvidence.Failed;
-        }
+            ProjectionDispositionState.NotStarted => ClaudeProjectionEvidence.NotStarted,
+            ProjectionDispositionState.Pending => ClaudeProjectionEvidence.Pending,
+            ProjectionDispositionState.Failed => ClaudeProjectionEvidence.Failed,
+            ProjectionDispositionState.Completed => ClaudeProjectionEvidence.Unknown,
+            _ => throw new InvalidOperationException("The projection disposition state is invalid."),
+        };
     }
-
-    private static bool CanBuildRecordProjection(WindowRecord record)
-    {
-        try
-        {
-            _ = MonitorProjectionBuilder.Build(ToProjectionRecord(record));
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
-
-    private static RawTelemetryRecord ToProjectionRecord(WindowRecord record) =>
-        new(record.Id, RawTelemetrySources.RawOtlp, null, record.ReceivedAt,
-            null, OtlpJsonRecognizedPayloadBuilder.Build(record.PayloadJson));
 
     private (ClaudeBoundSessionCompleteness Completeness, ClaudeAgreedContentState Content) ReadBoundSession(
         SqliteConnection connection,
