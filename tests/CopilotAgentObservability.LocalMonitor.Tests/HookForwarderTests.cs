@@ -14,14 +14,17 @@ public sealed class HookForwarderTests
     [InlineData("UserPromptSubmit", "UserPromptSubmit")]
     [InlineData("PreToolUse", "PreToolUse")]
     [InlineData("PostToolUse", "PostToolUse")]
+    [InlineData("PostToolUseFailure", "PostToolUseFailure")]
+    [InlineData("PermissionRequest", "PermissionRequest")]
     [InlineData("SubagentStart", "SubagentStart")]
     [InlineData("SubagentStop", "SubagentStop")]
     [InlineData("Stop", "Stop")]
+    [InlineData("SessionEnd", "SessionEnd")]
     public async Task SupportedHookIsForwardedAsCanonicalV1Envelope(string hookName, string eventType)
     {
         var handler = new RecordingHandler(HttpStatusCode.NoContent);
         var payload = $$"""
-            {"session_id":"native-1","hook_event_name":"{{hookName}}","timestamp":"2026-07-11T01:02:03Z","source_surface":"copilot-cli","prompt":"hello"}
+            {"session_id":"native-1","hook_event_name":"{{hookName}}","timestamp":"2026-07-11T01:02:03Z","source_surface":"copilot-cli"}
             """;
 
         var result = await RunAsync(payload, handler: handler);
@@ -111,6 +114,22 @@ public sealed class HookForwarderTests
         Assert.Equal(0, result.ExitCode);
         Assert.Empty(result.StdOut);
         Assert.Empty(result.StdErr);
+        Assert.Null(handler.Request);
+    }
+
+    [Fact]
+    public async Task CopilotStopFailureFailsOpenSilentlyWithoutRequest()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunAsync(
+            "{\"session_id\":\"s\",\"hook_event_name\":\"StopFailure\"}",
+            handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(0, handler.Attempts);
         Assert.Null(handler.Request);
     }
 

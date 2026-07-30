@@ -1317,6 +1317,34 @@ edits them. Every successful CLI plan therefore includes
 `managed_policy_unverified`; its `effective_source` describes only the observed
 environment layer and is not a claim about the final managed effective value.
 
+The opt-in Local Monitor session Hook installer manages only
+`~/.copilot/hooks/local-agent-monitor.json` with the exact
+`managed_by=CopilotAgentObservability.LocalMonitor` marker. For GitHub Copilot
+CLI 1.0.65, its supported and managed Hook events are exactly these ten, in
+canonical order:
+
+```text
+SessionStart
+UserPromptSubmit
+PreToolUse
+PostToolUse
+PostToolUseFailure
+PermissionRequest
+SubagentStart
+SubagentStop
+Stop
+SessionEnd
+```
+
+A new install writes exactly those ten registrations. Repeating installation
+with the same inputs produces identical configuration bytes, and an existing
+managed seven-event configuration is replaced by the canonical ten-event
+configuration. An existing file without the exact ownership marker remains
+byte-for-byte unchanged and installation fails with
+`hook_config_exists_unmanaged`. `StopFailure` is excluded because it is a
+Claude Code event, not a GitHub Copilot CLI event; it remains valid only in the
+separate Claude Hook mapping below.
+
 ### GitHub Copilot App / SDK
 
 App/SDK configuration is caller-owned. Detection reports whether the current

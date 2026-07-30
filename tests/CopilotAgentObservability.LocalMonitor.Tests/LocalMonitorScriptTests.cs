@@ -1203,7 +1203,7 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
-    public void SessionHookInstallAndUninstallAreIdempotentInTemporaryHome()
+    public void SessionHookInstallWritesCanonicalDeterministicConfigurationAndUninstallsIdempotently()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -1216,22 +1216,46 @@ public class LocalMonitorScriptTests
                 ScriptPath("install-session-hooks.ps1"),
                 "-HomeDirectory", home,
                 "-InstallRoot", installRoot);
+            Assert.Equal(0, first.ExitCode);
+            var configPath = Path.Combine(home, ".copilot", "hooks", "local-agent-monitor.json");
+            var firstConfigurationBytes = File.ReadAllBytes(configPath);
+
             var second = RunPowerShellScript(
                 ScriptPath("install-session-hooks.ps1"),
                 "-HomeDirectory", home,
                 "-InstallRoot", installRoot);
 
-            Assert.Equal(0, first.ExitCode);
             Assert.Equal(0, second.ExitCode);
-            var configPath = Path.Combine(home, ".copilot", "hooks", "local-agent-monitor.json");
-            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            var secondConfigurationBytes = File.ReadAllBytes(configPath);
+            Assert.Equal(firstConfigurationBytes, secondConfigurationBytes);
+            using var document = JsonDocument.Parse(secondConfigurationBytes);
             Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
             Assert.Equal(
                 "CopilotAgentObservability.LocalMonitor",
                 document.RootElement.GetProperty("managed_by").GetString());
-            Assert.Equal(7, document.RootElement.GetProperty("hooks").EnumerateObject().Count());
-            Assert.Contains("hook-forward", document.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("command").GetString());
-            Assert.Equal(1, document.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("timeoutSec").GetInt32());
+            var hooks = document.RootElement.GetProperty("hooks");
+            Assert.Equal(
+                [
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "PostToolUseFailure",
+                    "PermissionRequest",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "Stop",
+                    "SessionEnd",
+                ],
+                hooks.EnumerateObject().Select(property => property.Name).ToArray());
+            Assert.False(hooks.TryGetProperty("StopFailure", out _));
+            foreach (var hook in hooks.EnumerateObject())
+            {
+                var registration = Assert.Single(hook.Value.EnumerateArray());
+                Assert.Equal("command", registration.GetProperty("type").GetString());
+                Assert.Contains("hook-forward", registration.GetProperty("command").GetString());
+                Assert.Equal(1, registration.GetProperty("timeoutSec").GetInt32());
+            }
 
             var uninstall = RunPowerShellScript(
                 ScriptPath("uninstall-session-hooks.ps1"),
@@ -1251,6 +1275,162 @@ public class LocalMonitorScriptTests
     }
 
     [Fact]
+    public void SessionHookInstallUpgradesManagedSevenEventConfigurationToCanonicalBytes()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var managedHome = Directory.CreateDirectory(Path.Combine(root, "managed-home")).FullName;
+            var managedHooks = Directory.CreateDirectory(Path.Combine(managedHome, ".copilot", "hooks")).FullName;
+            var managedConfigPath = Path.Combine(managedHooks, "local-agent-monitor.json");
+            File.WriteAllText(
+                managedConfigPath,
+                """
+                {
+                  "version": 1,
+                  "managed_by": "CopilotAgentObservability.LocalMonitor",
+                  "hooks": {
+                    "SessionStart": [],
+                    "UserPromptSubmit": [],
+                    "PreToolUse": [],
+                    "PostToolUse": [],
+                    "SubagentStart": [],
+                    "SubagentStop": [],
+                    "Stop": []
+                  }
+                }
+                """);
+            var freshHome = Directory.CreateDirectory(Path.Combine(root, "fresh-home")).FullName;
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var upgrade = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", managedHome,
+                "-InstallRoot", installRoot);
+            var freshInstall = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", freshHome,
+                "-InstallRoot", installRoot);
+
+            Assert.Equal(0, upgrade.ExitCode);
+            Assert.Equal(0, freshInstall.ExitCode);
+            var freshConfigPath = Path.Combine(freshHome, ".copilot", "hooks", "local-agent-monitor.json");
+            Assert.Equal(File.ReadAllBytes(freshConfigPath), File.ReadAllBytes(managedConfigPath));
+            using var upgraded = JsonDocument.Parse(File.ReadAllBytes(managedConfigPath));
+            Assert.Equal(
+                [
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "PostToolUseFailure",
+                    "PermissionRequest",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "Stop",
+                    "SessionEnd",
+                ],
+                upgraded.RootElement.GetProperty("hooks").EnumerateObject().Select(property => property.Name).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("\"copilotAgentObservability.LocalMonitor\"")]
+    [InlineData("[\"CopilotAgentObservability.LocalMonitor\"]")]
+    [InlineData("\"CopilotAgentObservability.Local\\u0000Monitor\"")]
+    public void SessionHookInstallRejectsInvalidOwnershipMarkerWithoutChangingBytes(string markerJson)
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var hooks = Directory.CreateDirectory(Path.Combine(home, ".copilot", "hooks")).FullName;
+            var configPath = Path.Combine(hooks, "local-agent-monitor.json");
+            var unmanaged = Encoding.UTF8.GetBytes(
+                $$"""
+                {
+                  "version": 1,
+                  "managed_by": {{markerJson}},
+                  "hooks": {}
+                }
+                """);
+            using var fixture = JsonDocument.Parse(unmanaged);
+            if (markerJson.Contains("\\u0000", StringComparison.Ordinal))
+            {
+                Assert.Contains("\\u0000", Encoding.UTF8.GetString(unmanaged), StringComparison.Ordinal);
+                Assert.Equal(
+                    "CopilotAgentObservability.Local\0Monitor",
+                    fixture.RootElement.GetProperty("managed_by").GetString());
+            }
+            File.WriteAllBytes(configPath, unmanaged);
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
+
+            var install = RunPowerShellScript(
+                ScriptPath("install-session-hooks.ps1"),
+                "-HomeDirectory", home,
+                "-InstallRoot", installRoot);
+
+            Assert.NotEqual(0, install.ExitCode);
+            Assert.Contains("hook_config_exists_unmanaged", install.Error, StringComparison.Ordinal);
+            Assert.Equal(unmanaged, File.ReadAllBytes(configPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("\"copilotAgentObservability.LocalMonitor\"")]
+    [InlineData("[\"CopilotAgentObservability.LocalMonitor\"]")]
+    [InlineData("\"CopilotAgentObservability.Local\\u0000Monitor\"")]
+    public void SessionHookUninstallRejectsInvalidOwnershipMarkerWithoutChangingBytes(string markerJson)
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
+            var hooks = Directory.CreateDirectory(Path.Combine(home, ".copilot", "hooks")).FullName;
+            var configPath = Path.Combine(hooks, "local-agent-monitor.json");
+            var unmanaged = Encoding.UTF8.GetBytes(
+                $$"""
+                {
+                  "version": 1,
+                  "managed_by": {{markerJson}},
+                  "hooks": {}
+                }
+                """);
+            using var fixture = JsonDocument.Parse(unmanaged);
+            if (markerJson.Contains("\\u0000", StringComparison.Ordinal))
+            {
+                Assert.Contains("\\u0000", Encoding.UTF8.GetString(unmanaged), StringComparison.Ordinal);
+                Assert.Equal(
+                    "CopilotAgentObservability.Local\0Monitor",
+                    fixture.RootElement.GetProperty("managed_by").GetString());
+            }
+            File.WriteAllBytes(configPath, unmanaged);
+
+            var uninstall = RunPowerShellScript(
+                ScriptPath("uninstall-session-hooks.ps1"),
+                "-HomeDirectory", home);
+
+            Assert.NotEqual(0, uninstall.ExitCode);
+            Assert.Contains("hook_config_exists_unmanaged", uninstall.Error, StringComparison.Ordinal);
+            Assert.Equal(unmanaged, File.ReadAllBytes(configPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SessionHookScriptsNeverOverwriteOrDeleteUnmanagedFile()
     {
         var root = CreateTemporaryDirectory();
@@ -1259,8 +1439,8 @@ public class LocalMonitorScriptTests
             var home = Directory.CreateDirectory(Path.Combine(root, "home")).FullName;
             var hooks = Directory.CreateDirectory(Path.Combine(home, ".copilot", "hooks")).FullName;
             var configPath = Path.Combine(hooks, "local-agent-monitor.json");
-            const string unmanaged = "{\"version\":1,\"hooks\":{}}";
-            File.WriteAllText(configPath, unmanaged);
+            var unmanaged = Encoding.UTF8.GetBytes("{\r\n  \"version\": 1,\r\n  \"hooks\": {}\r\n}\r\n");
+            File.WriteAllBytes(configPath, unmanaged);
             var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
             File.WriteAllText(Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe"), string.Empty);
 
@@ -1268,15 +1448,17 @@ public class LocalMonitorScriptTests
                 ScriptPath("install-session-hooks.ps1"),
                 "-HomeDirectory", home,
                 "-InstallRoot", installRoot);
+            Assert.NotEqual(0, install.ExitCode);
+            Assert.Contains("hook_config_exists_unmanaged", install.Error, StringComparison.Ordinal);
+            Assert.Equal(unmanaged, File.ReadAllBytes(configPath));
+
             var uninstall = RunPowerShellScript(
                 ScriptPath("uninstall-session-hooks.ps1"),
                 "-HomeDirectory", home);
 
-            Assert.NotEqual(0, install.ExitCode);
-            Assert.Contains("hook_config_exists_unmanaged", install.Error, StringComparison.Ordinal);
             Assert.NotEqual(0, uninstall.ExitCode);
             Assert.Contains("hook_config_exists_unmanaged", uninstall.Error, StringComparison.Ordinal);
-            Assert.Equal(unmanaged, File.ReadAllText(configPath));
+            Assert.Equal(unmanaged, File.ReadAllBytes(configPath));
         }
         finally
         {
