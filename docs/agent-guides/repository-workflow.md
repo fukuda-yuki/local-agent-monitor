@@ -1,33 +1,92 @@
 # Repository Workflow Guidance
 
-This guide contains detailed repository workflow rules for coding agents.
-It is repository guidance, not product behavior.
+This guide owns the detailed workflow for coding agents in this repository. It is repository guidance, not product behavior.
 
-Keep `AGENTS.md` short and practical. Codex loads `AGENTS.md` automatically, so it should carry the durable instructions needed at the start of every task. Put detailed task-specific procedures here or in nearby agent guides, and read them when the task needs that detail.
+Keep feature-specific contracts, smoke procedures, and Issue history with the owning specification, script README, test project, or sprint record. Do not copy them into this general guide.
 
-## Codex Guidance Surfaces
+## Working Order
 
-- `AGENTS.md` is the durable natural-language instruction file for this repository. Nested `AGENTS.md` or `AGENTS.override.md` files can add more specific guidance closer to the working directory.
-- `.codex/rules/*.rules` is not a natural-language instruction surface. Codex rules control which commands may run outside the sandbox; they are for command policy, not review, workflow, or product guidance.
-- Alternate instruction filenames are ignored unless configured through `project_doc_fallback_filenames`.
-- If `AGENTS.md` grows too large, keep the main file concise and reference task-specific Markdown files such as this guide, `docs/agent-guides/review-workflow.md`, or architecture notes.
-- Add ecosystem commands such as `npm test` or `pytest -v` only when the repository contains the matching project manifest or current specification.
-- Prefer commands with concrete flags and paths so agents can run the right checks without guessing.
+Start with the smallest context that can establish the affected contract.
 
-These rules follow the official Codex distinction between `AGENTS.md` guidance, configuration, and command execution rules.
-They also reflect common agent-maintenance practice: keep the always-loaded instruction file short, put commands early, include flags and paths, and move rarely used detail to referenced guides.
+Always inspect:
 
-## Do Not Rule Shape
+1. The user's latest request and the active work item, including its current body and newest accepted Product Owner decision.
+2. The narrowest current specification that owns the affected behavior; when current sources conflict, retain the precedence in `AGENTS.md`:
+   - `docs/requirements.md` for product-wide requirements;
+   - `docs/spec.md` for cross-cutting product contracts;
+   - the relevant file under `docs/specifications/` for an interface, layer, or bounded contract.
+3. The target code and its nearest tests.
 
-Keep prohibitions short, concrete, and testable.
-Prefer "Do not commit secrets" over broad statements like "Be careful with security."
-If a prohibition needs nuance, put the short rule in `AGENTS.md` and keep the nuance in this guide or the relevant specification.
+Inspect only when the task affects them:
 
-## Repository Commands
+- `docs/architecture.md` or `docs/decisions.md` for architecture, policy, security, or data-boundary changes;
+- `docs/task.md` for roadmap or status changes;
+- user guides for user-workflow changes;
+- sprint material for historical rationale or evidence, following `docs/agent-guides/sprint-history.md`.
 
-Run these commands from the repository root.
+Do not read all canonical documents or all sprint material by default.
+If task authority and a current specification disagree, report the conflict before editing. When the user's latest explicit decision resolves the conflict, update the owning specification before or together with the implementation. Otherwise stop for a product decision.
 
-Standard validation for code, project file, CLI behavior, or workflow changes:
+## Autonomy And Confirmation
+
+For review, diagnosis, planning, or explanation requests, inspect and report without editing unless the user also requests changes.
+
+For implementation or fix requests, make the requested in-scope local changes and run relevant non-destructive validation without asking again.
+
+Stop before proceeding only when the task would:
+
+- perform a remote write that the user has not explicitly authorized for the exact target;
+- make a destructive or irreversible change;
+- add or update a runtime or development dependency or lockfile without explicit authority;
+- materially expand the requested scope;
+- require an unresolved product or specification decision.
+
+Minor, reversible, in-scope local edits do not require confirmation.
+
+## Simplicity And Change Scope
+
+Implement the smallest coherent change that satisfies the current request and contract.
+
+- Do not add features beyond the request.
+- Do not create abstractions for one use.
+- Do not add flexibility, configurability, alternate workflows, or impossible-scenario handling without a current requirement.
+- Do not refactor, reformat, or clean up adjacent code outside the task.
+- Match existing local style and patterns.
+- Remove only imports, variables, functions, documentation, or tests made obsolete by the current change.
+- Mention unrelated defects or dead code instead of fixing them without authority.
+- Every changed line must trace to the request, the affected contract, or required validation.
+
+If a change is materially larger than the problem, reduce it before continuing.
+
+## Goal-Driven Execution
+
+Define observable completion criteria before editing. For a multi-step task, use a brief plan that pairs each step with its verification.
+Do not broaden ambiguous wording into speculative product behavior. Resolve scope from the active work item and current specification; if they cannot resolve it, state the minimum explicit assumption or stop for the missing decision.
+
+## Impact-Based Validation
+
+Validation must match the changed surface. Start narrow and expand only when the affected contract or acceptance criteria require it.
+
+### 1. During iteration
+
+Run the nearest targeted test or check for the behavior being changed.
+
+```powershell
+dotnet test <test-project.csproj> --filter FullyQualifiedName~<test-or-class>
+```
+
+### 2. Before completion
+
+Validate the affected project or contract boundary:
+
+- documentation-only changes: inspect the rendered Markdown or diff, paths, and references; no build is required unless the documentation change is generated or executable;
+- local implementation changes: build or test the affected project and run nearby regression tests;
+- shared libraries, public interfaces, schemas, storage, serialization, or cross-process contracts: run all affected project and contract tests;
+- Razor Pages or browser behavior: run the affected browser-facing tests and install Playwright when those tests require it.
+
+### 3. Full integration validation
+
+Run the full solution validation only when the change is broad or integration-sensitive, the active acceptance criteria require it, or the work is being integrated, released, or closed as a cross-cutting item.
 
 ```powershell
 dotnet build CopilotAgentObservability.slnx
@@ -35,269 +94,53 @@ pwsh scripts\test\install-playwright-chromium.ps1
 dotnet test CopilotAgentObservability.slnx
 ```
 
-The Playwright install runs after build because `playwright.ps1` is generated
-under the LocalMonitor test output directory. The wrapper sets
-`PLAYWRIGHT_BROWSERS_PATH` to `artifacts\playwright-browsers` when unset so the
-cache and lock directory stay inside the writable repository workspace. Linux CI
-uses the same script with `-WithDeps`.
+The Playwright wrapper sets `PLAYWRIGHT_BROWSERS_PATH` to `artifacts\playwright-browsers` when unset. On Linux CI, pass `-WithDeps`.
+Do not install Playwright or run the full solution by default for an unrelated documentation or bounded implementation change.
 
-Targeted test example while iterating:
+Use component-owned specifications, scripts, READMEs, and test projects for feature-specific validation. This guide intentionally contains no feature- or Issue-specific smoke procedure.
 
-```powershell
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~<test-or-class>
-```
+Keep automated tests deterministic and isolate external services, network access, and live machine state. Do not use network-dependent validation as the only proof of correctness. Follow the fixture and data-safety rules in `AGENTS.md`.
 
-Collector example validation:
+If a required command fails, is skipped, or cannot run:
 
-```powershell
-$env:LANGFUSE_AUTH="dummy"
-docker compose -f infra\otel-collector\docker-compose.example.yml config
-```
+- do not treat a different command as equivalent success;
+- use diagnostic commands only as additional evidence, not substitution;
+- report the exact failed or unavailable command, the result, and the remaining unverified scope.
 
-Representative CLI smoke checks may use synthetic fixtures, for example:
+## Blockers, Fallbacks, And Compatibility
 
-```powershell
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- normalize-raw tests\CopilotAgentObservability.ConfigCli.Tests\TestData\raw-otlp.synthetic.json --json tmp\dashboard-demo\measurements.json
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-dashboard-dataset tmp\dashboard-demo\measurements.json --raw tests\CopilotAgentObservability.ConfigCli.Tests\TestData\raw-otlp.synthetic.json --json tmp\dashboard-demo\dashboard.json
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- generate-static-dashboard tmp\dashboard-demo\dashboard.json --out-dir tmp\dashboard-demo\site
-```
+Use the path, command, schema, source, tool, and validation procedure specified by the request or current source of truth.
+If it is unavailable, name the exact blocker instead of silently switching routes.
 
-Guided setup smoke checks use the byte-faithful repository wrapper. Preserve the
-`change_set_id` returned by `plan` when exercising the mutating verbs:
+Do not add fallback behavior, compatibility shims, dual paths, migration layers, alternate parsers, permissive parsing, default fallbacks, or silent retry paths unless the current contract or the user's explicit instruction requires them.
 
-```powershell
-pwsh scripts\local-monitor\setup.ps1 plan --adapter github-copilot --target all
-pwsh scripts\local-monitor\setup.ps1 apply --change-set <change-set-id>
-pwsh scripts\local-monitor\setup.ps1 status --adapter github-copilot
-pwsh scripts\local-monitor\setup.ps1 rollback --change-set <change-set-id>
-```
-
-Each recognized setup verb returns one `setup.v1` object on stdout. The wrapper
-preserves Config CLI stdout bytes and exit code. Subprocess wrapper evidence is
-limited to pre-dispatch invalid-input byte and exit-code parity. Do not use a
-child `LOCALAPPDATA` value to isolate successful setup/status storage: the
-production platform resolves its root through `Environment.GetFolderPath` and
-has no setup-specific environment override. Successful status/storage and the
-real #66→#67 composition belong to executable in-process production
-composition with an injected trusted platform. Release validation must invoke
-the packaged `scripts/setup.ps1` with `dotnet` unavailable on child `PATH`; that
-proves packaged-executable selection, not isolated status/storage behavior.
-Static setup success does not prove telemetry receipt. For the Claude adapter,
-a successful changed CLI apply emits `restart_claude_process` followed by
-`run_first_trace_doctor`, which hands the user to
-`first-trace begin --adapter claude-code`; it is guidance, not telemetry
-evidence. Already-correct no-op applies and rollback do not emit that changed-
-apply handoff. GitHub Copilot setup retains its existing first-trace ownership
-and does not emit the Claude-specific handoff.
-
-Focused Doctor validation uses the three owning test projects:
-
-```powershell
-dotnet test tests\CopilotAgentObservability.Doctor.Tests\CopilotAgentObservability.Doctor.Tests.csproj
-dotnet test tests\CopilotAgentObservability.ConfigCli.Tests\CopilotAgentObservability.ConfigCli.Tests.csproj --filter FullyQualifiedName~Doctor
-dotnet test tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj --filter FullyQualifiedName~Doctor
-```
-
-A repository-root CLI smoke can exercise stateless evaluation plus the public
-start/status/cancel lifecycle without a source-specific candidate producer:
-
-```powershell
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor evaluate --input tests\CopilotAgentObservability.Doctor.Tests\TestData\monitor-not-running.facts.json --json
-# The valid non-ready fixture intentionally returns exit 3.
-
-$doctorDirectory = Join-Path $PWD 'tmp\doctor-smoke'
-New-Item -ItemType Directory -Force $doctorDirectory | Out-Null
-$doctorDatabase = Join-Path $doctorDirectory 'doctor.db'
-$expiresAt = [DateTimeOffset]::UtcNow.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'")
-$startJson = dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification start --database $doctorDatabase --source-surface smoke-source --source-adapter smoke-adapter --expires-at $expiresAt --json
-if ($LASTEXITCODE -ne 0) { throw 'Doctor verification start failed.' }
-$start = $startJson | ConvertFrom-Json
-$verificationId = $start.verification.verification_id
-$revision = $start.verification.revision
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification status --database $doctorDatabase --verification-id $verificationId --json
-dotnet run --project src\CopilotAgentObservability.ConfigCli -- doctor verification cancel --database $doctorDatabase --verification-id $verificationId --expected-revision $revision --json
-```
-
-Issue #102 intentionally exposes no candidate observation command or route, so
-the generic smoke does not fabricate a successful complete operation. #103 and
-#104 own source-specific candidate producers; #105 owns the proxy/UI workflow.
-Setup success, evaluation success, or verification start does not prove receipt
-of a first real trace.
-
-For a Windows-safe prohibited-wait scan, expand the file list before invoking
-`rg`; do not pass unexpanded `Doctor*` path operands:
-
-```powershell
-$doctorFiles = @(rg --files src tests | Where-Object { $_ -match 'Doctor' })
-rg -n 'Thread\.Sleep|Task\.Delay|\bretry\b|\bpoll\b' -- $doctorFiles
-if ($LASTEXITCODE -eq 1) {
-    Write-Host 'No prohibited Doctor wait/retry usage found.'
-} elseif ($LASTEXITCODE -ne 0) {
-    throw "Doctor wait/retry scan failed with exit code $LASTEXITCODE."
-}
-```
-
-For the complete Config CLI surface, use `docs/specifications/interfaces/config-cli.md` and the user guides.
-
-## Working Order
-
-Before changing code, repository guidance, or project documents, inspect context in this order:
-
-1. `docs/requirements.md`.
-2. `docs/spec.md`.
-3. The relevant `docs/specifications/` file.
-4. `docs/architecture.md` and `docs/decisions.md` when architecture or policy may be affected.
-5. `docs/task.md` for roadmap and historical status.
-6. The target file to understand current structure, style, and local conventions.
-7. Historical sprint material only when a prior decision or evidence trail is needed.
-
-For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemetry-ingestion.md` and `docs/architecture.md`.
-
-## Confirmation Policy
-
-Ask before proceeding when the task would:
-
-- make an irreversible change;
-- change product behavior, public interfaces, input/output formats, or security policy;
-- add runtime or development dependencies;
-- conflict with `docs/requirements.md`, `docs/spec.md`, or `docs/specifications/`;
-- require a product/spec decision missing from the current specifications;
-- require creating a preserved review note when the active work item is unclear.
-
-Do not stop unnecessarily for minor, reversible, local edits.
-
-## Think Before Coding
-
-Do not assume. Do not hide confusion. Surface tradeoffs.
-
-Before implementing:
-
-- State assumptions explicitly when they affect the work.
-- If multiple interpretations exist, present them instead of choosing silently.
-- If a simpler approach exists, say so.
-- Push back when the request is risky, unclear, or inconsistent with the source of truth.
-
-## Simplicity First
-
-Minimum code that solves the problem. Nothing speculative.
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No flexibility, configurability, or new workflow unless requested or required by the current specifications.
-- No error handling for impossible scenarios.
-- If a change is much larger than the problem, simplify it.
-
-Ask: "Would a senior engineer say this is overcomplicated?" If yes, rewrite.
-
-## Surgical Changes
-
-Touch only what you must. Clean up only your own mess.
-
-When editing:
-
-- Do not improve adjacent code, comments, formatting, or structure outside the task.
-- Do not refactor things that are not broken.
-- Match existing style, even if you would choose a different one.
-- If you notice unrelated dead code, mention it; do not delete it unless asked.
-
-When your changes create orphans:
-
-- Remove imports, variables, functions, docs, or tests made unused by your change.
-- Do not remove pre-existing dead code unless asked.
-
-Every changed line should trace directly to the user's request.
-
-## Goal-Driven Execution
-
-Define success criteria. Loop until verified.
-
-Transform tasks into verifiable goals:
-
-- "Add validation" -> "Write or identify checks for invalid inputs, then make them pass."
-- "Fix the bug" -> "Reproduce the bug, then verify the fix."
-- "Refactor X" -> "Confirm behavior before and after using the relevant tests or checks."
-
-For multi-step tasks, state a brief plan when useful:
-
-```text
-1. [Step] -> verify: [check]
-2. [Step] -> verify: [check]
-3. [Step] -> verify: [check]
-```
-
-Weak success criteria such as "make it work" require clarification or an explicit assumption.
-
-## Tests And Validation
-
-- Derive test scope from `docs/requirements.md`, `docs/spec.md`, and the relevant `docs/specifications/` file.
-- Use small, synthetic or anonymized fixtures.
-- Do not commit secrets, real user data, confidential data, or generated runtime artifacts.
-- Check the changed behavior plus nearby edge cases and regression risks.
-- Keep automated tests deterministic; isolate external services, network, local machine state, and live services.
-- If behavior cannot be automatically verified, document the live check procedure and required evidence.
-- Use commands defined by the current specifications, project files, or existing repository scripts.
-- If required tools are missing, report the missing tool and the command that should have been run.
-- Use the command set in this guide early when planning, iterating, and reporting validation.
-
-## Failure And Non-Substitution Policy
-
-- If a required command fails, is skipped, or cannot run because a tool is missing, do not treat a different command as an equivalent success.
-- Diagnostic commands may be useful follow-up evidence, but they do not replace the required validation command.
-- Do not substitute a different workflow when it changes what is being verified.
-- In the final report, state the commands run, their result, any unverified scope, and the exact command still needed.
-
-## Fallbacks, Blockers, And Compatibility
-
-Use the path, command, schema, source, tool, and validation procedure specified by the user or the current source of truth.
-If the specified route is unavailable, stop and report the blocker instead of silently switching to a fallback.
-Name the missing condition precisely: missing tool, missing credential, unavailable service, failing command, unclear product decision, or absent spec.
-
-Do not add compatibility shims, dual behavior, migration layers, alternate parsers, permissive parsing, default fallbacks, or silent retry paths unless one of these is true:
-
-- the current source of truth requires compatibility;
-- the user explicitly asks for compatibility behavior;
-- the change is needed to preserve an existing documented public interface.
-
-When compatibility is required, keep it narrow and document the exact interface being preserved.
-When compatibility is not required, prefer one clear behavior and fail loudly on unsupported inputs.
-
-## Dependencies And Environment
-
-- Do not add runtime or development dependencies unless the current specifications require it or the user explicitly asks.
-- Do not update lockfiles as a side effect when dependency changes are out of scope.
-- Do not use network-dependent validation as the only proof of correctness.
+An existing documented public interface remains binding until the owning contract changes. When compatibility is required, keep it narrow and identify the exact interface being preserved. When an unreleased contract changes and no current specification requires retained data or behavior, update the single current path instead of adding migration or old/new modes.
 
 ## Project Document Updates
 
-Before finishing, update project documents when the task requires it:
+Update only the document that owns the changed information.
 
-- Update `docs/requirements.md`, `docs/spec.md`, and the relevant `docs/specifications/` file when product behavior or public interfaces change.
-- Update user-facing guides when the user workflow changes.
-- Update `docs/task.md` when roadmap or historical status changes.
-- Record reusable findings in the relevant specification or shared docs location.
-- Do not hide product specifications only in sprint notes or knowledge files.
-- If required documentation cannot be updated, do not claim completion. State the blocker and needed confirmation.
+- Update the relevant current specification when product behavior or a public contract changes.
+- Update `docs/requirements.md` or `docs/spec.md` only when their broader contract actually changes.
+- Update user-facing guides only when their explanation or workflow becomes incorrect.
+- Update `docs/task.md` only for roadmap or status changes.
+- Keep sprint notes historical; do not introduce current product behavior only there.
+- Do not duplicate the same normative rule across requirements, specifications, task records, sprint notes, and handoff files.
+
+If a required authoritative update cannot be made, do not claim the work complete. State the missing decision or authority.
 
 ## Subagent Requests
 
-Codex cannot assume autonomous access to subagents in every surface.
-Use subagents only when the user explicitly asks for subagent delegation and the active surface provides that capability.
-
-- When subagents are available, use the repository-local Mission Card guidance in `.agents/skills/codex-subagent-dispatch/SKILL.md`.
-- Do not pretend that delegation happened when no subagent capability is available.
-- If subagents are unavailable, continue in the main chat or provide a mission card the user can run elsewhere.
-- The main chat remains responsible for integration, validation, and final decisions.
+Use subagents only when the user explicitly requests delegation and the active surface supports it.
+When used, delegate only independent workstreams with explicit scope, file ownership, and success criteria.
+The primary agent remains responsible for shared-file coordination, integration, validation, and final decisions.
+Do not claim delegation when the active surface does not provide it.
 
 ## Git Rules
 
-Create local commits in small, coherent steps after validation and review are complete.
-Do not wait for an explicit user request when a completed, verified step can be committed cleanly.
-If the active work item is unclear, or the change mixes unrelated concerns, ask before committing.
+Create local commits in small, coherent steps after validation and review are complete. Do not wait for another request when a completed, verified step can be committed cleanly.
 
-Do not:
-
-- push branches or tags;
-- create, update, merge, or auto-merge pull requests;
-- rewrite remote history.
+Remote writes require explicit user authorization for the exact action and target. Without that authority, do not push or tag, create or update pull requests, merge, or move remote refs. Never rewrite remote history unless the user explicitly requests that exact destructive action.
 
 Commit messages must start with the active work item name and then follow Conventional Commits.
+For `feat`, `fix`, `refactor`, and `perf`, the body must record why the change was needed; see `docs/agent-guides/information-placement.md`.
