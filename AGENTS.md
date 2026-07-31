@@ -1,13 +1,9 @@
 # AGENTS.md
 
-These guidelines define how coding agents should work in this repository.
-They do not define product behavior.
-
 ## Language Rules
 
 - Write agent-facing materials and cross-agent shared materials in English.
 - Write user-facing responses in Japanese.
-- Keep product deliverables in the language and tone already used by the target document unless the user asks otherwise.
 
 ## Repository Commands
 
@@ -70,8 +66,10 @@ Use `docs/agent-guides/repository-workflow.md` for detailed working order, confi
 Before changing code, repository guidance, or project documents, inspect `docs/requirements.md`, `docs/spec.md`, the relevant `docs/specifications/` file, architecture/decision/task docs when applicable, and then the target file.
 For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemetry-ingestion.md` and `docs/architecture.md`.
 
-Ask before irreversible changes, product behavior or public interface changes, security policy changes, dependency additions, source-of-truth conflicts, missing spec decisions, or unclear preserved review records.
 Keep changes minimum, scoped, and traceable to the request.
+Do not preserve backward compatibility.
+Choose the simplest implementation that fully meets the current requirements.
+Prefer established, well-maintained libraries over custom implementations.
 
 ## Information Placement
 
@@ -86,24 +84,7 @@ Detail and examples: `docs/agent-guides/information-placement.md`.
 
 This repository's local tools (e.g. the Sprint8 Local Ingestion Monitor) target a
 single trusted local user who accepts same-machine exposure of their own data.
-Defend the risks that cross the machine boundary — remote / non-loopback access,
-other-origin browser-mediated exfiltration, and raw/PII leaking into logs or
-repository-committed artifacts — with low-cost controls: loopback bind,
-Host-header validation, CORS off, same-origin on the raw-detail route, CSRF on
-state-changing actions, no raw/PII in logs or repo.
-
-Do not over-engineer the display side. The monitor exists to show the user their
-own captured prompts/outputs, so do not add a heavy anti-XSS / CSP apparatus,
-payload sanitizers, or XSS payload-matrix tests for that display — rely on the UI
-framework's default output encoding (text, not live markup). The kept baseline is normal correct
-rendering: captured content is shown as escaped / inert text (framework default;
-no `Html.Raw`), so stored markup does not execute — that is not "over-defense".
-The accepted residual is only the absence of defense-in-depth on top of that
-escaping. Do not confuse this display de-scope with loosening genuine monitoring
-contracts: the readiness contract (default thresholds, units, config names, HTTP
-status mapping, machine-readable body) is the monitor's purpose and stays pinned.
-Detail: `docs/decisions.md` D020 and
-`docs/specifications/security-data-boundaries.md`.
+Do not over-engineer.
 
 ## Do Not
 
@@ -125,15 +106,11 @@ Derive test scope from `docs/requirements.md`, `docs/spec.md`, and the relevant 
 Use small synthetic or anonymized fixtures.
 
 If a required command fails, is skipped, or cannot run because a tool is missing, do not treat a different command as an equivalent success.
-Diagnostic commands may be useful follow-up evidence, but they do not replace required validation.
-In the final report, state commands run, results, unverified scope, and exact commands still needed.
-Do not use network-dependent validation as the only proof of correctness.
 
 ## Fallbacks And Compatibility
 
 Use the path, command, schema, source, tool, and validation procedure specified by the user or the current source of truth.
 If it is unavailable, stop and report the blocker instead of silently switching.
-Preserve compatibility only where `docs/requirements.md`, `docs/spec.md`, or `docs/specifications/` require it, or the user explicitly asks for it.
 
 ## Codex Guidance Files
 
@@ -142,16 +119,9 @@ Keep it short and practical; put detailed procedures in `docs/agent-guides/` and
 
 `.codex/rules/*.rules` is for command execution policy outside the sandbox, not for natural-language workflow guidance.
 
-## Subagent Requests
-
-Use subagents only when the user explicitly asks for subagent delegation and the active surface provides that capability.
-When subagents are available, use `.agents/skills/codex-subagent-dispatch/SKILL.md`.
-Otherwise continue in the main chat or provide a mission card the user can run elsewhere.
-
 ## Review Workflow
 
 Use `docs/agent-guides/review-workflow.md` for review depth, self-review expectations, preserved review records, and subagent-independent review practice.
-Documentation-only, typo-only, formatting-only, or other minor reversible changes can use a recorded self-review.
 
 ## Project Document Updates
 
@@ -163,11 +133,6 @@ Update `docs/task.md` when roadmap or historical status changes.
 
 Create local commits in small, coherent steps after validation and review are complete.
 Do not wait for an explicit user request when a completed, verified step can be committed cleanly.
-If the active work item is unclear, or the change mixes unrelated concerns, ask before committing.
 
 Commit messages must start with the active work item name and then follow Conventional Commits.
 For `feat`, `fix`, `refactor`, and `perf` commits, the body must record why the change was needed (see `docs/agent-guides/information-placement.md`).
-
----
-
-These guidelines are working if diffs contain fewer unnecessary changes, implementations need fewer rewrites due to overcomplication, and clarifying questions happen before mistakes rather than after them.
