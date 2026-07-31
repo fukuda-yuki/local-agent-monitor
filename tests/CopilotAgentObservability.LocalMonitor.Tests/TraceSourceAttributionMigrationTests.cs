@@ -502,6 +502,8 @@ public sealed class TraceSourceAttributionMigrationTests
             DROP TABLE source_trace_version_interpretation_heads;
             DROP TABLE source_trace_version_interpretation_supersessions;
             DROP TABLE source_trace_compatibility_revisions;
+            DROP TRIGGER IF EXISTS source_schema_observations_insert_no_replace;
+            DROP TRIGGER IF EXISTS source_trace_version_observations_insert_no_replace;
             DROP TRIGGER source_trace_version_observations_update_rejected;
             DROP TRIGGER source_trace_version_observations_delete_rejected;
             DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
