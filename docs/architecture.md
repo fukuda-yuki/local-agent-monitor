@@ -41,6 +41,31 @@ Session sanitized events -----------------> timeline as Session / unowned
 This path does not replace or alter the OTLP receiver and existing monitor
 projection.
 
+Issue #154 separates immutable source-version observation from current
+interpretation and current Skill claims. OTel and SDK enter the same claim/read
+authority through different predicates:
+
+```text
+validated retained OTel input
+  -> immutable trace-version observation
+  -> SourceCompatibilityReconciler (decoder/registry revision only)
+  -> append-only interpretation head + trace compatibility revision
+  -> exact OTel Skill generation/frontier/queue
+  -> Retention-fenced worker
+
+exact SDK Session/Event + full compatibility tuple
+  -> independent SDK claim subspace (no trace generation)
+
+OTel current claim + SDK current claim
+  -> single current-valid Skill read service
+  -> merge only on exact producer trace ID + span ID
+```
+
+Ordinary validated OTel ingestion and the reconciler call the same
+transaction-aware generation participant. The worker cannot discover a
+different raw set at run time, and a raw Skill snapshot cannot become claim
+authority.
+
 Issue #79 adds a separate historical-observation path:
 
 ```text
@@ -254,6 +279,35 @@ to Config CLI and no new Local Monitor route.
 - raw content は secret-filter 後に metadata と分離して保存し、capture から
   90 日で expiry。Retention catalog v1 が item-level physical cleanup を所有し、
   pin / delete-now は Issue #90 に残す。
+
+### Source Compatibility Reconciliation And Skill Projection
+
+- `source_trace_version_observations` remains immutable. The sole
+  `SourceCompatibilityReconciler` appends exact interpretation revisions and
+  updates heads; it offers no HTTP/manual repair surface.
+- These objects advance the Monitor source-compatibility owner from exact v10
+  to v11; `skill_projection:1` remains independent. Its OTel generation stores
+  only the trace revision it consumed, and its SDK claim subspace stores no
+  trace revision.
+- Effective trace aggregation remains fail-closed:
+  conflicting/multiple token, then unrecognised, then all-resolved-one-token,
+  then missing. A separate resolved observation does not hide missing.
+- `skill_projection:1` independently owns OTel generations, ordered input
+  frontiers, queue/lease state, current pointers and sanitized rows, plus the
+  non-generation-bound exact SDK Session/Event claim subspace. It is not a
+  second raw store or Retention owner.
+- An OTel compatibility or eligible-frontier change invalidates current OTel
+  claims and schedules one generation in the same SQLite transaction. OTel
+  publication rechecks all revision/frontier/projector/queue/Retention fences.
+- SDK current validity uses the complete exact
+  source-application/adapter/normalization/payload-schema/fingerprint registry
+  tuple. Cross-arm merge requires exact producer trace and span IDs; #158 still
+  owns and must fix the SDK wire writer and accepted registry seed.
+- The pre-release Skill tables are destructively retired without old-row
+  backfill or deletion of unrelated Session/raw/Retention data.
+- Canonical details are
+  [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
+  and [Skill projection](specifications/layers/skill-projection.md).
 
 ### Historical Import Subsystem
 
@@ -625,6 +679,24 @@ Canvas capture begins at first open. Missed earlier events are not reconstructed
 and lower completeness. Ephemeral usage is aggregated; reasoning and deltas are
 not persisted. OTel enrichment runs after existing projection and leaves the
 OTLP receiver, trace/span schema, and readiness contract unchanged.
+
+### OTel Skill Projection Reconciliation Loop
+
+```text
+ordinary exact ingest or accepted interpretation revision
+  -> one atomic compatibility/frontier generation participant
+  -> immediate current OTel-claim invalidation
+  -> persisted exact generation frontier + queue
+  -> composite Retention operation lease
+  -> fenced deterministic publish
+  -> current-valid OTel Skill claim read
+```
+
+An unresolved trace produces no current OTel claim. An
+expired/deleted/read-denied frontier becomes `input_unavailable`; it is not
+shortened or converted to an empty successful projection. Independent SDK
+claims join the same read authority through the arm predicate described above,
+not through this loop.
 
 ### Local Monitor v1 Investigation Loop
 

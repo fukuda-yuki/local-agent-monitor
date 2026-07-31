@@ -68,7 +68,7 @@ state; `node` resolves its exact execution and `analysis` never names a mutable
 contract from the IA. Draft cohort checkboxes remain transient until the server
 creates an opaque comparison snapshot ID.
 
-`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository reads are owned by #155/#156, Workspace reads by #133/#134, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository reads are owned by #155/#156, Workspace reads by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
 
 Old human-route disposition is exact: `/` changes from Overview to Repository selection; `/traces` retires when Session Explorer ships; `/traces/{traceId}` remains low-level technical evidence; raw record/span/event routes remain focused technical evidence; `/historical-analysis` retires when #164 integrates its backend into Repository-local AI while `/api/historical-analysis/v1/*` remains frozen; diagnostics, historical import, backup/restore and retention remain focused detail flows opened from Settings. No indefinite redirect, dual page path or permissive fallback is added.
 
@@ -981,6 +981,37 @@ batch-level source-version label and distinguishes resolved, missing,
 conflicting, and unrecognised states. No unresolved state falls back to the
 batch label.
 
+Issue #154 keeps those base trace-version observations immutable and adds
+append-only exact interpretation revisions. Only
+`SourceCompatibilityReconciler` may append one, from either decoder replay of
+the same retained bytes or registry recognition of an already retained token.
+`missing + resolved` remains missing unless the exact missing base observation
+is superseded. A semantic change atomically advances the trace compatibility
+revision, invalidates any current OTel Skill claim, persists one exact ordered
+input frontier/generation/queue row and records its idempotency receipt.
+These source-compatibility objects advance the Monitor component from exact v10
+to v11; `skill_projection:1` remains a separate component and holds no duplicate
+current-revision authority.
+
+The independent `skill_projection:1` component is the single current-valid
+Skill claim authority. Its OTel arm reruns only its persisted trace frontier
+under Retention operation leases and publishes only after revision, resolved
+state, desired generation, frontier, projector version, queue lease and
+Retention leases still match. Its independent SDK Session/Event claim subspace
+has no trace-generation dependency: current validity requires exact local
+Session/Event/source identity plus exact application, adapter, normalization,
+payload-schema and schema-fingerprint tuple acceptance by the current registry.
+The arms merge only when producer trace ID and span ID both exactly match; an
+unlinked same-Session pair is not added and yields `null` count with
+`certification_pending`. The obsolete pre-release Skill rows are discarded
+without copy, backfill, dual readers or deletion of unrelated
+Session/raw/Retention data. #158 must still pin and implement its wire writer
+and accepted registry seed before SDK claim admission is available.
+Canonical details are
+[source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
+and [Skill projection](specifications/layers/skill-projection.md). Issue #152
+unknown attribute-key drift remains unresolved.
+
 Monitor schema v10 adds a private per-raw-record/per-trace source-attribution
 evidence authority and a durable trace reconciliation queue. The shared
 trace-scoped resolver recognizes only the four exact mappings pinned in the
@@ -1021,6 +1052,8 @@ sanitized. The canonical contract is
 | --- | --- |
 | 実装仕様入口 | [specifications/README.md](specifications/README.md) |
 | Telemetry ingestion | [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) |
+| Source compatibility reconciliation | [specifications/layers/source-compatibility-reconciliation.md](specifications/layers/source-compatibility-reconciliation.md) |
+| Skill projection | [specifications/layers/skill-projection.md](specifications/layers/skill-projection.md) |
 | Raw store and normalization | [specifications/layers/raw-store-normalization.md](specifications/layers/raw-store-normalization.md) |
 | Candidate pipeline | [specifications/layers/candidate-pipeline.md](specifications/layers/candidate-pipeline.md) |
 | Dashboard publishing | [specifications/layers/dashboard-publishing.md](specifications/layers/dashboard-publishing.md) |

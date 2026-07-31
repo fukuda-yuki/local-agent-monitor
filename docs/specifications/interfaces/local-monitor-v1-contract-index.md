@@ -10,7 +10,8 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | IA/routes/layout/states | `docs/specifications/interfaces/local-monitor-v1-ia.md`, #132 | #135–#140, #145–#146, #167 |
 | Source claims/missing semantics | #129 | #137 and feature owners |
 | Repository catalog/locator/assignment | #155 | #156 |
-| Skill projection validity/re-run | #154 | #154 |
+| Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
+| Skill projection validity/re-run | [`skill-projection.md`](../layers/skill-projection.md), #154 | #154 |
 | Skill body/path snapshot/current file | #157 | #158 |
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | #160 | #161 |
@@ -59,4 +60,8 @@ telemetry fixes / #154
 - AI can interpret accepted snapshots but cannot recalculate Compare facts or explore outside scope.
 - Archive is not deletion, retention or pin.
 - Historical Skill snapshot is not the current file.
+- A raw Skill snapshot cannot create or resurrect a stale/invalid invocation
+  claim; the single #154 read authority checks OTel claims against current
+  resolved trace generation and SDK claims against their exact current-registry
+  tuple without requiring trace/span.
 - Sentence-level wording may change under #169 without changing contracts, routes or structured selectors.

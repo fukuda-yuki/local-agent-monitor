@@ -224,9 +224,20 @@ byte-preserving v1-to-v2 migration; exact v2 is validated. It then ensures
 capture. A partial/malformed/future engine or pricing-without-engine vector is
 rejected, not repaired.
 Declared Monitor v10 additionally requires the source-attribution evidence
-authority and durable reconciliation queue minimum shapes. The online snapshot,
-manifest table counts, inspection, preview, and restore preserve every pending
-queue row; backup never consumes reconciliation work.
+authority and durable reconciliation queue minimum shapes. Issue #154 advances
+the current Monitor component to v11. Exact v10 is its only supported
+predecessor; v11 additionally requires the append-only interpretation
+supersession/head/current-revision/receipt authority and base-observation
+update/delete/parent-cascade guards. The online snapshot, manifest table
+counts, inspection, preview, and restore preserve every pending source and
+Skill queue row; backup never consumes reconciliation work.
+Issue #154 additionally includes immutable trace-version base observations,
+interpretation supersession ledger/heads, trace compatibility revisions and
+the complete independent `skill_projection:1` namespace. A captured Skill
+queue lease is data, not permission to resume as the old worker: restore
+converts `leased` to `pending` for the same generation, clears lease owner and
+expiry, and preserves attempt count. Backup never consumes or reconstructs a
+generation frontier.
 It opens the source with pooling
 disabled and a bounded busy timeout, creates a same-directory private temporary
 SQLite file, and invokes `SqliteConnection.BackupDatabase`. It never copies a
@@ -280,8 +291,39 @@ describes.
 unchanged runtime-backup owner. The fixed migration tail is
 `historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
 -> `runtime_backup` -> `pricing`, preserving #79 -> #86 -> #88 as an unchanged
-subsequence before #95. It does not reserve or change Session 13, Monitor 10,
-Retention 1, or a Retention store kind.
+subsequence before #95. The runtime-backup owner itself does not reserve or
+change Session 13, current Monitor v11 (or its exact supported v10
+predecessor), Retention 1, or a Retention store kind. The separate #154 Monitor
+v10-to-v11 migration owns the source-compatibility change described above.
+
+`skill_projection:1` is an independent Local Monitor component, not a Retention
+kind and not part of `runtime_backup`'s historical Wave 3 tail. Its dependency
+position is after Monitor v11/source interpretation and Retention, and before the
+future `skill_invocation_snapshot` and Workspace projection components:
+
+```text
+monitor v11/source base observations
+  -> interpretation ledger/head
+  -> retention
+  -> skill_projection
+```
+
+An exact supported older database or backup without the component initializes
+an empty `skill_projection:1` and discards the recognized obsolete pre-release
+Skill tables/Skill-only marker without copying rows. A partial, newer or
+unknown intermediate Skill namespace fails before mutation. This transition
+does not delete Session, raw, source-observation, span, Retention or unrelated
+component data. Validation requires contiguous interpretation revisions,
+matching heads/trace revisions, exact frontier hashes, consistent
+generation/queue state pairs, valid desired/current pointers and unique OTel
+claim keys. It also validates every SDK claim's exact local Session/Event
+foreign key, existing `(source_adapter, source_event_id)` identity, source
+surface equality, complete mandatory-application/adapter/normalization/payload-
+schema/fingerprint tuple, payload digest and claim uniqueness. Registry
+rejection restores the row as non-current rather than rewriting it. The owning
+rules are
+[Source Compatibility Reconciliation](../layers/source-compatibility-reconciliation.md)
+and [Skill Projection](../layers/skill-projection.md).
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather

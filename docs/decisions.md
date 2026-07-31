@@ -2796,3 +2796,62 @@ stores/behavior, raw ingestion, export/import, replay, backup, retention and
 technical evidence routes remain unchanged. Historical records are retained;
 they do not regain current product authority. Sentence-level Japanese copy is
 deferred to #169.
+
+## D076: Source observations stay immutable and Skill claims use fenced generations
+
+Status: Accepted (2026-07-31)
+
+Issue #154 adopts DC154-01. A trace-scoped source-version base observation is an
+immutable capture fact. It is neither updated nor neutralized by an unrelated
+later observation. Effective aggregation remains fail-closed: conflicting or
+multiple exact tokens, then unrecognised, then all-resolved with one token,
+then missing. Consequently `missing + resolved = missing`.
+
+Only the internal `SourceCompatibilityReconciler` may append an interpretation
+revision for the exact `(source_observation_id, trace_id)`. Decoder revision may
+recover an exact version from the same retained bytes and is the only way to
+resolve missing. Registry revision may recognise an already retained exact
+token. There is no HTTP/manual repair surface, version-entry fallback or
+generic repository mutation. Base and ledger rows are protected from direct
+update/delete and parent-cascade deletion.
+
+One SQLite transaction appends a meaningful revision, moves its exact head,
+increments the trace compatibility revision, invalidates the current OTel Skill
+claim, persists one exact ordered input frontier/generation/queue row and saves
+the idempotency receipt. Ordinary validated OTel ingestion uses the same
+transaction-aware generation participant. The worker processes only that
+frontier under renewable exact Retention operation leases and publishes only
+after compatibility, resolved state, desired generation, queue lease,
+Retention leases, frontier and projector version still match. Raw expiry
+produces `input_unavailable`, never a shortened or empty successful projection.
+The source-compatibility ledger/head/revision/receipt and immutability guards
+advance exact Monitor v10 to v11. `skill_projection:1` is independent and does
+not duplicate the current trace revision authority.
+
+Skill claims are owned by the independent `skill_projection:1` component and
+one current read service. Its closed source-arm seam is
+`otel_trace_span | sdk_session_event`. OTel alone uses trace
+SourceCompatibility generations. The SDK arm is a non-generation-bound exact
+Session/Event claim that carries local Session/Event identity, producer Event
+identity, source adapter/surface/application version, adapter/normalization
+versions, payload schema/fingerprint/digest and nullable producer trace/span.
+The current registry accepts the complete exact tuple; trace/span are not
+required for SDK claim validity. Arms merge only when producer trace ID and span
+ID both exactly match. Otherwise same-Session positive observations are not
+added: count is `null` and state is `certification_pending`.
+#157/#158 own the SDK transport/snapshot writer and accepted registry seed, may
+not create a second projection authority, and remain blocked until those
+contracts are fixed. A raw snapshot cannot resurrect a stale claim, and
+name/path/time/cardinality cannot link the arms.
+
+The pre-release Skill projection has no compatibility or backfill obligation.
+The recognized transition drops obsolete Skill-owned tables/markers, creates
+one empty current component, and removes the old reader/writer. It preserves
+unrelated Session, raw, source-observation, span and Retention data. Older
+supported backups may initialize an empty component; partial/newer/unknown
+intermediate state fails closed. Full contracts are
+`docs/specifications/layers/source-compatibility-reconciliation.md` and
+`docs/specifications/layers/skill-projection.md`.
+
+This decision does not implement or resolve Issue #152 and does not modify
+frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE bytes.

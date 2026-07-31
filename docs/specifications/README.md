@@ -8,6 +8,8 @@
 | Layer | Spec |
 | --- | --- |
 | Telemetry ingestion | [layers/telemetry-ingestion.md](layers/telemetry-ingestion.md) |
+| Source compatibility reconciliation | [layers/source-compatibility-reconciliation.md](layers/source-compatibility-reconciliation.md) |
+| Skill projection | [layers/skill-projection.md](layers/skill-projection.md) |
 | Raw store and normalization | [layers/raw-store-normalization.md](layers/raw-store-normalization.md) |
 | Candidate pipeline | [layers/candidate-pipeline.md](layers/candidate-pipeline.md) |
 | Dashboard publishing | [layers/dashboard-publishing.md](layers/dashboard-publishing.md) |

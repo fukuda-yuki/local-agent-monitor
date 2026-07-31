@@ -806,6 +806,17 @@ busy member returns no partial value and no synthetic marker. Callers keep the
 returned lease until their actual raw use completes, then dispose it exactly
 once.
 
+Issue #154 Skill reprojection is one such composite operation. Its generation
+persists the exact ordered raw identity/digest frontier before a worker runs.
+The worker acquires an operation lease for every frontier member and holds it
+through response-free projection publication. Publication rechecks the queue
+lease and every Retention lease in the same transaction as current-pointer
+assignment. It never searches for a different/current raw set, shortens a
+frontier after expiry, or publishes partial rows. Authoritative expiry,
+deletion or read denial produces `input_unavailable` and no current Skill
+claim. The complete participant and retry contract is
+[Skill Projection](skill-projection.md).
+
 An access or operation lease whose shared-read transaction commits before the
 item expiry boundary keeps its bounded lease duration across that boundary.
 Expiry still denies every new read and queues cleanup at the exact policy

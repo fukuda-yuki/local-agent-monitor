@@ -615,27 +615,34 @@ is invalid. Traces in one ingest batch may resolve to different source versions.
 A missing, conflicting, or unrecognised source version fails closed and produces
 no Skill projection for that trace.
 
+Base version observations are immutable. A separate later resolved observation
+does not neutralize a missing observation. The sole accepted correction path is
+an exact append-only decoder/registry interpretation supersession through
+`SourceCompatibilityReconciler`; aggregation, framing, revision and transaction
+rules are canonical in
+[Source Compatibility Reconciliation](source-compatibility-reconciliation.md).
+
 This projection contract changes no `/api/monitor/*` or
 `/api/session-workspace/*` v1 shape, ordering, or bytes; no
 `session_events.content_state` value; and no closed raw-bearing surface.
 
-The projection pipeline evaluates the source-version gate once, when it writes
-the projection, and never re-evaluates it. A stored Skill projection therefore
-does not by itself establish that its trace still resolves to a recognised
-source version. At read time, any consumer of Skill projections must
-independently re-check the trace's current source-version resolution before
-making a Skill claim. A trace that does not currently resolve to `Resolved`
-supplies no Skill claim regardless of stored rows.
+Issue #154 replaces the installed one-shot Skill writer with independent
+`skill_projection:1`. Its OTel arm uses trace generations:
+source-compatibility changes immediately invalidate prior OTel claims, persist
+an exact ordered input frontier, and enqueue a deterministic rerun in the same
+transaction. Ordinary OTel ingestion uses the same transaction-aware generation
+participant. OTel publication rechecks the current compatibility revision,
+resolved state, desired generation, exact frontier, projector version, queue
+lease and Retention operation leases. The independent SDK Session/Event arm is
+not trace-generation-bound and remains unavailable until #158 fixes and
+implements its exact wire writer and accepted registry seed. A raw snapshot
+cannot resurrect an invalid claim.
 
-A trace whose source version is unresolved when its record is projected is not
-revisited. A later resolution does not produce a projection for it.
-
-Records already span-projected before the schema version that introduced Skill
-projection are not backfilled. Skill projection applies to records projected
-after that point.
-
-Re-evaluation, re-projection, and backfill are tracked separately in Issue #154.
-A Skill read surface depends on Issue #154.
+The old pre-release Skill rows and Skill-only completion marker are discarded;
+they are not copied, backfilled or served through a compatibility reader.
+Unrelated span, Session, raw, source-observation and Retention data is retained.
+The generation, queue, retry, read and transition contract is canonical in
+[Skill Projection](skill-projection.md).
 
 ## Session Event Ingestion And Enrichment
 

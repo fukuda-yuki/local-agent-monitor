@@ -58,6 +58,14 @@ Authority: #133/#134.
 - current file only after explicit POST action and current inventory/path/root/reparse validation.
 
 Authority: #157/#158. Historical snapshot and current file are never substituted for one another.
+Invocation/inventory claim validity is independently owned by
+[Skill Projection](../layers/skill-projection.md). A retained snapshot cannot
+resurrect a claim. OTel claims require a current resolved compatibility
+revision/generation; SDK Session/Event claims instead require exact persisted
+source identity and current-registry acceptance of their complete compatibility
+tuple, without requiring trace/span. OTel projection workers hold exact
+Retention operation leases through their publish fence; an unavailable input
+publishes no OTel claim.
 
 ### Repository
 
@@ -96,6 +104,8 @@ This namespace is raw-default human-UI support, not a sanitized public API.
 - expiry/delete denial is rechecked at read time;
 - derived raw instruction labels cannot outlive their source content;
 - Skill body/path index may outlive content only as digest/provenance/expired state;
+- sanitized Skill invocation/inventory rows are readable only through the
+  current-valid #154 projection authority;
 - archive does not extend retention;
 - Session AI report content uses analysis retention;
 - node/Repository/Compare AI operational content is deleted after 24 hours and is not backed up;

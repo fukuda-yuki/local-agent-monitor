@@ -118,6 +118,29 @@ retention. Session AI reports use analysis retention; node/Repository/Compare
 AI operational content and deterministic Compare snapshots expire after 24
 hours and are not backed up.
 
+Sanitized Skill invocation/inventory claims are independently current-valid.
+The sole #154 read service applies arm-specific predicates. An OTel claim
+requires a generation revision equal to the trace's current compatibility
+revision, current `resolved` SourceCompatibility and the current generation
+pointer. An SDK Session/Event claim does not require trace/span or an OTel
+generation; it requires exact local/source Event identity and current-registry
+acceptance of its full source-application/adapter/normalization/payload-schema/
+fingerprint tuple. A raw snapshot, body, path or digest cannot create or
+resurrect a stale claim. OTel reprojection reads only its persisted exact
+frontier under a composite Retention operation lease and publishes only after
+rechecking that lease, its queue lease, revision, frontier and projector
+version. Expired/deleted/read-denied OTel input yields `input_unavailable` and
+no claim.
+
+The append-only reconciliation ledger and Skill projection queues contain only
+local runtime metadata/digests and exact internal identities. They must not be
+copied into logs, screenshots, Issues, docs, static artifacts or
+repository-safe evidence. The obsolete pre-release Skill projection may be
+destroyed without deleting unrelated raw/Session/Retention data. Full
+authority is
+[Source Compatibility Reconciliation](layers/source-compatibility-reconciliation.md)
+and [Skill Projection](layers/skill-projection.md).
+
 `/api/local-monitor/v1/*` is raw-default human-UI support, not a sanitized
 public API. Responses are no-store; mutations require same-origin and CSRF;
 bodies are closed and bounded; fixed errors never echo raw input or inner
