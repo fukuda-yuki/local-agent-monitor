@@ -7,7 +7,7 @@
 
 ## Task Authority
 
-- The user's latest explicit instruction and the active work item define task scope and acceptance criteria.
+- The user's latest explicit instruction defines task scope. An identified active work item adds its current acceptance criteria and accepted Product Owner decisions.
 - `docs/requirements.md`, `docs/spec.md`, and the relevant file under `docs/specifications/` define current product behavior, in that precedence order when they conflict. Read only the narrowest source that owns the affected contract unless the task or a conflict requires broader context.
 - `docs/architecture.md` and `docs/decisions.md` define architecture and policy constraints when the task affects them.
 - Existing code and tests are implementation evidence; they do not override a current specification.
@@ -20,8 +20,6 @@ If task authority and a current specification conflict, state the conflict befor
 Use `docs/agent-guides/repository-workflow.md` for working order, autonomy, minimal-change rules, validation, blockers, compatibility, document updates, subagents, and Git operations.
 
 Default to the smallest coherent change that satisfies the request and current contract, using existing repository patterns.
-
-For Aspire AppHost usage decisions, refer to `docs/specifications/layers/telemetry-ingestion.md` and `docs/architecture.md` only when the task affects that boundary.
 
 ## Information Placement
 
