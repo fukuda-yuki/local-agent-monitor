@@ -11,7 +11,7 @@ public sealed class SkillInvokedSessionEventTests
         """{"name":"synthetic-skill","path":"skills/synthetic/SKILL.md","description":"synthetic description token=[REDACTED]","pluginName":"synthetic-plugin","source":"synthetic-source","trigger":"synthetic-trigger"}""";
 
     [Fact]
-    public async Task SkillInvoked_IsAvailableAndStoresFilteredPayloadWithoutUnsupportedIncrement()
+    public async Task SkillInvoked_IsUnsupportedAndStoresNoContentWithOneUnsupportedIncrement()
     {
         using var temp = CreateTempDirectory();
         var store = CreateStore(temp);
@@ -24,21 +24,18 @@ public sealed class SkillInvokedSessionEventTests
         var detail = Assert.IsType<SessionDetail>(store.GetDetail(session.SessionId));
         var persisted = Assert.Single(detail.Events);
         Assert.Equal("skill.invoked", persisted.Type);
-        Assert.Equal(SessionContentState.Available, persisted.ContentState);
+        Assert.Equal(SessionContentState.Unsupported, persisted.ContentState);
 
         var content = await store.ReadContentAsync(session.SessionId, persisted.EventId, CancellationToken.None);
-        Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
-        Assert.NotNull(content.Lease);
-        await using var lease = content.Lease!;
-        Assert.Equal("application/json", lease.Content.ContentKind);
-        Assert.Equal(FilteredSkillPayload, lease.Content.ContentJson);
-        Assert.Equal(0, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount ?? 0);
+        Assert.Equal(SessionContentReadDisposition.NotFound, content.Disposition);
+        Assert.Null(content.Lease);
+        Assert.Equal(1L, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount);
     }
 
     [Theory]
     [InlineData("skill.started")]
     [InlineData("skill.completed")]
-    public async Task ProducerlessSkillLifecycleType_IsUnsupportedAndStoresNoContent(string eventType)
+    public async Task SkillLifecycleType_IsAvailableAndStoresFilteredContent(string eventType)
     {
         using var temp = CreateTempDirectory();
         var store = CreateStore(temp);
@@ -51,21 +48,24 @@ public sealed class SkillInvokedSessionEventTests
         var detail = Assert.IsType<SessionDetail>(store.GetDetail(session.SessionId));
         var persisted = Assert.Single(detail.Events);
         Assert.Equal(eventType, persisted.Type);
-        Assert.Equal(SessionContentState.Unsupported, persisted.ContentState);
+        Assert.Equal(SessionContentState.Available, persisted.ContentState);
         var content = await store.ReadContentAsync(session.SessionId, persisted.EventId, CancellationToken.None);
-        Assert.Equal(SessionContentReadDisposition.NotFound, content.Disposition);
-        Assert.Null(content.Lease);
-        Assert.Equal(1L, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount);
+        Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
+        Assert.NotNull(content.Lease);
+        await using var lease = content.Lease!;
+        Assert.Equal("application/json", lease.Content.ContentKind);
+        Assert.Equal(FilteredSkillPayload, lease.Content.ContentJson);
+        Assert.Equal(0, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount ?? 0);
     }
 
     [Fact]
-    public async Task SkillInvoked_DuplicateReplayAfterTimeAdvanceKeepsOneAvailableByteIdenticalContent()
+    public async Task SupportedSkillLifecycle_DuplicateReplayAfterTimeAdvanceKeepsOneAvailableByteIdenticalContent()
     {
         using var temp = CreateTempDirectory();
         var time = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
         var store = CreateStore(temp);
         var normalizer = new SessionEventNormalizer(store, time);
-        var envelope = Envelope([SkillInvokedEvent()]);
+        var envelope = Envelope([SkillInvokedEvent() with { Type = "skill.started" }]);
         normalizer.NormalizeAndWrite(envelope);
         var session = Assert.IsType<ObservedSession>(
             store.Resolve(SessionSourceSurface.CopilotSdk, "synthetic-sdk-session"));
@@ -75,18 +75,41 @@ public sealed class SkillInvokedSessionEventTests
 
         time.Advance(TimeSpan.FromMinutes(1));
 
-        normalizer.NormalizeAndWrite(envelope);
+        normalizer.NormalizeAndWrite(Envelope([
+            SkillInvokedEvent() with
+            {
+                Type = "skill.started",
+                Payload = JsonDocument.Parse(
+                    """{"name":"replacement-skill","description":"replacement payload"}""").RootElement.Clone(),
+            },
+        ]));
 
         var persisted = Assert.Single(
             Assert.IsType<SessionDetail>(store.GetDetail(session.SessionId)).Events);
         Assert.Equal("synthetic-skill-event", persisted.SourceEventId);
-        Assert.Equal("skill.invoked", persisted.Type);
+        Assert.Equal("skill.started", persisted.Type);
         Assert.Equal(SessionContentState.Available, persisted.ContentState);
         Assert.Equal(firstEvent, persisted);
         Assert.Equal(
             firstContent,
             await ReadContentAsync(store, session.SessionId, persisted.EventId));
         Assert.Equal(0, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount ?? 0);
+    }
+
+    [Fact]
+    public void SupportedSkillLifecycle_ConflictingExactSourceReplayFailsClosed()
+    {
+        using var temp = CreateTempDirectory();
+        var store = CreateStore(temp);
+        var normalizer = new SessionEventNormalizer(store, temp.TimeProvider);
+        normalizer.NormalizeAndWrite(Envelope([SkillInvokedEvent() with { Type = "skill.started" }]));
+
+        Assert.ThrowsAny<InvalidOperationException>(() =>
+            normalizer.NormalizeAndWrite(
+                Envelope([SkillInvokedEvent() with { Type = "skill.started" }]) with
+                {
+                    NativeSessionId = "different-sdk-session",
+                }));
     }
 
     [Fact]
@@ -133,10 +156,10 @@ public sealed class SkillInvokedSessionEventTests
         ];
 
         var expected = await PersistScenarioAsync(batchShapes[0]);
-        Assert.Equal(0, expected.UnsupportedEventVersionCount);
+        Assert.Equal(1, expected.UnsupportedEventVersionCount);
         var expectedSkill = Assert.Single(expected.Events, item => item.Type == "skill.invoked");
-        Assert.Equal(SessionContentState.Available, expectedSkill.ContentState);
-        Assert.Equal(FilteredSkillPayload, expectedSkill.ContentJson);
+        Assert.Equal(SessionContentState.Unsupported, expectedSkill.ContentState);
+        Assert.Null(expectedSkill.ContentJson);
 
         foreach (var batchShape in batchShapes.Skip(1))
         {
@@ -164,16 +187,31 @@ public sealed class SkillInvokedSessionEventTests
         foreach (var item in detail.Events)
         {
             var content = await store.ReadContentAsync(session.SessionId, item.EventId, CancellationToken.None);
-            Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
-            Assert.NotNull(content.Lease);
-            await using var lease = content.Lease!;
-            persisted.Add(new(
-                item.SourceEventId,
-                item.Type,
-                item.OccurredAt,
-                item.ContentState,
-                lease.Content.ContentKind,
-                lease.Content.ContentJson));
+            if (item.ContentState == SessionContentState.Unsupported)
+            {
+                Assert.Equal(SessionContentReadDisposition.NotFound, content.Disposition);
+                Assert.Null(content.Lease);
+                persisted.Add(new(
+                    item.SourceEventId,
+                    item.Type,
+                    item.OccurredAt,
+                    item.ContentState,
+                    null,
+                    null));
+            }
+            else
+            {
+                Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
+                Assert.NotNull(content.Lease);
+                await using var lease = content.Lease!;
+                persisted.Add(new(
+                    item.SourceEventId,
+                    item.Type,
+                    item.OccurredAt,
+                    item.ContentState,
+                    lease.Content.ContentKind,
+                    lease.Content.ContentJson));
+            }
         }
 
         return new(
@@ -289,8 +327,8 @@ public sealed class SkillInvokedSessionEventTests
         string Type,
         DateTimeOffset OccurredAt,
         SessionContentState ContentState,
-        string ContentKind,
-        string ContentJson);
+        string? ContentKind,
+        string? ContentJson);
 
     private sealed record CanonicalResult(
         CanonicalEvent[] Events,
