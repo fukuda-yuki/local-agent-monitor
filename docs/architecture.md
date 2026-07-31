@@ -54,6 +54,7 @@ validated retained OTel input
   -> Retention-fenced worker
 
 exact SDK Session/Event + full compatibility tuple
+  -> seven-authority Skill snapshot transaction (after #158 gate closure)
   -> independent SDK claim subspace (no trace generation)
 
 OTel current claim + SDK current claim
@@ -65,6 +66,22 @@ Ordinary validated OTel ingestion and the reconciler call the same
 transaction-aware generation participant. The worker cannot discover a
 different raw set at run time, and a raw Skill snapshot cannot become claim
 authority.
+
+The installed Session ingest v1 keeps its frozen wire and supports
+`skill.started | skill.completed`; `skill.invoked` is unsupported there. The
+accepted Skill-only v2 writer, `skill_invocation_snapshot:1`, historical
+body/path reader, discovery/current-file service and raw-local routes are
+additive raw-default-only components. Their production registration remains
+blocked by the complete decision gate in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md);
+there is no v1 fallback, compatibility writer or dual path.
+Current-file discovery takes roots only from startup
+`SkillDiscovery.ProjectPaths` / `SkillDiscovery.SkillDirectories`, calls
+`ServerSkillsApi.DiscoverAsync` with those roots, and opens only an accepted
+discovery result through a platform no-follow handle walk. Historical
+path/CWD, Repository locator, prompt, workspace or time never creates a root,
+and the historical path is never opened directly. Exact name/path comparison
+and handle-identity proof remain part of the production gate.
 
 Issue #79 adds a separate historical-observation path:
 
@@ -158,7 +175,9 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   receiver, AI, Repository, archive, storage/backup and diagnostics entry.
 - `/api/local-monitor/v1/*` is the human-UI composition namespace. It reuses the
   [single Repository catalog/assignment authority](specifications/interfaces/local-repository-catalog.md),
-  #133/#134 Workspace reads, #157/#158 Skill raw detail, #160/#161 archive,
+  #133/#134 Workspace reads,
+  [#157/#158 Skill snapshot/raw detail](specifications/interfaces/skill-invocation-snapshot.md),
+  #160/#161 archive,
   #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
   `ILocalRepositoryScopeSnapshotService` and do not duplicate catalog readers.
@@ -310,7 +329,14 @@ to Config CLI and no new Local Monitor route.
   backfill or deletion of unrelated Session/raw/Retention data.
 - Canonical details are
   [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
-  and [Skill projection](specifications/layers/skill-projection.md).
+  and [Skill projection](specifications/layers/skill-projection.md). The
+  accepted transport/snapshot/read/discovery composition and all remaining
+  blockers are canonical in
+  [Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+  `skill_invocation_snapshot:1` owns index/metadata and equality receipts only;
+  Session Event content remains the sole historical body/path-byte owner. The
+  complete namespace is absent from sanitized export/import and emits no empty
+  carrier.
 
 ### Historical Import Subsystem
 
@@ -976,7 +1002,11 @@ only. Details are canonical in
 
 The accepted future `local_repository_catalog:1` component is ordered
 immediately after Session and before `local_archive`, followed by Retention,
-Skill projection/snapshot and Workspace projection. It backs up all
+`skill_projection:1`, `skill_invocation_snapshot:1` and Workspace projection.
+The snapshot component backs up index/metadata and equality receipts while
+existing Session Event content backs up body/path bytes exactly once; older
+component-absent state initializes empty and partial/newer state fails closed.
+Its registration remains blocked with #158. The catalog component backs up all
 catalog-owned tables and durable receipts; an older absent component
 initializes empty while partial/newer/unknown shapes fail closed. Catalog
 metadata may restore without source raw and reports unavailable provenance

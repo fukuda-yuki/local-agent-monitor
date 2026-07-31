@@ -299,13 +299,15 @@ v10-to-v11 migration owns the source-compatibility change described above.
 `skill_projection:1` is an independent Local Monitor component, not a Retention
 kind and not part of `runtime_backup`'s historical Wave 3 tail. Its dependency
 position is after Monitor v11/source interpretation and Retention, and before the
-future `skill_invocation_snapshot` and Workspace projection components:
+accepted future `skill_invocation_snapshot:1` and Workspace projection
+components:
 
 ```text
 monitor v11/source base observations
   -> interpretation ledger/head
   -> retention
   -> skill_projection
+  -> skill_invocation_snapshot
 ```
 
 An exact supported older database or backup without the component initializes
@@ -324,6 +326,21 @@ rejection restores the row as non-current rather than rewriting it. The owning
 rules are
 [Source Compatibility Reconciliation](../layers/source-compatibility-reconciliation.md)
 and [Skill Projection](../layers/skill-projection.md).
+
+`skill_invocation_snapshot:1` is likewise independent, not a Retention kind,
+and remains unregistered while the #158 implementation gate is open. It owns
+only invocation index/metadata and equality receipts. Existing Session Event
+content owns and backs up historical body/path bytes exactly once; the snapshot
+component adds no raw-content copy or sanitized carrier. An older exact
+supported backup with no component initializes it empty; declared partial or
+newer-than-v1 state fails closed. Restore validation requires the exact
+`skill.invoked` parent Event/content/claim ownership, unique
+`(session_id,event_id)`, digest/size/state consistency, and insert-or-identical
+receipt behavior fixed by
+[Skill Invocation Snapshot](skill-invocation-snapshot.md). Those exact byte
+domains and collision semantics remain blocked, so migration/registration is
+not production-ready. OTel-only `not_captured` observations have no row to
+backup.
 
 ### Local Repository catalog component
 

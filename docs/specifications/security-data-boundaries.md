@@ -101,9 +101,10 @@ The v1 raw-local set is closed to:
   content;
 - Tool input, result and error;
 - exact Sub-agent input and Event/error/permission content when captured;
-- historical Skill body and definition path captured by the exact
-  `skill.invoked` event, plus a separately labelled current file after explicit
-  POST and current inventory/path/root/reparse validation;
+- historical Skill body and definition path captured only by the accepted
+  additive v2 exact `skill.invoked` Event/snapshot transaction, plus a
+  separately labelled current file after explicit POST and current
+  inventory/path/root/reparse validation;
 - canonical Repository locator only in the dedicated management read;
 - immutable Session AI report content and transient node/Repository/Compare AI
   results;
@@ -117,6 +118,16 @@ outlive content only with an explicit expired state. Archive does not extend
 retention. Session AI reports use analysis retention; node/Repository/Compare
 AI operational content and deterministic Compare snapshots expire after 24
 hours and are not backed up.
+
+Frozen `POST /api/session-ingest/v1/events` supports `skill.started` and
+`skill.completed`; `skill.invoked` is unsupported and follows the existing
+unsupported-event behavior. This correction changes no other v1 route, wire,
+enum, limit, status mapping, error entity, success or Workspace response byte.
+The additive Skill v2 writer, snapshot component, raw-local routes and
+current-file discovery are raw-default-only and remain unregistered until the
+complete decision gate in
+[Skill Invocation Snapshot](interfaces/skill-invocation-snapshot.md)
+is closed. There is no v1 retry, compatibility writer, fallback or dual path.
 
 Repository catalog and assignment follow the closed
 [Local Repository Catalog and Session Assignment](interfaces/local-repository-catalog.md)
@@ -155,6 +166,12 @@ frontier under a composite Retention operation lease and publishes only after
 rechecking that lease, its queue lease, revision, frontier and projector
 version. Expired/deleted/read-denied OTel input yields `input_unavailable` and
 no claim.
+
+The two arms compose only when producer trace ID and span ID both match
+exactly. Trace-only, name, path, time, cardinality, Session co-membership and
+discovery output are not linkage evidence. The snapshot namespace and all
+body/path/current-file fields are excluded from sanitized export/import, and
+no empty carrier represents their absence.
 
 The append-only reconciliation ledger and Skill projection queues contain only
 local runtime metadata/digests and exact internal identities. They must not be

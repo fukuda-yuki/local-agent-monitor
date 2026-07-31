@@ -17,6 +17,11 @@ Optional:
 
 - Issue #51 Session events from `copilot-sdk-stream` or
   `copilot-compatible-hook`, accepted by the installed Local Monitor only.
+- The accepted but production-blocked Skill-only v2 transport from
+  `copilot-sdk-stream`; it is not an installed or registered source until every
+  gate in
+  [Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md)
+  is closed.
 
 Planned / blocked candidate:
 
@@ -688,6 +693,33 @@ surfaces `copilot-sdk`, `copilot-cli`, `vscode`, and `hook-unknown`. It requires
 a 1 MiB request limit. It returns `204` only after commit. Fixed error mapping,
 the envelope/event shape, and read interfaces are defined in
 [Canvas Session workspace](../interfaces/canvas-session-workspace.md).
+
+The frozen v1 supported set includes `skill.started` and `skill.completed`.
+`skill.invoked` is unsupported on this route and uses the existing unsupported
+Event behavior. No route, header/body version, envelope/event shape, source
+enum, 1 MiB/100-event limit, validation order, status/error bytes, `204`
+behavior or Workspace response byte changes with this correction.
+
+The accepted additive SDK Skill transport is:
+
+```text
+POST /api/session-ingest/v2/events
+```
+
+It is raw-default-only, JSON, header/body version 2, exactly one
+`skill.invoked` Event from `copilot-sdk-stream` / `copilot-sdk`, with an
+8,388,608-byte inclusive request limit and the mandatory compatibility
+provenance defined by
+[Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md).
+It has no retry, redirect, fallback, compatibility writer or dual transport.
+Production parser/writer and host registration remain `BLOCKED_DECISION`:
+the exact outer envelope/event inventory, nullability, order and SDK/local
+mapping; complete error/status/media/`405` bytes; repository schema,
+fingerprint and registry seed; equality receipt and storage byte domains;
+classification/nullability/name/path mapping; success/discovery literals; and
+historical-to-discovery identity proof are not yet fixed. Ingestion must not
+derive them from v1 DTOs, runtime reflection, serializer defaults or encounter
+order.
 
 The installed Local Monitor also provides:
 

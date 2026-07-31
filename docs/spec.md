@@ -70,6 +70,18 @@ creates an opaque comparison snapshot ID.
 
 `/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository catalog/assignment and its gated management routes are owned by #155/#156; #134 alone owns and serializes the composite `GET /api/local-monitor/v1/repositories` Workspace read. #156, #161 and #134 share one `ILocalRepositoryScopeSnapshotService`; #161 composes archive eligibility and neither #161 nor #134 adds direct catalog SQL or a second reader. Other Workspace reads are owned by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
 
+The accepted #119/#157/#158 Skill foundation is canonical in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+Frozen Session ingest v1 supports `skill.started` and `skill.completed`;
+`skill.invoked` remains an unsupported v1 Event. That correction changes no
+v1 route, wire shape, enum, limit, status mapping, entity byte or response byte.
+The additive Skill-only v2 transport, snapshot component, raw-local reads,
+current-file discovery and backup/sanitized composition are accepted
+foundation only. Production v2 parsing, persistence, migration, routes and
+registration remain `BLOCKED_DECISION` until the interface's complete
+implementation gate is closed; no serializer default, heuristic, fallback,
+compatibility writer or dual path may fill a blocked value.
+
 The Repository catalog contract is accepted but only its exact six-form GitHub
 locator parser, canonicalization and domain-separated fingerprint are currently
 `READY`. `local_repository_catalog:1`, automatic admission/reconciliation,
@@ -1030,6 +1042,19 @@ Canonical details are
 and [Skill projection](specifications/layers/skill-projection.md). Issue #152
 unknown attribute-key drift remains unresolved.
 
+The SDK transport and retained raw snapshot are separately governed by
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+That interface retains #154 as the sole current-valid claim authority and
+permits cross-arm composition only for exact producer trace ID plus span ID.
+Its v2 outer envelope/event inventory and mapping, complete error/status/media/
+`405` bytes, producer schema/fingerprint/registry seed, equality-receipt and
+content byte domains, multi-fault/nullability/name/path classification,
+success/discovery literals, and historical-to-discovery handle identity proof
+remain unsettled together. Consequently #119 v2 and #158 production are not
+implementation-ready. Raw-local registration is raw-default only; the complete
+snapshot namespace is excluded from sanitized export/import without an empty
+carrier or fallback.
+
 Monitor schema v10 adds a private per-raw-record/per-trace source-attribution
 evidence authority and a durable trace reconciliation queue. The shared
 trace-scoped resolver recognizes only the four exact mappings pinned in the
@@ -1072,6 +1097,7 @@ sanitized. The canonical contract is
 | Telemetry ingestion | [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) |
 | Source compatibility reconciliation | [specifications/layers/source-compatibility-reconciliation.md](specifications/layers/source-compatibility-reconciliation.md) |
 | Skill projection | [specifications/layers/skill-projection.md](specifications/layers/skill-projection.md) |
+| Skill invocation snapshot | [specifications/interfaces/skill-invocation-snapshot.md](specifications/interfaces/skill-invocation-snapshot.md) |
 | Raw store and normalization | [specifications/layers/raw-store-normalization.md](specifications/layers/raw-store-normalization.md) |
 | Candidate pipeline | [specifications/layers/candidate-pipeline.md](specifications/layers/candidate-pipeline.md) |
 | Dashboard publishing | [specifications/layers/dashboard-publishing.md](specifications/layers/dashboard-publishing.md) |

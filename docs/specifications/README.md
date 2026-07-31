@@ -23,6 +23,7 @@
 | Local Monitor v1 contract authority index | [interfaces/local-monitor-v1-contract-index.md](interfaces/local-monitor-v1-contract-index.md) |
 | Local Monitor v1 IA, routes and states | [interfaces/local-monitor-v1-ia.md](interfaces/local-monitor-v1-ia.md) |
 | Local Monitor v1 security supplement | [interfaces/local-monitor-v1-security.md](interfaces/local-monitor-v1-security.md) |
+| Skill invocation snapshot | [interfaces/skill-invocation-snapshot.md](interfaces/skill-invocation-snapshot.md) |
 | Local Repository catalog and Session assignment | [interfaces/local-repository-catalog.md](interfaces/local-repository-catalog.md) |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |

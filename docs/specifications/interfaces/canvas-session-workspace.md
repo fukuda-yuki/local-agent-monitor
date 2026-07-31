@@ -242,11 +242,14 @@ Event-type support uses exact ordinal matching. The supported v1 set is:
 `session.started`, `session.shutdown`, `session.task_complete`, `user.message`,
 `assistant.message`, `assistant.turn_end`, `tool.execution_start`,
 `tool.execution_complete`, `subagent.started`, `subagent.completed`,
-`subagent.failed`, `subagent.selected`, `subagent.deselected`, `skill.invoked`,
+`subagent.failed`, `subagent.selected`, `subagent.deselected`, `skill.started`,
+`skill.completed`,
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`,
-`SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd`. The producer-less
-`skill.started` and `skill.completed` types are unsupported.
+`SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd`. `skill.invoked` is
+unsupported and follows the existing unsupported-event behavior. This exact
+membership correction changes no other v1 wire, enum, limit, status, error
+entity, `204`, or workspace response byte.
 
 Supported non-usage events are stored with `content_state=available`, and their
 payload is secret-filtered into `session_event_content`. `assistant.usage` and

@@ -335,3 +335,16 @@ Tests pin the existing v1 golden SHA unchanged, v1-only/v2-only/mixed stores,
 corrupt v1 beside valid v2, future/broken schema refusal, direct v2/cost-carrier
 rejection, route/CLI behavior, and zero leakage of v2/pricing/private-override
 bytes or error details.
+
+## Skill invocation snapshot exclusion
+
+The accepted future `skill_invocation_snapshot` namespace and Skill-only
+Session ingest v2 do not widen this bundle. Snapshot IDs, payload/body/path
+digests or sizes, path provenance, content availability, current-file results,
+bodies and definition paths are never export/import carriers. The provider
+does not inventory or read that namespace, and no empty Skill carrier is
+emitted. Any future inclusion requires a new carrier and version. This
+exclusion remains binding whether or not the blocked v2/snapshot production
+gate in
+[Skill Invocation Snapshot](skill-invocation-snapshot.md)
+is later closed.

@@ -2901,3 +2901,74 @@ projection/snapshot and Workspace projection. Older component-absent state may
 initialize empty; partial, newer or unknown state fails closed. Frozen
 `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE bytes remain unchanged,
 and the human routes remain raw-default-only.
+
+## D078: Skill invocation snapshot foundation is accepted while production v2 stays blocked
+
+Status: Accepted foundation / production v2 blocked (2026-07-31)
+
+Issues #119, #157 and #158 adopt DC158-01 through DC158-11 through
+`docs/specifications/interfaces/skill-invocation-snapshot.md`.
+The frozen `POST /api/session-ingest/v1/events` supported set contains
+`skill.started` and `skill.completed`; `skill.invoked` is unsupported and uses
+the existing unsupported-event path. This corrects only event membership. It
+does not change the v1 route, header/body version, envelope/event shape,
+adapter/surface enum, 1 MiB body or 1..100 batch limit, content-state
+vocabulary, validation/status/error entity bytes, queue/commit/`204` behavior,
+or `/api/session-workspace/*` response bytes.
+
+The accepted additive direction is raw-default-only
+`POST /api/session-ingest/v2/events` for exactly one SDK `skill.invoked` Event,
+the independently versioned `skill_invocation_snapshot:1` component,
+historical body/path reads, an explicit current-file POST using configuration
+and discovery authority, and backup/raw-local/sanitized composition. Snapshot
+metadata and equality receipts do not copy historical body/path bytes already
+owned by Session Event content. The writer is one atomic seven-authority
+transaction; partial Event, content, Retention, snapshot, claim, receipt or
+invalid-claim state cannot remain.
+
+Startup `SkillDiscovery.ProjectPaths` and
+`SkillDiscovery.SkillDirectories` are the sole discovery-root authority.
+`ServerSkillsApi.DiscoverAsync` receives only those validated roots. Historical
+path/CWD, Repository locator, prompt, workspace label, timestamp and out-of-root
+results never create a root, and the service never opens the historical path
+directly. Only an accepted discovery result may enter the platform no-follow
+handle walk; exact name/path comparison and filesystem-identity proof stay in
+the decision gate.
+
+Issue #154 remains the sole current-valid Skill claim authority. SDK claim validity
+uses exact Session/Event/source identity and the complete current-registry
+compatibility tuple without requiring trace/span. OTel and SDK arms merge only
+when producer trace ID and span ID both match exactly. Trace-only, name, path,
+time, cardinality, Session co-membership and discovery output do not link
+claims. A raw snapshot cannot create or resurrect a stale/invalid claim, and
+OTel-only `not_captured` produces no snapshot row.
+
+Production v2 parsing/persistence, `skill_invocation_snapshot:1` migration,
+raw-local routes and host registration remain `BLOCKED_DECISION` until the
+canonical interface fixes all of:
+
+1. exact outer envelope/event property inventory, order, nullability and
+   SDK/local/provenance mapping;
+2. complete validation/status/error contract, exact entity/media/`405` bytes
+   and insert-or-identical conflict behavior;
+3. checked-in producer schema bytes, fingerprint domain/value, registry seed
+   and revision behavior;
+4. equality receipt key/framing/input/result byte domains and conflicts;
+5. payload digest/size and Session content/body/path storage byte domains plus
+   backup validation;
+6. total multi-fault precedence, nullable matrix, path/name rules,
+   projection-validity mapping and historical-read errors;
+7. success schema literals/presence, discovery root framing/hash,
+   current-file media/parameters and method precedence; and
+8. normalized historical name/path-to-discovery comparison, root/relative
+   handle-walker identity, persistence choice and Windows/Unix file identity
+   proof.
+
+No blocked value is inferred from the SDK, runtime reflection, v1 DTOs,
+serializer defaults, encounter order, secret-filtered content or
+implementation convenience. No v1 retry, fallback, compatibility writer,
+permissive parser or dual transport exists. `--sanitized-only` registers no v2
+writer, snapshot/current-file service or snapshot raw-local route. Sanitized
+export/import excludes the complete namespace and emits no empty carrier.
+Issue #152 remains unresolved, and frozen Monitor/Workspace/SSE contracts remain
+unchanged.

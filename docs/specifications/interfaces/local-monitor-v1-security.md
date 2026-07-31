@@ -54,10 +54,15 @@ Authority: #133/#134.
 
 ### Skill
 
-- historical Skill body and definition path captured by exact `skill.invoked` Session event;
+- historical Skill body and definition path captured only by the accepted
+  additive v2 exact `skill.invoked` Session Event/snapshot transaction;
 - current file only after explicit POST action and current inventory/path/root/reparse validation.
 
-Authority: #157/#158. Historical snapshot and current file are never substituted for one another.
+Frozen Session ingest v1 supports `skill.started | skill.completed` and treats
+`skill.invoked` as unsupported without changing any other v1 wire, limit,
+status or response bytes. Authority:
+[Skill Invocation Snapshot](skill-invocation-snapshot.md), #157/#158.
+Historical snapshot and current file are never substituted for one another.
 Invocation/inventory claim validity is independently owned by
 [Skill Projection](../layers/skill-projection.md). A retained snapshot cannot
 resurrect a claim. OTel claims require a current resolved compatibility
@@ -66,6 +71,19 @@ source identity and current-registry acceptance of their complete compatibility
 tuple, without requiring trace/span. OTel projection workers hold exact
 Retention operation leases through their publish fence; an unavailable input
 publishes no OTel claim.
+Cross-arm linkage requires exact producer trace ID and span ID together;
+name/path/time/cardinality and Session co-membership never link claims.
+Production v2 writer, snapshot migration, discovery/current-file service and
+raw-local routes remain unregistered until every decision gate in the snapshot
+interface is closed.
+Startup configuration is the sole current-file discovery-root authority:
+`SkillDiscovery.ProjectPaths` (at most 16) and
+`SkillDiscovery.SkillDirectories` (at most 32). `DiscoverAsync` receives only
+those validated roots. Historical path/CWD, Repository locator, prompt,
+workspace, time and out-of-root results never create a root, and the service
+never opens the historical path directly. Only an exact accepted discovery
+result proceeds through the platform no-follow handle walk; the final
+name/path comparison and filesystem-identity proof remain blocked decisions.
 
 ### Repository
 
