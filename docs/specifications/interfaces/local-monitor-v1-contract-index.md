@@ -10,7 +10,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | IA/routes/layout/states | `docs/specifications/interfaces/local-monitor-v1-ia.md`, #132 | #135–#140, #145–#146, #167 |
 | Source claims/missing semantics | #129 | #137 and feature owners |
 | Repository catalog/locator/assignment | #155 | #156 |
-| Skill projection validity/re-run | #154 | #154 |
+| Skill projection validity/re-run | #154; exact-v10 input evidence: `docs/specifications/contracts/skill-projection-v1-deleted-before-digest.md` | #154 |
 | Skill body/path snapshot/current file | #157 | #158 |
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | #160 | #161 |
@@ -55,6 +55,7 @@ telemetry fixes / #154
 - `/api/local-monitor/v1/*` is the raw-default local human-UI namespace and is absent in sanitized-only posture.
 - Repository, Session and hierarchy identities are exact and opaque.
 - Missing values are not zero.
+- Exact-v10 `deleted_before_digest_v10` is tagged predecessor evidence, never a fabricated payload digest; its OTel Skill projection outcome is fail-closed `input_unavailable` under the dedicated contract above.
 - Compare values are deterministic and AI-independent.
 - AI can interpret accepted snapshots but cannot recalculate Compare facts or explore outside scope.
 - Archive is not deletion, retention or pin.
