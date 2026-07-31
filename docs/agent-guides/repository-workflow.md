@@ -10,12 +10,16 @@ Start with the smallest context that can establish the affected contract.
 
 Always inspect:
 
-1. The user's latest request and the active work item, including its current body and newest accepted Product Owner decision.
-2. The narrowest current specification that owns the affected behavior; when current sources conflict, retain the precedence in `AGENTS.md`:
-   - `docs/requirements.md` for product-wide requirements;
-   - `docs/spec.md` for cross-cutting product contracts;
-   - the relevant file under `docs/specifications/` for an interface, layer, or bounded contract.
-3. The target code and its nearest tests.
+1. The user's latest request.
+2. The target code or document and its nearest tests or checks.
+
+For implementation, fix, or contract work, also inspect:
+
+- the active work item when one is identified, including its current body and newest accepted Product Owner decision;
+- the narrowest current specification that owns the affected behavior; when current sources conflict, retain the precedence in `AGENTS.md`:
+  - `docs/requirements.md` for product-wide requirements;
+  - `docs/spec.md` for cross-cutting product contracts;
+  - the relevant file under `docs/specifications/` for an interface, layer, or bounded contract.
 
 Inspect only when the task affects them:
 
