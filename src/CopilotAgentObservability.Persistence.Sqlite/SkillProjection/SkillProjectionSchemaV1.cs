@@ -105,6 +105,29 @@ internal static class SkillProjectionSchemaV1
                 table,
                 $"CREATE TRIGGER {table}_delete_rejected BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
         })
+        .Concat(new[]
+        {
+            (
+                "skill_projection_operation_receipts_insert_replacement_rejected",
+                "skill_projection_operation_receipts",
+                "CREATE TRIGGER skill_projection_operation_receipts_insert_replacement_rejected BEFORE INSERT ON skill_projection_operation_receipts WHEN EXISTS(SELECT 1 FROM skill_projection_operation_receipts WHERE operation_key=NEW.operation_key) BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
+            (
+                "skill_projection_invocations_insert_replacement_rejected",
+                "skill_projection_invocations",
+                "CREATE TRIGGER skill_projection_invocations_insert_replacement_rejected BEFORE INSERT ON skill_projection_invocations WHEN EXISTS(SELECT 1 FROM skill_projection_invocations WHERE invocation_id=NEW.invocation_id OR (generation_id=NEW.generation_id AND source_arm=NEW.source_arm AND raw_record_id=NEW.raw_record_id AND span_ordinal=NEW.span_ordinal)) BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
+            (
+                "skill_projection_inventories_insert_replacement_rejected",
+                "skill_projection_inventories",
+                "CREATE TRIGGER skill_projection_inventories_insert_replacement_rejected BEFORE INSERT ON skill_projection_inventories WHEN EXISTS(SELECT 1 FROM skill_projection_inventories WHERE inventory_id=NEW.inventory_id OR (generation_id=NEW.generation_id AND source_arm=NEW.source_arm AND raw_record_id=NEW.raw_record_id AND trace_id=NEW.trace_id)) BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
+            (
+                "skill_projection_inventory_names_insert_replacement_rejected",
+                "skill_projection_inventory_names",
+                "CREATE TRIGGER skill_projection_inventory_names_insert_replacement_rejected BEFORE INSERT ON skill_projection_inventory_names WHEN EXISTS(SELECT 1 FROM skill_projection_inventory_names WHERE inventory_id=NEW.inventory_id AND name_ordinal=NEW.name_ordinal) BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
+            (
+                "skill_projection_sdk_claims_insert_replacement_rejected",
+                "skill_projection_sdk_claims",
+                "CREATE TRIGGER skill_projection_sdk_claims_insert_replacement_rejected BEFORE INSERT ON skill_projection_sdk_claims WHEN EXISTS(SELECT 1 FROM skill_projection_sdk_claims WHERE claim_id=NEW.claim_id OR (session_id=NEW.session_id AND event_id=NEW.event_id) OR (source_adapter=NEW.source_adapter AND source_event_id=NEW.source_event_id)) BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;"),
+        })
         .ToArray();
 
     internal static void Ensure(SqliteConnection connection, SqliteTransaction transaction)
@@ -124,7 +147,7 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_generations (
-                generation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generation_id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(generation_id > 0),
                 trace_id TEXT NOT NULL CHECK(length(trace_id)=32 AND trace_id NOT GLOB '*[^0-9a-f]*'),
                 compatibility_revision INTEGER NOT NULL CHECK(compatibility_revision >= 0),
                 input_frontier_sha256 TEXT NOT NULL CHECK(length(input_frontier_sha256)=64 AND input_frontier_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -140,7 +163,7 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_generation_inputs (
-                generation_id INTEGER NOT NULL,
+                generation_id INTEGER NOT NULL CHECK(generation_id > 0),
                 input_ordinal INTEGER NOT NULL CHECK(input_ordinal >= 0),
                 source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 raw_record_id INTEGER NOT NULL CHECK(raw_record_id > 0),
@@ -166,8 +189,8 @@ internal static class SkillProjectionSchemaV1
             """
             CREATE TABLE IF NOT EXISTS skill_projection_trace_heads (
                 trace_id TEXT PRIMARY KEY CHECK(length(trace_id)=32 AND trace_id NOT GLOB '*[^0-9a-f]*'),
-                desired_generation_id INTEGER NULL UNIQUE,
-                current_generation_id INTEGER NULL UNIQUE,
+                desired_generation_id INTEGER NULL UNIQUE CHECK(desired_generation_id IS NULL OR desired_generation_id > 0),
+                current_generation_id INTEGER NULL UNIQUE CHECK(current_generation_id IS NULL OR current_generation_id > 0),
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(desired_generation_id) REFERENCES skill_projection_generations(generation_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
                 FOREIGN KEY(current_generation_id) REFERENCES skill_projection_generations(generation_id) ON UPDATE RESTRICT ON DELETE RESTRICT
@@ -178,7 +201,7 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_queue (
-                generation_id INTEGER PRIMARY KEY,
+                generation_id INTEGER PRIMARY KEY CHECK(generation_id > 0),
                 trace_id TEXT NOT NULL,
                 compatibility_revision INTEGER NOT NULL CHECK(compatibility_revision >= 0),
                 input_frontier_sha256 TEXT NOT NULL CHECK(length(input_frontier_sha256)=64 AND input_frontier_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -202,7 +225,7 @@ internal static class SkillProjectionSchemaV1
                 operation_key TEXT PRIMARY KEY CHECK(length(operation_key) BETWEEN 1 AND 128),
                 semantic_fingerprint TEXT NOT NULL CHECK(length(semantic_fingerprint)=64 AND semantic_fingerprint NOT GLOB '*[^0-9a-f]*'),
                 outcome TEXT NOT NULL CHECK(outcome IN ('changed','no_change','input_unavailable')),
-                generation_id INTEGER NULL,
+                generation_id INTEGER NULL CHECK(generation_id IS NULL OR generation_id > 0),
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(generation_id) REFERENCES skill_projection_generations(generation_id) ON UPDATE RESTRICT ON DELETE RESTRICT
             );
@@ -212,8 +235,8 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_invocations (
-                invocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                generation_id INTEGER NOT NULL,
+                invocation_id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(invocation_id > 0),
+                generation_id INTEGER NOT NULL CHECK(generation_id > 0),
                 source_arm TEXT NOT NULL CHECK(source_arm='otel_trace_span'),
                 raw_record_id INTEGER NOT NULL CHECK(raw_record_id > 0),
                 trace_id TEXT NOT NULL CHECK(length(trace_id)=32 AND trace_id NOT GLOB '*[^0-9a-f]*'),
@@ -234,8 +257,8 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_inventories (
-                inventory_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                generation_id INTEGER NOT NULL,
+                inventory_id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(inventory_id > 0),
+                generation_id INTEGER NOT NULL CHECK(generation_id > 0),
                 source_arm TEXT NOT NULL CHECK(source_arm='otel_trace_span'),
                 raw_record_id INTEGER NOT NULL CHECK(raw_record_id > 0),
                 trace_id TEXT NOT NULL CHECK(length(trace_id)=32 AND trace_id NOT GLOB '*[^0-9a-f]*'),
@@ -254,7 +277,7 @@ internal static class SkillProjectionSchemaV1
             transaction,
             """
             CREATE TABLE IF NOT EXISTS skill_projection_inventory_names (
-                inventory_id INTEGER NOT NULL,
+                inventory_id INTEGER NOT NULL CHECK(inventory_id > 0),
                 name_ordinal INTEGER NOT NULL CHECK(name_ordinal BETWEEN 0 AND 99),
                 skill_name TEXT NOT NULL CHECK(length(skill_name) BETWEEN 1 AND 256),
                 PRIMARY KEY(inventory_id, name_ordinal),
@@ -290,23 +313,15 @@ internal static class SkillProjectionSchemaV1
                 FOREIGN KEY(session_id,event_id) REFERENCES session_events(session_id,event_id) ON UPDATE RESTRICT ON DELETE RESTRICT
             );
             """);
-        foreach (var table in new[]
-        {
-            "skill_projection_operation_receipts",
-            "skill_projection_invocations",
-            "skill_projection_inventories",
-            "skill_projection_inventory_names",
-            "skill_projection_sdk_claims",
-        })
+        foreach (var trigger in TriggerDefinitions)
         {
             Execute(
                 connection,
                 transaction,
-                $"CREATE TRIGGER IF NOT EXISTS {table}_update_rejected BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;");
-            Execute(
-                connection,
-                transaction,
-                $"CREATE TRIGGER IF NOT EXISTS {table}_delete_rejected BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;");
+                trigger.Sql.Replace(
+                    "CREATE TRIGGER ",
+                    "CREATE TRIGGER IF NOT EXISTS ",
+                    StringComparison.Ordinal));
         }
         Execute(
             connection,
@@ -397,29 +412,62 @@ internal static class SkillProjectionSchemaV1
         }
         if (HasObsoleteAuthority(connection, transaction))
             throw new InvalidOperationException("Unsupported incomplete skill_projection schema version 1.");
-        foreach (var table in new[]
+        foreach (var trigger in TriggerDefinitions)
         {
-            "skill_projection_operation_receipts",
-            "skill_projection_invocations",
-            "skill_projection_inventories",
-            "skill_projection_inventory_names",
-            "skill_projection_sdk_claims",
-        })
-        {
-            if (!ObjectExists(connection, transaction, "trigger", $"{table}_update_rejected")
-                || !ObjectExists(connection, transaction, "trigger", $"{table}_delete_rejected"))
+            if (!ObjectExists(connection, transaction, "trigger", trigger.Name))
             {
                 throw new InvalidOperationException("Unsupported incomplete skill_projection schema version 1.");
             }
         }
+        ValidateGeneratedIdentities(connection, transaction);
         ValidateForeignKeys(connection, transaction);
         ValidateSdkClaims(connection, transaction);
         ValidateCanonicalRows(connection, transaction);
+        ValidateSanitizedSkillValues(connection, transaction);
         ValidateQueueShapes(connection, transaction);
         ValidateGenerationState(connection, transaction);
         ValidateFrontiers(connection, transaction);
         ValidateProjectionProvenance(connection, transaction);
         ValidateOperationReceipts(connection, transaction);
+    }
+
+    private static void ValidateGeneratedIdentities(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        if (Exists(
+                connection,
+                transaction,
+                """
+                SELECT 1 FROM skill_projection_generations
+                WHERE generation_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_generation_inputs
+                WHERE generation_id<=0 OR source_observation_id<=0 OR raw_record_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_trace_heads
+                WHERE desired_generation_id<=0 OR current_generation_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_queue
+                WHERE generation_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_operation_receipts
+                WHERE generation_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_invocations
+                WHERE invocation_id<=0 OR generation_id<=0 OR raw_record_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_inventories
+                WHERE inventory_id<=0 OR generation_id<=0 OR raw_record_id<=0
+                UNION ALL
+                SELECT 1 FROM skill_projection_inventory_names
+                WHERE inventory_id<=0
+                LIMIT 1;
+                """))
+        {
+            throw new InvalidOperationException(
+                "skill_projection_generated_identity_invalid");
+        }
     }
 
     private static void ValidateSdkClaims(
@@ -528,6 +576,40 @@ internal static class SkillProjectionSchemaV1
             FROM skill_projection_inventories;
             """,
             [TextRule.VisibleToken, TextRule.CanonicalTimestamp]);
+    }
+
+    private static void ValidateSanitizedSkillValues(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT skill_name,skill_source,invocation_trigger
+            FROM skill_projection_invocations
+            UNION ALL
+            SELECT skill_name,NULL,NULL
+            FROM skill_projection_inventory_names;
+            """;
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+            {
+                if (reader.IsDBNull(ordinal))
+                    continue;
+                var value = reader.GetString(ordinal);
+                if (!string.Equals(
+                        value,
+                        MeasurementSanitizer.SanitizeFreeFormName(value),
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "skill_projection_sanitized_value_invalid");
+                }
+            }
+        }
     }
 
     private static void ValidateQueueShapes(

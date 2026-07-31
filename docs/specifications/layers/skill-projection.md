@@ -206,37 +206,34 @@ The worker never re-queries “all raw records visible now.” Each generation
 stores the exact ordered input identities and digests selected in the
 transaction that created it.
 
-The frontier hash is:
+The frontier hash uses domain `skill-projection-frontier\0v2\0`. After the
+domain, every value is framed independently as its U32BE byte length followed
+by its bytes. Integers use unsigned decimal ASCII with no sign or leading
+zeroes; strings use their exact UTF-8 bytes.
+
+The canonical framed value sequence is:
 
 ```text
-SHA256(
-  UTF8("skill-projection-input-frontier\0v1\0")
-  || U32BE(item_count)
-  || item_0
-  || ...
-  || item_n
-)
+trace_id
+item_count
+for each item ordered by (raw_record_id, source_observation_id):
+  source_observation_id
+  raw_record_id
+  input_evidence_kind
+  evidence_value
 ```
 
-Items are sorted by `owner_identity bytes` using ordinal byte comparison.
-Duplicate identities are rejected; discovery order and timestamps are
-irrelevant. Each item is:
+`item_count`, `source_observation_id`, and `raw_record_id` use the integer
+encoding above. `input_evidence_kind` is the exact tagged-union token
+`payload_sha256` or `deleted_before_digest_v10`. For `payload_sha256`,
+`evidence_value` is the exact 64-character lowercase hexadecimal SHA-256 of the
+stored strict UTF-8 `payload_json` bytes. For `deleted_before_digest_v10`,
+`evidence_value` is the predecessor-schema marker token `10`. Duplicate
+`(raw_record_id, source_observation_id)` identities are rejected; discovery
+order and timestamps are irrelevant.
 
-```text
-U32BE(owner_identity_length)
-|| owner_identity
-|| 32 decoded input SHA-256 bytes
-```
-
-The OTel owner identity and input digest are:
-
-| Owner identity bytes | Input digest |
-| --- | --- |
-| `U64BE(raw_record_id)` | SHA-256 of the exact stored strict UTF-8 `payload_json` bytes |
-
-The shared framing/null rules are defined by
-[Source Compatibility Reconciliation](source-compatibility-reconciliation.md#canonical-binary-framing).
-Frontier items have no nullable field.
+This v2 framing supersedes the unintegrated v1 frontier framing. There is no
+v1 dual read, fallback, or compatibility path.
 
 The generation stores the ordered rows as well as the hash. Publication
 recomputes the hash from those rows and rejects a mismatch. Raw expiry never

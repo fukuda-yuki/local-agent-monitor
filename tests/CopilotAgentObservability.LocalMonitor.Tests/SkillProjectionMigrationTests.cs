@@ -627,6 +627,173 @@ public sealed class SkillProjectionMigrationTests
             () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
     }
 
+    [Theory]
+    [InlineData("operation-receipt-primary")]
+    [InlineData("invocation-primary")]
+    [InlineData("invocation-natural")]
+    [InlineData("inventory-primary")]
+    [InlineData("inventory-natural")]
+    [InlineData("inventory-name-primary")]
+    [InlineData("sdk-claim-primary")]
+    [InlineData("sdk-session-event")]
+    [InlineData("sdk-source-event")]
+    public void AppendOnlySkillRows_RejectInsertOrReplaceWithRecursiveTriggersDisabled(
+        string identity)
+    {
+        using var database = new TestDatabase();
+        _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            "PRAGMA foreign_keys=OFF; PRAGMA recursive_triggers=OFF;");
+        var (seed, replacement) = InsertOrReplaceAttack(identity);
+        Execute(connection, seed);
+
+        var error = Assert.Throws<SqliteException>(
+            () => Execute(connection, replacement));
+
+        Assert.Contains("skill_projection_append_only", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("skill_projection_invocations", "skill_name", "whitespace")]
+    [InlineData("skill_projection_invocations", "skill_name", "windows-path")]
+    [InlineData("skill_projection_invocations", "skill_source", "email")]
+    [InlineData("skill_projection_invocations", "invocation_trigger", "credential")]
+    [InlineData("skill_projection_inventory_names", "skill_name", "prompt")]
+    [InlineData("skill_projection_inventory_names", "skill_name", "unix-path")]
+    [InlineData("skill_projection_inventory_names", "skill_name", "truncated")]
+    public async Task RestoreValidation_RejectsNonCanonicalSanitizedOtelSkillValue(
+        string table,
+        string column,
+        string corruption)
+    {
+        using var database = new TestDatabase();
+        await SeedPublishedSkillProjection(database.Path);
+        using (var connection = Open(database.Path))
+        {
+            var updateTrigger = Assert.Single(
+                SkillProjectionSchemaV1.TriggerDefinitions,
+                trigger => trigger.Table == table
+                    && trigger.Name.EndsWith("_update_rejected", StringComparison.Ordinal));
+            Execute(connection, $"DROP TRIGGER {updateTrigger.Name};");
+            using (var mutation = connection.CreateCommand())
+            {
+                mutation.CommandText =
+                    $"PRAGMA ignore_check_constraints=ON; UPDATE {table} SET {column}=$value;";
+                mutation.Parameters.AddWithValue("$value", SanitizerCorruption(corruption));
+                mutation.ExecuteNonQuery();
+            }
+            Execute(connection, updateTrigger.Sql);
+
+            var error = Assert.Throws<InvalidOperationException>(
+                () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
+
+            Assert.Equal("skill_projection_sanitized_value_invalid", error.Message);
+            Execute(
+                connection,
+                "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
+        }
+
+        var preflight = new SqliteRuntimeBackupService()
+            .PreflightForMigration(database.Path);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("generation-primary")]
+    [InlineData("generation-input-reference")]
+    [InlineData("trace-head-desired-reference")]
+    [InlineData("trace-head-current-reference")]
+    [InlineData("queue-primary-reference")]
+    [InlineData("operation-receipt-reference")]
+    [InlineData("invocation-primary")]
+    [InlineData("invocation-generation-reference")]
+    [InlineData("inventory-primary")]
+    [InlineData("inventory-generation-reference")]
+    [InlineData("inventory-name-reference")]
+    public void CurrentSchemaChecks_RejectNegativeGeneratedIdentity(string identity)
+    {
+        using var database = new TestDatabase();
+        _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
+        using var connection = Open(database.Path);
+        Execute(connection, "PRAGMA foreign_keys=OFF;");
+
+        Assert.Throws<SqliteException>(
+            () => Execute(connection, NegativeIdentityInsert(identity)));
+    }
+
+    [Fact]
+    public async Task RestoreValidation_RejectsCoherentNegativeGeneratedIdentityGraph()
+    {
+        using var database = new TestDatabase();
+        await SeedPublishedSkillProjection(database.Path);
+        using (var connection = Open(database.Path))
+        {
+            var affectedTables = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "skill_projection_invocations",
+                "skill_projection_inventories",
+                "skill_projection_inventory_names",
+            };
+            var updateTriggers = SkillProjectionSchemaV1.TriggerDefinitions
+                .Where(trigger => affectedTables.Contains(trigger.Table)
+                    && trigger.Name.EndsWith("_update_rejected", StringComparison.Ordinal))
+                .ToArray();
+            foreach (var trigger in updateTriggers)
+                Execute(connection, $"DROP TRIGGER {trigger.Name};");
+            Execute(
+                connection,
+                $"""
+                PRAGMA foreign_keys=OFF;
+                PRAGMA ignore_check_constraints=ON;
+                UPDATE skill_projection_inventory_names
+                SET inventory_id=-inventory_id;
+                UPDATE skill_projection_inventories
+                SET inventory_id=-inventory_id,generation_id=-generation_id;
+                UPDATE skill_projection_invocations
+                SET invocation_id=-invocation_id,generation_id=-generation_id;
+                UPDATE skill_projection_generation_inputs
+                SET generation_id=-generation_id;
+                UPDATE skill_projection_queue
+                SET generation_id=-generation_id;
+                UPDATE skill_projection_trace_heads
+                SET desired_generation_id=CASE
+                        WHEN desired_generation_id IS NULL THEN NULL
+                        ELSE -desired_generation_id
+                    END,
+                    current_generation_id=CASE
+                        WHEN current_generation_id IS NULL THEN NULL
+                        ELSE -current_generation_id
+                    END;
+                UPDATE skill_projection_generations
+                SET generation_id=-generation_id;
+                INSERT INTO skill_projection_operation_receipts
+                VALUES(
+                    'negative-generation-proof','{new string('a', 64)}','changed',-1,
+                    '2026-07-31T00:00:00.0000000+00:00');
+                """);
+            foreach (var trigger in updateTriggers)
+                Execute(connection, trigger.Sql);
+
+            var error = Assert.Throws<InvalidOperationException>(
+                () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
+
+            Assert.Equal("skill_projection_generated_identity_invalid", error.Message);
+            Execute(
+                connection,
+                "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
+        }
+
+        var preflight = new SqliteRuntimeBackupService()
+            .PreflightForMigration(database.Path);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+    }
+
     [Fact]
     public void CurrentMonitorValidationRejectsAlteredDurableColumnDefinition()
     {
@@ -967,6 +1134,85 @@ public sealed class SkillProjectionMigrationTests
             """);
     }
 
+    private static (string Seed, string Replacement) InsertOrReplaceAttack(string identity)
+    {
+        const string at = "2026-07-31T00:00:00.0000000+00:00";
+        const string trace = "11111111111111111111111111111111";
+        const string otherTrace = "22222222222222222222222222222222";
+        const string span = "3333333333333333";
+        var invocation =
+            $"(1,1,'otel_trace_span',7,'{trace}','{span}',0,NULL,'safe-skill',NULL,NULL,'1.0.74','{at}')";
+        var inventory =
+            $"(1,1,'otel_trace_span',7,'{trace}',NULL,1,1,0,'1.0.74','{at}')";
+        var sdk =
+            $"('claim-1','session-1','event-1','source-event-1','adapter-1','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'safe-skill',NULL,NULL,'{at}')";
+        return identity switch
+        {
+            "operation-receipt-primary" =>
+                ($"INSERT INTO skill_projection_operation_receipts VALUES('operation-1','{new string('a', 64)}','no_change',NULL,'{at}');",
+                 $"INSERT OR REPLACE INTO skill_projection_operation_receipts VALUES('operation-1','{new string('b', 64)}','no_change',NULL,'{at}');"),
+            "invocation-primary" =>
+                ($"INSERT INTO skill_projection_invocations VALUES{invocation};",
+                 $"INSERT OR REPLACE INTO skill_projection_invocations VALUES(1,1,'otel_trace_span',8,'{otherTrace}','4444444444444444',1,NULL,'other-skill',NULL,NULL,'1.0.74','{at}');"),
+            "invocation-natural" =>
+                ($"INSERT INTO skill_projection_invocations VALUES{invocation};",
+                 $"INSERT OR REPLACE INTO skill_projection_invocations VALUES(2,1,'otel_trace_span',7,'{trace}','4444444444444444',0,NULL,'other-skill',NULL,NULL,'1.0.74','{at}');"),
+            "inventory-primary" =>
+                ($"INSERT INTO skill_projection_inventories VALUES{inventory};",
+                 $"INSERT OR REPLACE INTO skill_projection_inventories VALUES(1,1,'otel_trace_span',8,'{otherTrace}',NULL,1,1,0,'1.0.74','{at}');"),
+            "inventory-natural" =>
+                ($"INSERT INTO skill_projection_inventories VALUES{inventory};",
+                 $"INSERT OR REPLACE INTO skill_projection_inventories VALUES(2,1,'otel_trace_span',7,'{trace}',NULL,2,1,1,'1.0.74','{at}');"),
+            "inventory-name-primary" =>
+                ("INSERT INTO skill_projection_inventory_names VALUES(1,0,'safe-skill');",
+                 "INSERT OR REPLACE INTO skill_projection_inventory_names VALUES(1,0,'other-skill');"),
+            "sdk-claim-primary" =>
+                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                 $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-1','session-2','event-2','source-event-2','adapter-2','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
+            "sdk-session-event" =>
+                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                 $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-2','session-1','event-1','source-event-2','adapter-2','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
+            "sdk-source-event" =>
+                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                 $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-2','session-2','event-2','source-event-1','adapter-1','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
+            _ => throw new ArgumentOutOfRangeException(nameof(identity)),
+        };
+    }
+
+    private static string NegativeIdentityInsert(string identity)
+    {
+        const string at = "2026-07-31T00:00:00.0000000+00:00";
+        const string trace = "11111111111111111111111111111111";
+        const string span = "2222222222222222";
+        var sha = new string('a', 64);
+        return identity switch
+        {
+            "generation-primary" =>
+                $"INSERT INTO skill_projection_generations VALUES(-1,'{trace}',0,'{sha}','skill-projector-1','pending','{at}','{at}');",
+            "generation-input-reference" =>
+                $"INSERT INTO skill_projection_generation_inputs VALUES(-1,0,1,1,'payload_sha256','{sha}');",
+            "trace-head-desired-reference" =>
+                $"INSERT INTO skill_projection_trace_heads VALUES('{trace}',-1,NULL,'{at}');",
+            "trace-head-current-reference" =>
+                $"INSERT INTO skill_projection_trace_heads VALUES('{trace}',NULL,-1,'{at}');",
+            "queue-primary-reference" =>
+                $"INSERT INTO skill_projection_queue(generation_id,trace_id,compatibility_revision,input_frontier_sha256,projector_version,state) VALUES(-1,'{trace}',0,'{sha}','skill-projector-1','pending');",
+            "operation-receipt-reference" =>
+                $"INSERT INTO skill_projection_operation_receipts VALUES('operation-1','{sha}','changed',-1,'{at}');",
+            "invocation-primary" =>
+                $"INSERT INTO skill_projection_invocations VALUES(-1,1,'otel_trace_span',1,'{trace}','{span}',0,NULL,'safe-skill',NULL,NULL,'1.0.74','{at}');",
+            "invocation-generation-reference" =>
+                $"INSERT INTO skill_projection_invocations VALUES(1,-1,'otel_trace_span',1,'{trace}','{span}',0,NULL,'safe-skill',NULL,NULL,'1.0.74','{at}');",
+            "inventory-primary" =>
+                $"INSERT INTO skill_projection_inventories VALUES(-1,1,'otel_trace_span',1,'{trace}',NULL,1,1,0,'1.0.74','{at}');",
+            "inventory-generation-reference" =>
+                $"INSERT INTO skill_projection_inventories VALUES(1,-1,'otel_trace_span',1,'{trace}',NULL,1,1,0,'1.0.74','{at}');",
+            "inventory-name-reference" =>
+                "INSERT INTO skill_projection_inventory_names VALUES(-1,0,'safe-skill');",
+            _ => throw new ArgumentOutOfRangeException(nameof(identity)),
+        };
+    }
+
     private static void CreateExactObsoleteSkillAuthority(
         SqliteConnection connection,
         long rawRecordId)
@@ -1054,9 +1300,35 @@ public sealed class SkillProjectionMigrationTests
             store.ClaimNext(ObservedAt.AddSeconds(1)));
     }
 
-    private static ValidatedIngestionBatch CreateBatch()
+    private static async Task SeedPublishedSkillProjection(string path)
     {
-        const string payload = "{}";
+        new SqliteSourceCompatibilityStore(path).CreateSchema();
+        new SqliteIngestionCommitStore(path).Commit(CreateBatch(SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(path);
+        var worker = new SkillProjectionWorker(
+            new SqliteSkillProjectionStore(
+                path,
+                new RawTelemetryStore(path, retention)));
+
+        Assert.Equal(
+            SkillProjectionWorkOutcome.Published,
+            await worker.RunNextAsync(ObservedAt.AddSeconds(1)));
+    }
+
+    private static string SanitizerCorruption(string corruption) => corruption switch
+    {
+        "whitespace" => "   ",
+        "windows-path" => @"C:\synthetic\SKILL.md",
+        "email" => "synthetic@example.test",
+        "credential" => "api_key=synthetic",
+        "prompt" => "prompt: synthetic",
+        "unix-path" => "/tmp/synthetic-skill",
+        "truncated" => new string('x', MeasurementSanitizer.MaxSanitizedNameLength + 1),
+        _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+    };
+
+    private static ValidatedIngestionBatch CreateBatch(string payload = "{}")
+    {
         var inventory = OtlpJsonStructuralWalker.Build(payload, ObservedAt);
         var decision = SourceCompatibilityEvaluator.Assess(
             "github-copilot-cli",
@@ -1090,6 +1362,30 @@ public sealed class SkillProjectionMigrationTests
                 PayloadJson: payload),
             observation);
     }
+
+    private const string SkillPayload =
+        """
+        {"resourceSpans":[{
+          "resource":{"attributes":[
+            {"key":"service.version","value":{"stringValue":"1.0.74"}},
+            {"key":"client.kind","value":{"stringValue":"copilot-cli"}}
+          ]},
+          "scopeSpans":[{"spans":[{
+            "traceId":"11111111111111111111111111111111",
+            "spanId":"2222222222222222",
+            "attributes":[
+              {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+              {"key":"gen_ai.tool.name","value":{"stringValue":"skill"}},
+              {"key":"github.copilot.skill.name","value":{"stringValue":"safe-skill"}},
+              {"key":"github.copilot.skill.source","value":{"stringValue":"project"}},
+              {"key":"github.copilot.skill.invocation_trigger","value":{"stringValue":"agent-invoked"}},
+              {"key":"github.copilot.context.skills","value":{"arrayValue":{"values":[
+                {"stringValue":"safe-skill"}
+              ]}}}
+            ]
+          }]}]
+        }]}
+        """;
 
     private static SqliteConnection Open(string path)
     {
