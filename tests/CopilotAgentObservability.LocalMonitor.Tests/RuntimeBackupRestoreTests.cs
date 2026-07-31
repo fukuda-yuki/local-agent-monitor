@@ -336,6 +336,25 @@ public sealed class RuntimeBackupRestoreTests
         SkillProjectionSchemaV1.Validate(connection, transaction: null);
     }
 
+    [Theory]
+    [InlineData("unsanitized-otel-skill-value")]
+    [InlineData("coherent-negative-generated-identities")]
+    public void Persisted_skill_boundary_contradiction_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreatePublishedSupersededSkillProjectionDatabase(temp.Source);
+        var valid = Path.Combine(temp.Root, $"skill-boundary-{contradiction}-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateSkillProjectionStateContradictionArchive(
+            valid,
+            contradiction);
+        temp.AssertArchiveDatabaseChecksumMatchesManifest(malicious);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
     private static void AssertRestoreIncompatibleWithoutTargetMutation(
         RestoreTemp temp,
         SqliteRuntimeBackupService service,
@@ -2557,6 +2576,73 @@ public sealed class RuntimeBackupRestoreTests
                         error_code=NULL;
                     """);
             }
+            else if (contradiction == "unsanitized-otel-skill-value")
+            {
+                var updateTrigger = Assert.Single(
+                    SkillProjectionSchemaV1.TriggerDefinitions,
+                    trigger => trigger.Name == "skill_projection_invocations_update_rejected");
+                Execute(connection, $"DROP TRIGGER {updateTrigger.Name};");
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText =
+                        "UPDATE skill_projection_invocations SET skill_name=$unsafe;";
+                    command.Parameters.AddWithValue("$unsafe", @"C:\synthetic\SKILL.md");
+                    Assert.True(command.ExecuteNonQuery() >= 1);
+                }
+                Execute(connection, updateTrigger.Sql);
+            }
+            else if (contradiction == "coherent-negative-generated-identities")
+            {
+                var affectedTables = new HashSet<string>(StringComparer.Ordinal)
+                {
+                    "skill_projection_operation_receipts",
+                    "skill_projection_invocations",
+                    "skill_projection_inventories",
+                    "skill_projection_inventory_names",
+                };
+                var updateTriggers = SkillProjectionSchemaV1.TriggerDefinitions
+                    .Where(trigger => affectedTables.Contains(trigger.Table)
+                        && trigger.Name.EndsWith("_update_rejected", StringComparison.Ordinal))
+                    .ToArray();
+                foreach (var trigger in updateTriggers)
+                    Execute(connection, $"DROP TRIGGER {trigger.Name};");
+                Execute(
+                    connection,
+                    """
+                    PRAGMA foreign_keys=OFF;
+                    PRAGMA ignore_check_constraints=ON;
+                    UPDATE skill_projection_inventory_names
+                    SET inventory_id=-inventory_id;
+                    UPDATE skill_projection_inventories
+                    SET inventory_id=-inventory_id,generation_id=-generation_id;
+                    UPDATE skill_projection_invocations
+                    SET invocation_id=-invocation_id,generation_id=-generation_id;
+                    UPDATE skill_projection_generation_inputs
+                    SET generation_id=-generation_id;
+                    UPDATE skill_projection_trace_heads
+                    SET desired_generation_id=CASE
+                            WHEN desired_generation_id IS NULL THEN NULL
+                            ELSE -desired_generation_id
+                        END,
+                        current_generation_id=CASE
+                            WHEN current_generation_id IS NULL THEN NULL
+                            ELSE -current_generation_id
+                        END;
+                    UPDATE skill_projection_queue
+                    SET generation_id=-generation_id;
+                    UPDATE skill_projection_operation_receipts
+                    SET generation_id=CASE
+                        WHEN generation_id IS NULL THEN NULL
+                        ELSE -generation_id
+                    END;
+                    UPDATE skill_projection_generations
+                    SET generation_id=-generation_id;
+                    PRAGMA ignore_check_constraints=OFF;
+                    PRAGMA foreign_keys=ON;
+                    """);
+                foreach (var trigger in updateTriggers)
+                    Execute(connection, trigger.Sql);
+            }
             else
             {
                 throw new ArgumentOutOfRangeException(nameof(contradiction));
@@ -2985,6 +3071,18 @@ public sealed class RuntimeBackupRestoreTests
             return output;
         }
 
+        internal void AssertArchiveDatabaseChecksumMatchesManifest(string path)
+        {
+            using var archive = ZipFile.OpenRead(path);
+            var manifest = RuntimeBackupJson.ParseManifest(
+                Read(archive.GetEntry("manifest.json")!));
+            var database = Read(archive.GetEntry("database.sqlite")!);
+            Assert.Equal(manifest.DatabaseSize, database.LongLength);
+            Assert.Equal(
+                manifest.DatabaseSha256,
+                Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant());
+        }
+
         private static byte[] Read(ZipArchiveEntry entry)
         {
             using var stream = entry.Open();
@@ -3081,6 +3179,8 @@ public sealed class RuntimeBackupRestoreTests
                 DROP TABLE source_trace_version_interpretation_heads;
                 DROP TABLE source_trace_version_interpretation_supersessions;
                 DROP TABLE source_trace_compatibility_revisions;
+                DROP TRIGGER IF EXISTS source_schema_observations_insert_no_replace;
+                DROP TRIGGER IF EXISTS source_trace_version_observations_insert_no_replace;
                 DROP TRIGGER source_trace_version_observations_update_rejected;
                 DROP TRIGGER source_trace_version_observations_delete_rejected;
                 DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;

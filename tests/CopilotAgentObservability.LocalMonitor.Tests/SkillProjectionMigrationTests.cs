@@ -646,13 +646,16 @@ public sealed class SkillProjectionMigrationTests
         Execute(
             connection,
             "PRAGMA foreign_keys=OFF; PRAGMA recursive_triggers=OFF;");
-        var (seed, replacement) = InsertOrReplaceAttack(identity);
-        Execute(connection, seed);
+        var attack = InsertOrReplaceAttack(identity);
+        Execute(connection, attack.Seed);
+        var before = ReadEveryPersistedFieldAndCount(connection, attack.Table);
+        Assert.Equal(1, before.Count);
 
         var error = Assert.Throws<SqliteException>(
-            () => Execute(connection, replacement));
+            () => Execute(connection, attack.Replacement));
 
         Assert.Contains("skill_projection_append_only", error.Message, StringComparison.Ordinal);
+        Assert.Equal(before, ReadEveryPersistedFieldAndCount(connection, attack.Table));
     }
 
     [Theory]
@@ -1123,6 +1126,8 @@ public sealed class SkillProjectionMigrationTests
             DROP TABLE source_trace_version_interpretation_heads;
             DROP TABLE source_trace_version_interpretation_supersessions;
             DROP TABLE source_trace_compatibility_revisions;
+            DROP TRIGGER IF EXISTS source_schema_observations_insert_no_replace;
+            DROP TRIGGER IF EXISTS source_trace_version_observations_insert_no_replace;
             DROP TRIGGER source_trace_version_observations_update_rejected;
             DROP TRIGGER source_trace_version_observations_delete_rejected;
             DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
@@ -1134,7 +1139,8 @@ public sealed class SkillProjectionMigrationTests
             """);
     }
 
-    private static (string Seed, string Replacement) InsertOrReplaceAttack(string identity)
+    private static (string Table, string Seed, string Replacement) InsertOrReplaceAttack(
+        string identity)
     {
         const string at = "2026-07-31T00:00:00.0000000+00:00";
         const string trace = "11111111111111111111111111111111";
@@ -1149,35 +1155,70 @@ public sealed class SkillProjectionMigrationTests
         return identity switch
         {
             "operation-receipt-primary" =>
-                ($"INSERT INTO skill_projection_operation_receipts VALUES('operation-1','{new string('a', 64)}','no_change',NULL,'{at}');",
+                ("skill_projection_operation_receipts",
+                 $"INSERT INTO skill_projection_operation_receipts VALUES('operation-1','{new string('a', 64)}','no_change',NULL,'{at}');",
                  $"INSERT OR REPLACE INTO skill_projection_operation_receipts VALUES('operation-1','{new string('b', 64)}','no_change',NULL,'{at}');"),
             "invocation-primary" =>
-                ($"INSERT INTO skill_projection_invocations VALUES{invocation};",
+                ("skill_projection_invocations",
+                 $"INSERT INTO skill_projection_invocations VALUES{invocation};",
                  $"INSERT OR REPLACE INTO skill_projection_invocations VALUES(1,1,'otel_trace_span',8,'{otherTrace}','4444444444444444',1,NULL,'other-skill',NULL,NULL,'1.0.74','{at}');"),
             "invocation-natural" =>
-                ($"INSERT INTO skill_projection_invocations VALUES{invocation};",
+                ("skill_projection_invocations",
+                 $"INSERT INTO skill_projection_invocations VALUES{invocation};",
                  $"INSERT OR REPLACE INTO skill_projection_invocations VALUES(2,1,'otel_trace_span',7,'{trace}','4444444444444444',0,NULL,'other-skill',NULL,NULL,'1.0.74','{at}');"),
             "inventory-primary" =>
-                ($"INSERT INTO skill_projection_inventories VALUES{inventory};",
+                ("skill_projection_inventories",
+                 $"INSERT INTO skill_projection_inventories VALUES{inventory};",
                  $"INSERT OR REPLACE INTO skill_projection_inventories VALUES(1,1,'otel_trace_span',8,'{otherTrace}',NULL,1,1,0,'1.0.74','{at}');"),
             "inventory-natural" =>
-                ($"INSERT INTO skill_projection_inventories VALUES{inventory};",
+                ("skill_projection_inventories",
+                 $"INSERT INTO skill_projection_inventories VALUES{inventory};",
                  $"INSERT OR REPLACE INTO skill_projection_inventories VALUES(2,1,'otel_trace_span',7,'{trace}',NULL,2,1,1,'1.0.74','{at}');"),
             "inventory-name-primary" =>
-                ("INSERT INTO skill_projection_inventory_names VALUES(1,0,'safe-skill');",
+                ("skill_projection_inventory_names",
+                 "INSERT INTO skill_projection_inventory_names VALUES(1,0,'safe-skill');",
                  "INSERT OR REPLACE INTO skill_projection_inventory_names VALUES(1,0,'other-skill');"),
             "sdk-claim-primary" =>
-                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                ("skill_projection_sdk_claims",
+                 $"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
                  $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-1','session-2','event-2','source-event-2','adapter-2','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
             "sdk-session-event" =>
-                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                ("skill_projection_sdk_claims",
+                 $"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
                  $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-2','session-1','event-1','source-event-2','adapter-2','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
             "sdk-source-event" =>
-                ($"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
+                ("skill_projection_sdk_claims",
+                 $"INSERT INTO skill_projection_sdk_claims VALUES{sdk};",
                  $"INSERT OR REPLACE INTO skill_projection_sdk_claims VALUES('claim-2','session-2','event-2','source-event-1','adapter-1','copilot-sdk','1.0.0','adapter-v1','normalizer-v1','skill-invocation-v1','{new string('a', 64)}','{new string('b', 64)}',NULL,NULL,'other-skill',NULL,NULL,'{at}');"),
             _ => throw new ArgumentOutOfRangeException(nameof(identity)),
         };
     }
+
+    private static PersistedRows ReadEveryPersistedFieldAndCount(
+        SqliteConnection connection,
+        string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT * FROM {table} ORDER BY rowid;";
+        using var reader = command.ExecuteReader();
+        var rows = new List<object?[]>();
+        while (reader.Read())
+        {
+            var values = new object?[reader.FieldCount];
+            for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+            {
+                values[ordinal] = reader.IsDBNull(ordinal)
+                    ? null
+                    : reader.GetValue(ordinal);
+            }
+            rows.Add(values);
+        }
+        return new(
+            rows.Count,
+            System.Text.Json.JsonSerializer.Serialize(rows));
+    }
+
+    private sealed record PersistedRows(int Count, string EveryField);
 
     private static string NegativeIdentityInsert(string identity)
     {

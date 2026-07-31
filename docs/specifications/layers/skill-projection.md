@@ -113,7 +113,7 @@ The v1 component owns these exact namespaces:
 | Table | Required key/content |
 | --- | --- |
 | `skill_projection_generations` | OTel-only integer generation primary key; trace; compatibility revision; frontier digest; projector version; lifecycle; created/updated times; unique generation tuple |
-| `skill_projection_generation_inputs` | OTel generation plus zero-based input ordinal primary key; exact raw-record owner identity bytes; exact input digest |
+| `skill_projection_generation_inputs` | OTel generation plus zero-based input ordinal primary key; exact source-observation/raw-record identity; exact tagged input-evidence variant and value |
 | `skill_projection_trace_heads` | OTel trace primary key; nullable unique desired and current generation pointers; updated time |
 | `skill_projection_queue` | OTel generation primary key; repeated unique generation tuple; closed queue state; attempt/lease/retry/error fields |
 | `skill_projection_operation_receipts` | opaque operation key primary key; semantic fingerprint; fixed outcome; nullable generation; created time |
@@ -203,7 +203,7 @@ invalidation.
 ## Exact OTel input frontier
 
 The worker never re-queries “all raw records visible now.” Each generation
-stores the exact ordered input identities and digests selected in the
+stores the exact ordered input identities and tagged evidence selected in the
 transaction that created it.
 
 The frontier hash uses domain `skill-projection-frontier\0v2\0`. After the
@@ -394,7 +394,8 @@ The publication transaction revalidates all of:
 - every Retention operation lease has the exact renewed
   item-revision/owner/generation and expires after publication time;
 - persisted frontier rows recompute to `input_frontier_sha256`;
-- every input digest still matches the retained bytes; and
+- every tagged input-evidence item still satisfies its variant contract and,
+  for `payload_sha256`, still matches the retained bytes; and
 - projector version equals the generation projector version.
 
 Every state mutation in a failing publication transaction first verifies the
