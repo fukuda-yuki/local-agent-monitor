@@ -5,9 +5,37 @@ internal static class SourceCompatibilitySchemaV11
     internal static IReadOnlyList<(string Name, string Table, string Sql)> TriggerDefinitions { get; } =
     [
         (
+            "source_schema_observations_insert_no_replace",
+            "source_schema_observations",
+            """
+            CREATE TRIGGER source_schema_observations_insert_no_replace
+            BEFORE INSERT ON source_schema_observations
+            WHEN EXISTS(
+                SELECT 1 FROM source_schema_observations
+                WHERE id=NEW.id
+                   OR observation_id=NEW.observation_id COLLATE BINARY
+                   OR (NEW.raw_record_id IS NOT NULL AND raw_record_id=NEW.raw_record_id)
+                   OR (NEW.ingest_batch_id IS NOT NULL AND ingest_batch_id=NEW.ingest_batch_id COLLATE BINARY)
+            )
+            BEGIN SELECT RAISE(ABORT,'source_schema_observation_no_replace'); END;
+            """),
+        (
             "source_trace_version_observations_update_rejected",
             "source_trace_version_observations",
             "CREATE TRIGGER source_trace_version_observations_update_rejected BEFORE UPDATE ON source_trace_version_observations BEGIN SELECT RAISE(ABORT,'source_trace_version_observation_immutable'); END;"),
+        (
+            "source_trace_version_observations_insert_no_replace",
+            "source_trace_version_observations",
+            """
+            CREATE TRIGGER source_trace_version_observations_insert_no_replace
+            BEFORE INSERT ON source_trace_version_observations
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_observations
+                WHERE source_observation_id=NEW.source_observation_id
+                  AND trace_id=NEW.trace_id COLLATE BINARY
+            )
+            BEGIN SELECT RAISE(ABORT,'source_trace_version_observation_no_replace'); END;
+            """),
         (
             "source_trace_version_observations_delete_rejected",
             "source_trace_version_observations",
@@ -39,6 +67,21 @@ internal static class SourceCompatibilitySchemaV11
             "source_trace_version_interpretation_supersessions",
             "CREATE TRIGGER source_trace_version_interpretation_supersessions_update_rejected BEFORE UPDATE ON source_trace_version_interpretation_supersessions BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;"),
         (
+            "source_trace_version_interpretation_supersessions_insert_no_replace",
+            "source_trace_version_interpretation_supersessions",
+            """
+            CREATE TRIGGER source_trace_version_interpretation_supersessions_insert_no_replace
+            BEFORE INSERT ON source_trace_version_interpretation_supersessions
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_interpretation_supersessions
+                WHERE supersession_id=NEW.supersession_id
+                   OR (source_observation_id=NEW.source_observation_id
+                       AND trace_id=NEW.trace_id COLLATE BINARY
+                       AND new_interpretation_revision=NEW.new_interpretation_revision)
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_supersession_no_replace'); END;
+            """),
+        (
             "source_trace_version_interpretation_supersessions_delete_rejected",
             "source_trace_version_interpretation_supersessions",
             "CREATE TRIGGER source_trace_version_interpretation_supersessions_delete_rejected BEFORE DELETE ON source_trace_version_interpretation_supersessions BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;"),
@@ -47,6 +90,18 @@ internal static class SourceCompatibilitySchemaV11
             "source_compatibility_reconciliation_receipts",
             "CREATE TRIGGER source_compatibility_reconciliation_receipts_update_rejected BEFORE UPDATE ON source_compatibility_reconciliation_receipts BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;"),
         (
+            "source_compatibility_reconciliation_receipts_insert_no_replace",
+            "source_compatibility_reconciliation_receipts",
+            """
+            CREATE TRIGGER source_compatibility_reconciliation_receipts_insert_no_replace
+            BEFORE INSERT ON source_compatibility_reconciliation_receipts
+            WHEN EXISTS(
+                SELECT 1 FROM source_compatibility_reconciliation_receipts
+                WHERE operation_key=NEW.operation_key COLLATE BINARY
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_receipt_no_replace'); END;
+            """),
+        (
             "source_compatibility_reconciliation_receipts_delete_rejected",
             "source_compatibility_reconciliation_receipts",
             "CREATE TRIGGER source_compatibility_reconciliation_receipts_delete_rejected BEFORE DELETE ON source_compatibility_reconciliation_receipts BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;"),
@@ -54,6 +109,20 @@ internal static class SourceCompatibilitySchemaV11
             "source_trace_version_interpretation_heads_delete_rejected",
             "source_trace_version_interpretation_heads",
             "CREATE TRIGGER source_trace_version_interpretation_heads_delete_rejected BEFORE DELETE ON source_trace_version_interpretation_heads BEGIN SELECT RAISE(ABORT,'source_compatibility_head_delete_rejected'); END;"),
+        (
+            "source_trace_version_interpretation_heads_insert_no_replace",
+            "source_trace_version_interpretation_heads",
+            """
+            CREATE TRIGGER source_trace_version_interpretation_heads_insert_no_replace
+            BEFORE INSERT ON source_trace_version_interpretation_heads
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_interpretation_heads
+                WHERE (source_observation_id=NEW.source_observation_id
+                       AND trace_id=NEW.trace_id COLLATE BINARY)
+                   OR current_supersession_id=NEW.current_supersession_id
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_head_no_replace'); END;
+            """),
         (
             "source_trace_version_interpretation_heads_update_guard",
             "source_trace_version_interpretation_heads",
@@ -81,15 +150,20 @@ internal static class SourceCompatibilitySchemaV11
         "source_trace_version_interpretation_heads",
         "source_trace_compatibility_revisions",
         "source_compatibility_reconciliation_receipts",
+        "source_schema_observations_insert_no_replace",
         "source_trace_version_observations_update_rejected",
+        "source_trace_version_observations_insert_no_replace",
         "source_trace_version_observations_delete_rejected",
         "source_schema_observations_trace_version_child_delete_rejected",
         "source_schema_observations_projection_input_update_rejected",
         "source_trace_version_interpretation_supersessions_update_rejected",
+        "source_trace_version_interpretation_supersessions_insert_no_replace",
         "source_trace_version_interpretation_supersessions_delete_rejected",
         "source_compatibility_reconciliation_receipts_update_rejected",
+        "source_compatibility_reconciliation_receipts_insert_no_replace",
         "source_compatibility_reconciliation_receipts_delete_rejected",
         "source_trace_version_interpretation_heads_delete_rejected",
+        "source_trace_version_interpretation_heads_insert_no_replace",
         "source_trace_version_interpretation_heads_update_guard",
     ];
     private static readonly string[] AuthorityTableNames =
@@ -159,6 +233,7 @@ internal static class SourceCompatibilitySchemaV11
             if (!restricted)
                 throw new InvalidOperationException("Unsupported incomplete monitor schema version 11.");
         }
+        ValidatePositiveSourceIdentities(connection, transaction);
         if (Exists(
                 connection,
                 transaction,
@@ -260,6 +335,43 @@ internal static class SourceCompatibilitySchemaV11
             throw new InvalidOperationException(
                 "source_compatibility_supersession_transition_invalid");
         }
+    }
+
+    private static void ValidatePositiveSourceIdentities(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        if (Exists(
+                connection,
+                transaction,
+                """
+                SELECT 1 FROM source_schema_observations
+                WHERE id <= 0
+                   OR raw_record_id <= 0
+                UNION ALL
+                SELECT 1 FROM source_unknown_observations
+                WHERE id <= 0 OR source_observation_id <= 0
+                UNION ALL
+                SELECT 1 FROM source_trace_version_observations
+                WHERE source_observation_id <= 0
+                UNION ALL
+                SELECT 1 FROM source_trace_version_interpretation_supersessions
+                WHERE supersession_id <= 0
+                   OR source_observation_id <= 0
+                   OR raw_record_id <= 0
+                UNION ALL
+                SELECT 1 FROM source_trace_version_interpretation_heads
+                WHERE source_observation_id <= 0
+                   OR current_supersession_id <= 0
+                UNION ALL
+                SELECT 1 FROM source_compatibility_reconciliation_receipts
+                WHERE source_observation_id <= 0
+                   OR raw_record_id <= 0
+                   OR resulting_supersession_id <= 0
+                   OR resulting_generation_id <= 0
+                LIMIT 1;
+                """))
+            throw new InvalidOperationException("source_compatibility_identity_invalid");
     }
 
     private static void ValidateReconciliationFingerprints(
@@ -493,7 +605,9 @@ internal static class SourceCompatibilitySchemaV11
                     SELECT 1
                     FROM source_trace_version_observations AS trace
                     WHERE trace.source_observation_id=source.id),
-                raw.payload_json
+                raw.id IS NOT NULL,
+                typeof(raw.payload_json),
+                CASE WHEN typeof(raw.payload_json)='text' THEN raw.payload_json END
             FROM source_schema_observations AS source
             LEFT JOIN raw_records AS raw
               ON raw.id=source.raw_record_id;
@@ -505,9 +619,16 @@ internal static class SourceCompatibilitySchemaV11
             var evidenceKind = reader.IsDBNull(1) ? null : reader.GetString(1);
             var hasDigest = !reader.IsDBNull(2);
             var hasProjectionChild = reader.GetInt64(3) != 0;
-            var rawPayload = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var rawRowExists = reader.GetInt64(4) != 0;
+            var rawPayloadStorageClass = reader.GetString(5);
+            var rawPayload = reader.IsDBNull(6) ? null : reader.GetString(6);
             if (!hasRaw && (evidenceKind is not null || hasDigest || hasProjectionChild)
-                || hasProjectionChild && evidenceKind is null)
+                || hasProjectionChild && evidenceKind is null
+                || rawRowExists
+                   && !string.Equals(
+                       rawPayloadStorageClass,
+                       "text",
+                       StringComparison.Ordinal))
                 throw new InvalidOperationException("source_projection_input_authority_invalid");
             if (evidenceKind is null)
             {
@@ -521,10 +642,10 @@ internal static class SourceCompatibilitySchemaV11
                     throw new InvalidOperationException("source_projection_input_authority_invalid");
                 var digest = reader.GetString(2);
                 if (!IsLowercaseHash(digest)
-                    || rawPayload is not null
+                    || rawRowExists
                        && !string.Equals(
                         digest,
-                        SkillProjectionHashing.InputDigest(rawPayload),
+                        SkillProjectionHashing.InputDigest(rawPayload!),
                         StringComparison.Ordinal))
                     throw new InvalidOperationException("source_projection_input_authority_invalid");
             }
@@ -533,7 +654,7 @@ internal static class SourceCompatibilitySchemaV11
                          "deleted_before_digest_v10",
                          StringComparison.Ordinal)
                      || hasDigest
-                     || rawPayload is not null
+                     || rawRowExists
                      || !hasProjectionChild)
             {
                 throw new InvalidOperationException("source_projection_input_authority_invalid");
@@ -705,8 +826,8 @@ internal static class SourceCompatibilitySchemaV11
         bool allowDeletedProjectionInput)
     {
         var unavailablePredicate = allowDeletedProjectionInput
-            ? "source.raw_record_id IS NULL"
-            : "(source.raw_record_id IS NULL OR raw.id IS NULL)";
+            ? "(source.raw_record_id IS NULL OR (raw.id IS NOT NULL AND typeof(raw.payload_json)<>'text'))"
+            : "(source.raw_record_id IS NULL OR raw.id IS NULL OR typeof(raw.payload_json)<>'text')";
         return TableExists(connection, transaction, "source_schema_observations")
             && TableExists(connection, transaction, "source_trace_version_observations")
             && TableExists(connection, transaction, "raw_records")
@@ -821,9 +942,10 @@ internal static class SourceCompatibilitySchemaV11
             transaction,
             """
             CREATE TABLE IF NOT EXISTS source_schema_observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
                 observation_id TEXT NOT NULL UNIQUE,
-                raw_record_id INTEGER NULL UNIQUE,
+                raw_record_id INTEGER NULL UNIQUE
+                    CHECK(raw_record_id IS NULL OR raw_record_id > 0),
                 raw_payload_sha256 TEXT NULL CHECK(
                     raw_payload_sha256 IS NULL OR (
                         length(raw_payload_sha256)=64
@@ -870,8 +992,8 @@ internal static class SourceCompatibilitySchemaV11
             transaction,
             """
             CREATE TABLE IF NOT EXISTS source_unknown_observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_observation_id INTEGER NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id > 0),
+                source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 kind TEXT NOT NULL CHECK (kind IN ('span', 'event', 'attribute')),
                 name TEXT NOT NULL,
                 occurrence_count INTEGER NOT NULL CHECK (occurrence_count BETWEEN 1 AND 1000000),
@@ -900,6 +1022,50 @@ internal static class SourceCompatibilitySchemaV11
         if (hasEvidenceKind)
             return;
 
+        var recovered = new List<(
+            long ObservationId,
+            long RawRecordId,
+            bool RawRowExists,
+            string RawPayloadStorageClass,
+            string? Payload,
+            bool HasProjectionChild)>();
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText =
+                """
+                SELECT source.id,source.raw_record_id,raw.id IS NOT NULL,
+                       typeof(raw.payload_json),
+                       CASE WHEN typeof(raw.payload_json)='text' THEN raw.payload_json END,
+                       EXISTS(
+                           SELECT 1
+                           FROM source_trace_version_observations AS trace
+                           WHERE trace.source_observation_id=source.id)
+                FROM source_schema_observations AS source
+                LEFT JOIN raw_records AS raw ON raw.id=source.raw_record_id
+                WHERE source.raw_record_id IS NOT NULL
+                ORDER BY source.id;
+                """;
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                recovered.Add((
+                    reader.GetInt64(0),
+                    reader.GetInt64(1),
+                    reader.GetInt64(2) != 0,
+                    reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.GetInt64(5) != 0));
+            }
+        }
+        if (recovered.Any(static item =>
+                item.RawRowExists
+                && !string.Equals(
+                    item.RawPayloadStorageClass,
+                    "text",
+                    StringComparison.Ordinal)))
+            throw new InvalidOperationException("source_projection_input_authority_invalid");
+
         Execute(
             connection,
             transaction,
@@ -925,39 +1091,9 @@ internal static class SourceCompatibilitySchemaV11
             );
             """);
 
-        var recovered = new List<(
-            long ObservationId,
-            long RawRecordId,
-            string? Payload,
-            bool HasProjectionChild)>();
-        using (var read = connection.CreateCommand())
-        {
-            read.Transaction = transaction;
-            read.CommandText =
-                """
-                SELECT source.id,source.raw_record_id,raw.payload_json,
-                       EXISTS(
-                           SELECT 1
-                           FROM source_trace_version_observations AS trace
-                           WHERE trace.source_observation_id=source.id)
-                FROM source_schema_observations AS source
-                LEFT JOIN raw_records AS raw ON raw.id=source.raw_record_id
-                WHERE source.raw_record_id IS NOT NULL
-                ORDER BY source.id;
-                """;
-            using var reader = read.ExecuteReader();
-            while (reader.Read())
-            {
-                recovered.Add((
-                    reader.GetInt64(0),
-                    reader.GetInt64(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.GetInt64(3) != 0));
-            }
-        }
         foreach (var item in recovered)
         {
-            var evidenceKind = item.Payload is not null
+            var evidenceKind = item.RawRowExists
                 ? "payload_sha256"
                 : item.HasProjectionChild && predecessorVersion == 10
                     ? "deleted_before_digest_v10"
@@ -1086,7 +1222,7 @@ internal static class SourceCompatibilitySchemaV11
             transaction,
             $"""
             CREATE TABLE {tableName} (
-                source_observation_id INTEGER NOT NULL,
+                source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 trace_id TEXT NOT NULL,
                 resolution_state TEXT NOT NULL CHECK (resolution_state IN ('resolved', 'missing', 'conflicting', 'unrecognised')),
                 source_application_version TEXT NULL CHECK (source_application_version IS NULL OR (length(source_application_version) BETWEEN 1 AND 256)),
@@ -1112,9 +1248,37 @@ internal static class SourceCompatibilitySchemaV11
             connection,
             transaction,
             """
+            CREATE TRIGGER IF NOT EXISTS source_schema_observations_insert_no_replace
+            BEFORE INSERT ON source_schema_observations
+            WHEN EXISTS(
+                SELECT 1 FROM source_schema_observations
+                WHERE id=NEW.id
+                   OR observation_id=NEW.observation_id COLLATE BINARY
+                   OR (NEW.raw_record_id IS NOT NULL AND raw_record_id=NEW.raw_record_id)
+                   OR (NEW.ingest_batch_id IS NOT NULL AND ingest_batch_id=NEW.ingest_batch_id COLLATE BINARY)
+            )
+            BEGIN SELECT RAISE(ABORT,'source_schema_observation_no_replace'); END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
             CREATE TRIGGER IF NOT EXISTS source_trace_version_observations_update_rejected
             BEFORE UPDATE ON source_trace_version_observations
             BEGIN SELECT RAISE(ABORT,'source_trace_version_observation_immutable'); END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_trace_version_observations_insert_no_replace
+            BEFORE INSERT ON source_trace_version_observations
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_observations
+                WHERE source_observation_id=NEW.source_observation_id
+                  AND trace_id=NEW.trace_id COLLATE BINARY
+            )
+            BEGIN SELECT RAISE(ABORT,'source_trace_version_observation_no_replace'); END;
             """);
         Execute(
             connection,

@@ -168,6 +168,59 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
+    public void TraceVersionObservation_InsertOrReplaceCannotReplaceExistingEvidenceWhenRecursiveTriggersAreOff()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("batch-no-replace-trace-version", BuildOverflowInventory()));
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            $"INSERT INTO source_trace_version_observations VALUES ({committed.ObservationId}, '{traceId}', 'missing', NULL);");
+        Execute(connection, "PRAGMA recursive_triggers=OFF;");
+        var before = SnapshotTraceVersionObservation(
+            connection,
+            committed.ObservationId,
+            traceId);
+
+        Assert.Contains(
+            "source_trace_version_observation_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                $"INSERT OR REPLACE INTO source_trace_version_observations VALUES ({committed.ObservationId}, '{traceId}', 'resolved', '1.0.74');")).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            "missing",
+            ScalarText(
+                connection,
+                $"SELECT resolution_state FROM source_trace_version_observations WHERE source_observation_id={committed.ObservationId} AND trace_id='{traceId}';"));
+        Assert.Equal(
+            before,
+            SnapshotTraceVersionObservation(
+                connection,
+                committed.ObservationId,
+                traceId));
+    }
+
+    [Fact]
+    public void TriggerDefinitions_MatchInstalledSourceCompatibilityTriggers()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+
+        foreach (var trigger in SourceCompatibilitySchemaV11.TriggerDefinitions)
+        {
+            var actual = ScalarText(
+                connection,
+                $"SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='{trigger.Name}';");
+            Assert.Equal(NormalizeTriggerSql(trigger.Sql), NormalizeTriggerSql(actual));
+        }
+    }
+
+    [Fact]
     public void Commit_PersistsTraceSourceEvidenceAtomicallyAndReturnsAggregateResolution()
     {
         const string traceId = "11111111111111111111111111111111";
@@ -900,6 +953,7 @@ public sealed class SourceCompatibilityStoreTests
                 DROP TABLE source_trace_version_interpretation_heads;
                 DROP TABLE source_trace_version_interpretation_supersessions;
                 DROP TABLE source_trace_compatibility_revisions;
+                DROP TRIGGER source_schema_observations_insert_no_replace;
                 DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
                 DROP TRIGGER source_schema_observations_projection_input_update_rejected;
                 ALTER TABLE source_schema_observations
@@ -1198,6 +1252,37 @@ public sealed class SourceCompatibilityStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+
+    private static string NormalizeTriggerSql(string sql) =>
+        string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            .TrimEnd(';')
+            .Replace("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", StringComparison.Ordinal);
+
+    private static string SnapshotTraceVersionObservation(
+        SqliteConnection connection,
+        long sourceObservationId,
+        string traceId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT source_observation_id,trace_id,resolution_state,source_application_version
+            FROM source_trace_version_observations
+            WHERE source_observation_id=$source_observation_id AND trace_id=$trace_id;
+            """;
+        command.Parameters.AddWithValue("$source_observation_id", sourceObservationId);
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        var snapshot = string.Join(
+            '\0',
+            reader.GetInt64(0).ToString(CultureInfo.InvariantCulture),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.IsDBNull(3) ? "<null>" : reader.GetString(3));
+        Assert.False(reader.Read());
+        return snapshot;
     }
 
     private static object? ScalarObject(SqliteConnection connection, string sql)

@@ -9,8 +9,8 @@ internal static class SourceCompatibilityReconciliationSchema
             transaction,
             """
             CREATE TABLE IF NOT EXISTS source_trace_version_interpretation_supersessions (
-                supersession_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_observation_id INTEGER NOT NULL,
+                supersession_id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(supersession_id > 0),
+                source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 trace_id TEXT NOT NULL CHECK(length(trace_id)=32 AND trace_id NOT GLOB '*[^0-9a-f]*'),
                 previous_interpretation_revision INTEGER NOT NULL CHECK(previous_interpretation_revision >= 0),
                 new_interpretation_revision INTEGER NOT NULL CHECK(new_interpretation_revision = previous_interpretation_revision + 1),
@@ -43,10 +43,10 @@ internal static class SourceCompatibilityReconciliationSchema
             transaction,
             """
             CREATE TABLE IF NOT EXISTS source_trace_version_interpretation_heads (
-                source_observation_id INTEGER NOT NULL,
+                source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 trace_id TEXT NOT NULL,
                 current_interpretation_revision INTEGER NOT NULL CHECK(current_interpretation_revision > 0),
-                current_supersession_id INTEGER NOT NULL UNIQUE,
+                current_supersession_id INTEGER NOT NULL UNIQUE CHECK(current_supersession_id > 0),
                 PRIMARY KEY(source_observation_id,trace_id),
                 FOREIGN KEY(source_observation_id,trace_id)
                     REFERENCES source_trace_version_observations(source_observation_id,trace_id)
@@ -79,7 +79,7 @@ internal static class SourceCompatibilityReconciliationSchema
             CREATE TABLE IF NOT EXISTS source_compatibility_reconciliation_receipts (
                 operation_key TEXT PRIMARY KEY CHECK(length(operation_key) BETWEEN 1 AND 128),
                 request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
-                source_observation_id INTEGER NOT NULL,
+                source_observation_id INTEGER NOT NULL CHECK(source_observation_id > 0),
                 trace_id TEXT NOT NULL,
                 expected_interpretation_revision INTEGER NOT NULL CHECK(expected_interpretation_revision >= 0),
                 raw_record_id INTEGER NOT NULL CHECK(raw_record_id > 0),
@@ -89,10 +89,10 @@ internal static class SourceCompatibilityReconciliationSchema
                 registry_revision TEXT NOT NULL CHECK(length(registry_revision) BETWEEN 1 AND 128),
                 projector_version TEXT NOT NULL CHECK(length(projector_version) BETWEEN 1 AND 128),
                 outcome TEXT NOT NULL CHECK(outcome IN ('changed','no_change','input_unavailable')),
-                resulting_supersession_id INTEGER NULL,
+                resulting_supersession_id INTEGER NULL CHECK(resulting_supersession_id IS NULL OR resulting_supersession_id > 0),
                 resulting_interpretation_revision INTEGER NOT NULL CHECK(resulting_interpretation_revision >= 0),
                 resulting_compatibility_revision INTEGER NULL CHECK(resulting_compatibility_revision IS NULL OR resulting_compatibility_revision >= 0),
-                resulting_generation_id INTEGER NULL,
+                resulting_generation_id INTEGER NULL CHECK(resulting_generation_id IS NULL OR resulting_generation_id > 0),
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(source_observation_id,trace_id)
                     REFERENCES source_trace_version_observations(source_observation_id,trace_id)
@@ -109,6 +109,47 @@ internal static class SourceCompatibilityReconciliationSchema
                         AND resulting_compatibility_revision IS NULL
                         AND resulting_generation_id IS NULL))
             );
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_trace_version_interpretation_supersessions_insert_no_replace
+            BEFORE INSERT ON source_trace_version_interpretation_supersessions
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_interpretation_supersessions
+                WHERE supersession_id=NEW.supersession_id
+                   OR (source_observation_id=NEW.source_observation_id
+                       AND trace_id=NEW.trace_id COLLATE BINARY
+                       AND new_interpretation_revision=NEW.new_interpretation_revision)
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_supersession_no_replace'); END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_trace_version_interpretation_heads_insert_no_replace
+            BEFORE INSERT ON source_trace_version_interpretation_heads
+            WHEN EXISTS(
+                SELECT 1 FROM source_trace_version_interpretation_heads
+                WHERE (source_observation_id=NEW.source_observation_id
+                       AND trace_id=NEW.trace_id COLLATE BINARY)
+                   OR current_supersession_id=NEW.current_supersession_id
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_head_no_replace'); END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_compatibility_reconciliation_receipts_insert_no_replace
+            BEFORE INSERT ON source_compatibility_reconciliation_receipts
+            WHEN EXISTS(
+                SELECT 1 FROM source_compatibility_reconciliation_receipts
+                WHERE operation_key=NEW.operation_key COLLATE BINARY
+            )
+            BEGIN SELECT RAISE(ABORT,'source_compatibility_receipt_no_replace'); END;
             """);
         foreach (var table in new[]
         {

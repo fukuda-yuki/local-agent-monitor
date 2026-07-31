@@ -67,7 +67,9 @@ Every supersession row contains at least:
 | `derived_state` | `resolved`, `missing`, `unrecognised`, or `conflicting` |
 | `exact_version` | exact retained token only when the state permits it |
 | `reason` | `decoder_revision` or `registry_revision` |
-| `retained_input_sha256` | 64 lowercase hexadecimal characters |
+| `raw_record_id` | exact positive retained raw-record identity |
+| `input_evidence_kind` | `payload_sha256` or exact-v10-only `deleted_before_digest_v10` |
+| `raw_payload_sha256` | exact 64-character lowercase hexadecimal digest for `payload_sha256`; null for the marker |
 | `resolver_revision`, `registry_revision` | exact reviewed implementation/registry revisions |
 | `created_at` | canonical UTC timestamp |
 | `operation_fingerprint` | 64 lowercase hexadecimal characters |
@@ -77,6 +79,10 @@ target are contiguous and append-only. The head identifies only the current
 revision; it does not copy or mutate the base row. Supersession ledger rows and
 receipts reject update and delete. A head update is legal only in the same
 transaction that appends its exact next ledger row.
+Base observations, supersessions, heads, and receipts reject a conflicting
+insert on every primary or alternate unique identity before SQLite replacement
+semantics can remove the existing row, including when recursive triggers are
+disabled.
 
 The v11 table ownership is:
 
@@ -87,7 +93,7 @@ The v11 table ownership is:
 | `source_trace_compatibility_revisions` | `trace_id` primary key; nonnegative current revision; current effective state/version; updated time |
 | `source_compatibility_reconciliation_receipts` | opaque `operation_key` primary key; request fingerprint; exact target/expected revision; fixed outcome; nullable resulting supersession/revision; created time |
 
-IDs/revisions are nonnegative SQLite integers. Trace IDs are exact 32 lowercase
+IDs are positive SQLite integers; revisions are nonnegative SQLite integers. Trace IDs are exact 32 lowercase
 hexadecimal characters. Digests are exact 64 lowercase hexadecimal characters.
 Times are UTC with seven fractional digits and `+00:00`. Revision tokens are
 1..128 visible ASCII bytes with whitespace, controls and path separators
@@ -132,37 +138,37 @@ contribution is an exact decoder supersession of the same
 
 ## Canonical binary framing
 
-The reconciliation and projection owners share one internal hashing codec:
-
-- domain literals are exact UTF-8 bytes, including shown NUL bytes;
-- unsigned integers are fixed-width big-endian (`U32BE` or `U64BE`);
-- a required byte string is `U32BE(byte_length) || bytes`;
-- a nullable byte string is `0x00` for null, or
-  `0x01 || U32BE(byte_length) || bytes` for a present value;
-- strings are strict UTF-8 with no trim, case fold, normalization, BOM, or
-  trailing newline;
-- SHA-256 values inside a hash input are their 32 decoded bytes, not hexadecimal
-  text.
+The reconciliation fingerprint uses the DC154-03 v2 hashing codec. Every value
+is encoded as `U32BE(byte_length) || value_bytes`. Unsigned integers use their
+minimal unsigned decimal ASCII representation with no leading zeroes. Strings
+use their exact strict UTF-8 bytes with no trim, case fold, normalization, BOM,
+or trailing newline.
 
 The operation fingerprint is:
 
 ```text
 SHA256(
-  UTF8("skill-projection-reconcile\0v1\0")
-  || frame(U64BE(source_observation_id))
-  || frame(decoded 16-byte lowercase trace_id)
-  || frame(U64BE(expected_interpretation_revision))
-  || frame(decoded retained_input_sha256)
+  UTF8("skill-projection-reconcile\0v2\0")
+  || frame(unsigned-decimal-ASCII(source_observation_id))
+  || frame(UTF8(trace_id))
+  || frame(unsigned-decimal-ASCII(expected_interpretation_revision))
+  || frame(unsigned-decimal-ASCII(raw_record_id))
+  || frame(UTF8(input_evidence_kind))
+  || frame(UTF8(evidence_value))
   || frame(UTF8(resolver_revision))
   || frame(UTF8(registry_revision))
   || frame(UTF8(projector_version))
 )
 ```
 
-Every field is required for this fingerprint. The operation key is an opaque
-internal idempotency key stored separately from the fingerprint. The same key
-and fingerprint replays the stored result; the same key with a different
-fingerprint is a hard conflict.
+`input_evidence_kind` is the exact tag `payload_sha256` or
+`deleted_before_digest_v10`. Its following `evidence_value` is respectively
+the exact lowercase hexadecimal payload digest or the exact predecessor-schema
+token `10`. Every field is required and appears in the order shown. The
+operation key is an opaque internal idempotency key stored separately from the
+fingerprint. The same key and fingerprint replays the stored result; the same
+key with a different fingerprint is a hard conflict. This v2 definition
+supersedes the unintegrated v1 framing; there is no v1 reader or dual path.
 
 ## Atomic change boundary
 

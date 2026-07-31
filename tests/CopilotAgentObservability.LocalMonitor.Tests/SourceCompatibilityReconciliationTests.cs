@@ -351,7 +351,8 @@ public sealed class SourceCompatibilityReconciliationTests
         var bundle = Path.Combine(database.Root, "semantic-no-op.zip");
         var restoredPath = Path.Combine(database.Root, "semantic-no-op-restored.sqlite");
         var service = new SqliteRuntimeBackupService();
-        Assert.True(service.CreateAndPublish(database.Path, bundle).Success);
+        var created = service.CreateAndPublish(database.Path, bundle);
+        Assert.True(created.Success, created.ErrorCode);
         var restored = service.Restore(
             bundle,
             restoredPath,
@@ -660,6 +661,159 @@ public sealed class SourceCompatibilityReconciliationTests
     }
 
     [Fact]
+    public void SourceIdentityOwners_InsertOrReplaceCannotReplaceAnyUniqueIdentityWhenRecursiveTriggersAreOff()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path).Commit(
+            CreateBatch(
+                "all-source-identities",
+                TraceSourceVersionResolutionState.Missing,
+                sourceApplicationVersion: null,
+                VersionPayload("1.0.74")));
+        CreateReconciler(database.Path).Reconcile(
+            Request(
+                "all-source-identities-operation",
+                committed.ObservationId,
+                SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-2",
+                "registry-1"));
+        using var connection = Open(database.Path);
+        Execute(connection, "PRAGMA foreign_keys=OFF; PRAGMA recursive_triggers=OFF;");
+        var sourceSnapshot = SnapshotTable(connection, "source_schema_observations");
+
+        foreach (var identity in new[] { "id", "observation_id", "raw_record_id", "ingest_batch_id" })
+        {
+            var id = identity == "id" ? "id" : "NULL";
+            var observationId = identity == "observation_id"
+                ? "observation_id"
+                : $"observation_id || '-{identity}'";
+            var rawRecordId = identity == "raw_record_id" ? "raw_record_id" : "NULL";
+            var evidenceKind = identity == "raw_record_id" ? "input_evidence_kind" : "NULL";
+            var payloadDigest = identity == "raw_record_id" ? "raw_payload_sha256" : "NULL";
+            var ingestBatchId = identity == "ingest_batch_id" ? "ingest_batch_id" : "NULL";
+            var sql =
+                $"""
+                INSERT OR REPLACE INTO source_schema_observations(
+                    id,observation_id,raw_record_id,raw_payload_sha256,input_evidence_kind,
+                    ingest_batch_id,source_surface,source_application_version,source_adapter,
+                    adapter_version,schema_fingerprint,inventory_hash,compatibility_state,
+                    reason_code,next_action,capture_content_state,unknown_span_count,
+                    unknown_event_count,unknown_attribute_count,overflow_distinct_count,
+                    overflow_occurrence_count,observed_at)
+                SELECT
+                    {id},{observationId},{rawRecordId},{payloadDigest},{evidenceKind},
+                    {ingestBatchId},source_surface,source_application_version,source_adapter,
+                    adapter_version,schema_fingerprint,inventory_hash,compatibility_state,
+                    reason_code,next_action,capture_content_state,unknown_span_count,
+                    unknown_event_count,unknown_attribute_count,overflow_distinct_count,
+                    overflow_occurrence_count,observed_at
+                FROM source_schema_observations
+                WHERE id={committed.ObservationId};
+                """;
+
+            Assert.Contains(
+                "source_schema_observation_no_replace",
+                Assert.Throws<SqliteException>(() => Execute(connection, sql)).Message,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                sourceSnapshot,
+                SnapshotTable(connection, "source_schema_observations"));
+        }
+
+        var supersessionSnapshot = SnapshotTable(
+            connection,
+            "source_trace_version_interpretation_supersessions");
+        Assert.Contains(
+            "source_compatibility_supersession_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                "INSERT OR REPLACE INTO source_trace_version_interpretation_supersessions SELECT * FROM source_trace_version_interpretation_supersessions;")).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            supersessionSnapshot,
+            SnapshotTable(connection, "source_trace_version_interpretation_supersessions"));
+        Assert.Contains(
+            "source_compatibility_supersession_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                """
+                INSERT OR REPLACE INTO source_trace_version_interpretation_supersessions
+                SELECT supersession_id+100,source_observation_id,trace_id,
+                       previous_interpretation_revision,new_interpretation_revision,
+                       derived_state,exact_version,reason,raw_record_id,input_evidence_kind,
+                       raw_payload_sha256,resolver_revision,registry_revision,projector_version,
+                       created_at,operation_fingerprint
+                FROM source_trace_version_interpretation_supersessions;
+                """)).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            supersessionSnapshot,
+            SnapshotTable(connection, "source_trace_version_interpretation_supersessions"));
+
+        var headSnapshot = SnapshotTable(
+            connection,
+            "source_trace_version_interpretation_heads");
+        Assert.Contains(
+            "source_compatibility_head_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                "INSERT OR REPLACE INTO source_trace_version_interpretation_heads SELECT * FROM source_trace_version_interpretation_heads;")).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            headSnapshot,
+            SnapshotTable(connection, "source_trace_version_interpretation_heads"));
+        Assert.Contains(
+            "source_compatibility_head_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                """
+                INSERT OR REPLACE INTO source_trace_version_interpretation_heads
+                SELECT source_observation_id+100,trace_id,current_interpretation_revision,
+                       current_supersession_id
+                FROM source_trace_version_interpretation_heads;
+                """)).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            headSnapshot,
+            SnapshotTable(connection, "source_trace_version_interpretation_heads"));
+
+        var receiptSnapshot = SnapshotTable(
+            connection,
+            "source_compatibility_reconciliation_receipts");
+        Assert.Contains(
+            "source_compatibility_receipt_no_replace",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                "INSERT OR REPLACE INTO source_compatibility_reconciliation_receipts SELECT * FROM source_compatibility_reconciliation_receipts;")).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            receiptSnapshot,
+            SnapshotTable(connection, "source_compatibility_reconciliation_receipts"));
+
+        foreach (var suffix in new[] { "first-null", "second-null" })
+        {
+            Execute(
+                connection,
+                $"""
+                INSERT INTO source_schema_observations(
+                    observation_id,compatibility_state,reason_code,next_action,
+                    capture_content_state,unknown_span_count,unknown_event_count,
+                    unknown_attribute_count,overflow_distinct_count,overflow_occurrence_count,
+                    observed_at)
+                VALUES(
+                    '{suffix}','supported',NULL,'none','available',0,0,0,0,0,
+                    '2026-07-31T00:02:00.0000000+00:00');
+                """);
+        }
+        Assert.Equal(
+            2,
+            ScalarLong(
+                connection,
+                "SELECT COUNT(*) FROM source_schema_observations WHERE raw_record_id IS NULL AND ingest_batch_id IS NULL;"));
+    }
+
+    [Fact]
     public void SchemaValidation_RejectsLedgerRevisionBeyondTheCurrentHead()
     {
         using var database = new TestDatabase();
@@ -704,6 +858,159 @@ public sealed class SourceCompatibilityReconciliationTests
 
         Assert.Throws<InvalidOperationException>(
             () => SourceCompatibilitySchemaV11.Validate(connection, transaction: null));
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("blob")]
+    public void CurrentSchemaValidation_RejectsPresentRawEvidenceThatIsNotText(
+        string storageClass)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path).Commit(
+            CreateBatch(
+                "current-nontext-raw",
+                TraceSourceVersionResolutionState.Missing,
+                sourceApplicationVersion: null,
+                VersionPayload("1.0.74")));
+        if (storageClass == "blob")
+        {
+            using var connection = Open(database.Path);
+            Execute(
+                connection,
+                $"UPDATE raw_records SET payload_json=zeroblob(1) WHERE id={committed.RawRecordId};");
+        }
+        else
+        {
+            SetRawPayloadToNullWithoutChangingStoredSchema(
+                database.Path,
+                committed.RawRecordId);
+        }
+        using var verification = Open(database.Path);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => MonitorSchemaMigrator.ValidateBeforeInitialization(verification));
+
+        Assert.Equal("source_projection_input_authority_invalid", error.Message);
+    }
+
+    [Fact]
+    public void CurrentSchemaValidation_RejectsDeletedBeforeDigestMarkerWhenRawRowIsPresent()
+    {
+        using var database = new TestDatabase();
+        var committed = CreateMarkerObservation(
+            database.Path,
+            "marker-with-present-raw",
+            TraceSourceVersionResolutionState.Missing,
+            sourceApplicationVersion: null);
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            $"""
+            INSERT INTO raw_records(
+                id,source,trace_id,received_at,resource_attributes_json,payload_json,
+                schema_version,retention_owner_token)
+            VALUES(
+                {committed.RawRecordId},'raw-otlp','{TraceId}',
+                '2026-07-31T00:02:00.0000000+00:00',NULL,'[]',1,randomblob(32));
+            """);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => MonitorSchemaMigrator.ValidateBeforeInitialization(connection));
+
+        Assert.Equal("source_projection_input_authority_invalid", error.Message);
+    }
+
+    [Fact]
+    public void CurrentSchemaValidation_RejectsNegativeRawReferenceAtRevisionZero()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            """
+            PRAGMA ignore_check_constraints=ON;
+            INSERT INTO source_schema_observations(
+                id,observation_id,raw_record_id,compatibility_state,reason_code,next_action,
+                capture_content_state,unknown_span_count,unknown_event_count,
+                unknown_attribute_count,overflow_distinct_count,overflow_occurrence_count,
+                observed_at)
+            VALUES(
+                1,'negative-raw-revision-zero',-1,'supported',NULL,'none','available',
+                0,0,0,0,0,'2026-07-31T00:00:00.0000000+00:00');
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => SourceCompatibilitySchemaV11.Validate(connection, transaction: null));
+
+        Assert.Equal("source_compatibility_identity_invalid", error.Message);
+    }
+
+    [Fact]
+    public void CurrentSchemaValidation_RejectsCoherentNegativeSourceIdentityGraphWhenChecksAreDisabled()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            $"""
+            PRAGMA ignore_check_constraints=ON;
+            INSERT INTO raw_records(
+                id,source,trace_id,received_at,resource_attributes_json,payload_json,
+                schema_version,retention_owner_token)
+            VALUES(1,'raw-otlp','{TraceId}','2026-07-31T00:00:00.0000000+00:00',
+                   NULL,'[]',1,randomblob(32));
+            INSERT INTO source_schema_observations(
+                id,observation_id,raw_record_id,raw_payload_sha256,input_evidence_kind,
+                ingest_batch_id,source_surface,source_application_version,source_adapter,
+                adapter_version,schema_fingerprint,inventory_hash,compatibility_state,
+                reason_code,next_action,capture_content_state,unknown_span_count,
+                unknown_event_count,unknown_attribute_count,overflow_distinct_count,
+                overflow_occurrence_count,observed_at)
+            VALUES(
+                -1,'negative-source-graph',1,'{Sha256("[]")}',
+                'payload_sha256','negative-source-graph-batch','github-copilot-cli',
+                '1.0.74','github-copilot-otel','adapter-1',NULL,NULL,'supported',NULL,
+                'none','available',0,0,0,0,0,'2026-07-31T00:00:00.0000000+00:00');
+            INSERT INTO source_trace_version_observations
+            VALUES(-1,'{TraceId}','missing',NULL);
+            INSERT INTO source_trace_version_interpretation_supersessions(
+                supersession_id,source_observation_id,trace_id,
+                previous_interpretation_revision,new_interpretation_revision,
+                derived_state,exact_version,reason,raw_record_id,input_evidence_kind,
+                raw_payload_sha256,resolver_revision,registry_revision,projector_version,
+                created_at,operation_fingerprint)
+            VALUES(
+                -2,-1,'{TraceId}',0,1,'missing',NULL,'decoder_revision',1,
+                'payload_sha256','{Sha256("[]")}','resolver-2','registry-1',
+                'skill-projector-1','2026-07-31T00:01:00.0000000+00:00',
+                '{new string('a', 64)}');
+            INSERT INTO source_trace_version_interpretation_heads
+            VALUES(-1,'{TraceId}',1,-2);
+            INSERT INTO source_trace_compatibility_revisions
+            VALUES('{TraceId}',1,'missing',NULL,'2026-07-31T00:01:00.0000000+00:00');
+            INSERT INTO source_compatibility_reconciliation_receipts(
+                operation_key,request_fingerprint,source_observation_id,trace_id,
+                expected_interpretation_revision,raw_record_id,input_evidence_kind,
+                raw_payload_sha256,resolver_revision,registry_revision,projector_version,
+                outcome,resulting_supersession_id,resulting_interpretation_revision,
+                resulting_compatibility_revision,resulting_generation_id,created_at)
+            VALUES(
+                'negative-source-graph-operation','{new string('b', 64)}',-1,
+                '{TraceId}',0,1,'payload_sha256','{Sha256("[]")}',
+                'resolver-2','registry-1','skill-projector-1','changed',-2,1,1,NULL,
+                '2026-07-31T00:01:00.0000000+00:00');
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => SourceCompatibilitySchemaV11.Validate(connection, transaction: null));
+
+        Assert.Equal("source_compatibility_identity_invalid", error.Message);
     }
 
     [Theory]
@@ -1025,6 +1332,84 @@ public sealed class SourceCompatibilityReconciliationTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static void Execute(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static string SnapshotTable(SqliteConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT * FROM \"{table.Replace("\"", "\"\"")}\" ORDER BY rowid;";
+        using var reader = command.ExecuteReader();
+        var snapshot = new StringBuilder();
+        while (reader.Read())
+        {
+            snapshot.Append('[');
+            for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+            {
+                switch (reader.GetValue(ordinal))
+                {
+                    case DBNull:
+                        snapshot.Append("null;");
+                        break;
+                    case long integer:
+                        snapshot.Append('i').Append(integer).Append(';');
+                        break;
+                    case double number:
+                        snapshot.Append('d').Append(
+                            number.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
+                        break;
+                    case string text:
+                        snapshot.Append('s').Append(
+                            Convert.ToBase64String(Encoding.UTF8.GetBytes(text))).Append(';');
+                        break;
+                    case byte[] bytes:
+                        snapshot.Append('b').Append(Convert.ToBase64String(bytes)).Append(';');
+                        break;
+                    default:
+                        throw new InvalidOperationException("unsupported_sqlite_snapshot_value");
+                }
+            }
+            snapshot.Append(']');
+        }
+        return snapshot.ToString();
+    }
+
+    private static void SetRawPayloadToNullWithoutChangingStoredSchema(
+        string path,
+        long rawRecordId)
+    {
+        RewriteRawPayloadNullability(path, nullable: true);
+        using (var connection = Open(path))
+            Execute(connection, $"UPDATE raw_records SET payload_json=NULL WHERE id={rawRecordId};");
+        RewriteRawPayloadNullability(path, nullable: false);
+    }
+
+    private static void RewriteRawPayloadNullability(string path, bool nullable)
+    {
+        using var connection = Open(path);
+        var schemaVersion = ScalarLong(connection, "PRAGMA schema_version;");
+        var from = nullable ? "payload_json TEXT NOT NULL" : "payload_json TEXT";
+        var to = nullable ? "payload_json TEXT" : "payload_json TEXT NOT NULL";
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            PRAGMA writable_schema=ON;
+            UPDATE sqlite_schema
+            SET sql=replace(sql,$from,$to)
+            WHERE type='table' AND name='raw_records';
+            PRAGMA schema_version={schemaVersion + 1};
+            PRAGMA writable_schema=OFF;
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+        command.ExecuteNonQuery();
     }
 
     private static AtomicCounts SnapshotAtomicCounts(string path)
