@@ -10,9 +10,6 @@ Review depth should match risk.
 Use a self-review for documentation-only, typo-only, formatting-only, and other minor reversible changes.
 Use a deeper review for implementation changes, behavior changes, public interface changes, security-sensitive changes, data-safety boundaries, workflow changes, and broad refactors.
 
-Codex cannot assume subagents are available.
-If subagents are unavailable, perform the review in the main chat and be explicit about the limits of that review.
-
 ## Required Perspectives
 
 Check these perspectives before completion:
@@ -45,9 +42,8 @@ For a recorded self-review, include:
 Keep review notes factual.
 Do not use sprint-local review notes to introduce new product behavior.
 
-## Subagent-Independent Practice
+## Review Execution
 
-When the user explicitly requests subagents and the active surface supports them, follow `.agents/skills/codex-subagent-dispatch/SKILL.md`.
-Otherwise, do not claim delegated review.
-
-For main-chat review, inspect the diff directly, compare it to the current sources of truth, and run the applicable validation commands.
+Follow the subagent and delegation policy in `docs/agent-guides/repository-workflow.md`.
+Regardless of who performs the review, inspect the diff directly, compare it with the current sources of truth, and run the applicable validation commands.
+Do not describe a primary-agent self-review as independent or delegated review.
