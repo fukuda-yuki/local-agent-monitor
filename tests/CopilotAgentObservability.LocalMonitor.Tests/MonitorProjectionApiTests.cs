@@ -200,8 +200,13 @@ public class MonitorProjectionApiTests
 
         for (var i = 0; i < 2; i++)
         {
-            var post = await host.Client.PostAsync("/v1/traces", JsonContent(TraceJson($"live-trace-{i}")));
-            Assert.Equal(HttpStatusCode.OK, post.StatusCode);
+            var traceId = i == 0
+                ? "11111111111111111111111111111111"
+                : "22222222222222222222222222222222";
+            var post = await host.Client.PostAsync("/v1/traces", JsonContent(TraceJson(traceId)));
+            Assert.True(
+                post.StatusCode == HttpStatusCode.OK,
+                $"Expected 200, received {(int)post.StatusCode}: {await post.Content.ReadAsStringAsync()}");
         }
 
         var ingestions = await WaitForIngestionCountAsync(host, expected: 2);

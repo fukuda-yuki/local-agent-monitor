@@ -616,16 +616,8 @@ internal sealed partial class RawTelemetryStore
     public bool ApplySpanProjection(
         long rawRecordId,
         IReadOnlyList<MonitorSpanProjection> spans,
-        DateTimeOffset projectedAt) =>
-        ApplySpanProjection(rawRecordId, spans, MonitorSkillProjectionBatch.Empty, projectedAt);
-
-    public bool ApplySpanProjection(
-        long rawRecordId,
-        IReadOnlyList<MonitorSpanProjection> spans,
-        MonitorSkillProjectionBatch skills,
         DateTimeOffset projectedAt)
     {
-        ArgumentNullException.ThrowIfNull(skills);
         var projectedAtText = FormatTimestamp(projectedAt);
 
         using var connection = OpenConnection();
@@ -709,93 +701,6 @@ internal sealed partial class RawTelemetryStore
             AddParameter(insert, "$end_time", span.EndTime);
             AddParameter(insert, "$projected_at", projectedAtText);
             insert.ExecuteNonQuery();
-        }
-
-        foreach (var invocation in skills.Invocations)
-        {
-            using var insert = connection.CreateCommand();
-            insert.Transaction = transaction;
-            insert.CommandText =
-                """
-                INSERT OR IGNORE INTO monitor_skill_invocations (
-                    raw_record_id, trace_id, span_id, span_ordinal, session_id,
-                    skill_name, skill_source, invocation_trigger,
-                    source_application_version, projected_at
-                ) VALUES (
-                    $raw_record_id, $trace_id, $span_id, $span_ordinal, $session_id,
-                    $skill_name, $skill_source, $invocation_trigger,
-                    $source_application_version, $projected_at
-                );
-                """;
-            AddParameter(insert, "$raw_record_id", rawRecordId);
-            AddParameter(insert, "$trace_id", invocation.TraceId);
-            AddParameter(insert, "$span_id", invocation.SpanId);
-            AddParameter(insert, "$span_ordinal", invocation.SpanOrdinal);
-            AddParameter(
-                insert,
-                "$session_id",
-                ResolveExactCopilotCliSessionId(
-                    connection,
-                    transaction,
-                    invocation.NativeSessionId));
-            AddParameter(insert, "$skill_name", invocation.SkillName);
-            AddParameter(insert, "$skill_source", invocation.SkillSource);
-            AddParameter(insert, "$invocation_trigger", invocation.InvocationTrigger);
-            AddParameter(insert, "$source_application_version", invocation.SourceApplicationVersion);
-            AddParameter(insert, "$projected_at", projectedAtText);
-            insert.ExecuteNonQuery();
-        }
-
-        foreach (var inventory in skills.Inventories)
-        {
-            var sessionId = ResolveExactCopilotCliSessionId(
-                connection,
-                transaction,
-                inventory.NativeSessionId);
-            using (var insert = connection.CreateCommand())
-            {
-                insert.Transaction = transaction;
-                insert.CommandText =
-                    """
-                    INSERT OR IGNORE INTO monitor_skill_inventories (
-                        raw_record_id, trace_id, session_id, observed_name_count,
-                        retained_name_count, names_truncated,
-                        source_application_version, projected_at
-                    ) VALUES (
-                        $raw_record_id, $trace_id, $session_id, $observed_name_count,
-                        $retained_name_count, $names_truncated,
-                        $source_application_version, $projected_at
-                    );
-                    """;
-                AddParameter(insert, "$raw_record_id", rawRecordId);
-                AddParameter(insert, "$trace_id", inventory.TraceId);
-                AddParameter(insert, "$session_id", sessionId);
-                AddParameter(insert, "$observed_name_count", inventory.ObservedNameCount);
-                AddParameter(insert, "$retained_name_count", inventory.RetainedNames.Count);
-                AddParameter(insert, "$names_truncated", inventory.NamesTruncated ? 1 : 0);
-                AddParameter(insert, "$source_application_version", inventory.SourceApplicationVersion);
-                AddParameter(insert, "$projected_at", projectedAtText);
-                insert.ExecuteNonQuery();
-            }
-
-            for (var nameOrdinal = 0; nameOrdinal < inventory.RetainedNames.Count; nameOrdinal++)
-            {
-                using var insertName = connection.CreateCommand();
-                insertName.Transaction = transaction;
-                insertName.CommandText =
-                    """
-                    INSERT OR IGNORE INTO monitor_skill_inventory_names (
-                        raw_record_id, trace_id, name_ordinal, skill_name
-                    ) VALUES (
-                        $raw_record_id, $trace_id, $name_ordinal, $skill_name
-                    );
-                    """;
-                AddParameter(insertName, "$raw_record_id", rawRecordId);
-                AddParameter(insertName, "$trace_id", inventory.TraceId);
-                AddParameter(insertName, "$name_ordinal", nameOrdinal);
-                AddParameter(insertName, "$skill_name", inventory.RetainedNames[nameOrdinal]);
-                insertName.ExecuteNonQuery();
-            }
         }
 
         // Update rollup columns on monitor_traces for each affected trace_id.
@@ -896,40 +801,6 @@ internal sealed partial class RawTelemetryStore
 
         transaction.Commit();
         return true;
-    }
-
-    private static string? ResolveExactCopilotCliSessionId(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        string? nativeSessionId)
-    {
-        if (string.IsNullOrWhiteSpace(nativeSessionId))
-        {
-            return null;
-        }
-
-        using (var table = connection.CreateCommand())
-        {
-            table.Transaction = transaction;
-            table.CommandText =
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_native_ids';";
-            if ((long)table.ExecuteScalar()! == 0)
-            {
-                return null;
-            }
-        }
-
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            """
-            SELECT session_id
-            FROM session_native_ids
-            WHERE source_surface = 'copilot-cli'
-              AND native_session_id = $native_session_id COLLATE BINARY;
-            """;
-        AddParameter(command, "$native_session_id", nativeSessionId);
-        return command.ExecuteScalar() as string;
     }
 
     /// <summary>Backlog count for span projection (records with ingestion row but no span_projected_at).</summary>

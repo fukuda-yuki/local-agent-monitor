@@ -122,6 +122,42 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
             connection,
             transaction,
             "CREATE INDEX IF NOT EXISTS IX_source_trace_version_observations_trace_id ON source_trace_version_observations(trace_id, source_observation_id);");
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_trace_version_observations_update_rejected
+            BEFORE UPDATE ON source_trace_version_observations
+            BEGIN
+                SELECT RAISE(ABORT, 'source_trace_version_observation_immutable');
+            END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_trace_version_observations_delete_rejected
+            BEFORE DELETE ON source_trace_version_observations
+            BEGIN
+                SELECT RAISE(ABORT, 'source_trace_version_observation_immutable');
+            END;
+            """);
+        Execute(
+            connection,
+            transaction,
+            """
+            CREATE TRIGGER IF NOT EXISTS source_schema_observations_trace_version_child_delete_rejected
+            BEFORE DELETE ON source_schema_observations
+            WHEN EXISTS (
+                SELECT 1
+                FROM source_trace_version_observations
+                WHERE source_observation_id = OLD.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'source_trace_version_observation_parent_restricted');
+            END;
+            """);
+        SourceCompatibilityReconciliationSchema.Ensure(connection, transaction);
         MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
         MonitorSchemaMigrator.EnsureRuntimeStateSchema(connection, transaction);
         migrationCheckpoint?.Invoke(connection, transaction);
@@ -154,6 +190,8 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
                 transaction,
                 failure.ObservationId,
                 rawRecordId: null,
+                inputEvidenceKind: null,
+                rawPayloadSha256: null,
                 failure.IngestBatchId,
                 failure.SourceSurface,
                 failure.SourceApplicationVersion,
@@ -313,62 +351,7 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(traceId);
         using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT resolution_state, source_application_version
-            FROM source_trace_version_observations
-            WHERE trace_id = $trace_id
-            ORDER BY source_observation_id;
-            """;
-        command.Parameters.AddWithValue("$trace_id", traceId);
-        using var reader = command.ExecuteReader();
-        var observations = new List<(TraceSourceVersionResolutionState State, string? Version)>();
-        while (reader.Read())
-        {
-            observations.Add((
-                ParseTraceSourceVersionResolutionState(reader.GetString(0)),
-                NullableString(reader, 1)));
-        }
-        if (observations.Count == 0)
-        {
-            return null;
-        }
-        if (observations.Any(item => item.State == TraceSourceVersionResolutionState.Conflicting))
-        {
-            return new TraceSourceVersionResolutionRow(
-                traceId, TraceSourceVersionResolutionState.Conflicting, SourceApplicationVersion: null);
-        }
-
-        var versions = observations
-            .Where(item => item.Version is not null)
-            .Select(item => item.Version!)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        if (versions.Length > 1)
-        {
-            return new TraceSourceVersionResolutionRow(
-                traceId, TraceSourceVersionResolutionState.Conflicting, SourceApplicationVersion: null);
-        }
-        var unrecognised = observations
-            .Where(item => item.State == TraceSourceVersionResolutionState.Unrecognised)
-            .ToArray();
-        if (unrecognised.Length > 0)
-        {
-            var version = unrecognised.All(item => item.Version is not null) && versions.Length == 1
-                ? versions[0]
-                : null;
-            return new TraceSourceVersionResolutionRow(
-                traceId, TraceSourceVersionResolutionState.Unrecognised, version);
-        }
-        if (observations.All(item => item.State == TraceSourceVersionResolutionState.Resolved)
-            && versions.Length == 1)
-        {
-            return new TraceSourceVersionResolutionRow(
-                traceId, TraceSourceVersionResolutionState.Resolved, versions.Single());
-        }
-        return new TraceSourceVersionResolutionRow(
-            traceId, TraceSourceVersionResolutionState.Missing, SourceApplicationVersion: null);
+        return SourceCompatibilityReconciler.ReadEffectiveTrace(connection, transaction: null, traceId);
     }
 
     public TraceSourceResolutionRow? GetTraceSourceResolution(string traceId)
@@ -494,6 +477,7 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
         SqliteConnection connection,
         SqliteTransaction transaction,
         long rawRecordId,
+        string rawPayloadJson,
         SourceObservationBatchDraft observation)
     {
         var id = InsertParent(
@@ -501,6 +485,8 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
             transaction,
             observation.IngestBatchId,
             rawRecordId,
+            "payload_sha256",
+            SkillProjectionHashing.InputDigest(rawPayloadJson),
             observation.IngestBatchId,
             observation.SourceSurface,
             observation.SourceApplicationVersion,
@@ -559,6 +545,8 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
         SqliteTransaction transaction,
         string observationId,
         long? rawRecordId,
+        string? inputEvidenceKind,
+        string? rawPayloadSha256,
         string? ingestBatchId,
         string? sourceSurface,
         string? sourceApplicationVersion,
@@ -582,12 +570,14 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
         command.CommandText =
             """
             INSERT INTO source_schema_observations (
-                observation_id, raw_record_id, ingest_batch_id, source_surface, source_application_version,
+                observation_id, raw_record_id, input_evidence_kind, raw_payload_sha256,
+                ingest_batch_id, source_surface, source_application_version,
                 source_adapter, adapter_version, schema_fingerprint, inventory_hash, compatibility_state,
                 reason_code, next_action, capture_content_state, unknown_span_count, unknown_event_count,
                 unknown_attribute_count, overflow_distinct_count, overflow_occurrence_count, observed_at
             ) VALUES (
-                $observation_id, $raw_record_id, $ingest_batch_id, $source_surface, $source_application_version,
+                $observation_id, $raw_record_id, $input_evidence_kind, $raw_payload_sha256,
+                $ingest_batch_id, $source_surface, $source_application_version,
                 $source_adapter, $adapter_version, $schema_fingerprint, $inventory_hash, $compatibility_state,
                 $reason_code, $next_action, $capture_content_state, $unknown_span_count, $unknown_event_count,
                 $unknown_attribute_count, $overflow_distinct_count, $overflow_occurrence_count, $observed_at
@@ -596,6 +586,8 @@ internal sealed partial class SqliteSourceCompatibilityStore : ISourceCompatibil
             """;
         Add(command, "$observation_id", observationId);
         Add(command, "$raw_record_id", rawRecordId);
+        Add(command, "$input_evidence_kind", inputEvidenceKind);
+        Add(command, "$raw_payload_sha256", rawPayloadSha256);
         Add(command, "$ingest_batch_id", ingestBatchId);
         Add(command, "$source_surface", sourceSurface);
         Add(command, "$source_application_version", sourceApplicationVersion);

@@ -446,25 +446,74 @@ public sealed class SourceCompatibilityIngestionTests
         var before = await CaptureResponses(host.Client, paths);
         var beforeSse = await CaptureSseConnectBytes(host.Client);
 
+        long sourceObservationId;
+        string retainedPayload;
+        TraceSourceVersionResolutionState currentState;
+        string? currentVersion;
         using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
         {
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                UPDATE source_trace_version_observations
-                SET resolution_state = 'unrecognised', source_application_version = 'safe-unknown'
-                WHERE trace_id = $trace_id;
-                INSERT INTO source_trace_attribution_observations(
-                    raw_record_id, trace_id, cli_candidate_observed, vscode_candidate_observed,
-                    unknown_candidate_observed, relevant_evidence_observed)
-                VALUES(999, $trace_id, 0, 1, 0, 1);
+                SELECT version.source_observation_id,raw.payload_json,
+                       version.resolution_state,version.source_application_version
+                FROM source_trace_version_observations AS version
+                JOIN source_schema_observations AS source
+                  ON source.id=version.source_observation_id
+                JOIN raw_records AS raw
+                  ON raw.id=source.raw_record_id
+                WHERE version.trace_id=$trace_id
                 """;
             command.Parameters.AddWithValue("$trace_id", traceId);
-            Assert.Equal(2, command.ExecuteNonQuery());
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read());
+            sourceObservationId = reader.GetInt64(0);
+            retainedPayload = reader.GetString(1);
+            currentState = reader.GetString(2) switch
+            {
+                "resolved" => TraceSourceVersionResolutionState.Resolved,
+                "missing" => TraceSourceVersionResolutionState.Missing,
+                "unrecognised" => TraceSourceVersionResolutionState.Unrecognised,
+                "conflicting" => TraceSourceVersionResolutionState.Conflicting,
+                _ => throw new InvalidOperationException("Unexpected trace source state."),
+            };
+            currentVersion = reader.IsDBNull(3) ? null : reader.GetString(3);
+            Assert.False(reader.Read());
         }
-        new SqliteSourceCompatibilityStore(temp.DatabasePath)
-            .ReconcileProjectedTraceSourceAttribution();
+        var reconciliationRegistry = currentState == TraceSourceVersionResolutionState.Resolved
+            ? VerifiedSourceFingerprintRegistry.Create(
+                [
+                    VerifiedSourceFingerprintEvidence.Create(
+                        "github-copilot-cli",
+                        currentVersion!,
+                        new string('a', 64)),
+                ],
+                [],
+                [])
+            : VerifiedSourceFingerprintRegistry.Create([], [], []);
+        var reconciliation = new SourceCompatibilityReconciler(
+                temp.DatabasePath,
+                SourceCompatibilityReconciliationAuthority.Create(
+                [
+                    new(
+                        "resolver-frozen-byte-1",
+                        "registry-frozen-byte-1",
+                        reconciliationRegistry),
+                ]),
+                time)
+            .Reconcile(SourceCompatibilityReconciliationRequest.Create(
+                "frozen-byte-no-op",
+                sourceObservationId,
+                traceId,
+                0,
+                currentState == TraceSourceVersionResolutionState.Unrecognised
+                    ? SourceCompatibilityReconciliationTrigger.RegistryRevision
+                    : SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-frozen-byte-1",
+                "registry-frozen-byte-1",
+                SkillProjectionGenerationParticipant.CurrentProjectorVersion));
+        Assert.Equal(SourceCompatibilityReconciliationOutcome.NoChange, reconciliation.Outcome);
 
         var after = await CaptureResponses(host.Client, paths);
         var afterSse = await CaptureSseConnectBytes(host.Client);

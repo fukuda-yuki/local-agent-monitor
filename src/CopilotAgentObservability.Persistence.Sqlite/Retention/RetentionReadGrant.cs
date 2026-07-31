@@ -20,7 +20,9 @@ internal sealed class RetentionReadGrant
     internal long Revision { get; }
     internal string LeaseOwner { get; }
     internal long LeaseGeneration { get; }
-    internal DateTimeOffset LeaseExpiresAt { get; }
+    internal DateTimeOffset LeaseExpiresAt { get; private set; }
+
+    internal void AdvanceExpiry(DateTimeOffset leaseExpiresAt) => LeaseExpiresAt = leaseExpiresAt;
 
     internal void BindSelectorCapability(SqliteCommand command)
     {

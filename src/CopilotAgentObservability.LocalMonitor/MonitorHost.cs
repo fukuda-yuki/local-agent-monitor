@@ -195,10 +195,22 @@ internal static class MonitorHost
             builder.Services.AddHostedService(_ => worker);
         }
 
+        var projectionRawStore = new RawTelemetryStore(
+            options.DatabasePath,
+            retentionContext,
+            timeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
         var projectionStore = testOptions?.ProjectionStore
-            ?? new RawTelemetryStoreProjectionStore(
-                new RawTelemetryStore(options.DatabasePath, retentionContext, timeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter));
+            ?? new RawTelemetryStoreProjectionStore(projectionRawStore);
         builder.Services.AddSingleton(projectionStore);
+        var skillProjectionStore = new SqliteSkillProjectionStore(
+            options.DatabasePath,
+            projectionRawStore);
+        var skillProjectionWorker = new SkillProjectionWorker(
+            skillProjectionStore,
+            timeProvider: timeProvider);
+        builder.Services.AddSingleton(skillProjectionStore);
+        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath));
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
         var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);
@@ -277,7 +289,8 @@ internal static class MonitorHost
                 health,
                 compatibilityStore,
                 eventBroker: eventBroker,
-                pollInterval: testOptions?.ProjectionPollInterval);
+                pollInterval: testOptions?.ProjectionPollInterval,
+                skillProjectionWorker: skillProjectionWorker);
             builder.Services.AddHostedService(_ => projectionWorker);
         }
         if (testOptions?.StartSessionOtelEnrichment ?? true)

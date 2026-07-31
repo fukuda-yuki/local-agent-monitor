@@ -108,7 +108,7 @@ public class MonitorProjectionStoreTests
         var store = new RawTelemetryStore(temp.DatabasePath, temp.RetentionContext, new MutableTimeProvider(T(0)), RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
 
-        Assert.Equal(10, RawTelemetryStore.MonitorSchemaVersion);
+        Assert.Equal(11, RawTelemetryStore.MonitorSchemaVersion);
         var trace = Assert.Single(store.ListMonitorTraces(0, 100).Items);
         Assert.Equal("legacy-trace", trace.TraceId);
         Assert.Null(trace.RepositoryName);

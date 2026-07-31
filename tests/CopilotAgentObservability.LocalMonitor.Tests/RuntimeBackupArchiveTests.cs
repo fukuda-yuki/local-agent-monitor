@@ -1477,6 +1477,36 @@ public sealed class RuntimeBackupArchiveTests
     }
 
     [Fact]
+    public void EmptyDeclaredSkillComponentWithoutRetentionDependencyFailsBeforeMutation()
+    {
+        using var temp = new RuntimeBackupTemp();
+        temp.CreateDatabase("value");
+        using (var connection = RuntimeBackupTemp.Open(temp.DatabasePath))
+        {
+            RuntimeBackupTemp.Execute(
+                connection,
+                "DELETE FROM retention_component_versions WHERE component='retention';");
+            RuntimeBackupTemp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.DatabasePath));
+        var output = Path.Combine(temp.DirectoryPath, "invalid-skill-dependency.zip");
+        var service = new SqliteRuntimeBackupService(temp.TimeProvider);
+
+        var preflight = service.PreflightForMigration(temp.DatabasePath);
+        var initialize = service.Initialize(temp.DatabasePath);
+        var create = service.CreateAndPublish(temp.DatabasePath, output);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.False(initialize.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, initialize.ErrorCode);
+        Assert.False(create.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, create.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.DatabasePath)));
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
     public void Case_aliased_retention_table_cannot_bypass_value_bounds_before_initialization()
     {
         using var temp = new RuntimeBackupTemp();
@@ -1969,8 +1999,8 @@ public sealed class RuntimeBackupArchiveTests
             if (attack == "duplicate-manifest-key")
                 manifest = Encoding.UTF8.GetBytes(ReplaceRequired(
                     Encoding.UTF8.GetString(manifest),
-                    "\"monitor\":10",
-                    "\"monitor\":10,\"monitor\":10"));
+                    "\"monitor\":11",
+                    "\"monitor\":11,\"monitor\":11"));
             if (attack == "invalid-journal-mode")
                 manifest = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(manifest).Replace("\"source_journal_mode\":\"wal\"", "\"source_journal_mode\":\"other\"", StringComparison.Ordinal));
             if (attack == "invalid-external-state")

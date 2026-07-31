@@ -207,7 +207,8 @@ public sealed class DoctorMigrationTests
     {
         Assert.Equal(
             [
-                "id", "observation_id", "raw_record_id", "ingest_batch_id", "source_surface",
+                "id", "observation_id", "raw_record_id", "raw_payload_sha256",
+                "input_evidence_kind", "ingest_batch_id", "source_surface",
                 "source_application_version", "source_adapter", "adapter_version", "schema_fingerprint",
                 "inventory_hash", "compatibility_state", "reason_code", "next_action", "capture_content_state",
                 "unknown_span_count", "unknown_event_count", "unknown_attribute_count", "overflow_distinct_count",
@@ -227,6 +228,13 @@ public sealed class DoctorMigrationTests
             "id INTEGER PRIMARY KEY AUTOINCREMENT",
             "observation_id TEXT NOT NULL UNIQUE",
             "raw_record_id INTEGER NULL UNIQUE",
+            "raw_payload_sha256 TEXT NULL CHECK(",
+            "raw_payload_sha256 IS NULL OR (",
+            "length(raw_payload_sha256)=64",
+            "AND raw_payload_sha256 NOT GLOB '*[^0-9a-f]*'",
+            "input_evidence_kind TEXT NULL CHECK(",
+            "input_evidence_kind='payload_sha256'",
+            "input_evidence_kind='deleted_before_digest_v10'",
             "ingest_batch_id TEXT NULL UNIQUE",
             "source_surface TEXT NULL",
             "source_application_version TEXT NULL",

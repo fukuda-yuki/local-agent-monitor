@@ -70,6 +70,10 @@ public sealed partial class RetentionCatalogStore
         Backfill(connection, transaction, timeProvider.GetUtcNow());
         backfillValidationCheckpoint?.Invoke(connection, transaction);
         ValidateBackfill(connection, transaction);
+        if (SkillProjectionSchemaV1.HasObsoleteAuthority(connection, transaction))
+            SkillProjectionSchemaV1.TransitionFromObsolete(connection, transaction);
+        else
+            SkillProjectionSchemaV1.Ensure(connection, transaction);
     }
 
     internal void RegisterRawRecord(
@@ -464,7 +468,13 @@ public sealed partial class RetentionCatalogStore
                 return new(RetentionReadDisposition.Denied, null);
             }
             transaction.Commit();
-            return new(RetentionReadDisposition.Granted, new RetentionReadLease<T>(value, RetentionRevisionFence.Create(), () => ReleaseAsync(item.ItemId, leaseKind, owner, generation.Value)));
+            return new(
+                RetentionReadDisposition.Granted,
+                new RetentionReadLease<T>(
+                    value,
+                    RetentionRevisionFence.Create(),
+                    () => ReleaseAsync(item.ItemId, leaseKind, owner, generation.Value),
+                    grant));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -548,7 +558,7 @@ public sealed partial class RetentionCatalogStore
                     var kind = requests[index].LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
                     await ReleaseAsync(items[index].ItemId, kind, owner, grants[index].LeaseGeneration).ConfigureAwait(false);
                 }
-            }));
+            }, grants));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -637,7 +647,7 @@ public sealed partial class RetentionCatalogStore
                     var kind = requests[index].LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
                     await ReleaseAsync(items[index].ItemId, kind, owner, grants[index].LeaseGeneration).ConfigureAwait(false);
                 }
-            }));
+            }, grants));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {

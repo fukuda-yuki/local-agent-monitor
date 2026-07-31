@@ -22,6 +22,7 @@ public sealed class TraceSourceAttributionMigrationTests
                 connection,
                 TraceId,
                 Payload(TraceId, "1111111111111111", "github-copilot"));
+            CreateObsoleteSkillTables(connection);
             InsertProjectedTrace(
                 connection,
                 rawRecordId,
@@ -82,10 +83,12 @@ public sealed class TraceSourceAttributionMigrationTests
         var beforeSessionInvariant = ReadSessionInvariantSnapshot(temp.DatabasePath);
 
         store.CreateSchema();
+        new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(
+            temp.DatabasePath).CreateSchema();
 
         using (var connection = Open(temp.DatabasePath))
         {
-            Assert.Equal(10L, Scalar<long>(
+            Assert.Equal(11L, Scalar<long>(
                 connection,
                 "SELECT version FROM schema_version WHERE component='monitor';"));
             Assert.Equal("copilot-cli", Scalar<string>(
@@ -100,6 +103,9 @@ public sealed class TraceSourceAttributionMigrationTests
             Assert.Equal("vscode", Scalar<string>(
                 connection,
                 "SELECT source_surface FROM session_events WHERE event_id='migration-event';"));
+            Assert.Equal(0L, Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'monitor_skill_%' OR name LIKE 'IX_monitor_skill_%';"));
         }
         Assert.Equal(beforeInvariant, ReadInvariantSnapshot(temp.DatabasePath));
         Assert.Equal(beforeSessionInvariant, ReadSessionInvariantSnapshot(temp.DatabasePath));
@@ -107,6 +113,8 @@ public sealed class TraceSourceAttributionMigrationTests
         var firstStartupHash = ReadCanonicalDatabaseHash(temp.DatabasePath);
 
         store.CreateSchema();
+        new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(
+            temp.DatabasePath).CreateSchema();
 
         Assert.Equal(firstStartupState, ReadAttributionState(temp.DatabasePath));
         Assert.Equal(beforeInvariant, ReadInvariantSnapshot(temp.DatabasePath));
@@ -474,14 +482,90 @@ public sealed class TraceSourceAttributionMigrationTests
         return rawRecordId;
     }
 
-    private static void PrepareAsV9(SqliteConnection connection) =>
+    private static void PrepareAsV9(SqliteConnection connection)
+    {
+        CreateObsoleteSkillTables(connection);
         Execute(
             connection,
             """
+            DROP TABLE IF EXISTS skill_projection_inventory_names;
+            DROP TABLE IF EXISTS skill_projection_inventories;
+            DROP TABLE IF EXISTS skill_projection_invocations;
+            DROP TABLE IF EXISTS skill_projection_sdk_claims;
+            DROP TABLE IF EXISTS skill_projection_operation_receipts;
+            DROP TABLE IF EXISTS skill_projection_queue;
+            DROP TABLE IF EXISTS skill_projection_trace_heads;
+            DROP TABLE IF EXISTS skill_projection_generation_inputs;
+            DROP TABLE IF EXISTS skill_projection_generations;
+            DELETE FROM schema_version WHERE component='skill_projection';
+            DROP TABLE source_compatibility_reconciliation_receipts;
+            DROP TABLE source_trace_version_interpretation_heads;
+            DROP TABLE source_trace_version_interpretation_supersessions;
+            DROP TABLE source_trace_compatibility_revisions;
+            DROP TRIGGER source_trace_version_observations_update_rejected;
+            DROP TRIGGER source_trace_version_observations_delete_rejected;
+            DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
+            DROP TRIGGER source_schema_observations_projection_input_update_rejected;
+            ALTER TABLE source_schema_observations
+            DROP COLUMN input_evidence_kind;
+            ALTER TABLE source_schema_observations
+            DROP COLUMN raw_payload_sha256;
             DROP INDEX IX_source_trace_attribution_observations_trace_id;
             DROP TABLE source_trace_attribution_observations;
             DROP TABLE source_trace_attribution_reconciliation_queue;
             UPDATE schema_version SET version=9 WHERE component='monitor';
+            """);
+    }
+
+    private static void CreateObsoleteSkillTables(SqliteConnection connection) =>
+        Execute(
+            connection,
+            """
+            CREATE TABLE IF NOT EXISTS monitor_skill_invocations(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_record_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL,
+                span_id TEXT NULL,
+                span_ordinal INTEGER NOT NULL,
+                session_id TEXT NULL,
+                skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
+                skill_source TEXT NULL CHECK (skill_source IS NULL OR length(skill_source) BETWEEN 1 AND 256),
+                invocation_trigger TEXT NULL CHECK (invocation_trigger IS NULL OR length(invocation_trigger) BETWEEN 1 AND 256),
+                source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
+                projected_at TEXT NOT NULL,
+                UNIQUE(raw_record_id, span_ordinal),
+                UNIQUE(trace_id, span_id)
+            );
+            CREATE TABLE IF NOT EXISTS monitor_skill_inventories(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_record_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL,
+                session_id TEXT NULL,
+                observed_name_count INTEGER NOT NULL CHECK (observed_name_count >= 0),
+                retained_name_count INTEGER NOT NULL CHECK (retained_name_count BETWEEN 0 AND 100),
+                names_truncated INTEGER NOT NULL CHECK (names_truncated IN (0, 1)),
+                source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
+                projected_at TEXT NOT NULL,
+                UNIQUE(raw_record_id, trace_id)
+            );
+            CREATE TABLE IF NOT EXISTS monitor_skill_inventory_names(
+                raw_record_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL,
+                name_ordinal INTEGER NOT NULL CHECK (name_ordinal BETWEEN 0 AND 99),
+                skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
+                PRIMARY KEY (raw_record_id, trace_id, name_ordinal),
+                FOREIGN KEY (raw_record_id, trace_id)
+                    REFERENCES monitor_skill_inventories(raw_record_id, trace_id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS IX_monitor_skill_invocations_trace_id
+                ON monitor_skill_invocations(trace_id,id);
+            CREATE INDEX IF NOT EXISTS IX_monitor_skill_invocations_session_id
+                ON monitor_skill_invocations(session_id,id);
+            CREATE INDEX IF NOT EXISTS IX_monitor_skill_inventories_trace_id
+                ON monitor_skill_inventories(trace_id,id);
+            CREATE INDEX IF NOT EXISTS IX_monitor_skill_inventories_session_id
+                ON monitor_skill_inventories(session_id,id);
             """);
 
     private static string ReadInvariantSnapshot(string path)
@@ -500,16 +584,7 @@ public sealed class TraceSourceAttributionMigrationTests
                 "SELECT raw_record_id,trace_id,span_id,span_ordinal,operation,total_tokens,duration_ms,projected_at FROM monitor_spans ORDER BY raw_record_id,span_ordinal;"),
             ReadRows(
                 connection,
-                "SELECT raw_record_id,state,revision,updated_at FROM monitor_projection_dispositions ORDER BY raw_record_id;"),
-            ReadRows(
-                connection,
-                "SELECT raw_record_id,trace_id,span_id,span_ordinal,skill_name,source_application_version,projected_at FROM monitor_skill_invocations ORDER BY raw_record_id,span_ordinal;"),
-            ReadRows(
-                connection,
-                "SELECT raw_record_id,trace_id,session_id,observed_name_count,retained_name_count,names_truncated,source_application_version,projected_at FROM monitor_skill_inventories ORDER BY raw_record_id,trace_id;"),
-            ReadRows(
-                connection,
-                "SELECT raw_record_id,trace_id,name_ordinal,skill_name FROM monitor_skill_inventory_names ORDER BY raw_record_id,trace_id,name_ordinal;"));
+                "SELECT raw_record_id,state,revision,updated_at FROM monitor_projection_dispositions ORDER BY raw_record_id;"));
     }
 
     private static string ReadAttributionState(string path)

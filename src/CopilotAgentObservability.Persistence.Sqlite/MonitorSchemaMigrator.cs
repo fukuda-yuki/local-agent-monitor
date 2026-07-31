@@ -2,7 +2,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class MonitorSchemaMigrator
 {
-    public const int BaseSchemaVersion = 10;
+    public const int BaseSchemaVersion = 11;
 
     public static void EnsureRawRecordsSchema(SqliteConnection connection, SqliteTransaction transaction)
     {
@@ -129,63 +129,6 @@ internal static class MonitorSchemaMigrator
             """);
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_spans_trace_id ON monitor_spans(trace_id);");
         Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_spans_raw_record_id ON monitor_spans(raw_record_id);");
-        Execute(
-            connection,
-            transaction,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_skill_invocations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_record_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL,
-                span_id TEXT NULL,
-                span_ordinal INTEGER NOT NULL,
-                session_id TEXT NULL,
-                skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
-                skill_source TEXT NULL CHECK (skill_source IS NULL OR length(skill_source) BETWEEN 1 AND 256),
-                invocation_trigger TEXT NULL CHECK (invocation_trigger IS NULL OR length(invocation_trigger) BETWEEN 1 AND 256),
-                source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
-                projected_at TEXT NOT NULL,
-                UNIQUE(raw_record_id, span_ordinal),
-                UNIQUE(trace_id, span_id)
-            );
-            """);
-        Execute(
-            connection,
-            transaction,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_skill_inventories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                raw_record_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL,
-                session_id TEXT NULL,
-                observed_name_count INTEGER NOT NULL CHECK (observed_name_count >= 0),
-                retained_name_count INTEGER NOT NULL CHECK (retained_name_count BETWEEN 0 AND 100),
-                names_truncated INTEGER NOT NULL CHECK (names_truncated IN (0, 1)),
-                source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
-                projected_at TEXT NOT NULL,
-                UNIQUE(raw_record_id, trace_id)
-            );
-            """);
-        Execute(
-            connection,
-            transaction,
-            """
-            CREATE TABLE IF NOT EXISTS monitor_skill_inventory_names (
-                raw_record_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL,
-                name_ordinal INTEGER NOT NULL CHECK (name_ordinal BETWEEN 0 AND 99),
-                skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
-                PRIMARY KEY (raw_record_id, trace_id, name_ordinal),
-                FOREIGN KEY (raw_record_id, trace_id)
-                    REFERENCES monitor_skill_inventories(raw_record_id, trace_id)
-                    ON DELETE CASCADE
-            );
-            """);
-        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_skill_invocations_trace_id ON monitor_skill_invocations(trace_id, id);");
-        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_skill_invocations_session_id ON monitor_skill_invocations(session_id, id);");
-        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_skill_inventories_trace_id ON monitor_skill_inventories(trace_id, id);");
-        Execute(connection, transaction, "CREATE INDEX IF NOT EXISTS IX_monitor_skill_inventories_session_id ON monitor_skill_inventories(session_id, id);");
-
         AddColumnIfMissing(connection, transaction, "monitor_ingestions", "span_projected_at", "TEXT NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "input_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "output_tokens", "INTEGER NULL");
@@ -209,6 +152,7 @@ internal static class MonitorSchemaMigrator
         {
             SqliteSourceCompatibilityStore.TransitionRetainedTraceSourceAttribution(connection, transaction);
         }
+        SourceCompatibilitySchemaV11.Ensure(connection, transaction, existingVersion);
 
         if (existingVersion is null or < BaseSchemaVersion)
         {
@@ -230,10 +174,31 @@ internal static class MonitorSchemaMigrator
         if (existingVersion == BaseSchemaVersion)
         {
             ValidateCurrentTraceSourceAttributionSchema(connection, transaction);
+            SourceCompatibilitySchemaV11.Validate(connection, transaction);
+        }
+        else if (existingVersion == 10)
+        {
+            ValidateCurrentTraceSourceAttributionSchema(connection, transaction);
+            SourceCompatibilitySchemaV11.RejectCollidingAuthority(
+                connection,
+                transaction,
+                allowDeletedProjectionInput: true);
+            SkillProjectionSchemaV1.ValidateObsoleteAuthority(connection, transaction);
+            SkillProjectionSchemaV1.RejectCollidingAuthority(connection, transaction);
+        }
+        else if (existingVersion == 9)
+        {
+            RejectPreexistingTraceSourceAttributionAuthority(connection, transaction);
+            SourceCompatibilitySchemaV11.RejectCollidingAuthority(connection, transaction);
+            SkillProjectionSchemaV1.ValidateObsoleteAuthority(connection, transaction);
+            SkillProjectionSchemaV1.RejectCollidingAuthority(connection, transaction);
         }
         else
         {
             RejectPreexistingTraceSourceAttributionAuthority(connection, transaction);
+            SourceCompatibilitySchemaV11.RejectCollidingAuthority(connection, transaction);
+            SkillProjectionSchemaV1.RejectObsoleteAuthority(connection, transaction);
+            SkillProjectionSchemaV1.RejectCollidingAuthority(connection, transaction);
         }
 
         return existingVersion;

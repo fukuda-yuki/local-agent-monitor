@@ -138,6 +138,36 @@ public sealed class SourceCompatibilityStoreTests
     }
 
     [Fact]
+    public void TraceVersionObservation_RejectsUpdateDeleteAndParentDelete()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("batch-immutable-trace-version", BuildOverflowInventory()));
+        using var connection = Open(database.Path);
+        Execute(
+            connection,
+            $"INSERT INTO source_trace_version_observations VALUES ({committed.ObservationId}, '{traceId}', 'missing', NULL);");
+
+        Assert.Contains(
+            "source_trace_version_observation_immutable",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                $"UPDATE source_trace_version_observations SET resolution_state='conflicting' WHERE source_observation_id={committed.ObservationId} AND trace_id='{traceId}';")).Message,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "source_trace_version_observation_immutable",
+            Assert.Throws<SqliteException>(() => Execute(
+                connection,
+                $"DELETE FROM source_trace_version_observations WHERE source_observation_id={committed.ObservationId} AND trace_id='{traceId}';")).Message,
+            StringComparison.Ordinal);
+        Assert.Throws<SqliteException>(() => Execute(
+            connection,
+            $"DELETE FROM source_schema_observations WHERE id={committed.ObservationId};"));
+    }
+
+    [Fact]
     public void Commit_PersistsTraceSourceEvidenceAtomicallyAndReturnsAggregateResolution()
     {
         const string traceId = "11111111111111111111111111111111";
@@ -441,7 +471,7 @@ public sealed class SourceCompatibilityStoreTests
         using (var connection = Open(database.Path))
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "UPDATE schema_version SET version = 11 WHERE component = 'monitor';";
+            command.CommandText = "UPDATE schema_version SET version = 12 WHERE component = 'monitor';";
             command.ExecuteNonQuery();
         }
 
@@ -449,7 +479,7 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Contains("newer", exception.Message, StringComparison.OrdinalIgnoreCase);
         using var verification = Open(database.Path);
-        Assert.Equal(11L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(12L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
     }
 
     [Theory]
@@ -467,7 +497,7 @@ public sealed class SourceCompatibilityStoreTests
         {
             Execute(connection, """
                 DROP INDEX IX_raw_records_source;
-                UPDATE schema_version SET version = 11 WHERE component = 'monitor';
+                UPDATE schema_version SET version = 12 WHERE component = 'monitor';
                 CREATE TABLE future_monitor_sentinel(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
                 INSERT INTO future_monitor_sentinel(id,value) VALUES(1,'future-state');
                 PRAGMA journal_mode=DELETE;
@@ -499,7 +529,7 @@ public sealed class SourceCompatibilityStoreTests
         Assert.False(File.Exists(database.Path + "-wal"));
         Assert.False(File.Exists(database.Path + "-shm"));
         using var verification = Open(database.Path);
-        Assert.Equal(11L, Scalar(
+        Assert.Equal(12L, Scalar(
             verification,
             "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(0L, Scalar(
@@ -626,7 +656,7 @@ public sealed class SourceCompatibilityStoreTests
         Assert.False(File.Exists(database.Path + "-shm"));
         Assert.False(File.Exists(database.Path + "-journal"));
         using var verification = Open(database.Path);
-        Assert.Equal(10L, Scalar(
+        Assert.Equal(11L, Scalar(
             verification,
             "SELECT version FROM schema_version WHERE component='monitor';"));
         Assert.Equal("current-state", ScalarText(
@@ -736,7 +766,7 @@ public sealed class SourceCompatibilityStoreTests
             .CreateSchema());
 
         Assert.Equal(
-            "Unsupported incomplete monitor schema version 10.",
+            "Unsupported incomplete monitor schema version 11.",
             exception.Message);
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(database.Path)));
         Assert.False(File.Exists(database.Path + "-wal"));
@@ -757,16 +787,19 @@ public sealed class SourceCompatibilityStoreTests
         using var database = new TestDatabase();
         database.CreateRawStore().CreateMonitorSchema();
         using (var connection = Open(database.Path))
-        using (var command = connection.CreateCommand())
         {
-            command.CommandText = "CREATE VIEW source_unknown_observations AS SELECT 1 AS conflict;";
-            command.ExecuteNonQuery();
+            Execute(
+                connection,
+                """
+                DROP TABLE source_unknown_observations;
+                CREATE VIEW source_unknown_observations AS SELECT 1 AS conflict;
+                """);
         }
 
         Assert.Throws<SqliteException>(() => new SqliteSourceCompatibilityStore(database.Path).CreateSchema());
 
         using var verification = Open(database.Path);
-        Assert.Empty(Columns(verification, "source_schema_observations"));
+        Assert.NotEmpty(Columns(verification, "source_schema_observations"));
         Assert.Equal(RawTelemetryStore.MonitorSchemaVersion, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(1L, Scalar(verification, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'source_unknown_observations';"));
     }
@@ -778,9 +811,9 @@ public sealed class SourceCompatibilityStoreTests
         database.CreateRawStore().CreateMonitorSchema();
         using var connection = Open(database.Path);
 
-        Assert.Empty(Columns(connection, "source_schema_observations"));
-        Assert.Empty(Columns(connection, "source_unknown_observations"));
-        Assert.Empty(Columns(connection, "source_trace_version_observations"));
+        Assert.NotEmpty(Columns(connection, "source_schema_observations"));
+        Assert.NotEmpty(Columns(connection, "source_unknown_observations"));
+        Assert.NotEmpty(Columns(connection, "source_trace_version_observations"));
         Assert.Equal(
             [
                 "raw_record_id", "trace_id", "cli_candidate_observed", "vscode_candidate_observed",
@@ -799,7 +832,8 @@ public sealed class SourceCompatibilityStoreTests
 
         Assert.Equal(
             [
-                "id", "observation_id", "raw_record_id", "ingest_batch_id", "source_surface",
+                "id", "observation_id", "raw_record_id", "raw_payload_sha256",
+                "input_evidence_kind", "ingest_batch_id", "source_surface",
                 "source_application_version", "source_adapter", "adapter_version", "schema_fingerprint",
                 "inventory_hash", "compatibility_state", "reason_code", "next_action", "capture_content_state",
                 "unknown_span_count", "unknown_event_count", "unknown_attribute_count", "overflow_distinct_count",
@@ -852,6 +886,26 @@ public sealed class SourceCompatibilityStoreTests
             Execute(
                 connection,
                 """
+                DROP TABLE IF EXISTS skill_projection_sdk_claims;
+                DROP TABLE IF EXISTS skill_projection_inventory_names;
+                DROP TABLE IF EXISTS skill_projection_inventories;
+                DROP TABLE IF EXISTS skill_projection_invocations;
+                DROP TABLE IF EXISTS skill_projection_operation_receipts;
+                DROP TABLE IF EXISTS skill_projection_queue;
+                DROP TABLE IF EXISTS skill_projection_trace_heads;
+                DROP TABLE IF EXISTS skill_projection_generation_inputs;
+                DROP TABLE IF EXISTS skill_projection_generations;
+                DELETE FROM schema_version WHERE component='skill_projection';
+                DROP TABLE source_compatibility_reconciliation_receipts;
+                DROP TABLE source_trace_version_interpretation_heads;
+                DROP TABLE source_trace_version_interpretation_supersessions;
+                DROP TABLE source_trace_compatibility_revisions;
+                DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
+                DROP TRIGGER source_schema_observations_projection_input_update_rejected;
+                ALTER TABLE source_schema_observations
+                DROP COLUMN input_evidence_kind;
+                ALTER TABLE source_schema_observations
+                DROP COLUMN raw_payload_sha256;
                 DROP TABLE source_trace_version_observations;
                 DROP INDEX IX_source_trace_attribution_observations_trace_id;
                 DROP TABLE source_trace_attribution_observations;
@@ -863,7 +917,7 @@ public sealed class SourceCompatibilityStoreTests
         store.CreateSchema();
 
         using var verification = Open(database.Path);
-        Assert.Equal(10L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
+        Assert.Equal(11L, Scalar(verification, "SELECT version FROM schema_version WHERE component = 'monitor';"));
         Assert.Equal(
             ["source_observation_id", "trace_id", "resolution_state", "source_application_version"],
             Columns(verification, "source_trace_version_observations"));
