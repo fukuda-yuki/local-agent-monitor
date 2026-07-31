@@ -71,8 +71,18 @@ publishes no OTel claim.
 
 - canonical GitHub locator only in a dedicated management read;
 - standard Repository cards and Session rows do not return raw locator/path/owner.
+- admitted canonical locator, fingerprint, display casing and bounded
+  provenance are catalog-owned durable raw-local metadata after raw expiry;
+  they do not reconstruct the raw body or expose the internal raw-record
+  reference;
+- Repository management routes and catalog data are absent in receiver-only
+  and `--sanitized-only` composition and excluded from sanitized evidence
+  export/import.
 
-Authority: #155/#156.
+Authority:
+[Local Repository Catalog and Session Assignment](local-repository-catalog.md),
+#155/#156. #134 alone owns the composite
+`GET /api/local-monitor/v1/repositories` route.
 
 ### AI
 

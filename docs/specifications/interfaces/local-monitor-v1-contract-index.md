@@ -1,6 +1,6 @@
 # Local Monitor v1 Contract Index
 
-Status: **Accepted input to Issue #118**
+Status: **Accepted current authority**
 
 This index identifies the single authority for every Local Monitor v1 behavior. Consumers must not create parallel schemas, fallback readers or alternate state vocabularies.
 
@@ -9,7 +9,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Product definition | `docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md` | — |
 | IA/routes/layout/states | `docs/specifications/interfaces/local-monitor-v1-ia.md`, #132 | #135–#140, #145–#146, #167 |
 | Source claims/missing semantics | #129 | #137 and feature owners |
-| Repository catalog/locator/assignment | #155 | #156 |
+| Repository catalog/locator/assignment | [`local-repository-catalog.md`](local-repository-catalog.md), #155 | #156 |
 | Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
 | Skill projection validity/re-run | [`skill-projection.md`](../layers/skill-projection.md), #154 | #154 |
 | Skill body/path snapshot/current file | #157 | #158 |
@@ -52,6 +52,15 @@ telemetry fixes / #154
 
 ## Rules
 
+- Only the Repository locator parser/canonicalization/fingerprint slice is
+  `READY`; full #156 remains `BLOCKED_DECISION` under the explicit gaps in the
+  Repository catalog contract.
+- #134 alone maps and serializes
+  `GET /api/local-monitor/v1/repositories`. #156 owns its five gated
+  management/action routes, not the composite Repository-card read.
+- #156, #161 and #134 use one `ILocalRepositoryScopeSnapshotService`; #161
+  composes archive eligibility and #161/#134 add no direct catalog SQL or
+  parallel reader.
 - Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE are never widened.
 - `/api/local-monitor/v1/*` is the raw-default local human-UI namespace and is absent in sanitized-only posture.
 - Repository, Session and hierarchy identities are exact and opaque.
@@ -65,3 +74,5 @@ telemetry fixes / #154
   resolved trace generation and SDK claims against their exact current-registry
   tuple without requiring trace/span.
 - Sentence-level wording may change under #169 without changing contracts, routes or structured selectors.
+- Repository identity/assignment is exact-only; no name/path/CWD/prompt/time/
+  cardinality heuristic is permitted, and Issue #152 remains unresolved.

@@ -2855,3 +2855,49 @@ intermediate state fails closed. Full contracts are
 
 This decision does not implement or resolve Issue #152 and does not modify
 frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE bytes.
+
+## D077: Repository catalog and assignment use one exact gated authority
+
+Status: Accepted (2026-07-31)
+
+Local Monitor v1 adopts
+`docs/specifications/interfaces/local-repository-catalog.md` as the canonical
+Repository identity, GitHub locator, observation provenance, Session
+assignment, mutation, scope and backup contract. Exact opaque identities and
+the accepted locator grammar replace every name/path/CWD/prompt/time/
+cardinality heuristic. V1 observes only `vcs.repository.url.full` and
+`copilot_chat.repo.remote_url`; Issue #152 unknown attribute-key drift remains
+unresolved.
+
+The independent future component is `local_repository_catalog:1`. It keeps
+immutable locator rows and movable heads, exact observation provenance, manual
+overrides and assignment revisions, append-only history and durable exact-byte
+idempotency receipts. Catalog-owned canonical locator, fingerprint, display
+casing, safe label and bounded provenance survive source raw expiry without
+reconstructing source raw. The component is excluded from sanitized evidence
+export/import.
+
+#134 is the sole HTTP owner of
+`GET /api/local-monitor/v1/repositories`. #156 owns the catalog/assignment core
+and only its five management/action routes after their gates. #161 composes
+archive eligibility and #134 consumes the result through the same
+`ILocalRepositoryScopeSnapshotService`; neither adds direct catalog SQL or a
+second reader. Archive meaning remains #160/#161-owned.
+
+Only the exact six-form GitHub locator parser, canonicalization and
+domain-separated fingerprint are currently `READY`. Production schema,
+automatic admission/reconciliation, assignment mutation/read routes, scope
+composition and backup registration remain `BLOCKED_DECISION` until the
+canonical contract closes automatic creation/binding, identity framing and
+exact Session join, automatic-revision history, reconciliation frontier,
+complete wire bytes, durable raw-reference shape and single-transaction
+composition. Implementations do not invent intermediate tables, history
+actions, wire carriers, compatibility paths, fallback readers or permissive
+parsers.
+
+The future backup dependency order places `local_repository_catalog`
+immediately after Session and before `local_archive`, Retention, Skill
+projection/snapshot and Workspace projection. Older component-absent state may
+initialize empty; partial, newer or unknown state fails closed. Frozen
+`/api/monitor/*`, `/api/session-workspace/*` v1 and SSE bytes remain unchanged,
+and the human routes remain raw-default-only.

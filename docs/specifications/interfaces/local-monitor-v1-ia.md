@@ -125,7 +125,14 @@ Supplementary entries:
 - `リポジトリを追加`;
 - archived Repository management through Settings.
 
-Identity, locator, assignment, correction and conflict behavior are owned by #155/#156. Archive behavior is owned by #160/#161.
+Identity, locator, assignment, correction and conflict behavior are owned by
+[the Local Repository catalog contract](local-repository-catalog.md) and
+#155/#156. Only its locator parser/canonicalization/fingerprint slice is
+currently implementation-ready; catalog admission, mutation/read routes and
+scope composition remain gated by that contract. #134 alone owns
+`GET /api/local-monitor/v1/repositories`, consuming the one
+`ILocalRepositoryScopeSnapshotService` shared with #156/#161. Archive behavior
+is owned by #160/#161.
 
 ## 6. Session Explorer
 
@@ -522,7 +529,7 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 
 | Area | Contract | Implementation |
 |---|---|---|
-| Repository catalog/assignment | #155 | #156 |
+| Repository catalog/assignment | [catalog contract](local-repository-catalog.md) + #155 | #156 |
 | Skill projection validity | #154 | #154 |
 | Skill body/path snapshot | #157 | #158 |
 | Sanitized-only runtime | #159 | #168 |

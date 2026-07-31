@@ -644,6 +644,35 @@ Unrelated span, Session, raw, source-observation and Retention data is retained.
 The generation, queue, retry, read and transition contract is canonical in
 [Skill Projection](skill-projection.md).
 
+## Local Repository observation admission
+
+The sole Repository catalog/assignment authority is
+[Local Repository Catalog and Session Assignment](../interfaces/local-repository-catalog.md).
+V1 considers only OTel scalar-string values from:
+
+```text
+vcs.repository.url.full
+copilot_chat.repo.remote_url
+```
+
+It applies exact duplicate-key rejection and span-over-resource precedence;
+invalid or duplicate higher-precedence data never falls back to resource
+attributes. Equal canonical locators retain distinct provenance without
+creating multiple assignment candidates. Unequal same-scope or cross-span
+locators produce conflict, not a guessed assignment. Names, paths, CWD,
+prompts, timestamps, source labels, future manifest candidates and Issue #152
+unknown-key drift are not admission authorities.
+
+Admission must hold a Retention operation lease before parsing and bind only to
+one exact existing Session. Once admitted, canonical locator, fingerprint,
+display casing and bounded provenance are catalog-owned metadata that survive
+source raw expiry without reconstructing raw content. Automatic
+admission/reconciliation remains blocked: its creation/binding lifecycle,
+identity framing, exact Session join, automatic-revision history, durable
+frontier and raw-reference shape are not yet executable. Only the six-form
+GitHub locator parser, canonicalization and fingerprint are currently `READY`;
+ingestion must not add a scan-on-read, queue, fallback or heuristic join.
+
 ## Session Event Ingestion And Enrichment
 
 Issue #51 adds a Session event input beside, not inside, the OTLP receiver:

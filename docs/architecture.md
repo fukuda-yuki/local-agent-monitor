@@ -157,9 +157,12 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   detail or deterministic Repository Session Compare. Unified Settings owns
   receiver, AI, Repository, archive, storage/backup and diagnostics entry.
 - `/api/local-monitor/v1/*` is the human-UI composition namespace. It reuses the
-  #155/#156 Repository owner, #133/#134 Workspace reads, #157/#158 Skill raw
-  detail, #160/#161 archive, #165/#166 Compare and #162/#163/#164 AI owners. It
-  does not duplicate their readers or widen `/api/monitor/*`,
+  [single Repository catalog/assignment authority](specifications/interfaces/local-repository-catalog.md),
+  #133/#134 Workspace reads, #157/#158 Skill raw detail, #160/#161 archive,
+  #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
+  `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
+  `ILocalRepositoryScopeSnapshotService` and do not duplicate catalog readers.
+  It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
 - AI-independent observation/investigation/Compare remains complete without an
   LLM. Optional GitHub Copilot SDK execution crosses an explicit bounded
@@ -702,6 +705,7 @@ not through this loop.
 
 ```text
 exact Repository catalog/assignment
+  -> one coherent Repository/archive scope snapshot
   -> Repository selection
   -> bounded Session Explorer read
   -> exact Session snapshot
@@ -713,6 +717,16 @@ two explicit Session cohorts
   -> deterministic #165 formulas and exact drill-down
   -> optional AI interpretation of the accepted receipt
 ```
+
+`local_repository_catalog:1` is the future exact Repository identity and
+Session-assignment component. It owns immutable locator/head/history,
+observation provenance, manual overrides and revisions, durable operation
+receipts and catalog-owned raw-expiry metadata. Repository identity is never
+derived from name, path, CWD, prompt, time or cardinality. Only the exact
+GitHub locator parser/canonicalization/fingerprint is currently executable;
+production schema, admission/reconciliation, routes, scope composition and
+backup registration remain blocked by the canonical contract's explicit
+unknowns. Issue #152 remains unresolved.
 
 Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
 exact. Missing facts remain missing. Archive changes default eligibility only;
@@ -959,6 +973,16 @@ backup files are excluded by contract. The HTTP/UI surface can create and
 inspect but never restores a live database; restore authority is offline CLI
 only. Details are canonical in
 [Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md).
+
+The accepted future `local_repository_catalog:1` component is ordered
+immediately after Session and before `local_archive`, followed by Retention,
+Skill projection/snapshot and Workspace projection. It backs up all
+catalog-owned tables and durable receipts; an older absent component
+initializes empty while partial/newer/unknown shapes fail closed. Catalog
+metadata may restore without source raw and reports unavailable provenance
+without reconstructing content. The component is excluded from sanitized
+evidence export/import. Registration remains gated by the unresolved catalog
+schema/history and raw-reference decisions.
 
 ## 5. Aspire AppHost Boundary
 
