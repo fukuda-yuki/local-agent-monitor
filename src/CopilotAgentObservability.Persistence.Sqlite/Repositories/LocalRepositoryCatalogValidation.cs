@@ -59,9 +59,8 @@ internal static class LocalRepositoryCatalogValidation
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            if (!IsCanonicalUuidV7(reader.GetString(0)) || !IsCanonicalUuidV7(reader.GetString(1)) || !GitHubRepositoryLocatorParser.TryParse("https://" + reader.GetString(2), out var locator)
-                || locator.CanonicalLocator != reader.GetString(2) || locator.LocatorSha256 != reader.GetString(3)
-                || locator.DisplayOwner != reader.GetString(4) || locator.DisplayRepository != reader.GetString(5)
+            if (!IsCanonicalUuidV7(reader.GetString(0)) || !IsCanonicalUuidV7(reader.GetString(1))
+                || !HasExactLocatorFields(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5))
                 || !IsCanonicalTimestamp(reader.GetString(6)))
                 Reject();
         }
@@ -80,12 +79,17 @@ internal static class LocalRepositoryCatalogValidation
                 || !IsApprovedObservationAttributeKey(reader.GetString(9))
                 || (!reader.IsDBNull(10) && !IsVisibleVersion(reader.GetString(10))) || !IsCanonicalTimestamp(reader.GetString(11))
                 || (reader.GetString(12) == "admitted" && (!"github_repository".Equals(reader.GetString(13), StringComparison.Ordinal)
-                    || !GitHubRepositoryLocatorParser.TryParse("https://" + reader.GetString(14), out var locator)
-                    || locator.CanonicalLocator != reader.GetString(14) || locator.LocatorSha256 != reader.GetString(15)
-                    || locator.DisplayOwner != reader.GetString(16) || locator.DisplayRepository != reader.GetString(17))))
+                    || !HasExactLocatorFields(reader.GetString(14), reader.GetString(15), reader.GetString(16), reader.GetString(17)))))
                 Reject();
         }
     }
+
+    private static bool HasExactLocatorFields(string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
+        GitHubRepositoryLocatorParser.TryParse($"https://github.com/{displayOwner}/{displayRepository}.git", out var locator)
+        && string.Equals(locator.CanonicalLocator, canonicalLocator, StringComparison.Ordinal)
+        && string.Equals(locator.LocatorSha256, locatorSha256, StringComparison.Ordinal)
+        && string.Equals(locator.DisplayOwner, displayOwner, StringComparison.Ordinal)
+        && string.Equals(locator.DisplayRepository, displayRepository, StringComparison.Ordinal);
 
     private static void ValidateContextRows(SqliteConnection connection, SqliteTransaction? transaction)
     {

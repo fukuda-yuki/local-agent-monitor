@@ -210,6 +210,52 @@ public sealed class LocalRepositoryCatalogSchemaTests
         LocalRepositoryCatalogValidation.Validate(connection, null);
     }
 
+    [Fact]
+    public void Validator_AcceptsOriginalDisplayCasingForDurableLocatorAndAdmittedPhysicalObservation()
+    {
+        using var database = new TestDatabase();
+        using var connection = CreateCompleteCatalog(database.Path, "https://github.com/Example/Widget");
+
+        Assert.Equal("Example|Widget", ScalarText(connection,
+            "SELECT display_owner || '|' || display_repository FROM local_repository_locators;"));
+        Assert.Equal("Example|Widget", ScalarText(connection,
+            "SELECT display_owner || '|' || display_repository FROM session_repository_observations;"));
+        LocalRepositoryCatalogValidation.Validate(connection, null);
+    }
+
+    [Fact]
+    public void Validator_AcceptsLogicalDisplayRepositoryEndingInLowercaseGit()
+    {
+        using var database = new TestDatabase();
+        using var connection = CreateCompleteCatalog(database.Path, "https://github.com/Example/Repository.git.git");
+
+        Assert.Equal("github.com/example/repository.git|Example|Repository.git", ScalarText(connection,
+            "SELECT canonical_locator || '|' || display_owner || '|' || display_repository FROM local_repository_locators;"));
+        Assert.Equal("github.com/example/repository.git|Example|Repository.git", ScalarText(connection,
+            "SELECT canonical_locator || '|' || display_owner || '|' || display_repository FROM session_repository_observations;"));
+        LocalRepositoryCatalogValidation.Validate(connection, null);
+    }
+
+    [Theory]
+    [InlineData("locator display owner does not match", "UPDATE local_repository_locators SET display_owner='Other';")]
+    [InlineData("observation display repository does not match", "UPDATE session_repository_observations SET display_repository='Gadget';")]
+    [InlineData("locator display repository suffix casing changes identity", "UPDATE local_repository_locators SET display_repository='Widget.GIT';")]
+    [InlineData("locator display owner has invalid grammar", "UPDATE local_repository_locators SET display_owner='-Example';")]
+    [InlineData("observation display repository has invalid grammar", "UPDATE session_repository_observations SET display_repository='Widget/Other';")]
+    [InlineData("locator canonical locator does not match", "UPDATE local_repository_locators SET canonical_locator='github.com/example/gadget';")]
+    [InlineData("observation fingerprint does not match", "UPDATE session_repository_observations SET locator_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';")]
+    [InlineData("locator canonical owner casing is not lowercase", "UPDATE local_repository_locators SET canonical_locator='github.com/Example/widget';")]
+    [InlineData("observation canonical repository casing is not lowercase", "UPDATE session_repository_observations SET canonical_locator='github.com/example/Widget';")]
+    public void Validator_RejectsPersistedLocatorFieldsThatCannotBeReparsedExactly(string _, string mutation)
+    {
+        using var database = new TestDatabase();
+        using var connection = CreateCompleteCatalog(database.Path, "https://github.com/Example/Widget");
+        Execute(connection, "DROP TRIGGER local_repository_locators_update_rejected; DROP TRIGGER session_repository_observations_update_rejected;");
+        Execute(connection, mutation);
+
+        Assert.Throws<InvalidOperationException>(() => LocalRepositoryCatalogValidation.ValidateRows(connection, null));
+    }
+
     [Theory]
     [InlineData("01900000_0000-7000-8000-000000000082")]
     [InlineData("01900000-0000-7000-c000-000000000082")]
@@ -634,7 +680,7 @@ public sealed class LocalRepositoryCatalogSchemaTests
         return connection;
     }
 
-    private static SqliteConnection CreateCompleteCatalog(string path)
+    private static SqliteConnection CreateCompleteCatalog(string path, string locatorText = "https://github.com/example/repository")
     {
         new SqliteSessionStore(path).CreateSchema();
         SqliteConnection.ClearAllPools();
@@ -648,7 +694,7 @@ public sealed class LocalRepositoryCatalogSchemaTests
         const string contextId = "01900000-0000-7000-8000-000000000040";
         const string operationKey = "lrc1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         const string digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        Assert.True(GitHubRepositoryLocatorParser.TryParse("https://github.com/example/repository", out var locator));
+        Assert.True(GitHubRepositoryLocatorParser.TryParse(locatorText, out var locator));
         var sourceIdentity = LocalRepositoryIdentityHashing.SourceIdentity(
             LocalRepositorySourceIdentityInput.Span(1, 0, 0, 0, 0, "vcs.repository.url.full"));
         var contextIdentity = LocalRepositoryIdentityHashing.ContextIdentity(
