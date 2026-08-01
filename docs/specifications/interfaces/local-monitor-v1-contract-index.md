@@ -53,12 +53,20 @@ telemetry fixes / #154
 ## Rules
 
 - The complete `local_repository_catalog:1` contract is `READY` under base
-  DC156-01–11 plus executable closure DC156-12–19. The closure supersedes the
-  base document's temporary blocker/status section and fixes automatic exact
-  creation/binding, source/context framing, exact Session Event join,
-  automatic revision history, fixed-frontier queue/recovery, complete wire
-  bytes/bounds, opaque raw-reference durability and the single SQLite snapshot
-  composition seam.
+  DC156-01–11 plus executable closure DC156-12–19. The closure is the accepted
+  amendment to every temporary `only parser READY` / unresolved-blocker summary
+  written before DC156-12–19. Implementers consume the closure rather than
+  treating those historical status sentences as a current gate.
+- DC156-12–19 fix automatic exact creation/binding, physical-source/context
+  framing, exact Session Event join, automatic revision history, one
+  fixed-frontier queue/recovery path, complete wire bytes/bounds, opaque
+  raw-reference durability and the single SQLite snapshot composition seam.
+- Repository reconciliation has one discovery/enqueue path only: the durable
+  monitor-span cursor. There is no ingest-time alternate enqueue, route-trigger,
+  scan-on-read or fallback cursor.
+- V1 has no accepted observed Repository-label source. Locator/display
+  components are not label evidence; assignment responses always contain exact
+  `"observed_label_candidates":[]`, and no catalog table stores a candidate.
 - #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`. #156 owns its five
   management/action routes, not the composite Repository-card read.
@@ -66,8 +74,8 @@ telemetry fixes / #154
   composes archive eligibility and #161/#134 add no direct catalog SQL or
   parallel reader.
 - Repository automatic creation uses exact admitted GitHub locator fingerprints
-  only. It never uses name/path/CWD/prompt/time/cardinality, and an archived
-  exact owner is reused without restore or duplication.
+  only. It never uses name/label/path/CWD/prompt/time/cardinality, and an
+  archived exact owner is reused without restore or duplication.
 - Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE are never widened.
 - Frozen Session ingest v1 supports `skill.started | skill.completed`;
   `skill.invoked` is unsupported and no other v1 shape, enum, limit, status,
