@@ -24,7 +24,7 @@
 | Local Monitor v1 IA, routes and states | [interfaces/local-monitor-v1-ia.md](interfaces/local-monitor-v1-ia.md) |
 | Local Monitor v1 security supplement | [interfaces/local-monitor-v1-security.md](interfaces/local-monitor-v1-security.md) |
 | Skill invocation snapshot | [interfaces/skill-invocation-snapshot.md](interfaces/skill-invocation-snapshot.md) |
-| Local Repository catalog and Session assignment | [interfaces/local-repository-catalog.md](interfaces/local-repository-catalog.md) |
+| Local Repository catalog and Session assignment | [interfaces/local-repository-catalog.md](interfaces/local-repository-catalog.md) + [DC156-12–19 executable closure](interfaces/local-repository-catalog-executable.md) |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |
 | Configuration setup | [interfaces/configuration-setup.md](interfaces/configuration-setup.md) |
