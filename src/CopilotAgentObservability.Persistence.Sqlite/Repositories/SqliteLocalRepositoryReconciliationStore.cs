@@ -38,7 +38,7 @@ internal interface ILocalRepositoryReconciliationCheckpoint
     void Reached(LocalRepositoryReconciliationCheckpoint checkpoint);
 }
 
-internal sealed class SqliteLocalRepositoryReconciliationStore
+internal sealed partial class SqliteLocalRepositoryReconciliationStore
 {
     private const int DiscoverySpanBatchSize = 256;
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromSeconds(30);

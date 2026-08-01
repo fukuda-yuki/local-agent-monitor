@@ -892,6 +892,458 @@ public sealed class LocalRepositoryReconciliationQueueTests
         Assert.Equal("catalog_payload_digest_mismatch", ScalarText(connection, $"SELECT terminal_reason FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
     }
 
+    [Fact]
+    public void RestoreNormalization_IsUnconditionalTransactionBoundAndPreservesEveryOtherStoredValue()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        for (var rawRecordId = 901; rawRecordId <= 907; rawRecordId++)
+            InsertSpan(connection, rawRecordId, 0, rawRecordId.ToString("x32", System.Globalization.CultureInfo.InvariantCulture));
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000901", 901, "leased", 7, "9998-12-31T23:59:00.0000000+00:00", new string('a', 64), "9998-12-31T23:59:30.0000000+00:00");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000902", 902, "leased", 9, "2000-01-01T00:00:00.0000000+00:00", new string('b', 64), "2000-01-01T00:00:30.0000000+00:00");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000903", 903, "completed", 1, "2026-08-01T02:00:00.0000000+00:00");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000904", 904, "pending", 0, "2026-08-01T03:00:00.0000000+00:00");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000905", 905, "waiting_session", 1, "2026-08-01T04:00:00.0000000+00:00");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000906", 906, "input_unavailable", 0, "2026-08-01T05:00:00.0000000+00:00", evidenceKind: "input_unavailable");
+        InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000907", 907, "failed_terminal", 1, "2026-08-01T06:00:00.0000000+00:00", terminalReason: "catalog_parse_failure");
+        InsertDiscoveryCursor(connection, 7);
+        var before = QueueStoredValues(connection);
+
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            _ = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction);
+            SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(connection, transaction);
+            transaction.Rollback();
+        }
+        Assert.Equal(before, QueueStoredValues(connection));
+
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            _ = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction);
+            SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(connection, transaction);
+            transaction.Commit();
+        }
+
+        var after = QueueStoredValues(connection);
+        Assert.Equal(2, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue WHERE raw_record_id IN (901,902) AND state='pending' AND lease_token IS NULL AND lease_expires_at IS NULL;"));
+        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue WHERE state='leased';"));
+        for (var row = 0; row < 2; row++)
+            foreach (var column in Enumerable.Range(0, 13).Except([6, 8, 9]))
+                Assert.Equal(before[row][column], after[row][column]);
+        for (var row = 2; row < before.Count; row++)
+            Assert.Equal(before[row], after[row]);
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_repository_reconciliation_queue SET attempt_count=-1;")]
+    [InlineData("UPDATE local_repository_reconciliation_queue SET state='completed',attempt_count=0;")]
+    [InlineData("UPDATE local_repository_reconciliation_queue SET lease_expires_at='2026-08-01T00:00:31.0000000+00:00';")]
+    [InlineData("UPDATE local_repository_reconciliation_queue SET terminal_reason='catalog_parse_failure';")]
+    public void RestoreValidation_RejectsUnreachableLeaseStateWithOneValueFreeToken(string corruption)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 903, 0, "33333333333333333333333333333333");
+            InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000903", 903, "leased", 1, "2026-08-01T00:00:00.0000000+00:00", new string('c', 64), "2026-08-01T00:00:30.0000000+00:00");
+            InsertDiscoveryCursor(connection, 1);
+            Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+            Execute(connection, corruption);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Theory]
+    [InlineData("input_unavailable", "input_unavailable", 0L, null)]
+    [InlineData("payload_sha256", "pending", 0L, null)]
+    [InlineData("payload_sha256", "pending", long.MaxValue, null)]
+    [InlineData("payload_sha256", "waiting_session", 1L, null)]
+    [InlineData("payload_sha256", "leased", 1L, null)]
+    [InlineData("payload_sha256", "completed", 1L, null)]
+    [InlineData("payload_sha256", "input_unavailable", 1L, null)]
+    [InlineData("payload_sha256", "failed_terminal", 1L, "catalog_parse_failure")]
+    public void RestoreValidation_AcceptsEveryReachableEvidenceStateAttemptArm(string evidence, string state, long attempts, string? terminalReason)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 905, 0, "55555555555555555555555555555555");
+            InsertRestorableQueue(
+                connection,
+                "01900000-0000-7000-8000-000000000905",
+                905,
+                state,
+                attempts,
+                "2026-08-01T00:00:00.0000000+00:00",
+                state == "leased" ? new string('d', 64) : null,
+                state == "leased" ? "2026-08-01T00:00:30.0000000+00:00" : null,
+                terminalReason,
+                evidence);
+            InsertDiscoveryCursor(connection, 1);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            _ = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction);
+
+            transaction.Rollback();
+        }
+    }
+
+    [Theory]
+    [InlineData("input_unavailable", "pending", 0L)]
+    [InlineData("input_unavailable", "waiting_session", 1L)]
+    [InlineData("input_unavailable", "completed", 1L)]
+    [InlineData("input_unavailable", "failed_terminal", 1L)]
+    [InlineData("payload_sha256", "waiting_session", 0L)]
+    [InlineData("payload_sha256", "completed", 0L)]
+    [InlineData("payload_sha256", "input_unavailable", 0L)]
+    [InlineData("payload_sha256", "failed_terminal", 0L)]
+    public void RestoreValidation_RejectsEveryUnreachableEvidenceStateAttemptArm(string evidence, string state, long attempts)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 906, 0, "66666666666666666666666666666666");
+            InsertRestorableQueue(
+                connection,
+                "01900000-0000-7000-8000-000000000906",
+                906,
+                state,
+                attempts,
+                "2026-08-01T00:00:00.0000000+00:00",
+                terminalReason: state == "failed_terminal" ? "catalog_parse_failure" : null,
+                evidenceKind: evidence);
+            InsertDiscoveryCursor(connection, 1);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void RestoreValidation_UsesBoundedBinaryQueuePagesAndFindsLaterPageCorruption()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            for (var index = 130; index >= 1; index--)
+            {
+                InsertSpan(connection, index, 0, index.ToString("x32", System.Globalization.CultureInfo.InvariantCulture));
+                InsertRestorableQueue(connection, $"01900000-0000-7000-8000-{index:x12}", index, "pending", 0, "2026-08-01T00:00:00.0000000+00:00");
+            }
+            InsertDiscoveryCursor(connection, 130);
+            var pageCounts = new List<int>();
+            using (var transaction = connection.BeginTransaction(deferred: true))
+            {
+                _ = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction, pageCounts.Add, null);
+                transaction.Rollback();
+            }
+            Assert.True(pageCounts.Count > 1);
+            Assert.Equal(130, pageCounts.Sum());
+            Assert.All(pageCounts, count => Assert.InRange(count, 1, 64));
+
+            Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+            Execute(connection, "UPDATE local_repository_reconciliation_queue SET attempt_count=-1 WHERE raw_record_id=130;");
+            pageCounts.Clear();
+            using var corruptTransaction = connection.BeginTransaction(deferred: true);
+            var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, corruptTransaction, pageCounts.Add, null));
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            Assert.True(pageCounts.Count > 1);
+            Assert.All(pageCounts, count => Assert.InRange(count, 1, 64));
+            corruptTransaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void QueueValidation_FirstPageIncludesCheckBypassedEmptyQueueId()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+            InsertSpan(connection, 951, 0, "11111111111111111111111111111111");
+            InsertRestorableQueue(connection, string.Empty, 951, "pending", 0, "2026-08-01T00:00:00.0000000+00:00");
+            InsertDiscoveryCursor(connection, 1);
+
+            using (var transaction = connection.BeginTransaction(deferred: true))
+            {
+                var restoreError = Assert.Throws<InvalidOperationException>(
+                    () => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+                Assert.Equal("local_repository_reconciliation_restore_invalid", restoreError.Message);
+                transaction.Rollback();
+            }
+
+            var catalogError = Assert.Throws<InvalidOperationException>(
+                () => LocalRepositoryCatalogValidation.Validate(connection, transaction: null));
+            Assert.Equal("local_repository_catalog_canonical_value_invalid", catalogError.Message);
+        }
+    }
+
+    [Fact]
+    public void ValidatedRestoreState_HasOnlyAPrivateConstructionPath()
+    {
+        var capabilityType = typeof(LocalRepositoryValidatedReconciliationState);
+
+        Assert.Equal(
+            "CopilotAgentObservability.Persistence.Sqlite.LocalRepositoryValidatedReconciliationState",
+            capabilityType.FullName);
+        Assert.True(capabilityType.IsNotPublic);
+        var constructor = Assert.Single(capabilityType.GetConstructors(
+            System.Reflection.BindingFlags.Instance
+            | System.Reflection.BindingFlags.Public
+            | System.Reflection.BindingFlags.NonPublic));
+        Assert.True(constructor.IsPrivate);
+    }
+
+    [Fact]
+    public void ValidatedRestoreState_FactoryRejectsCorruptStateBeforeReturningProof()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 952, 0, "22222222222222222222222222222222");
+            var fingerprint = InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000952", 952, "completed", 1, "2026-08-01T00:00:00.0000000+00:00");
+            InsertSourceReconciliationHistory(connection, fingerprint);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var restoreError = Assert.Throws<InvalidOperationException>(
+                () => LocalRepositoryValidatedReconciliationState.ValidateAndCreate(connection, transaction, null, null));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", restoreError.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void ValidatedRestoreState_IsReferenceBoundAndPerformsOnlyLazyExactLookups()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 904, 0, "44444444444444444444444444444444");
+            var fingerprint = InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000904", 904, "completed", 1, "2026-08-01T00:00:00.0000000+00:00");
+            InsertDiscoveryCursor(connection, 1);
+            InsertSourceReconciliationHistory(connection, fingerprint);
+            var lookupCounts = new List<int>();
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var state = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction, null, lookupCounts.Add);
+
+            Assert.Empty(lookupCounts);
+            Assert.True(state.IsBoundTo(connection, transaction));
+            Assert.True(state.TryGetCompletedPayloadRawRecordId(fingerprint, out var rawRecordId));
+            Assert.Equal(904, rawRecordId);
+            Assert.Equal([1], lookupCounts);
+            Assert.False(state.TryGetCompletedPayloadRawRecordId(new string('f', 64), out _));
+            Assert.Equal([1, 0], lookupCounts);
+            var malformed = Assert.Throws<InvalidOperationException>(() => state.TryGetCompletedPayloadRawRecordId("904", out _));
+            Assert.Equal("local_repository_reconciliation_restore_fingerprint_invalid", malformed.Message);
+            Assert.Equal([1, 0], lookupCounts);
+
+            using var otherConnection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString());
+            otherConnection.Open();
+            using var otherTransaction = otherConnection.BeginTransaction(deferred: true);
+            Assert.False(state.IsBoundTo(otherConnection, otherTransaction));
+            otherTransaction.Rollback();
+            transaction.Rollback();
+            using var laterTransaction = connection.BeginTransaction(deferred: true);
+            Assert.False(state.IsBoundTo(connection, laterTransaction));
+            laterTransaction.Rollback();
+        }
+    }
+
+    [Theory]
+    [InlineData("queue_without_cursor")]
+    [InlineData("null_frontier_with_queue")]
+    [InlineData("frontier_span_missing")]
+    [InlineData("queue_raw_beyond_frontier")]
+    [InlineData("frontier_skips_raw")]
+    public void RestoreValidation_RejectsEveryCursorFrontierContradiction(string contradiction)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 911, 0, "11111111111111111111111111111111");
+            if (contradiction == "frontier_skips_raw")
+                InsertSpan(connection, 912, 0, "22222222222222222222222222222222");
+            InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000911", contradiction == "queue_raw_beyond_frontier" ? 912 : 911, "pending", 0, "2026-08-01T00:00:00.0000000+00:00");
+            switch (contradiction)
+            {
+                case "queue_without_cursor":
+                    break;
+                case "null_frontier_with_queue":
+                    InsertDiscoveryCursor(connection, null);
+                    break;
+                case "frontier_span_missing":
+                    InsertDiscoveryCursor(connection, 2);
+                    break;
+                default:
+                    InsertDiscoveryCursor(connection, contradiction == "frontier_skips_raw" ? 2 : 1);
+                    break;
+            }
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Theory]
+    [InlineData("orphan")]
+    [InlineData("wrong_digest")]
+    [InlineData("unavailable_evidence")]
+    [InlineData("noncompleted")]
+    public void RestoreValidation_RejectsObservationWithoutCompletedPayloadOwnership(string contradiction)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 921, 0, "11111111111111111111111111111111");
+            var evidenceKind = contradiction == "unavailable_evidence" ? "input_unavailable" : "payload_sha256";
+            var state = contradiction switch
+            {
+                "unavailable_evidence" => "input_unavailable",
+                "noncompleted" => "waiting_session",
+                _ => "completed",
+            };
+            InsertRestorableQueue(
+                connection,
+                "01900000-0000-7000-8000-000000000921",
+                921,
+                state,
+                state == "input_unavailable" ? 0 : 1,
+                "2026-08-01T00:00:00.0000000+00:00",
+                evidenceKind: evidenceKind);
+            InsertDiscoveryCursor(connection, 1);
+            var queueDigest = evidenceKind == "payload_sha256"
+                ? ScalarText(connection, "SELECT raw_payload_sha256 FROM local_repository_reconciliation_queue WHERE raw_record_id=921;")
+                : new string('a', 64);
+            InsertObservation(
+                connection,
+                contradiction == "orphan" ? 922 : 921,
+                contradiction == "wrong_digest" ? new string('f', 64) : queueDigest);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(
+                () => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Theory]
+    [InlineData("waiting_session")]
+    [InlineData("input_unavailable")]
+    [InlineData("failed_terminal")]
+    [InlineData("missing")]
+    public void RestoreValidation_RejectsSourceHistoryWithoutCompletedPayloadOwnership(string contradiction)
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 922, 0, "22222222222222222222222222222222");
+            var queueState = contradiction == "missing" ? "completed" : contradiction;
+            var evidenceKind = queueState == "input_unavailable" ? "input_unavailable" : "payload_sha256";
+            var fingerprint = InsertRestorableQueue(
+                connection,
+                "01900000-0000-7000-8000-000000000922",
+                922,
+                queueState,
+                queueState == "input_unavailable" ? 0 : 1,
+                "2026-08-01T00:00:00.0000000+00:00",
+                terminalReason: queueState == "failed_terminal" ? "catalog_parse_failure" : null,
+                evidenceKind: evidenceKind);
+            InsertDiscoveryCursor(connection, 1);
+            InsertSourceReconciliationHistory(
+                connection,
+                contradiction == "missing" ? new string('f', 64) : fingerprint);
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(
+                () => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void ValidatedRestoreState_LazyLookupRejectsAmbiguousSourceHistoryMembership()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            Execute(connection, "PRAGMA ignore_check_constraints=ON;");
+            InsertSpan(connection, 923, 0, "33333333333333333333333333333333");
+            var fingerprint = InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000923", 923, "completed", 1, "2026-08-01T00:00:00.0000000+00:00");
+            InsertDiscoveryCursor(connection, 1);
+            InsertSourceReconciliationHistory(connection, fingerprint);
+            var lookupCounts = new List<int>();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var state = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction, null, lookupCounts.Add);
+            var digest = ScalarText(connection, "SELECT raw_payload_sha256 FROM local_repository_reconciliation_queue WHERE raw_record_id=923;");
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = """
+                    INSERT INTO local_repository_reconciliation_queue
+                    (queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,reconciliation_fingerprint,state,attempt_count,lease_token,lease_expires_at,terminal_reason,created_at,updated_at)
+                    VALUES('01900000-0000-7000-8000-000000000924',924,'payload_sha256',$digest,'local-repository-catalog:1',$fingerprint,'completed',1,NULL,NULL,NULL,
+                           '2026-08-01T00:00:00.0000000+00:00','2026-08-01T00:00:00.0000000+00:00');
+                    """;
+                command.Parameters.AddWithValue("$digest", digest);
+                command.Parameters.AddWithValue("$fingerprint", fingerprint);
+                command.ExecuteNonQuery();
+            }
+
+            Assert.False(state.TryGetCompletedPayloadRawRecordId(fingerprint, out var rawRecordId));
+            Assert.Equal(0, rawRecordId);
+            Assert.Equal([0], lookupCounts);
+            transaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void RestoreValidation_EnforcesTheSessionGlobalCandidateBoundAcrossQueueItems()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            InsertSpan(connection, 931, 0, "11111111111111111111111111111111");
+            InsertSpan(connection, 932, 0, "22222222222222222222222222222222");
+            InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000931", 931, "completed", 1, "2026-08-01T00:00:00.0000000+00:00");
+            InsertRestorableQueue(connection, "01900000-0000-7000-8000-000000000932", 932, "completed", 1, "2026-08-01T00:00:00.0000000+00:00");
+            InsertDiscoveryCursor(connection, 2);
+            Execute(connection, "PRAGMA foreign_keys=OFF;");
+            for (var index = 1; index <= 128; index++)
+                InsertSyntheticAdmittedContext(connection, index);
+            using (var accepted = connection.BeginTransaction(deferred: true))
+            {
+                _ = SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, accepted);
+                accepted.Rollback();
+            }
+
+            InsertSyntheticAdmittedContext(connection, 129);
+            using var rejected = connection.BeginTransaction(deferred: true);
+            var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, rejected));
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            rejected.Rollback();
+        }
+    }
+
     private static SqliteConnection OpenCatalog(string path)
     {
         new SqliteSessionStore(path).CreateSchema();
@@ -899,6 +1351,142 @@ public sealed class LocalRepositoryReconciliationQueueTests
         connection.Open();
         LocalRepositoryCatalogSchemaV1.Ensure(connection);
         return connection;
+    }
+
+    private static MonitorTempDirectory CreateRestorableQueueDatabase(out SqliteConnection connection)
+    {
+        var temp = new MonitorTempDirectory();
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        connection = OpenCatalog(temp.DatabasePath);
+        return temp;
+    }
+
+    private static string InsertRestorableQueue(
+        SqliteConnection connection,
+        string queueId,
+        long rawRecordId,
+        string state,
+        long attempts,
+        string updatedAt,
+        string? token = null,
+        string? expiry = null,
+        string? terminalReason = null,
+        string evidenceKind = "payload_sha256")
+    {
+        var digest = evidenceKind == "payload_sha256" ? new string((char)('a' + rawRecordId % 6), 64) : null;
+        var evidence = digest is null
+            ? LocalRepositoryReconciliationEvidence.InputUnavailable(rawRecordId)
+            : LocalRepositoryReconciliationEvidence.PayloadSha256(rawRecordId, digest);
+        var fingerprint = LocalRepositoryIdentityHashing.ReconciliationFingerprint(evidence);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO local_repository_reconciliation_queue
+            (queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,reconciliation_fingerprint,state,attempt_count,lease_token,lease_expires_at,terminal_reason,created_at,updated_at)
+            VALUES($queue_id,$raw_id,$evidence,$digest,'local-repository-catalog:1',$fingerprint,$state,$attempts,$token,$expiry,$reason,$updated,$updated);
+            """;
+        command.Parameters.AddWithValue("$queue_id", queueId);
+        command.Parameters.AddWithValue("$raw_id", rawRecordId);
+        command.Parameters.AddWithValue("$evidence", evidenceKind);
+        command.Parameters.AddWithValue("$digest", digest ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$fingerprint", fingerprint);
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$attempts", attempts);
+        command.Parameters.AddWithValue("$token", token ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$expiry", expiry ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$reason", terminalReason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$updated", updatedAt);
+        command.ExecuteNonQuery();
+        return fingerprint;
+    }
+
+    private static void InsertDiscoveryCursor(SqliteConnection connection, long? frontier)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at) VALUES('local-repository-catalog-v1',$frontier,'2026-08-01T00:00:00.0000000+00:00');";
+        command.Parameters.AddWithValue("$frontier", frontier ?? (object)DBNull.Value);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertSourceReconciliationHistory(SqliteConnection connection, string fingerprint)
+    {
+        Execute(connection, "PRAGMA foreign_keys=OFF;");
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO session_repository_assignment_history
+            (history_id,session_id,action,previous_revision,new_revision,previous_assignment_state_sha256,new_assignment_state_sha256,
+             previous_state,new_state,previous_authority,new_authority,previous_repository_id,new_repository_id,cause_kind,operation_key,reconciliation_fingerprint,occurred_at)
+            VALUES('01900000-0000-7000-8000-000000000905','01900000-0000-7000-8000-000000000906','automatic_reconcile',0,1,
+                   $before,$after,'unassigned','unassigned','none','none',NULL,NULL,'source_reconciliation',NULL,$fingerprint,'2026-08-01T00:00:00.0000000+00:00');
+            """;
+        command.Parameters.AddWithValue("$before", new string('1', 64));
+        command.Parameters.AddWithValue("$after", new string('2', 64));
+        command.Parameters.AddWithValue("$fingerprint", fingerprint);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertObservation(SqliteConnection connection, long rawRecordId, string digest)
+    {
+        var sourceIdentity = LocalRepositoryIdentityHashing.SourceIdentity(
+            LocalRepositorySourceIdentityInput.Span(rawRecordId, 0, 0, 0, 0, "vcs.repository.url.full"));
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO session_repository_observations
+            (observation_id,source_identity_sha256,raw_record_id,raw_payload_sha256,resource_span_ordinal,scope_span_ordinal,span_ordinal,attribute_ordinal,
+             scope_kind,attribute_key,value_classification,locator_kind,canonical_locator,locator_sha256,display_owner,display_repository,
+             source_surface,source_application_version,observed_at)
+            VALUES('01900000-0000-7000-8000-000000000925',$source,$raw_id,$digest,0,0,0,0,'span','vcs.repository.url.full','invalid_locator',
+                   NULL,NULL,NULL,NULL,NULL,'github-copilot-vscode',NULL,'2026-08-01T00:00:00.0000000+00:00');
+            """;
+        command.Parameters.AddWithValue("$source", sourceIdentity);
+        command.Parameters.AddWithValue("$raw_id", rawRecordId);
+        command.Parameters.AddWithValue("$digest", digest);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertSyntheticAdmittedContext(SqliteConnection connection, int index)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO session_repository_observation_contexts
+            (context_id,observation_id,context_identity_sha256,session_event_id,session_id,trace_id,span_id,admission_state,repository_id,locator_id,observed_at)
+            VALUES($context,$observation,$identity,$event,'01900000-0000-7000-8000-000000000940','11111111111111111111111111111111','2222222222222222',
+                   'admitted',$repository,$locator,'2026-08-01T00:00:00.0000000+00:00');
+            """;
+        command.Parameters.AddWithValue("$context", $"01900000-0000-7000-8001-{index:x12}");
+        command.Parameters.AddWithValue("$observation", $"01900000-0000-7000-8002-{index:x12}");
+        command.Parameters.AddWithValue("$identity", index.ToString("x64", System.Globalization.CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$event", $"01900000-0000-7000-8003-{index:x12}");
+        command.Parameters.AddWithValue("$repository", $"01900000-0000-7000-8004-{index:x12}");
+        command.Parameters.AddWithValue("$locator", $"01900000-0000-7000-8005-{index:x12}");
+        command.ExecuteNonQuery();
+    }
+
+    private static List<string[]> QueueStoredValues(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT typeof(queue_id),CAST(queue_id AS BLOB),typeof(raw_record_id),CAST(raw_record_id AS BLOB),
+                   typeof(input_evidence_kind),CAST(input_evidence_kind AS BLOB),typeof(raw_payload_sha256),CAST(raw_payload_sha256 AS BLOB),
+                   typeof(projector_version),CAST(projector_version AS BLOB),typeof(reconciliation_fingerprint),CAST(reconciliation_fingerprint AS BLOB),
+                   typeof(state),CAST(state AS BLOB),typeof(attempt_count),CAST(attempt_count AS BLOB),
+                   typeof(lease_token),CAST(lease_token AS BLOB),typeof(lease_expires_at),CAST(lease_expires_at AS BLOB),
+                   typeof(terminal_reason),CAST(terminal_reason AS BLOB),typeof(created_at),CAST(created_at AS BLOB),
+                   typeof(updated_at),CAST(updated_at AS BLOB)
+            FROM local_repository_reconciliation_queue
+            ORDER BY queue_id COLLATE BINARY;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<string[]>();
+        while (reader.Read())
+        {
+            var row = new string[reader.FieldCount / 2];
+            for (var index = 0; index < row.Length; index++)
+                row[index] = $"{reader.GetString(index * 2)}:{(reader.IsDBNull((index * 2) + 1) ? string.Empty : Convert.ToHexString(reader.GetFieldValue<byte[]>((index * 2) + 1)))}";
+            rows.Add(row);
+        }
+        return rows;
     }
 
     private static void Execute(SqliteConnection connection, string sql)

@@ -7,6 +7,8 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalRepositoryCatalogValidation
 {
+    private const int ReconciliationQueueValidationPageSize = 64;
+
     internal static void Validate(SqliteConnection connection, SqliteTransaction? transaction) =>
         LocalRepositoryCatalogSchemaV1.Validate(connection, transaction);
 
@@ -38,7 +40,7 @@ internal static class LocalRepositoryCatalogValidation
         ValidateMutableRows(connection, transaction);
         ValidateHistoryRows(connection, transaction);
         ValidateReceiptRows(connection, transaction);
-        ValidateQueueRows(connection, transaction);
+        ValidateReconciliationQueueRows(connection, transaction);
     }
 
     private static void ValidateRepositoryRows(SqliteConnection connection, SqliteTransaction? transaction)
@@ -190,20 +192,130 @@ internal static class LocalRepositoryCatalogValidation
                 Reject();
     }
 
-    private static void ValidateQueueRows(SqliteConnection connection, SqliteTransaction? transaction)
+    internal static void ValidateReconciliationQueueRows(
+        SqliteConnection connection,
+        SqliteTransaction? transaction) =>
+        ValidateReconciliationQueueRows(connection, transaction, null, requireReachableRestoreState: false);
+
+    internal static void ValidateRestorableReconciliationQueueRows(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Action<int>? pageObserver) =>
+        ValidateReconciliationQueueRows(connection, transaction, pageObserver, requireReachableRestoreState: true);
+
+    private static void ValidateReconciliationQueueRows(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Action<int>? pageObserver,
+        bool requireReachableRestoreState)
     {
-        using var command = Command(connection, transaction, "SELECT queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,reconciliation_fingerprint,lease_token,lease_expires_at,created_at,updated_at FROM local_repository_reconciliation_queue;");
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        string? after = null;
+        while (true)
         {
-            var digest = reader.IsDBNull(3) ? null : reader.GetString(3);
-            if (!IsCanonicalUuidV7(reader.GetString(0)) || !IsLowerSha256(reader.GetString(5))
-                || reader.GetString(5) != ReconciliationFingerprint(reader.GetInt64(1), reader.GetString(2), digest, reader.GetString(4))
-                || (!reader.IsDBNull(6) && !IsLowerSha256(reader.GetString(6)))
-                || (!reader.IsDBNull(7) && !IsCanonicalTimestamp(reader.GetString(7)))
-                || !IsCanonicalTimestamp(reader.GetString(8)) || !IsCanonicalTimestamp(reader.GetString(9)))
+            using var command = Command(connection, transaction, after is null
+                ? """
+                  SELECT queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,reconciliation_fingerprint,
+                         state,attempt_count,lease_token,lease_expires_at,terminal_reason,created_at,updated_at
+                  FROM local_repository_reconciliation_queue
+                  ORDER BY queue_id COLLATE BINARY
+                  LIMIT $limit;
+                  """
+                : """
+                  SELECT queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,reconciliation_fingerprint,
+                         state,attempt_count,lease_token,lease_expires_at,terminal_reason,created_at,updated_at
+                  FROM local_repository_reconciliation_queue
+                  WHERE queue_id COLLATE BINARY > $after
+                  ORDER BY queue_id COLLATE BINARY
+                  LIMIT $limit;
+                  """);
+            if (after is not null)
+                command.Parameters.AddWithValue("$after", after);
+            command.Parameters.AddWithValue("$limit", ReconciliationQueueValidationPageSize);
+            using var reader = command.ExecuteReader();
+            var pageCount = 0;
+            var pageIsValid = true;
+            while (reader.Read())
+            {
+                pageCount++;
+                after = reader.GetString(0);
+                var rawRecordId = reader.GetInt64(1);
+                var evidenceKind = reader.GetString(2);
+                var digest = reader.IsDBNull(3) ? null : reader.GetString(3);
+                var projectorVersion = reader.GetString(4);
+                var state = reader.GetString(6);
+                var attemptCount = reader.GetInt64(7);
+                var leaseToken = reader.IsDBNull(8) ? null : reader.GetString(8);
+                var leaseExpiry = reader.IsDBNull(9) ? null : reader.GetString(9);
+                var terminalReason = reader.IsDBNull(10) ? null : reader.GetString(10);
+                var createdAt = reader.GetString(11);
+                var updatedAt = reader.GetString(12);
+                if (!IsCanonicalUuidV7(after) || rawRecordId <= 0 || attemptCount < 0
+                    || !IsLowerSha256(reader.GetString(5))
+                    || reader.GetString(5) != ReconciliationFingerprint(rawRecordId, evidenceKind, digest, projectorVersion)
+                    || leaseToken is not null && !IsLowerSha256(leaseToken)
+                    || leaseExpiry is not null && !IsCanonicalTimestamp(leaseExpiry)
+                    || !IsCanonicalTimestamp(createdAt) || !IsCanonicalTimestamp(updatedAt)
+                    || requireReachableRestoreState && !HasReachableQueueState(evidenceKind, digest, state, attemptCount, leaseToken, leaseExpiry, terminalReason, updatedAt))
+                    pageIsValid = false;
+            }
+            if (pageCount == 0)
+                break;
+            pageObserver?.Invoke(pageCount);
+            if (!pageIsValid)
                 Reject();
+            if (pageCount < ReconciliationQueueValidationPageSize)
+                break;
         }
+    }
+
+    private static bool HasReachableQueueState(
+        string evidenceKind,
+        string? digest,
+        string state,
+        long attemptCount,
+        string? leaseToken,
+        string? leaseExpiry,
+        string? terminalReason,
+        string updatedAt)
+    {
+        if (state is not ("pending" or "waiting_session" or "leased" or "completed" or "input_unavailable" or "failed_terminal"))
+            return false;
+        if (evidenceKind == "input_unavailable")
+        {
+            if (digest is not null || state != "input_unavailable" || attemptCount != 0)
+                return false;
+        }
+        else if (evidenceKind == "payload_sha256")
+        {
+            if (!IsLowerSha256(digest) || state != "pending" && attemptCount < 1)
+                return false;
+        }
+        else
+            return false;
+
+        if (state == "leased")
+        {
+            if (!IsLowerSha256(leaseToken) || !IsCanonicalTimestamp(leaseExpiry) || terminalReason is not null)
+                return false;
+            if (!DateTimeOffset.TryParseExact(updatedAt, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var updated)
+                || !DateTimeOffset.TryParseExact(leaseExpiry, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry))
+                return false;
+            try
+            {
+                if (updated.AddSeconds(30) != expiry)
+                    return false;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return false;
+            }
+        }
+        else if (leaseToken is not null || leaseExpiry is not null)
+            return false;
+
+        return state == "failed_terminal"
+            ? terminalReason is "catalog_identity_conflict" or "catalog_session_identity_conflict" or "catalog_cardinality_exceeded" or "catalog_payload_digest_mismatch" or "catalog_parse_failure" or "catalog_schema_violation"
+            : terminalReason is null;
     }
 
     private static void ValidateForeignKeys(SqliteConnection connection, SqliteTransaction? transaction)
