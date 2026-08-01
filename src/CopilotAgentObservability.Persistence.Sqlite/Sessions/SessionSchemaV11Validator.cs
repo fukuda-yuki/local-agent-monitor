@@ -471,8 +471,15 @@ internal static class SessionSchemaV11Validator
         return true;
     }
 
-    private static bool IsReservedName(string name) => ReservedPrefixes.Any(prefix =>
-        name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    private static bool IsReservedName(string name)
+    {
+        if (name.StartsWith("session_repository_", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        return ReservedPrefixes.Any(prefix =>
+            name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
 
     private static bool HasExactSessionVersionRow(
         SqliteConnection connection,

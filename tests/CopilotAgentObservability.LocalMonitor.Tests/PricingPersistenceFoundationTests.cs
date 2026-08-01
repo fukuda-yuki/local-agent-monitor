@@ -665,6 +665,25 @@ public sealed class PricingPersistenceFoundationTests
     }
 
     [Fact]
+    public void PricingSchemaV1_Ensure_AcceptsCatalogOwnedSessionRepositoryNamespace()
+    {
+        using var database = new PricingDatabase();
+        database.CreateDependencies();
+
+        using (var connection = database.Open())
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+            PricingSchemaV1.Ensure(connection, transaction);
+            transaction.Commit();
+        }
+
+        using var read = database.Open();
+        Assert.True(PricingSchemaV1.IsValid(read, null));
+    }
+
+    [Fact]
     public void PricingSchemaV1_Ensure_RejectsRuntimeBackupMissingWithoutMutation()
     {
         using var database = new PricingDatabase();

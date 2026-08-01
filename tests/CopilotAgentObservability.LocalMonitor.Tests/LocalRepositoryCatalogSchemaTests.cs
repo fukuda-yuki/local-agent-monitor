@@ -175,6 +175,7 @@ public sealed class LocalRepositoryCatalogSchemaTests
     [InlineData("altered-trigger", "DROP TRIGGER local_repository_locators_update_rejected; CREATE TRIGGER local_repository_locators_update_rejected BEFORE UPDATE ON local_repository_locators BEGIN SELECT RAISE(ABORT,'altered'); END;")]
     [InlineData("altered-table", "ALTER TABLE local_repositories ADD COLUMN altered INTEGER;")]
     [InlineData("extra-table", "CREATE TABLE local_repository_extra(id INTEGER PRIMARY KEY);")]
+    [InlineData("extra-session-repository-table", "CREATE TABLE session_repository_extra(id INTEGER PRIMARY KEY);")]
     [InlineData("extra-index", "CREATE INDEX IX_local_repository_extra ON local_repositories(display_name);")]
     [InlineData("extra-trigger", "CREATE TRIGGER local_repository_extra_trigger BEFORE INSERT ON local_repositories BEGIN SELECT 1; END;")]
     public void Validate_FailsClosedAndDoesNotMutateForAnyOwnedObjectInventoryDeviation(string _, string mutation)
