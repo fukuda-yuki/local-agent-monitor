@@ -948,6 +948,410 @@ public sealed class LocalRepositoryAssignmentTests
         transaction.Rollback();
     }
 
+    [Fact]
+    public void ReadCurrent_ProjectsRevisionZeroAsImmutableUnassignedState()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        LocalRepositoryAssignmentSnapshot snapshot;
+        using (var transaction = fixture.Connection.BeginTransaction())
+        {
+            snapshot = resolver.ReadCurrent(fixture.Connection, transaction, SessionOne);
+            transaction.Commit();
+        }
+
+        Assert.Equal(0, snapshot.AssignmentRevision);
+        Assert.Equal("unassigned", snapshot.State);
+        Assert.Equal("none", snapshot.Authority);
+        Assert.Null(snapshot.RepositoryId);
+        Assert.Null(snapshot.UpdatedAt);
+        Assert.Empty(snapshot.ConflictingRepositoryIds);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)snapshot.ConflictingRepositoryIds).Add(RfcByteFirstRepository));
+    }
+
+    [Fact]
+    public void ApplyManual_OwnsAssignNoOpExplicitUnassignAndResumeTransitions()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        fixture.EnsureOperationReceipt(OperationKey(1));
+        fixture.EnsureOperationReceipt(OperationKey(2));
+        fixture.EnsureOperationReceipt(OperationKey(3));
+        fixture.EnsureOperationReceipt(OperationKey(4));
+        var nextHistoryId = 900;
+        var resolver = new LocalRepositoryAssignmentResolver(_ => $"01900000-0000-7000-8000-{++nextHistoryId:x12}");
+
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var assigned = resolver.ApplyManual(fixture.Connection, transaction, SessionOne, 0, LocalRepositorySessionAction.Assign, RfcByteFirstRepository, OperationKey(1), DateTimeOffset.Parse(At, System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(assigned.RevisionChanged);
+            transaction.Commit();
+        }
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var noOp = resolver.ApplyManual(fixture.Connection, transaction, SessionOne, 1, LocalRepositorySessionAction.Assign, RfcByteFirstRepository, OperationKey(2), DateTimeOffset.Parse(At, System.Globalization.CultureInfo.InvariantCulture));
+            Assert.False(noOp.RevisionChanged);
+            transaction.Commit();
+        }
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var explicitlyUnassigned = resolver.ApplyManual(fixture.Connection, transaction, SessionOne, 1, LocalRepositorySessionAction.ExplicitlyUnassign, null, OperationKey(3), DateTimeOffset.Parse(At, System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(explicitlyUnassigned.RevisionChanged);
+            transaction.Commit();
+        }
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var resumed = resolver.ApplyManual(fixture.Connection, transaction, SessionOne, 2, LocalRepositorySessionAction.ResumeAutomatic, null, OperationKey(4), DateTimeOffset.Parse(At, System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(resumed.RevisionChanged);
+            Assert.Equal("unassigned", resumed.Current.State);
+            transaction.Commit();
+        }
+
+        Assert.Equal(3, fixture.ScalarLong($"SELECT revision FROM session_repository_assignment_revisions WHERE session_id='{SessionOne}';"));
+        Assert.Equal("assign|explicitly_unassign|resume_automatic", fixture.ScalarText($"SELECT group_concat(action,'|') FROM (SELECT action FROM session_repository_assignment_history WHERE session_id='{SessionOne}' ORDER BY new_revision);"));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsThe129thPersistedCandidateBeforeMaterializingItsCorruptValue()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        var candidates = CreateCandidateRepositoryIds(128, start: 3000);
+        foreach (var (repositoryId, index) in candidates.Select((value, index) => (value, index)))
+            fixture.CreateRepository(repositoryId, index + 3000);
+        var contexts = candidates.Select((repositoryId, index) =>
+            fixture.PrepareAdmittedContext(SessionOne, repositoryId, 40, index)).ToArray();
+
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            foreach (var context in contexts)
+                fixture.PublishAdmittedContext(context, transaction);
+            transaction.Commit();
+        }
+        fixture.PublishCorruptCandidateAfterThe128CanonicalCandidates(SessionOne);
+
+        var resolver = new LocalRepositoryAssignmentResolver();
+        using var read = fixture.Connection.BeginTransaction();
+        var exception = Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+
+        Assert.Equal("local_repository_assignment_cardinality_exceeded", exception.Message);
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAnAssignHistoryRowThatEndsExplicitlyUnassigned()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateManualOverride(SessionOne, "explicitly_unassigned", null, ManualUnassignedFingerprint);
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"UPDATE session_repository_assignment_history SET action='assign' WHERE session_id='{SessionOne}' AND new_revision=1;");
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_ProjectsAnExplicitManualUnassignment()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateManualOverride(SessionOne, "explicitly_unassigned", null, ManualUnassignedFingerprint);
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        var snapshot = resolver.ReadCurrent(fixture.Connection, read, SessionOne);
+
+        Assert.Equal(1, snapshot.AssignmentRevision);
+        Assert.Equal("explicitly_unassigned", snapshot.State);
+        Assert.Equal("manual", snapshot.Authority);
+        Assert.Null(snapshot.RepositoryId);
+        Assert.Empty(snapshot.ConflictingRepositoryIds);
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAnAutomaticEndpointRecordedAsAUserAssign()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        var resolver = new LocalRepositoryAssignmentResolver();
+        EstablishAutomaticAssignment(fixture, resolver, SessionOne, RfcByteFirstRepository, 41);
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"""
+            UPDATE session_repository_assignment_history
+            SET action='assign',cause_kind='user_operation',operation_key='{OperationKey(6)}',reconciliation_fingerprint=NULL
+            WHERE session_id='{SessionOne}' AND new_revision=1;
+            """);
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAManualHistoryRowWithTheSourceReconciliationCauseArm()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateManualOverride(SessionOne, "explicitly_unassigned", null, ManualUnassignedFingerprint);
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"""
+            PRAGMA ignore_check_constraints=ON;
+            UPDATE session_repository_assignment_history
+            SET cause_kind='source_reconciliation',operation_key=NULL,reconciliation_fingerprint='{fixture.ReconciliationFingerprint}'
+            WHERE session_id='{SessionOne}' AND new_revision=1;
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAManualHistoryRowWithAMalformedOperationReference()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateManualOverride(SessionOne, "explicitly_unassigned", null, ManualUnassignedFingerprint);
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"""
+            PRAGMA ignore_check_constraints=ON;
+            UPDATE session_repository_assignment_history
+            SET operation_key='not-an-idempotency-key'
+            WHERE session_id='{SessionOne}' AND new_revision=1;
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAnImmutableHistoryRowThatRepeatsTheSameManualState()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        fixture.CreateManualOverride(SessionOne, "assigned", RfcByteFirstRepository, ManualAssignedFingerprint);
+        fixture.ExecuteDirect($"""
+            INSERT INTO session_repository_assignment_history VALUES(
+                '{Guid.CreateVersion7():D}','{SessionOne}','assign',1,2,
+                '{ManualAssignedFingerprint}','{ManualAssignedFingerprint}','assigned','assigned','manual','manual','{RfcByteFirstRepository}','{RfcByteFirstRepository}',
+                'user_operation','{OperationKey(7)}',NULL,'{Later}');
+            UPDATE session_repository_assignment_revisions SET revision=2,updated_at='{Later}' WHERE session_id='{SessionOne}';
+            UPDATE session_repository_manual_overrides SET revision=2,updated_at='{Later}' WHERE session_id='{SessionOne}';
+            """);
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_UsesCanonicalCandidateOrderingForConflict()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(ThirdRepository, 3);
+        fixture.CreateRepository(LittleEndianFirstRepository, 2);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        var contexts = new[]
+        {
+            fixture.PrepareAdmittedContext(SessionOne, ThirdRepository, 42, 0),
+            fixture.PrepareAdmittedContext(SessionOne, RfcByteFirstRepository, 42, 1),
+            fixture.PrepareAdmittedContext(SessionOne, LittleEndianFirstRepository, 42, 2),
+        };
+        var resolver = new LocalRepositoryAssignmentResolver();
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var preparation = resolver.PrepareAutomatic(
+                fixture.Connection,
+                transaction,
+                42,
+                [SessionOne],
+                contexts.Select(static context => context.Assignment).ToArray(),
+                fixture.ReconciliationFingerprint,
+                DateTimeOffset.Parse(Later, System.Globalization.CultureInfo.InvariantCulture));
+            foreach (var context in contexts)
+                fixture.PublishAdmittedContext(context, transaction);
+            resolver.ApplyAutomatic(fixture.Connection, transaction, preparation);
+            transaction.Commit();
+        }
+        using var read = fixture.Connection.BeginTransaction();
+        var snapshot = resolver.ReadCurrent(fixture.Connection, read, SessionOne);
+
+        Assert.Equal("conflict", snapshot.State);
+        Assert.Equal([RfcByteFirstRepository, LittleEndianFirstRepository, ThirdRepository], snapshot.ConflictingRepositoryIds);
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsFabricatedAutomaticAssignedHistoryHiddenByACorrectCurrentHead()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        var resolver = new LocalRepositoryAssignmentResolver();
+        EstablishAutomaticAssignment(fixture, resolver, SessionOne, RfcByteFirstRepository, 50);
+        var duplicateOne = fixture.PrepareAdmittedContext(SessionOne, RfcByteFirstRepository, 51, 1);
+        var duplicateTwo = fixture.PrepareAdmittedContext(SessionOne, RfcByteFirstRepository, 52, 2);
+        var fabricated = new string('b', 64);
+
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            fixture.PublishAdmittedContext(duplicateOne, transaction);
+            fixture.PublishAdmittedContext(duplicateTwo, transaction);
+            fixture.Execute(transaction, $"""
+                INSERT INTO session_repository_assignment_history VALUES(
+                    '{Guid.CreateVersion7():D}','{SessionOne}','automatic_reconcile',1,2,
+                    '{RfcByteFirstAssignedFingerprint}','{fabricated}','assigned','assigned','automatic','automatic','{RfcByteFirstRepository}','{RfcByteFirstRepository}',
+                    'source_reconciliation',NULL,'{fixture.ReconciliationFingerprintFor(51)}','{Later}');
+                INSERT INTO session_repository_assignment_history VALUES(
+                    '{Guid.CreateVersion7():D}','{SessionOne}','automatic_reconcile',2,3,
+                    '{fabricated}','{RfcByteFirstAssignedFingerprint}','assigned','assigned','automatic','automatic','{RfcByteFirstRepository}','{RfcByteFirstRepository}',
+                    'source_reconciliation',NULL,'{fixture.ReconciliationFingerprintFor(52)}','{Later}');
+                UPDATE session_repository_assignment_revisions SET revision=3,updated_at='{Later}' WHERE session_id='{SessionOne}';
+                """);
+            transaction.Commit();
+        }
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAnAutomaticConflictNoOpHiddenByACorrectCurrentHead()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        fixture.CreateRepository(LittleEndianFirstRepository, 2);
+        var resolver = new LocalRepositoryAssignmentResolver();
+        EstablishAutomaticAssignment(fixture, resolver, SessionOne, RfcByteFirstRepository, 60);
+        var second = fixture.PrepareAdmittedContext(SessionOne, LittleEndianFirstRepository, 61);
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var preparation = resolver.PrepareAutomatic(
+                fixture.Connection,
+                transaction,
+                second.RawRecordId,
+                [SessionOne],
+                [second.Assignment],
+                fixture.ReconciliationFingerprint,
+                DateTimeOffset.Parse(Later, System.Globalization.CultureInfo.InvariantCulture));
+            fixture.PublishAdmittedContext(second, transaction);
+            resolver.ApplyAutomatic(fixture.Connection, transaction, preparation);
+            transaction.Commit();
+        }
+        var duplicateOne = fixture.PrepareAdmittedContext(SessionOne, LittleEndianFirstRepository, 62, 1);
+        var duplicateTwo = fixture.PrepareAdmittedContext(SessionOne, LittleEndianFirstRepository, 63, 2);
+        var fabricated = new string('c', 64);
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            fixture.PublishAdmittedContext(duplicateOne, transaction);
+            fixture.PublishAdmittedContext(duplicateTwo, transaction);
+            fixture.Execute(transaction, $"""
+                INSERT INTO session_repository_assignment_history VALUES(
+                    '{Guid.CreateVersion7():D}','{SessionOne}','automatic_reconcile',2,3,
+                    '{TwoCandidateConflictFingerprint}','{fabricated}','conflict','conflict','automatic','automatic',NULL,NULL,
+                    'source_reconciliation',NULL,'{fixture.ReconciliationFingerprintFor(62)}','{Later}');
+                INSERT INTO session_repository_assignment_history VALUES(
+                    '{Guid.CreateVersion7():D}','{SessionOne}','automatic_reconcile',3,4,
+                    '{fabricated}','{TwoCandidateConflictFingerprint}','conflict','conflict','automatic','automatic',NULL,NULL,
+                    'source_reconciliation',NULL,'{fixture.ReconciliationFingerprintFor(63)}','{Later}');
+                UPDATE session_repository_assignment_revisions SET revision=4,updated_at='{Later}' WHERE session_id='{SessionOne}';
+                """);
+            transaction.Commit();
+        }
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Fact]
+    public void ReadCurrent_RejectsAWellFormedButMissingOperationReceiptReference()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateManualOverride(SessionOne, "explicitly_unassigned", null, ManualUnassignedFingerprint);
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"UPDATE session_repository_assignment_history SET operation_key='{OperationKey(8)}' WHERE session_id='{SessionOne}' AND new_revision=1;");
+        var resolver = new LocalRepositoryAssignmentResolver();
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong_session")]
+    [InlineData("terminal")]
+    public void ReadCurrent_RejectsAnAutomaticHistoryReferenceWithoutItsExactCompletedSessionSource(string mutation)
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateSession(SessionTwo);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        var resolver = new LocalRepositoryAssignmentResolver();
+        EstablishAutomaticAssignment(fixture, resolver, SessionOne, RfcByteFirstRepository, 70);
+        string fingerprint;
+        switch (mutation)
+        {
+            case "missing":
+                fingerprint = fixture.ReconciliationFingerprintFor(701);
+                break;
+            case "wrong_session":
+                {
+                    var foreign = fixture.PrepareAdmittedContext(SessionTwo, RfcByteFirstRepository, 702);
+                    using var transaction = fixture.Connection.BeginTransaction(deferred: false);
+                    fixture.PublishAdmittedContext(foreign, transaction);
+                    transaction.Commit();
+                    fingerprint = fixture.ReconciliationFingerprintFor(702);
+                    break;
+                }
+            case "terminal":
+                fixture.EnsureCompletedQueue(703);
+                fixture.ExecuteDirect("UPDATE local_repository_reconciliation_queue SET state='failed_terminal',terminal_reason='catalog_schema_violation' WHERE raw_record_id=703;");
+                fingerprint = fixture.ReconciliationFingerprintFor(703);
+                break;
+            default:
+                throw new InvalidOperationException(mutation);
+        }
+        fixture.ExecuteDirect("DROP TRIGGER session_repository_assignment_history_update_rejected;");
+        fixture.ExecuteDirect($"UPDATE session_repository_assignment_history SET reconciliation_fingerprint='{fingerprint}' WHERE session_id='{SessionOne}' AND new_revision=1;");
+
+        using var read = fixture.Connection.BeginTransaction();
+        Assert.Throws<InvalidOperationException>(() => resolver.ReadCurrent(fixture.Connection, read, SessionOne));
+    }
+
+    [Theory]
+    [InlineData("pending")]
+    [InlineData("leased")]
+    [InlineData("completed")]
+    public void ReadCurrent_AcceptsAnExactAutomaticHistoryCauseWhileItsQueueIsReplayed(string queueState)
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.CreateRepository(RfcByteFirstRepository, 1);
+        var resolver = new LocalRepositoryAssignmentResolver();
+        EstablishAutomaticAssignment(fixture, resolver, SessionOne, RfcByteFirstRepository, 80);
+        var fingerprint = fixture.ReconciliationFingerprintFor(80);
+        var lease = queueState == "leased"
+            ? $",lease_token='{new string('a', 64)}',lease_expires_at='{Later}'"
+            : ",lease_token=NULL,lease_expires_at=NULL";
+        fixture.ExecuteDirect($"UPDATE local_repository_reconciliation_queue SET state='{queueState}',terminal_reason=NULL{lease} WHERE reconciliation_fingerprint='{fingerprint}';");
+
+        using var read = fixture.Connection.BeginTransaction();
+        var snapshot = resolver.ReadCurrent(fixture.Connection, read, SessionOne);
+        Assert.Equal("assigned", snapshot.State);
+        Assert.Equal("automatic", snapshot.Authority);
+        Assert.Equal(RfcByteFirstRepository, snapshot.RepositoryId);
+    }
+
     private static string[] CreateCandidateRepositoryIds(int count, int start = 100)
     {
         var repositories = new string[count];
@@ -955,6 +1359,9 @@ public sealed class LocalRepositoryAssignmentTests
             repositories[index] = $"01900000-{start + index:x4}-7000-8000-{start + index:x12}";
         return repositories;
     }
+
+    private static string OperationKey(byte value) => "lrc1_" + Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray())
+        .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static void EstablishAutomaticAssignment(
         CatalogFixture fixture,
@@ -984,6 +1391,7 @@ public sealed class LocalRepositoryAssignmentTests
         private readonly string directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"local-repository-assignment-{Guid.NewGuid():N}");
         private readonly Dictionary<string, string> sessionEvents = new(StringComparer.Ordinal);
         private readonly Dictionary<string, RepositoryLocator> repositories = new(StringComparer.Ordinal);
+        private long lastReconciliationRawRecordId = 1;
 
         internal CatalogFixture()
         {
@@ -992,17 +1400,20 @@ public sealed class LocalRepositoryAssignmentTests
             new SqliteSessionStore(Path).CreateSchema();
             Connection = Open(Path);
             LocalRepositoryCatalogSchemaV1.Ensure(Connection);
-            ReconciliationFingerprint = LocalRepositoryIdentityHashing.ReconciliationFingerprint(
-                LocalRepositoryReconciliationEvidence.PayloadSha256(1, new string('a', 64)));
+            var fingerprint = ReconciliationFingerprintFor(1);
             Execute($"""
                 INSERT INTO local_repository_reconciliation_queue VALUES(
-                    '01900000-0000-7000-8000-000000000001',1,'payload_sha256','{new string('a', 64)}','local-repository-catalog:1','{ReconciliationFingerprint}','pending',0,NULL,NULL,NULL,'{At}','{At}');
+                    '01900000-0000-7000-8000-000000000001',1,'payload_sha256','{new string('a', 64)}','local-repository-catalog:1','{fingerprint}','pending',0,NULL,NULL,NULL,'{At}','{At}');
                 """);
         }
 
         internal string Path { get; }
         internal SqliteConnection Connection { get; }
-        internal string ReconciliationFingerprint { get; }
+        internal string ReconciliationFingerprint => ReconciliationFingerprintFor(lastReconciliationRawRecordId);
+
+        internal string ReconciliationFingerprintFor(long rawRecordId) =>
+            LocalRepositoryIdentityHashing.ReconciliationFingerprint(
+                LocalRepositoryReconciliationEvidence.PayloadSha256(rawRecordId, new string('a', 64)));
 
         internal string LocatorId(string repositoryId) => repositories[repositoryId].LocatorId;
 
@@ -1069,6 +1480,8 @@ public sealed class LocalRepositoryAssignmentTests
             long rawRecordId,
             int attributeOrdinal = 0)
         {
+            lastReconciliationRawRecordId = rawRecordId;
+            EnsureCompletedQueue(rawRecordId);
             var eventId = sessionEvents[sessionId];
             var repository = repositories[repositoryId];
             var observationId = Guid.CreateVersion7().ToString("D", System.Globalization.CultureInfo.InvariantCulture);
@@ -1082,11 +1495,25 @@ public sealed class LocalRepositoryAssignmentTests
                 "11111111111111111111111111111111",
                 "2222222222222222"));
             return new(
+                this,
                 new(contextId, contextIdentity, sessionId, repositoryId, repository.LocatorId),
                 rawRecordId,
                 observationId,
                 sourceIdentity,
                 attributeOrdinal);
+        }
+
+        internal void SelectReconciliationRawRecord(long rawRecordId) => lastReconciliationRawRecordId = rawRecordId;
+
+        internal void EnsureCompletedQueue(long rawRecordId)
+        {
+            var fingerprint = ReconciliationFingerprintFor(rawRecordId);
+            Execute($"""
+                INSERT INTO local_repository_reconciliation_queue VALUES(
+                    '{Guid.CreateVersion7():D}',{rawRecordId},'payload_sha256','{new string('a', 64)}','local-repository-catalog:1','{fingerprint}','completed',0,NULL,NULL,NULL,'{At}','{At}')
+                ON CONFLICT(raw_record_id,projector_version) DO UPDATE SET
+                    state='completed',lease_token=NULL,lease_expires_at=NULL,terminal_reason=NULL,updated_at=excluded.updated_at;
+                """);
         }
 
         internal void PublishAdmittedContext(
@@ -1113,6 +1540,20 @@ public sealed class LocalRepositoryAssignmentTests
                 """);
         }
 
+        internal void PublishCorruptCandidateAfterThe128CanonicalCandidates(string sessionId)
+        {
+            var sessionEventId = sessionEvents[sessionId];
+            Execute($"""
+                PRAGMA foreign_keys=OFF;
+                PRAGMA ignore_check_constraints=ON;
+                INSERT INTO session_repository_observation_contexts VALUES(
+                    '{Guid.CreateVersion7():D}','{Guid.CreateVersion7():D}','{new string('a', 64)}','{sessionEventId}','{sessionId}',
+                    '11111111111111111111111111111111','2222222222222222','admitted','zzzzzzzz-zzzz-7zzz-8zzz-zzzzzzzzzzzz','{Guid.CreateVersion7():D}','{At}');
+                PRAGMA ignore_check_constraints=OFF;
+                PRAGMA foreign_keys=ON;
+                """);
+        }
+
         internal void CreateManualOverride(string sessionId, string state, string? repositoryId, string fingerprint)
         {
             Execute($"""
@@ -1125,6 +1566,15 @@ public sealed class LocalRepositoryAssignmentTests
                     'user_operation','{OperationKey}',NULL,'{At}');
                 INSERT INTO session_repository_manual_overrides VALUES(
                     '{sessionId}','{state}',{(repositoryId is null ? "NULL" : $"'{repositoryId}'")},1,'{At}');
+                """);
+        }
+
+        internal void EnsureOperationReceipt(string operationKey)
+        {
+            Execute($"""
+                INSERT INTO local_repository_operation_receipts VALUES(
+                    '{operationKey}','{new string('a', 64)}',200,'application/json; charset=utf-8','no-store',X'7B7D','{At}')
+                ON CONFLICT(operation_key) DO NOTHING;
                 """);
         }
 
@@ -1166,6 +1616,8 @@ public sealed class LocalRepositoryAssignmentTests
             return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
         }
 
+        internal void ExecuteDirect(string sql) => Execute(sql);
+
         internal static SqliteConnection Open(string path)
         {
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -1206,10 +1658,39 @@ public sealed class LocalRepositoryAssignmentTests
         private sealed record RepositoryLocator(string LocatorId, GitHubRepositoryLocator Locator);
     }
 
-    private sealed record PreparedContext(
-        LocalRepositoryProspectiveAssignmentContext Assignment,
-        long RawRecordId,
-        string ObservationId,
-        string SourceIdentity,
-        int AttributeOrdinal);
+    private sealed class PreparedContext
+    {
+        private readonly CatalogFixture fixture;
+        private readonly LocalRepositoryProspectiveAssignmentContext assignment;
+
+        internal PreparedContext(
+            CatalogFixture fixture,
+            LocalRepositoryProspectiveAssignmentContext assignment,
+            long rawRecordId,
+            string observationId,
+            string sourceIdentity,
+            int attributeOrdinal)
+        {
+            this.fixture = fixture;
+            this.assignment = assignment;
+            RawRecordId = rawRecordId;
+            ObservationId = observationId;
+            SourceIdentity = sourceIdentity;
+            AttributeOrdinal = attributeOrdinal;
+        }
+
+        internal LocalRepositoryProspectiveAssignmentContext Assignment
+        {
+            get
+            {
+                fixture.SelectReconciliationRawRecord(RawRecordId);
+                return assignment;
+            }
+        }
+
+        internal long RawRecordId { get; }
+        internal string ObservationId { get; }
+        internal string SourceIdentity { get; }
+        internal int AttributeOrdinal { get; }
+    }
 }

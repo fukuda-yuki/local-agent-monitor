@@ -23,6 +23,13 @@ internal interface ILocalRepositoryAdmissionCheckpoint
     void Reached(LocalRepositoryAdmissionCheckpoint checkpoint);
 }
 
+internal enum LocalRepositoryLocatorReadCheckpoint { BeforeAvailabilityRead, AfterAvailabilityLeaseAcquired }
+
+internal interface ILocalRepositoryLocatorReadCheckpoint
+{
+    void Reached(LocalRepositoryLocatorReadCheckpoint checkpoint);
+}
+
 internal sealed class LocalRepositoryAdmissionRetryableException(string message) : Exception(message);
 
 internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalRepositoryRawRecordProcessor
@@ -34,6 +41,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
     private readonly TimeProvider timeProvider;
     private readonly Func<DateTimeOffset, string> uuidV7Factory;
     private readonly ILocalRepositoryAdmissionCheckpoint? checkpoint;
+    private readonly ILocalRepositoryLocatorReadCheckpoint? locatorReadCheckpoint;
 
     internal SqliteLocalRepositoryCatalogStore(
         string databasePath,
@@ -41,7 +49,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
         LocalRepositoryAssignmentResolver assignmentResolver,
         TimeProvider? timeProvider = null,
         Func<DateTimeOffset, string>? uuidV7Factory = null,
-        ILocalRepositoryAdmissionCheckpoint? checkpoint = null)
+        ILocalRepositoryAdmissionCheckpoint? checkpoint = null,
+        ILocalRepositoryLocatorReadCheckpoint? locatorReadCheckpoint = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
@@ -58,6 +67,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore : ILocalReposito
         this.uuidV7Factory = uuidV7Factory
             ?? (static at => Guid.CreateVersion7(at).ToString("D", CultureInfo.InvariantCulture));
         this.checkpoint = checkpoint;
+        this.locatorReadCheckpoint = locatorReadCheckpoint;
     }
 
     private SqliteConnection Open()

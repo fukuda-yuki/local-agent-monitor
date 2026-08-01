@@ -85,11 +85,7 @@ internal static class LocalRepositoryCatalogValidation
     }
 
     private static bool HasExactLocatorFields(string canonicalLocator, string locatorSha256, string displayOwner, string displayRepository) =>
-        GitHubRepositoryLocatorParser.TryParse($"https://github.com/{displayOwner}/{displayRepository}.git", out var locator)
-        && string.Equals(locator.CanonicalLocator, canonicalLocator, StringComparison.Ordinal)
-        && string.Equals(locator.LocatorSha256, locatorSha256, StringComparison.Ordinal)
-        && string.Equals(locator.DisplayOwner, displayOwner, StringComparison.Ordinal)
-        && string.Equals(locator.DisplayRepository, displayRepository, StringComparison.Ordinal);
+        GitHubRepositoryLocatorParser.IsExact(canonicalLocator, locatorSha256, displayOwner, displayRepository);
 
     private static void ValidateContextRows(SqliteConnection connection, SqliteTransaction? transaction)
     {

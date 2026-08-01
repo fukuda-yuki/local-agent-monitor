@@ -32,11 +32,40 @@ public static class GitHubRepositoryLocatorParser
             return false;
         }
 
-        var canonicalLocator = $"github.com/{owner.ToLowerInvariant()}/{repository.ToLowerInvariant()}";
-        var fingerprintBytes = Encoding.UTF8.GetBytes(FingerprintDomain + canonicalLocator);
-        var locatorSha256 = Convert.ToHexString(SHA256.HashData(fingerprintBytes)).ToLowerInvariant();
+        ComputeIdentity(owner, repository, out var canonicalLocator, out var locatorSha256);
         locator = new GitHubRepositoryLocator(canonicalLocator, locatorSha256, owner, repository);
         return true;
+    }
+
+    internal static bool IsExact(GitHubRepositoryLocator? locator) => locator is not null
+        && IsExact(locator.CanonicalLocator, locator.LocatorSha256, locator.DisplayOwner, locator.DisplayRepository);
+
+    internal static bool IsExact(
+        string? canonicalLocator,
+        string? locatorSha256,
+        string? displayOwner,
+        string? displayRepository)
+    {
+        if (canonicalLocator is null
+            || locatorSha256 is null
+            || displayOwner is null
+            || displayRepository is null
+            || !IsOwner(displayOwner)
+            || !IsRepository(displayRepository))
+        {
+            return false;
+        }
+
+        ComputeIdentity(displayOwner, displayRepository, out var expectedCanonicalLocator, out var expectedLocatorSha256);
+        return string.Equals(canonicalLocator, expectedCanonicalLocator, StringComparison.Ordinal)
+            && string.Equals(locatorSha256, expectedLocatorSha256, StringComparison.Ordinal);
+    }
+
+    private static void ComputeIdentity(string owner, string repository, out string canonicalLocator, out string locatorSha256)
+    {
+        canonicalLocator = $"github.com/{owner.ToLowerInvariant()}/{repository.ToLowerInvariant()}";
+        var fingerprintBytes = Encoding.UTF8.GetBytes(FingerprintDomain + canonicalLocator);
+        locatorSha256 = Convert.ToHexString(SHA256.HashData(fingerprintBytes)).ToLowerInvariant();
     }
 
     private static bool IsAsciiLocatorInput(string input)
