@@ -428,6 +428,167 @@ internal sealed class LocalRepositoryAssignmentResolver
             state.UpdatedAt);
     }
 
+    internal static bool IsValidHistoricalAssignmentEndpoint(
+        string state,
+        string authority,
+        string? repositoryId,
+        string assignmentStateFingerprint)
+    {
+        if (!LocalRepositoryCatalogValidation.IsLowerSha256(assignmentStateFingerprint))
+            return false;
+        var validState = state switch
+        {
+            "assigned" => authority is "automatic" or "manual"
+                && repositoryId is not null
+                && LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId),
+            "unassigned" => authority == "none" && repositoryId is null,
+            "explicitly_unassigned" => authority == "manual" && repositoryId is null,
+            "conflict" => authority == "automatic" && repositoryId is null,
+            _ => false,
+        };
+        if (!validState)
+            return false;
+        if (authority == "manual")
+            return HasExpectedManualFingerprint(state, authority, repositoryId, assignmentStateFingerprint);
+        if (state == "unassigned")
+            return string.Equals(assignmentStateFingerprint, Fingerprint(ResolveAutomatic([])), StringComparison.Ordinal);
+        if (state == "assigned")
+            return string.Equals(assignmentStateFingerprint, Fingerprint(ResolveAutomatic([repositoryId!])), StringComparison.Ordinal);
+        return true;
+    }
+
+    internal static bool IsValidAutomaticReconciliationTransition(
+        string previousState,
+        string previousAuthority,
+        string? previousRepositoryId,
+        string previousFingerprint,
+        string newState,
+        string newAuthority,
+        string? newRepositoryId,
+        string newFingerprint,
+        string reconciliationFingerprint) =>
+        IsValidHistoricalAssignmentEndpoint(previousState, previousAuthority, previousRepositoryId, previousFingerprint)
+        && IsValidHistoricalAssignmentEndpoint(newState, newAuthority, newRepositoryId, newFingerprint)
+        && !string.Equals(previousFingerprint, newFingerprint, StringComparison.Ordinal)
+        && previousAuthority != "manual"
+        && newAuthority != "manual"
+        && LocalRepositoryCatalogValidation.IsLowerSha256(reconciliationFingerprint);
+
+    internal static void ValidateCurrentResolverHead(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        long revision,
+        string state,
+        string authority,
+        string? repositoryId,
+        string assignmentStateFingerprint) =>
+        ValidateCurrentResolverHeadCore(
+            connection,
+            transaction,
+            sessionId,
+            revision,
+            state,
+            authority,
+            repositoryId,
+            assignmentStateFingerprint,
+            observer: null);
+
+    internal static void ValidateCurrentResolverHead(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        long revision,
+        string state,
+        string authority,
+        string? repositoryId,
+        string assignmentStateFingerprint,
+        ILocalRepositoryMutationValidationObserver observer)
+    {
+        ArgumentNullException.ThrowIfNull(observer);
+        ValidateCurrentResolverHeadCore(
+            connection,
+            transaction,
+            sessionId,
+            revision,
+            state,
+            authority,
+            repositoryId,
+            assignmentStateFingerprint,
+            observer);
+    }
+
+    private static void ValidateCurrentResolverHeadCore(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        long revision,
+        string state,
+        string authority,
+        string? repositoryId,
+        string assignmentStateFingerprint,
+        ILocalRepositoryMutationValidationObserver? observer)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        if (!ReferenceEquals(transaction.Connection, connection))
+            throw new InvalidOperationException("local_repository_mutation_state_transaction_mismatch");
+        try
+        {
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId)
+                || revision < 0
+                || !SessionExists(connection, transaction, sessionId))
+            {
+                throw new InvalidOperationException("local_repository_mutation_state_invalid");
+            }
+
+            var storedRevision = ReadStoredRevision(connection, transaction, sessionId);
+            if (revision == 0 ? storedRevision is not null : storedRevision != revision)
+                throw new InvalidOperationException("local_repository_mutation_state_invalid");
+            var candidates = ReadExistingCandidates(
+                connection,
+                transaction,
+                sessionId,
+                observer,
+                "local_repository_mutation_state_invalid");
+            var manual = ReadManualOverride(connection, transaction, sessionId);
+            LocalRepositoryEffectiveAssignment current;
+            if (manual is null)
+            {
+                current = ResolveAutomatic(candidates);
+            }
+            else
+            {
+                if (manual.Revision != revision
+                    || !IsValidHistoricalAssignmentEndpoint(manual.State, "manual", manual.RepositoryId, assignmentStateFingerprint))
+                {
+                    throw new InvalidOperationException("local_repository_mutation_state_invalid");
+                }
+                current = new(manual.State, "manual", manual.RepositoryId, []);
+            }
+            var currentFingerprint = Fingerprint(current);
+            if (!string.Equals(state, current.State, StringComparison.Ordinal)
+                || !string.Equals(authority, current.Authority, StringComparison.Ordinal)
+                || !string.Equals(repositoryId, current.RepositoryId, StringComparison.Ordinal)
+                || !string.Equals(assignmentStateFingerprint, currentFingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("local_repository_mutation_state_invalid");
+            }
+        }
+        catch (SqliteException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+            or InvalidCastException
+            or FormatException
+            or OverflowException
+            or ArgumentException)
+        {
+            throw new InvalidOperationException("local_repository_mutation_state_invalid");
+        }
+    }
+
     private static CurrentAssignmentState ReadCurrentState(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -573,7 +734,20 @@ internal sealed class LocalRepositoryAssignmentResolver
     private static string[] ReadExistingCandidates(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string sessionId)
+        string sessionId) =>
+        ReadExistingCandidates(
+            connection,
+            transaction,
+            sessionId,
+            observer: null,
+            "local_repository_assignment_cardinality_exceeded");
+
+    private static string[] ReadExistingCandidates(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        ILocalRepositoryMutationValidationObserver? observer,
+        string overflowMessage)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -590,10 +764,11 @@ internal sealed class LocalRepositoryAssignmentResolver
         while (reader.Read())
         {
             if (candidates.Count == MaximumCandidateCount)
-                throw new InvalidOperationException("local_repository_assignment_cardinality_exceeded");
+                throw new InvalidOperationException(overflowMessage);
             var repositoryId = reader.GetString(0);
             ValidateUuid(repositoryId, "persisted_repository_id");
             candidates.Add(repositoryId);
+            observer?.Materialized(LocalRepositoryMutationValidationBuffer.CurrentCandidateCollection, candidates.Count);
         }
         return candidates.ToArray();
     }
@@ -789,7 +964,9 @@ internal sealed class LocalRepositoryAssignmentResolver
                     row.CauseKind,
                     row.OperationKey,
                     row.ReconciliationFingerprint,
+                    row.PreviousState,
                     row.PreviousAuthority,
+                    row.PreviousRepositoryId,
                     row.PreviousFingerprint,
                     row.NewState,
                     row.NewAuthority,
@@ -960,37 +1137,17 @@ internal sealed class LocalRepositoryAssignmentResolver
         string state,
         string authority,
         string? repositoryId,
-        string fingerprint)
-    {
-        if (!LocalRepositoryCatalogValidation.IsLowerSha256(fingerprint))
-            return false;
-        var validState = state switch
-        {
-            "assigned" => authority is "automatic" or "manual"
-                && repositoryId is not null
-                && LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId),
-            "unassigned" => authority == "none" && repositoryId is null,
-            "explicitly_unassigned" => authority == "manual" && repositoryId is null,
-            "conflict" => authority == "automatic" && repositoryId is null,
-            _ => false,
-        };
-        if (!validState)
-            return false;
-        if (authority == "manual")
-            return HasExpectedManualFingerprint(state, authority, repositoryId, fingerprint);
-        if (state == "unassigned")
-            return string.Equals(fingerprint, Fingerprint(ResolveAutomatic([])), StringComparison.Ordinal);
-        if (state == "assigned")
-            return string.Equals(fingerprint, Fingerprint(ResolveAutomatic([repositoryId!])), StringComparison.Ordinal);
-        return true;
-    }
+        string fingerprint) =>
+        IsValidHistoricalAssignmentEndpoint(state, authority, repositoryId, fingerprint);
 
     private static bool HasValidHistoryTransition(
         string action,
         string causeKind,
         string? operationKey,
         string? reconciliationFingerprint,
+        string previousState,
         string previousAuthority,
+        string? previousRepositoryId,
         string previousFingerprint,
         string newState,
         string newAuthority,
@@ -1014,8 +1171,16 @@ internal sealed class LocalRepositoryAssignmentResolver
                 && previousAuthority == "manual"
                 && newAuthority != "manual",
             "automatic_reconcile" => HasSourceReconciliationCause(causeKind, operationKey, reconciliationFingerprint)
-                && previousAuthority != "manual"
-                && newAuthority != "manual",
+                && IsValidAutomaticReconciliationTransition(
+                    previousState,
+                    previousAuthority,
+                    previousRepositoryId,
+                    previousFingerprint,
+                    newState,
+                    newAuthority,
+                    newRepositoryId,
+                    newFingerprint,
+                    reconciliationFingerprint!),
             _ => false,
         };
     }

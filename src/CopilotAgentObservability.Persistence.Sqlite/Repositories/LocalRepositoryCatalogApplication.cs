@@ -486,6 +486,42 @@ internal sealed record LocalRepositoryAssignmentSessionNotFound : LocalRepositor
 internal sealed record LocalRepositoryAssignmentReadBusy : LocalRepositoryAssignmentReadResult;
 internal sealed record LocalRepositoryAssignmentReadCorrupt : LocalRepositoryAssignmentReadResult;
 
+internal static class LocalRepositoryOperationFingerprint
+{
+    internal static string Create(string displayName, string? canonicalLocator) =>
+        Fingerprint("POST", "/api/local-monitor/v1/repositories", "create", null, null, displayName, canonicalLocator, null, null);
+
+    internal static string Rename(string repositoryId, long expectedRevision, string displayName) =>
+        Fingerprint("PATCH", "/api/local-monitor/v1/repositories/{repositoryId}", "rename", repositoryId, expectedRevision, displayName, null, null, null);
+
+    internal static string SetGitHubLocator(string repositoryId, long expectedRevision, string canonicalLocator) =>
+        Fingerprint("PATCH", "/api/local-monitor/v1/repositories/{repositoryId}", "set_github_locator", repositoryId, expectedRevision, null, canonicalLocator, null, null);
+
+    internal static string SessionAction(string sessionId, long expectedRevision, string action, string? repositoryId) =>
+        Fingerprint("POST", "/api/local-monitor/v1/session-repository-actions", "session_action", sessionId, expectedRevision, null, null, action, repositoryId);
+
+    private static string Fingerprint(
+        string method,
+        string routeTemplate,
+        string operation,
+        string? targetId,
+        long? expectedRevision,
+        string? displayName,
+        string? canonicalLocator,
+        string? sessionAction,
+        string? repositoryId) =>
+        LocalRepositoryIdentityHashing.OperationFingerprint(new(
+            method,
+            routeTemplate,
+            operation,
+            targetId,
+            expectedRevision?.ToString(CultureInfo.InvariantCulture),
+            displayName,
+            canonicalLocator,
+            sessionAction,
+            repositoryId));
+}
+
 internal sealed class LocalRepositoryCatalogApplication
 {
     private const string CollectionRoute = "/api/local-monitor/v1/repositories";
@@ -782,31 +818,28 @@ internal sealed class LocalRepositoryCatalogApplication
     private LocalRepositoryCreateStoreInput CreateStoreInput(PreparedCreateState state)
     {
         _ = ValidatePreparedState(state);
-        var fingerprint = Fingerprint(state.Method, state.RouteTemplate, state.Operation, null, null, state.DisplayName, state.Locator?.CanonicalLocator, null, null);
+        var fingerprint = LocalRepositoryOperationFingerprint.Create(state.DisplayName, state.Locator?.CanonicalLocator);
         return LocalRepositoryCreateStoreInput.Create(this, storeInputSeal, state.ExpectedSuccessStatus, state.DisplayName, state.Locator, fingerprint);
     }
 
     private LocalRepositoryRenameStoreInput CreateStoreInput(PreparedRenameState state)
     {
         _ = ValidatePreparedState(state);
-        var revision = state.ExpectedRevision.ToString(CultureInfo.InvariantCulture);
-        var fingerprint = Fingerprint(state.Method, state.RouteTemplate, state.Operation, state.RepositoryId, revision, state.DisplayName, null, null, null);
+        var fingerprint = LocalRepositoryOperationFingerprint.Rename(state.RepositoryId, state.ExpectedRevision, state.DisplayName);
         return LocalRepositoryRenameStoreInput.Create(this, storeInputSeal, state.ExpectedSuccessStatus, state.RepositoryId, state.ExpectedRevision, state.DisplayName, fingerprint);
     }
 
     private LocalRepositorySetLocatorStoreInput CreateStoreInput(PreparedSetLocatorState state)
     {
         _ = ValidatePreparedState(state);
-        var revision = state.ExpectedRevision.ToString(CultureInfo.InvariantCulture);
-        var fingerprint = Fingerprint(state.Method, state.RouteTemplate, state.Operation, state.RepositoryId, revision, null, state.Locator.CanonicalLocator, null, null);
+        var fingerprint = LocalRepositoryOperationFingerprint.SetGitHubLocator(state.RepositoryId, state.ExpectedRevision, state.Locator.CanonicalLocator);
         return LocalRepositorySetLocatorStoreInput.Create(this, storeInputSeal, state.ExpectedSuccessStatus, state.RepositoryId, state.ExpectedRevision, state.Locator, fingerprint);
     }
 
     private LocalRepositorySessionActionStoreInput CreateStoreInput(PreparedSessionActionState state)
     {
         _ = ValidatePreparedState(state);
-        var revision = state.ExpectedRevision.ToString(CultureInfo.InvariantCulture);
-        var fingerprint = Fingerprint(state.Method, state.RouteTemplate, state.Operation, state.SessionId, revision, null, null, state.ActionValue, state.RepositoryId);
+        var fingerprint = LocalRepositoryOperationFingerprint.SessionAction(state.SessionId, state.ExpectedRevision, state.ActionValue, state.RepositoryId);
         return LocalRepositorySessionActionStoreInput.Create(this, storeInputSeal, state.ExpectedSuccessStatus, state.SessionId, state.ExpectedRevision, state.Action, state.ActionValue, state.RepositoryId, fingerprint);
     }
 
@@ -834,26 +867,6 @@ internal sealed class LocalRepositoryCatalogApplication
         }
     }
 
-    private static string Fingerprint(
-        string method,
-        string routeTemplate,
-        string operation,
-        string? targetId,
-        string? expectedRevision,
-        string? displayName,
-        string? canonicalLocator,
-        string? sessionAction,
-        string? repositoryId) =>
-        LocalRepositoryIdentityHashing.OperationFingerprint(new(
-            method,
-            routeTemplate,
-            operation,
-            targetId,
-            expectedRevision,
-            displayName,
-            canonicalLocator,
-            sessionAction,
-            repositoryId));
 }
 
 internal abstract class LocalRepositoryStoreInput
