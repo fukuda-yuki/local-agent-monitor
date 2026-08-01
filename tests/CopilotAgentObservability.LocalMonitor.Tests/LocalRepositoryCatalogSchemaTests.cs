@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
+using System.Collections.Frozen;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Repositories;
 
@@ -135,6 +137,123 @@ public sealed class LocalRepositoryCatalogSchemaTests
     }
 
     [Fact]
+    public void OwnedSchemaDescriptorCompiler_IsConnectionFreeImmutableAndRejectsDuplicateKeys()
+    {
+        var definitions = new List<SqliteOwnedSchemaDefinition>
+        {
+            new("table", "owned", "owned", "CREATE TABLE IF NOT EXISTS owned(id INTEGER);"),
+        };
+
+        var compiled = SqliteOwnedSchemaAuthority.Compile(definitions);
+        definitions[0] = new SqliteOwnedSchemaDefinition("table", "owned", "owned", "CREATE TABLE owned(changed TEXT);");
+
+        Assert.IsAssignableFrom<FrozenDictionary<(string Type, string Name), SqliteOwnedSchemaObject>>(compiled);
+        Assert.Equal("6:create5:table5:owned1:(2:id7:integer1:)",
+            compiled[("table", "owned")].Sql);
+        Assert.Throws<ArgumentException>(() => SqliteOwnedSchemaAuthority.Compile(
+        [
+            new SqliteOwnedSchemaDefinition("table", "duplicate", "duplicate", "CREATE TABLE duplicate(id INTEGER);"),
+            new SqliteOwnedSchemaDefinition("table", "duplicate", "duplicate", "CREATE TABLE duplicate(other INTEGER);"),
+        ]));
+    }
+
+    [Fact]
+    public void OwnedSchemaDescriptor_NormalizesTerminalSemicolonsAndIfNotExistsLikeInstalledSqlite()
+    {
+        var expected = SqliteOwnedSchemaAuthority.Compile(
+        [
+            new SqliteOwnedSchemaDefinition("table", "owned", "owned", "CREATE TABLE IF NOT EXISTS owned(id INTEGER);"),
+            new SqliteOwnedSchemaDefinition("index", "IX_owned_id", "owned", "CREATE INDEX IF NOT EXISTS IX_owned_id ON owned(id);"),
+        ]);
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        Execute(connection, "CREATE TABLE owned(id INTEGER); CREATE INDEX IX_owned_id ON owned(id);");
+
+        var actual = SqliteOwnedSchemaAuthority.Read(connection, null, static (name, _) =>
+            name.Equals("owned", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("IX_owned_id", StringComparison.OrdinalIgnoreCase));
+
+        Assert.True(SqliteOwnedSchemaAuthority.Equal(actual, expected));
+    }
+
+    [Fact]
+    public void OwnedSchemaDescriptor_NormalizationKeepsQuotedLiteralsInjectiveWhileNormalizingCreatePrefixes()
+    {
+        var firstQuotedLiteral = SqliteOwnedSchemaAuthority.Compile(
+        [
+            new SqliteOwnedSchemaDefinition("table", "owned", "owned", "CREATE TABLE owned(value TEXT DEFAULT 'a2:if3:not6:existsb');"),
+        ]);
+        var secondQuotedLiteral = SqliteOwnedSchemaAuthority.Compile(
+        [
+            new SqliteOwnedSchemaDefinition("table", "owned", "owned", "CREATE TABLE owned(value TEXT DEFAULT '2:if3:not6:existsab');"),
+        ]);
+
+        Assert.Equal(firstQuotedLiteral[("table", "owned")].Sql.Length, secondQuotedLiteral[("table", "owned")].Sql.Length);
+        Assert.NotEqual(firstQuotedLiteral[("table", "owned")].Sql, secondQuotedLiteral[("table", "owned")].Sql);
+        foreach (var (type, name, table, withPrefix, normalized) in new[]
+        {
+            ("table", "owned", "owned", "CREATE TABLE IF NOT EXISTS owned(value TEXT DEFAULT 'unchanged');", "create /* comment */ table owned(value text default 'unchanged')"),
+            ("index", "IX_owned_value", "owned", "CREATE INDEX IF NOT EXISTS IX_owned_value ON owned(value);", "create /* comment */ index IX_owned_value on owned(value)"),
+            ("trigger", "owned_insert", "owned", "CREATE TRIGGER IF NOT EXISTS owned_insert BEFORE INSERT ON owned BEGIN SELECT 1; END;", "create /* comment */ trigger owned_insert before insert on owned begin select 1; end"),
+        })
+        {
+            var withPrefixObject = SqliteOwnedSchemaAuthority.Compile(
+            [
+                new SqliteOwnedSchemaDefinition(type, name, table, withPrefix),
+            ]);
+            var normalizedObject = SqliteOwnedSchemaAuthority.Compile(
+            [
+                new SqliteOwnedSchemaDefinition(type, name, table, normalized),
+            ]);
+
+            Assert.Equal(withPrefixObject[(type, name)].Sql, normalizedObject[(type, name)].Sql);
+        }
+    }
+
+    [Fact]
+    public void BlankCatalogInstall_ExecutesEachOwnedCreateDefinitionExactlyOnce()
+    {
+        using var database = new TestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+        var statements = new List<string>();
+        strdelegate_trace trace = (_, sql) => statements.Add(sql);
+        raw.sqlite3_trace(connection.Handle, trace, null);
+        try
+        {
+            LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        }
+        finally
+        {
+            raw.sqlite3_trace(connection.Handle, (strdelegate_trace)null!, null);
+        }
+
+        Assert.Equal(12, statements.Count(static sql => sql.TrimStart().StartsWith("CREATE TABLE", StringComparison.OrdinalIgnoreCase)));
+        Assert.Equal(6, statements.Count(static sql => sql.TrimStart().StartsWith("CREATE INDEX", StringComparison.OrdinalIgnoreCase)));
+        Assert.Equal(18, statements.Count(static sql => sql.TrimStart().StartsWith("CREATE TRIGGER", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
+    public void CatalogOwnerDescriptor_EqualsTheFreshInstalledTwelveTableSixIndexAndEighteenTriggerSchema()
+    {
+        using var database = new TestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+        LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        using var transaction = connection.BeginTransaction();
+
+        Assert.Equal(12L, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND (name='local_repositories' OR name LIKE 'local_repository_%' OR name LIKE 'session_repository_%');"));
+        Assert.Equal(6L, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'IX_%repository%';"));
+        Assert.Equal(18L, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND (name LIKE 'local_repository%' OR name LIKE 'session_repository%');"));
+        Assert.True(LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(connection, transaction));
+        LocalRepositoryCatalogSchemaV1.Validate(connection, transaction);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1;";
+        Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
     public void OperationKeyValidation_RequiresCanonicalUnpaddedBase64Url32Bytes()
     {
         Assert.True(LocalRepositoryCatalogValidation.IsOperationKey("lrc1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
@@ -187,6 +306,7 @@ public sealed class LocalRepositoryCatalogSchemaTests
         Execute(connection, mutation);
         var before = ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%repository%';");
 
+        Assert.False(LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(connection, transaction: null));
         Assert.Throws<InvalidOperationException>(() => LocalRepositoryCatalogSchemaV1.Ensure(connection));
 
         Assert.Equal(before, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%repository%';"));

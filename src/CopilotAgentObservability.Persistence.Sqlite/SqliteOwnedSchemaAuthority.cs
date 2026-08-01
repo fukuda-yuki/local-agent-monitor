@@ -1,7 +1,28 @@
+using System.Collections.Frozen;
+
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class SqliteOwnedSchemaAuthority
 {
+    internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
+        Compile(IReadOnlyList<SqliteOwnedSchemaDefinition> definitions)
+    {
+        ArgumentNullException.ThrowIfNull(definitions);
+        var objects = new Dictionary<(string Type, string Name), SqliteOwnedSchemaObject>(definitions.Count);
+        foreach (var definition in definitions)
+        {
+            ArgumentNullException.ThrowIfNull(definition);
+            var value = new SqliteOwnedSchemaObject(
+                definition.Type,
+                definition.Name,
+                definition.Table,
+                NormalizeSql(definition.Sql));
+            if (!objects.TryAdd((value.Type, value.Name), value))
+                throw new ArgumentException("Owned schema definitions must have unique type and name keys.", nameof(definitions));
+        }
+        return objects.ToFrozenDictionary();
+    }
+
     internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
         Read(
             SqliteConnection connection,
@@ -54,7 +75,7 @@ internal static class SqliteOwnedSchemaAuthority
 
     private static string NormalizeSql(string sql)
     {
-        var result = new System.Text.StringBuilder(sql.Length);
+        var tokens = new List<SqlToken>();
         for (var index = 0; index < sql.Length; index++)
         {
             if (char.IsWhiteSpace(sql[index])
@@ -62,7 +83,7 @@ internal static class SqliteOwnedSchemaAuthority
                 continue;
             if (TryReadQuotedToken(sql, ref index, out var quoted))
             {
-                AppendToken(result, quoted);
+                tokens.Add(new SqlToken(quoted, true));
                 continue;
             }
             if (char.IsLetterOrDigit(sql[index]) || sql[index] is '_' or '.' or '$')
@@ -72,15 +93,32 @@ internal static class SqliteOwnedSchemaAuthority
                        && (char.IsLetterOrDigit(sql[index + 1])
                            || sql[index + 1] is '_' or '.' or '$'))
                     index++;
-                AppendToken(
-                    result,
-                    sql[start..(index + 1)].ToLowerInvariant());
+                tokens.Add(new SqlToken(sql[start..(index + 1)].ToLowerInvariant(), false));
                 continue;
             }
-            AppendToken(result, sql[index].ToString());
+            tokens.Add(new SqlToken(sql[index].ToString(), false));
         }
+        if (tokens.Count != 0 && IsUnquoted(tokens[^1], ";"))
+            tokens.RemoveAt(tokens.Count - 1);
+        if (tokens.Count >= 5
+            && IsUnquoted(tokens[0], "create")
+            && (IsUnquoted(tokens[1], "table")
+                || IsUnquoted(tokens[1], "index")
+                || IsUnquoted(tokens[1], "trigger"))
+            && IsUnquoted(tokens[2], "if")
+            && IsUnquoted(tokens[3], "not")
+            && IsUnquoted(tokens[4], "exists"))
+        {
+            tokens.RemoveRange(2, 3);
+        }
+        var result = new System.Text.StringBuilder(sql.Length);
+        foreach (var token in tokens)
+            AppendToken(result, token.Value);
         return result.ToString();
     }
+
+    private static bool IsUnquoted(SqlToken token, string value) =>
+        !token.IsQuoted && token.Value.Equals(value, StringComparison.Ordinal);
 
     private static void AppendToken(
         System.Text.StringBuilder result,
@@ -142,9 +180,17 @@ internal static class SqliteOwnedSchemaAuthority
         index--;
         return true;
     }
+
+    private sealed record SqlToken(string Value, bool IsQuoted);
 }
 
 internal sealed record SqliteOwnedSchemaObject(
+    string Type,
+    string Name,
+    string Table,
+    string Sql);
+
+internal sealed record SqliteOwnedSchemaDefinition(
     string Type,
     string Name,
     string Table,

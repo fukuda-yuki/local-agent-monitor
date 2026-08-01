@@ -45,9 +45,6 @@ internal static class LocalRepositoryCatalogSchemaV1
         })
         .ToArray();
 
-    private static readonly Lazy<IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>> ExpectedObjects =
-        new(BuildExpectedObjects);
-
     internal static void Ensure(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -69,7 +66,8 @@ internal static class LocalRepositoryCatalogSchemaV1
         }
 
         ValidateDependencies(connection, transaction);
-        Execute(connection, transaction, SchemaSql);
+        foreach (var definition in InstallDefinitions)
+            Execute(connection, transaction, definition.Sql);
         foreach (var trigger in TriggerDefinitions)
             Execute(connection, transaction, trigger.Sql.Replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", StringComparison.Ordinal));
         Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_repository_catalog',1);");
@@ -80,20 +78,13 @@ internal static class LocalRepositoryCatalogSchemaV1
         if (ReadDeclaredVersion(connection, transaction) != Version)
             Reject();
         ValidateDependencies(connection, transaction);
-        if (!SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects.Value))
+        if (!HasExactOwnedSchema(connection, transaction))
             Reject();
         LocalRepositoryCatalogValidation.ValidateRows(connection, transaction);
     }
 
-    private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> BuildExpectedObjects()
-    {
-        using var connection = new SqliteConnection("Data Source=:memory:");
-        connection.Open();
-        using var transaction = connection.BeginTransaction();
-        Execute(connection, transaction, "CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO schema_version VALUES('session',13); CREATE TABLE sessions(session_id TEXT PRIMARY KEY); CREATE TABLE session_events(event_id TEXT PRIMARY KEY,session_id TEXT NOT NULL, UNIQUE(session_id,event_id));");
-        Ensure(connection, transaction);
-        return ReadOwnedObjects(connection, transaction);
-    }
+    internal static bool HasExactOwnedSchema(SqliteConnection connection, SqliteTransaction? transaction) =>
+        SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects);
 
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Read(connection, transaction, static (name, table) =>
@@ -222,4 +213,76 @@ internal static class LocalRepositoryCatalogSchemaV1
         CREATE INDEX IX_session_repository_manual_overrides_repository_session ON session_repository_manual_overrides(repository_id,session_id);
         CREATE INDEX IX_local_repository_operation_receipts_created ON local_repository_operation_receipts(created_at,operation_key);
         """;
+
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> InstallDefinitions =
+        BuildInstallDefinitions();
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects =
+        SqliteOwnedSchemaAuthority.Compile(
+            InstallDefinitions.Concat(TriggerDefinitions.Select(static trigger =>
+                new SqliteOwnedSchemaDefinition("trigger", trigger.Name, trigger.Table, trigger.Sql))).ToArray());
+
+    private static IReadOnlyList<SqliteOwnedSchemaDefinition> BuildInstallDefinitions()
+    {
+        var statements = SplitStatements(SchemaSql);
+        if (statements.Count != TableNames.Length + IndexNames.Length)
+            throw new InvalidOperationException("local_repository_catalog_schema_definitions_invalid");
+        var definitions = new List<SqliteOwnedSchemaDefinition>(statements.Count);
+        for (var index = 0; index < TableNames.Length; index++)
+            definitions.Add(new SqliteOwnedSchemaDefinition("table", TableNames[index], TableNames[index], statements[index]));
+
+        var indexTables = new[]
+        {
+            "local_repository_locators",
+            "session_repository_observation_contexts",
+            "session_repository_observation_contexts",
+            "session_repository_observations",
+            "session_repository_manual_overrides",
+            "local_repository_operation_receipts",
+        };
+        for (var index = 0; index < IndexNames.Length; index++)
+        {
+            definitions.Add(new SqliteOwnedSchemaDefinition(
+                "index",
+                IndexNames[index],
+                indexTables[index],
+                statements[TableNames.Length + index]));
+        }
+        return definitions.AsReadOnly();
+    }
+
+    private static IReadOnlyList<string> SplitStatements(string sql)
+    {
+        var statements = new List<string>();
+        var start = 0;
+        char? quoted = null;
+        for (var index = 0; index < sql.Length; index++)
+        {
+            var character = sql[index];
+            if (quoted is { } closing)
+            {
+                if (character != closing)
+                    continue;
+                if (index + 1 < sql.Length && sql[index + 1] == closing)
+                {
+                    index++;
+                    continue;
+                }
+                quoted = null;
+                continue;
+            }
+            if (character is '\'' or '"' or '`')
+            {
+                quoted = character;
+                continue;
+            }
+            if (character != ';')
+                continue;
+            statements.Add(sql[start..(index + 1)]);
+            start = index + 1;
+        }
+        if (!string.IsNullOrWhiteSpace(sql[start..]))
+            throw new InvalidOperationException("local_repository_catalog_schema_definitions_invalid");
+        return statements;
+    }
 }
