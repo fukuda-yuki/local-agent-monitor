@@ -193,6 +193,28 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public void RetentionReadGrant_PublicationScopePublishesTheSameExpiryToPropertyAndSelectorCapability()
+    {
+        var initialExpiry = new DateTimeOffset(2026, 8, 1, 0, 1, 0, TimeSpan.Zero);
+        var renewedExpiry = initialExpiry.AddMinutes(2);
+        var grant = new RetentionReadGrant("item", 7, "owner", 11, initialExpiry, new byte[32]);
+
+        using (var publication = grant.EnterLeasePublication())
+        {
+            Assert.Equal(initialExpiry, publication.LeaseExpiresAt);
+            publication.AdvanceExpiry(renewedExpiry);
+        }
+
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        using var command = connection.CreateCommand();
+        grant.BindSelectorCapability(command);
+        Assert.Equal(renewedExpiry, grant.LeaseExpiresAt);
+        Assert.Equal(
+            renewedExpiry.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            Assert.IsType<string>(command.Parameters["$retention_read_lease_expires_at"].Value));
+    }
+
+    [Fact]
     public async Task ReadAsync_StaleRevisionReturnsDeniedWithoutExposingValue()
     {
         var path = CopyFixture();
