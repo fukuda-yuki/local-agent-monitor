@@ -198,6 +198,65 @@ public sealed class LocalRepositoryObservationParserTests
         });
     }
 
+    [Fact]
+    public void ParseCarriesResourceContextTargetOrdinalsInPayloadOrderDespiteReverseLexicalTraceAndSpanIds()
+    {
+        var result = Parse("""
+            {"resourceSpans":[{"resource":{"attributes":[{"key":"vcs.repository.url.full","value":{"stringValue":"https://github.com/Octo/Repo"}}]},"scopeSpans":[{"spans":[]},{"spans":[{"traceId":"ffffffffffffffffffffffffffffffff","spanId":"ffffffffffffffff","attributes":[]},{"traceId":"00000000000000000000000000000000","spanId":"0000000000000000","attributes":[]}]}]}]}
+            """);
+
+        var occurrence = Assert.Single(result.Occurrences);
+        Assert.Equal((null, null), (occurrence.ScopeSpanOrdinal, occurrence.SpanOrdinal));
+        Assert.Equal("6a292e942a32a9c09c66f187c179011126dcd411265c04a850f3e72841254c59", occurrence.SourceIdentitySha256);
+        Assert.Equal(
+            [(1, 0, "ffffffffffffffffffffffffffffffff", "ffffffffffffffff"), (1, 1, "00000000000000000000000000000000", "0000000000000000")],
+            result.ContextLinks.Select(link => (link.ContextScopeSpanOrdinal, link.ContextSpanOrdinal, link.TraceId, link.SpanId)));
+    }
+
+    [Fact]
+    public void ParseMatchesSpanPhysicalAndContextOrdinals()
+    {
+        var result = Parse("""
+            {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[]},{"spans":[{"traceId":"00112233445566778899aabbccddeeff","spanId":"0123456789abcdef","attributes":[{"key":"vcs.repository.url.full","value":{"stringValue":"https://github.com/Octo/Repo"}}]}]}]}]}
+            """);
+
+        var link = Assert.Single(result.ContextLinks);
+        Assert.Equal((1, 0), (link.Occurrence.ScopeSpanOrdinal, link.Occurrence.SpanOrdinal));
+        Assert.Equal((1, 0), (link.ContextScopeSpanOrdinal, link.ContextSpanOrdinal));
+    }
+
+    [Fact]
+    public void ContextLinkRejectsNegativeTargetOrdinals()
+    {
+        var occurrence = Assert.Single(Parse("""
+            {"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[{"traceId":"00112233445566778899aabbccddeeff","spanId":"0123456789abcdef","attributes":[{"key":"vcs.repository.url.full","value":{"stringValue":"https://github.com/Octo/Repo"}}]}]}]}]}
+            """).Occurrences);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LocalRepositoryObservationContextLink(
+            occurrence,
+            "00112233445566778899aabbccddeeff",
+            "0123456789abcdef",
+            -1,
+            0,
+            LocalRepositoryAdmissionState.Admitted));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LocalRepositoryObservationContextLink(
+            occurrence,
+            "00112233445566778899aabbccddeeff",
+            "0123456789abcdef",
+            0,
+            -1,
+            LocalRepositoryAdmissionState.Admitted));
+
+        var maximum = new LocalRepositoryObservationContextLink(
+            occurrence,
+            "00112233445566778899aabbccddeeff",
+            "0123456789abcdef",
+            int.MaxValue,
+            int.MaxValue,
+            LocalRepositoryAdmissionState.Admitted);
+        Assert.Equal((int.MaxValue, int.MaxValue), (maximum.ContextScopeSpanOrdinal, maximum.ContextSpanOrdinal));
+    }
+
     private static LocalRepositoryObservationParseResult Parse(string payloadJson) =>
         LocalRepositoryObservationParser.Parse(
             rawRecordId: 7,

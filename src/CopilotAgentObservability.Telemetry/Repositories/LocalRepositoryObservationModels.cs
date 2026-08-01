@@ -154,11 +154,41 @@ internal sealed record LocalRepositoryPhysicalOccurrence(
     public string AttributeKey => SourceIdentityInput.AttributeKey;
 }
 
-internal sealed record LocalRepositoryObservationContextLink(
-    LocalRepositoryPhysicalOccurrence Occurrence,
-    string? TraceId,
-    string? SpanId,
-    LocalRepositoryAdmissionState AdmissionState);
+internal sealed record LocalRepositoryObservationContextLink
+{
+    public LocalRepositoryObservationContextLink(
+        LocalRepositoryPhysicalOccurrence occurrence,
+        string? traceId,
+        string? spanId,
+        int contextScopeSpanOrdinal,
+        int contextSpanOrdinal,
+        LocalRepositoryAdmissionState admissionState)
+    {
+        ArgumentNullException.ThrowIfNull(occurrence);
+        if (contextScopeSpanOrdinal < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(contextScopeSpanOrdinal));
+        }
+        if (contextSpanOrdinal < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(contextSpanOrdinal));
+        }
+
+        Occurrence = occurrence;
+        TraceId = traceId;
+        SpanId = spanId;
+        ContextScopeSpanOrdinal = contextScopeSpanOrdinal;
+        ContextSpanOrdinal = contextSpanOrdinal;
+        AdmissionState = admissionState;
+    }
+
+    public LocalRepositoryPhysicalOccurrence Occurrence { get; }
+    public string? TraceId { get; }
+    public string? SpanId { get; }
+    public int ContextScopeSpanOrdinal { get; }
+    public int ContextSpanOrdinal { get; }
+    public LocalRepositoryAdmissionState AdmissionState { get; }
+}
 
 internal sealed record LocalRepositoryObservationParseResult(
     IReadOnlyList<LocalRepositoryPhysicalOccurrence> Occurrences,

@@ -70,6 +70,8 @@ internal static class LocalRepositoryObservationParser
                                 occurrence,
                                 traceId,
                                 spanId,
+                                scopeSpanOrdinal,
+                                spanOrdinal,
                                 LocalRepositoryAdmissionState.Shadowed));
                         }
                         foreach (var occurrence in spanOccurrences)
@@ -78,6 +80,8 @@ internal static class LocalRepositoryObservationParser
                                 occurrence,
                                 traceId,
                                 spanId,
+                                scopeSpanOrdinal,
+                                spanOrdinal,
                                 ToAdmissionState(occurrence.Classification)));
                         }
                     }
@@ -89,6 +93,8 @@ internal static class LocalRepositoryObservationParser
                                 occurrence,
                                 traceId,
                                 spanId,
+                                scopeSpanOrdinal,
+                                spanOrdinal,
                                 ToAdmissionState(occurrence.Classification)));
                         }
                     }
