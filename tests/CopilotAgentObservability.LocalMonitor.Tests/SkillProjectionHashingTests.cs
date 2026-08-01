@@ -68,6 +68,20 @@ public sealed class SkillProjectionHashingTests
             digest);
     }
 
+    [Theory]
+    [InlineData("{\"line\":\"a\\nb\"}", "1d88cec5ba51e84a68beaf90e86b4d09e6681b75887e466ad7f40a11dc0b187f")]
+    [InlineData("{\"line\":\"a\\r\\nb\"}", "5b3a5dc7248392002fc4011ef4f7d7c3fcc912078a19d10bd2bef156c3d9c67c")]
+    [InlineData("{\"name\":\"é\"}", "2f16b8477146a1b2ba7d6bb7cf7c9979c191cc2838a107dbf5f0d920b4cb3ba1")]
+    [InlineData("{\"name\":\"é\"}", "6a547588c4055916e090ed61467326046dd52810679d03bfb84d862a7123522e")]
+    [InlineData("﻿{}", "aa25e978046d680ef8740d837e6de5bc1e2a2dc6089dbda1012544b538d53f65")]
+    [InlineData("{}", "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a")]
+    [InlineData("{} ", "3d8e6a3f3561a8683abc16c3851110c4e607124c4c5a919cb7e78764882f37ad")]
+    [InlineData("{}\n", "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356")]
+    public void InputDigestUsesExactPersistedPayloadUtf8Bytes(string payloadJson, string expectedDigest)
+    {
+        Assert.Equal(expectedDigest, SkillProjectionHashing.InputDigest(payloadJson));
+    }
+
     private static SkillProjectionFrontierInput CreateInput(
         long sourceObservationId,
         long rawRecordId,
