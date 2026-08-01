@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -8,6 +9,18 @@ internal static class SessionSchemaV11Validator
     private const string ValidationError = "Unsupported incomplete Session schema version 11.";
     private static readonly object ExpectedSchemasLock = new();
     private static readonly Dictionary<int, ExpectedSchemas> ExpectedSchemasByVersion = new();
+
+    private static readonly IReadOnlyList<string> CurrentV13ProfileFingerprintValues = Array.AsReadOnly<string>(
+    [
+        "f30df9a68497a7ec0ee31a690bde064a3743b4324739d877fb6eec9c3449a75b",
+        "c37043235a1fe454bfcca93d5eec7f7a578d3083533e5a8c99c1c5eeb8d5aa89",
+        "24fe01f033f440919761461a24c731cfdc4ea602fec762f0c390ac5cb8a4d4d4",
+        "a214a7033922e531722618f88e4f3cef76fdcd0c214d1a902d62db67b38d50b8",
+        "78bca7ae6c9a3af05fb578daae7acf15a2a478f1ade8848bf88f61a4b6e20d6c",
+    ]);
+    private static readonly IReadOnlySet<string> CurrentV13ProfileFingerprintSet = new HashSet<string>(
+        CurrentV13ProfileFingerprintValues,
+        StringComparer.Ordinal);
 
     private static readonly string[] ReservedPrefixes =
     [
@@ -52,6 +65,49 @@ internal static class SessionSchemaV11Validator
             var actual = ReadProfile(connection, transaction, expected.TableNames);
             return actual is not null
                 && expected.Profiles.Count(profile => ProfileEquals(profile, actual)) == 1;
+        }
+        catch (SqliteException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (InvalidCastException)
+        {
+            return false;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    internal static IReadOnlyList<string> CurrentV13ProfileFingerprints => CurrentV13ProfileFingerprintValues;
+
+    internal static bool IsCurrentV13SchemaValidSelectOnly(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        try
+        {
+            var tableNames = DiscoverCurrentV13TableNames(connection, transaction);
+            if (tableNames is null
+                || !HasExactSessionVersionRow(connection, transaction, expectedVersion: 13))
+            {
+                return false;
+            }
+
+            var actual = ReadProfile(connection, transaction, tableNames);
+            return actual is not null
+                && CurrentV13ProfileFingerprintSet.Contains(Fingerprint(actual));
         }
         catch (SqliteException)
         {
@@ -481,6 +537,64 @@ internal static class SessionSchemaV11Validator
             name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsCurrentV13OwnedTableName(string name) =>
+        name.Equals("schema_version", StringComparison.Ordinal)
+        || name.Equals("proposal_applies", StringComparison.OrdinalIgnoreCase)
+        || IsReservedName(name);
+
+    private static IReadOnlySet<string>? DiscoverCurrentV13TableNames(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        var objects = new List<(string Type, string Name, string Table)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%';";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                objects.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+        }
+
+        var tableNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (type, name, _) in objects)
+        {
+            if (name.StartsWith("session_repository_", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (IsCurrentV13OwnedTableName(name)
+                && type.Equals("table", StringComparison.Ordinal))
+            {
+                if (!tableNames.Add(name))
+                {
+                    return null;
+                }
+            }
+        }
+
+        foreach (var (type, name, table) in objects)
+        {
+            if (name.StartsWith("session_repository_", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (IsCurrentV13OwnedTableName(name)
+                && !(type is "index" or "trigger" && tableNames.Contains(table)))
+            {
+                if (!type.Equals("table", StringComparison.Ordinal) || !tableNames.Contains(name))
+                    return null;
+            }
+            if (tableNames.Contains(table) && type is not ("table" or "index" or "trigger"))
+            {
+                return null;
+            }
+        }
+        return tableNames;
+    }
+
     private static bool HasExactSessionVersionRow(
         SqliteConnection connection,
         SqliteTransaction? transaction,
@@ -701,6 +815,143 @@ internal static class SessionSchemaV11Validator
             result.Add(reader.GetString(0), reader.GetString(1));
         }
         return result;
+    }
+
+    private static string Fingerprint(DatabaseProfile profile)
+    {
+        var writer = new ProfileWriter();
+        WriteString(writer, "session-schema-profile\0v1\0");
+        WriteInt32(writer, profile.Tables.Count);
+        foreach (var (name, table) in profile.Tables.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            WriteString(writer, name);
+            WriteTable(writer, table);
+        }
+        return Convert.ToHexString(SHA256.HashData(writer.ToArray())).ToLowerInvariant();
+    }
+
+    private static void WriteTable(ProfileWriter writer, TableShape table)
+    {
+        WriteString(writer, table.TableList.Type);
+        WriteInt32(writer, table.TableList.ColumnCount);
+        WriteInt32(writer, table.TableList.WithoutRowId);
+        WriteInt32(writer, table.TableList.Strict);
+        WriteCollection(writer, table.Columns, WriteColumn);
+        WriteString(writer, table.Sql);
+        WriteMultiset(writer, table.Indexes, IndexBytes);
+        WriteCollection(writer, table.ForeignKeys, WriteForeignKey);
+        WriteMultiset(writer, table.Triggers, TriggerBytes);
+    }
+
+    private static void WriteColumn(ProfileWriter writer, ColumnShape column)
+    {
+        WriteInt32(writer, column.ColumnId);
+        WriteString(writer, column.Name);
+        WriteString(writer, column.DeclaredType);
+        WriteInt32(writer, column.NotNull);
+        WriteString(writer, column.DefaultSql);
+        WriteInt32(writer, column.PrimaryKeyOrder);
+        WriteInt32(writer, column.Hidden);
+    }
+
+    private static void WriteIndex(ProfileWriter writer, IndexShape index)
+    {
+        WriteString(writer, index.Name);
+        WriteInt32(writer, index.Unique);
+        WriteString(writer, index.Origin);
+        WriteInt32(writer, index.Partial);
+        WriteString(writer, index.Sql);
+        WriteCollection(writer, index.Terms, WriteIndexTerm);
+    }
+
+    private static void WriteIndexTerm(ProfileWriter writer, IndexTermShape term)
+    {
+        WriteInt32(writer, term.Sequence);
+        WriteInt32(writer, term.ColumnId);
+        WriteString(writer, term.Name);
+        WriteInt32(writer, term.Descending);
+        WriteString(writer, term.Collation);
+        WriteInt32(writer, term.Key);
+    }
+
+    private static void WriteForeignKey(ProfileWriter writer, ForeignKeyShape foreignKey)
+    {
+        WriteInt32(writer, foreignKey.Id);
+        WriteInt32(writer, foreignKey.Sequence);
+        WriteString(writer, foreignKey.Table);
+        WriteString(writer, foreignKey.From);
+        WriteString(writer, foreignKey.To);
+        WriteString(writer, foreignKey.OnUpdate);
+        WriteString(writer, foreignKey.OnDelete);
+        WriteString(writer, foreignKey.Match);
+    }
+
+    private static void WriteTrigger(ProfileWriter writer, TriggerShape trigger)
+    {
+        WriteString(writer, trigger.Name);
+        WriteString(writer, trigger.Sql);
+    }
+
+    private static byte[] IndexBytes(IndexShape index) => EncodeRecord(hash => WriteIndex(hash, index));
+
+    private static byte[] TriggerBytes(TriggerShape trigger) => EncodeRecord(hash => WriteTrigger(hash, trigger));
+
+    private static void WriteMultiset<T>(
+        ProfileWriter writer,
+        IReadOnlyList<T> values,
+        Func<T, byte[]> encode)
+    {
+        var encoded = values.Select(encode).OrderBy(value => value, ByteArrayComparer.Instance).ToArray();
+        WriteInt32(writer, encoded.Length);
+        foreach (var value in encoded)
+        {
+            WriteInt32(writer, value.Length);
+            writer.WriteRaw(value);
+        }
+    }
+
+    private static void WriteCollection<T>(
+        ProfileWriter writer,
+        IReadOnlyList<T> values,
+        Action<ProfileWriter, T> write)
+    {
+        WriteInt32(writer, values.Count);
+        foreach (var value in values)
+        {
+            var encoded = EncodeRecord(recordHash => write(recordHash, value));
+            WriteInt32(writer, encoded.Length);
+            writer.WriteRaw(encoded);
+        }
+    }
+
+    private static byte[] EncodeRecord(Action<ProfileWriter> write)
+    {
+        var writer = new ProfileWriter();
+        write(writer);
+        return writer.ToArray();
+    }
+
+    private static void WriteInt32(ProfileWriter writer, int value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        bytes[0] = (byte)(value >> 24);
+        bytes[1] = (byte)(value >> 16);
+        bytes[2] = (byte)(value >> 8);
+        bytes[3] = (byte)value;
+        writer.WriteRaw(bytes);
+    }
+
+    private static void WriteString(ProfileWriter writer, string? value)
+    {
+        if (value is null)
+        {
+            writer.WriteRaw([0]);
+            return;
+        }
+        writer.WriteRaw([1]);
+        var bytes = Encoding.UTF8.GetBytes(value);
+        WriteInt32(writer, bytes.Length);
+        writer.WriteRaw(bytes);
     }
 
     private static bool ProfileEquals(DatabaseProfile expected, DatabaseProfile actual)
@@ -950,4 +1201,26 @@ internal static class SessionSchemaV11Validator
         int OpeningParenthesis,
         int ClosingParenthesis,
         IReadOnlyList<string> Definitions);
+
+    private sealed class ProfileWriter
+    {
+        private readonly MemoryStream stream = new();
+
+        internal void WriteRaw(ReadOnlySpan<byte> value) => stream.Write(value);
+
+        internal byte[] ToArray() => stream.ToArray();
+    }
+
+    private sealed class ByteArrayComparer : IComparer<byte[]>
+    {
+        internal static ByteArrayComparer Instance { get; } = new();
+
+        public int Compare(byte[]? left, byte[]? right)
+        {
+            if (ReferenceEquals(left, right)) return 0;
+            if (left is null) return -1;
+            if (right is null) return 1;
+            return left.AsSpan().SequenceCompareTo(right);
+        }
+    }
 }

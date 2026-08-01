@@ -1,9 +1,12 @@
 using System.Globalization;
+using System.Diagnostics;
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -558,6 +561,629 @@ public sealed class SessionSchemaMigrationFixtureTests
             SqliteConnection.ClearAllPools();
             DeleteDatabaseFiles(databasePath);
         }
+    }
+
+    [Fact]
+    public void Current_v13_profile_authority_pins_exactly_five_whole_database_fingerprints()
+    {
+        var fingerprints = SessionSchemaV11Validator.CurrentV13ProfileFingerprints;
+
+        Assert.Equal(new[]
+        {
+            "f30df9a68497a7ec0ee31a690bde064a3743b4324739d877fb6eec9c3449a75b",
+            "c37043235a1fe454bfcca93d5eec7f7a578d3083533e5a8c99c1c5eeb8d5aa89",
+            "24fe01f033f440919761461a24c731cfdc4ea602fec762f0c390ac5cb8a4d4d4",
+            "a214a7033922e531722618f88e4f3cef76fdcd0c214d1a902d62db67b38d50b8",
+            "78bca7ae6c9a3af05fb578daae7acf15a2a478f1ade8848bf88f61a4b6e20d6c",
+        }, fingerprints);
+        Assert.Equal(5, fingerprints.Distinct(StringComparer.Ordinal).Count());
+        Assert.All(fingerprints, fingerprint => Assert.Matches("^[0-9a-f]{64}$", fingerprint));
+    }
+
+    [Fact]
+    public void Current_schema_seam_accepts_a_fresh_canonical_v13_database_before_initialization()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"session-schema-fresh-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            new SqliteSessionStore(databasePath).CreateSchema();
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(SupportedWholeProfileFixtures))]
+    public void Current_schema_seam_accepts_each_retained_v13_whole_profile_before_initialization(string fixtureFile)
+    {
+        var databasePath = CreateStampedCurrentFixture(fixtureFile);
+        try
+        {
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(StampedVersionElevenSemanticMutations))]
+    public void Current_schema_seam_rejects_each_semantic_mutation(string mutationName)
+    {
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
+        try
+        {
+            ApplyStampedVersionElevenMutation(databasePath, mutationName);
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+
+            Assert.False(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(WholeProfileHybrids))]
+    public void Current_schema_seam_rejects_each_per_table_whole_profile_hybrid(
+        string targetFixture,
+        string donorFixture,
+        string table)
+    {
+        var databasePath = CreateStampedCurrentFixture(targetFixture);
+        var donorPath = CreateStampedCurrentFixture(donorFixture);
+        try
+        {
+            string donorSql;
+            using (var donor = OpenReadOnly(donorPath))
+                donorSql = Scalar<string>(donor, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$id;", table);
+            RewriteTableSql(databasePath, table, current =>
+            {
+                Assert.NotEqual(CanonicalSql(current), CanonicalSql(donorSql));
+                return donorSql;
+            });
+
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+            Assert.False(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+            DeleteDatabaseFiles(donorPath);
+        }
+    }
+
+    [Fact]
+    public void Current_schema_seam_ignores_unrelated_and_catalog_namespace_objects_without_relaxing_owned_profile()
+    {
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
+        try
+        {
+            using (var setupConnection = Open(databasePath))
+                Execute(setupConnection, "CREATE TABLE monitor_test_state(value TEXT PRIMARY KEY); CREATE TABLE session_repository_catalog_probe(value TEXT PRIMARY KEY);");
+
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Fact]
+    public void Current_schema_seam_accepts_comments_and_quoted_decoys()
+    {
+        var databasePath = CreateStampedCurrentFixture("session-v10.sqlite");
+        try
+        {
+            RewriteTableSql(databasePath, "sessions", sql => ReplaceRequired(
+                sql,
+                "status TEXT NOT NULL",
+                "/* AUTOINCREMENT CHECK (status='decoy') 'quoted CHECK' */ status TEXT NOT NULL"));
+
+            using var connection = Open(databasePath);
+            using var transaction = connection.BeginTransaction();
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task Current_schema_seam_is_select_only_on_the_caller_owned_handle_in_a_cold_testhost()
+    {
+        if (Environment.GetEnvironmentVariable("CAO_SESSION_SCHEMA_COLD_CHILD") == "1")
+        {
+            if (Environment.GetEnvironmentVariable("CAO_SESSION_SCHEMA_COLD_CHILD_HANG") == "1")
+                await HoldColdChildDatabaseLockAsync(
+                    Environment.GetEnvironmentVariable("CAO_SESSION_SCHEMA_COLD_DATABASE"),
+                    Environment.GetEnvironmentVariable("CAO_SESSION_SCHEMA_COLD_READY_PATH"));
+
+            AssertCurrentSchemaColdChild(Environment.GetEnvironmentVariable("CAO_SESSION_SCHEMA_COLD_DATABASE"));
+            return;
+        }
+
+        var databasePath = Path.Combine(Path.GetTempPath(), $"session-schema-cold-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            new SqliteSessionStore(databasePath).CreateSchema();
+            var result = await RunColdChildAsync(databasePath, TimeSpan.FromSeconds(60), hangChild: false);
+            Assert.True(result.ExitCode == 0, $"Cold child failed with exit code {result.ExitCode}.{Environment.NewLine}{result.Output}{Environment.NewLine}{result.Error}");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task Cold_child_runner_kills_a_non_exiting_private_mode_child_and_releases_its_database()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"session-schema-cold-timeout-{Guid.NewGuid():N}.sqlite");
+        var readinessPath = databasePath + ".cold-ready";
+        try
+        {
+            new SqliteSessionStore(databasePath).CreateSchema();
+            SwitchCleanupFixtureToRollbackJournal(databasePath);
+
+            var exception = await Assert.ThrowsAsync<ColdChildTimeoutException>(() => RunColdChildAsync(
+                databasePath,
+                TimeSpan.FromSeconds(5),
+                hangChild: true,
+                readinessPath: readinessPath,
+                readinessTimeout: TimeSpan.FromSeconds(20)));
+
+            Assert.Contains("Cold child timed out", exception.Message, StringComparison.Ordinal);
+            Assert.True(exception.Cleanup.RootExited, exception.Cleanup.Diagnostic);
+            Assert.True(exception.Cleanup.StreamsDrained, exception.Cleanup.Diagnostic);
+            Assert.Null(exception.Cleanup.KillFailure);
+            Assert.True(exception.PreKillWriteProbe.IsBusy, $"Expected SQLITE_BUSY; actual {exception.PreKillWriteProbe}.");
+            Assert.True(exception.Cleanup.Liveness.TestHostExited, exception.Cleanup.Diagnostic);
+            AssertChildProcessExited(exception.Readiness.TestHostProcessId);
+            var postKillWriteProbe = ProbeExclusiveWrite(databasePath);
+            Assert.True(postKillWriteProbe.Succeeded, $"{exception.Cleanup.Diagnostic}; post-kill={postKillWriteProbe}");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabaseFiles(databasePath);
+            File.Delete(readinessPath);
+            File.Delete(readinessPath + ".tmp");
+            Assert.False(File.Exists(databasePath));
+        }
+    }
+
+    public static TheoryData<int> DdlAuthorizerActions => new()
+    {
+        raw.SQLITE_CREATE_INDEX,
+        raw.SQLITE_CREATE_TABLE,
+        raw.SQLITE_CREATE_TEMP_INDEX,
+        raw.SQLITE_CREATE_TEMP_TABLE,
+        raw.SQLITE_CREATE_TEMP_TRIGGER,
+        raw.SQLITE_CREATE_TEMP_VIEW,
+        raw.SQLITE_CREATE_TRIGGER,
+        raw.SQLITE_CREATE_VIEW,
+        raw.SQLITE_CREATE_VTABLE,
+        raw.SQLITE_DROP_INDEX,
+        raw.SQLITE_DROP_TABLE,
+        raw.SQLITE_DROP_TEMP_INDEX,
+        raw.SQLITE_DROP_TEMP_TABLE,
+        raw.SQLITE_DROP_TEMP_TRIGGER,
+        raw.SQLITE_DROP_TEMP_VIEW,
+        raw.SQLITE_DROP_TRIGGER,
+        raw.SQLITE_DROP_VIEW,
+        raw.SQLITE_DROP_VTABLE,
+        raw.SQLITE_ALTER_TABLE,
+        raw.SQLITE_REINDEX,
+        raw.SQLITE_ANALYZE,
+    };
+
+    [Theory]
+    [MemberData(nameof(DdlAuthorizerActions))]
+    public void Schema_validation_authorizer_denies_every_supported_ddl_action(int action) =>
+        Assert.True(IsForbiddenSchemaValidationAction(action));
+
+    private static async Task<ColdChildResult> RunColdChildAsync(
+        string databasePath,
+        TimeSpan timeout,
+        bool hangChild,
+        string? readinessPath = null,
+        TimeSpan? readinessTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        if (hangChild) ArgumentException.ThrowIfNullOrWhiteSpace(readinessPath);
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo("dotnet")
+            {
+                WorkingDirectory = FindRepositoryRoot(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            },
+        };
+        process.StartInfo.ArgumentList.Add("test");
+        process.StartInfo.ArgumentList.Add("tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj");
+        process.StartInfo.ArgumentList.Add("--no-build");
+        process.StartInfo.ArgumentList.Add("--no-restore");
+        process.StartInfo.ArgumentList.Add("--filter");
+        process.StartInfo.ArgumentList.Add($"FullyQualifiedName={typeof(SessionSchemaMigrationFixtureTests).FullName}.Current_schema_seam_is_select_only_on_the_caller_owned_handle_in_a_cold_testhost");
+        process.StartInfo.Environment["CAO_SESSION_SCHEMA_COLD_CHILD"] = "1";
+        process.StartInfo.Environment["CAO_SESSION_SCHEMA_COLD_DATABASE"] = databasePath;
+        if (hangChild)
+        {
+            process.StartInfo.Environment["CAO_SESSION_SCHEMA_COLD_CHILD_HANG"] = "1";
+        }
+        if (readinessPath is not null)
+        {
+            File.Delete(readinessPath);
+            process.StartInfo.Environment["CAO_SESSION_SCHEMA_COLD_READY_PATH"] = readinessPath;
+        }
+
+        var output = new BoundedTextCapture();
+        var error = new BoundedTextCapture();
+        Task? outputTask = null;
+        Task? errorTask = null;
+        ColdChildReadiness? readiness = null;
+        ColdChildWriteProbe? preKillWriteProbe = null;
+        ColdChildLivenessMonitor? liveness = null;
+        CancellationTokenSource? timeoutSource = null;
+        CancellationTokenSource? waitSource = null;
+        var started = false;
+        var exitAndDrainsConfirmed = false;
+        var cleanupAttempted = false;
+        try
+        {
+            started = process.Start();
+            Assert.True(started);
+            outputTask = CaptureIncrementallyAsync(process.StandardOutput, output);
+            errorTask = CaptureIncrementallyAsync(process.StandardError, error);
+
+            if (hangChild)
+            {
+                readiness = await WaitForColdChildReadinessAsync(
+                    process,
+                    readinessPath!,
+                    readinessTimeout ?? TimeSpan.FromSeconds(20),
+                    cancellationToken);
+                liveness = ColdChildLivenessMonitor.Open(process, readiness);
+                preKillWriteProbe = ProbeImmediateWrite(databasePath);
+                Assert.True(preKillWriteProbe.IsBusy, $"Expected SQLITE_BUSY from competing BEGIN IMMEDIATE; actual {preKillWriteProbe}.");
+            }
+
+            timeoutSource = new CancellationTokenSource(timeout);
+            waitSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+            await process.WaitForExitAsync(waitSource.Token);
+            await Task.WhenAll(outputTask, errorTask).WaitAsync(TimeSpan.FromSeconds(10));
+            exitAndDrainsConfirmed = true;
+            return new ColdChildResult(process.ExitCode, output.Snapshot(), error.Snapshot());
+        }
+        catch (Exception exception)
+        {
+            if (!started) throw;
+
+            cleanupAttempted = true;
+            var cleanup = await StopColdChildAndDrainAsync(process, outputTask, errorTask, output, error, databasePath, liveness);
+            var details = BuildColdChildDiagnostic(cleanup);
+            if (timeoutSource?.IsCancellationRequested == true && !cancellationToken.IsCancellationRequested && readiness is not null)
+                throw new ColdChildTimeoutException(timeout, readiness, preKillWriteProbe!, cleanup, exception);
+            if (cancellationToken.IsCancellationRequested)
+                throw new OperationCanceledException($"Cold child was cancelled.{details}", exception, cancellationToken);
+            throw new InvalidOperationException($"Cold child did not complete its lifecycle.{details}", exception);
+        }
+        finally
+        {
+            timeoutSource?.Dispose();
+            waitSource?.Dispose();
+            if (started && !exitAndDrainsConfirmed && !cleanupAttempted)
+                await StopColdChildAndDrainAsync(process, outputTask, errorTask, output, error, databasePath, liveness);
+            liveness?.Dispose();
+        }
+    }
+
+    private static async Task<ColdChildReadiness> WaitForColdChildReadinessAsync(
+        Process process,
+        string readinessPath,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        using var waitSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+        try
+        {
+            while (true)
+            {
+                waitSource.Token.ThrowIfCancellationRequested();
+                if (process.HasExited)
+                    throw new InvalidOperationException("Cold child root exited before publishing readiness.");
+                if (File.Exists(readinessPath) && TryReadColdChildReadiness(readinessPath, out var readiness))
+                {
+                    using var child = Process.GetProcessById(readiness.TestHostProcessId);
+                    if (!child.HasExited && child.StartTime.ToUniversalTime().Ticks == readiness.TestHostStartTimeUtcTicks)
+                        return readiness;
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(50), waitSource.Token);
+            }
+        }
+        catch (OperationCanceledException exception) when (timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Cold child did not publish readiness within {timeout}.", exception);
+        }
+    }
+
+    private static bool TryReadColdChildReadiness(string readinessPath, out ColdChildReadiness readiness)
+    {
+        var parts = File.ReadAllText(readinessPath).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 2
+            && int.TryParse(parts[0], CultureInfo.InvariantCulture, out var testHostProcessId)
+            && long.TryParse(parts[1], CultureInfo.InvariantCulture, out var testHostStartTimeUtcTicks))
+        {
+            readiness = new ColdChildReadiness(testHostProcessId, testHostStartTimeUtcTicks);
+            return true;
+        }
+        readiness = default!;
+        return false;
+    }
+
+    private static async Task<ColdChildCleanup> StopColdChildAndDrainAsync(
+        Process process,
+        Task? outputTask,
+        Task? errorTask,
+        BoundedTextCapture output,
+        BoundedTextCapture error,
+        string databasePath,
+        ColdChildLivenessMonitor? liveness)
+    {
+        Exception? killFailure = null;
+        Exception? exitFailure = null;
+        Exception? drainFailure = null;
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (Win32Exception exception) { killFailure = exception; }
+        catch (NotSupportedException exception) { killFailure = exception; }
+        catch (AggregateException exception) { killFailure = exception; }
+        catch (InvalidOperationException exception) { killFailure = exception; }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException and not AccessViolationException)
+        {
+            killFailure = exception;
+        }
+
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception exception)
+        {
+            exitFailure = exception;
+        }
+
+        try
+        {
+            if (outputTask is null || errorTask is null)
+                throw new InvalidOperationException("Cold child output capture did not start.");
+            await Task.WhenAll(outputTask, errorTask).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception exception)
+        {
+            drainFailure = exception;
+        }
+
+        var livenessSnapshot = liveness is null
+            ? ColdChildLivenessSnapshot.None
+            : await liveness.CaptureAfterExitAsync();
+
+        return new ColdChildCleanup(
+            SafeHasExited(process),
+            outputTask?.IsCompletedSuccessfully == true && errorTask?.IsCompletedSuccessfully == true,
+            killFailure,
+            exitFailure,
+            drainFailure,
+            CaptureDatabaseFiles(databasePath),
+            livenessSnapshot,
+            output.Snapshot(),
+            error.Snapshot());
+    }
+
+    private static bool SafeHasExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private static DatabaseFileState CaptureDatabaseFiles(string databasePath) => new(
+        CaptureDatabaseFile(databasePath),
+        CaptureDatabaseFile(databasePath + "-wal"),
+        CaptureDatabaseFile(databasePath + "-shm"));
+
+    private static DatabaseFile CaptureDatabaseFile(string path) => File.Exists(path)
+        ? new DatabaseFile(true, new FileInfo(path).Length)
+        : new DatabaseFile(false, 0);
+
+    private static async Task CaptureIncrementallyAsync(StreamReader reader, BoundedTextCapture capture)
+    {
+        var buffer = new char[1024];
+        int read;
+        while ((read = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            capture.Append(buffer.AsSpan(0, read));
+    }
+
+    private static string BuildColdChildDiagnostic(ColdChildCleanup cleanup) =>
+        $"{Environment.NewLine}cleanup: {cleanup.Diagnostic}{Environment.NewLine}stdout:{Environment.NewLine}{cleanup.Output}{Environment.NewLine}stderr:{Environment.NewLine}{cleanup.Error}";
+
+    private static async Task HoldColdChildDatabaseLockAsync(string? databasePath, string? readinessPath)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(databasePath));
+        Assert.False(string.IsNullOrWhiteSpace(readinessPath));
+        using var connection = Open(databasePath!);
+        Execute(connection, "BEGIN IMMEDIATE;");
+        try
+        {
+            WriteColdChildReadiness(readinessPath!);
+            Console.Out.WriteLine("session-schema-cold-child-ready");
+            Console.Error.WriteLine("session-schema-cold-child-ready");
+            await Task.Delay(Timeout.InfiniteTimeSpan);
+        }
+        finally
+        {
+            Execute(connection, "ROLLBACK;");
+        }
+    }
+
+    private static void WriteColdChildReadiness(string readinessPath)
+    {
+        using var current = Process.GetCurrentProcess();
+        var contents = $"{Environment.ProcessId}{Environment.NewLine}{current.StartTime.ToUniversalTime().Ticks}{Environment.NewLine}";
+        var temporaryPath = readinessPath + ".tmp";
+        File.WriteAllText(temporaryPath, contents, Encoding.UTF8);
+        File.Move(temporaryPath, readinessPath, overwrite: true);
+    }
+
+    private static void AssertChildProcessExited(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            Assert.True(process.HasExited, $"Cold child testhost {processId} is still running after cleanup.");
+        }
+        catch (ArgumentException)
+        {
+        }
+    }
+
+    private static ColdChildWriteProbe ProbeExclusiveWrite(string databasePath) => ProbeWrite(databasePath, "BEGIN EXCLUSIVE;");
+
+    private static ColdChildWriteProbe ProbeImmediateWrite(string databasePath) => ProbeWrite(databasePath, "BEGIN IMMEDIATE;");
+
+    private static void SwitchCleanupFixtureToRollbackJournal(string databasePath)
+    {
+        using var connection = Open(databasePath);
+        // Why not WAL here: this test proves tree and write-lock release, not Windows WAL crash recovery after Kill(true).
+        Assert.Equal("delete", Scalar<string>(connection, "PRAGMA journal_mode=DELETE;").ToLowerInvariant());
+    }
+
+    private static ColdChildWriteProbe ProbeWrite(string databasePath, string sql)
+    {
+        var before = CaptureDatabaseFiles(databasePath);
+        var started = Stopwatch.GetTimestamp();
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+            DefaultTimeout = 1,
+        }.ToString());
+        try
+        {
+            connection.Open();
+            Execute(connection, sql);
+            Execute(connection, "ROLLBACK;");
+            return new ColdChildWriteProbe(sql, true, null, null, before, CaptureDatabaseFiles(databasePath), Stopwatch.GetElapsedTime(started));
+        }
+        catch (SqliteException exception)
+        {
+            return new ColdChildWriteProbe(sql, false, exception.SqliteErrorCode, exception.SqliteExtendedErrorCode, before, CaptureDatabaseFiles(databasePath), Stopwatch.GetElapsedTime(started));
+        }
+    }
+
+    private static void AssertCurrentSchemaColdChild(string? databasePath)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(databasePath));
+        using var connection = Open(databasePath!);
+        using var transaction = connection.BeginTransaction();
+        var statements = new List<string>();
+        var deniedActions = new List<int>();
+        strdelegate_trace trace = (_, statement) => statements.Add(statement);
+        strdelegate_authorizer authorizer = (_, action, firstArgument, _, _, _) =>
+        {
+            if (action == raw.SQLITE_PRAGMA && IsReadOnlyProfilePragma(firstArgument)) return raw.SQLITE_OK;
+            if (!IsForbiddenSchemaValidationAction(action)) return raw.SQLITE_OK;
+            deniedActions.Add(action);
+            return raw.SQLITE_DENY;
+        };
+
+        raw.sqlite3_trace(connection.Handle, trace, null);
+        Assert.Equal(raw.SQLITE_OK, raw.sqlite3_set_authorizer(connection.Handle, authorizer, null));
+        try
+        {
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction), string.Join(",", deniedActions));
+            Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
+            Assert.NotEmpty(statements);
+            Assert.All(
+                statements.Where(statement => !statement.TrimStart().StartsWith("-- PRAGMA ", StringComparison.OrdinalIgnoreCase)),
+                statement => Assert.StartsWith("SELECT", statement.TrimStart(), StringComparison.OrdinalIgnoreCase));
+            Assert.All(
+                statements.Where(statement => statement.TrimStart().StartsWith("-- PRAGMA ", StringComparison.OrdinalIgnoreCase)),
+                statement => Assert.True(
+                    IsReadOnlyProfilePragmaTrace(statement),
+                    $"Unexpected internal SQLite trace statement: {statement}"));
+
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT 1;";
+            Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            raw.sqlite3_set_authorizer(connection.Handle, (strdelegate_authorizer?)null, null);
+            raw.sqlite3_trace(connection.Handle, (strdelegate_trace?)null, null);
+        }
+    }
+
+    private static bool IsForbiddenSchemaValidationAction(int action) => action is
+        raw.SQLITE_INSERT or raw.SQLITE_UPDATE or raw.SQLITE_DELETE
+        or raw.SQLITE_CREATE_INDEX or raw.SQLITE_CREATE_TABLE or raw.SQLITE_CREATE_TEMP_INDEX or raw.SQLITE_CREATE_TEMP_TABLE
+        or raw.SQLITE_CREATE_TEMP_TRIGGER or raw.SQLITE_CREATE_TEMP_VIEW or raw.SQLITE_CREATE_TRIGGER or raw.SQLITE_CREATE_VIEW or raw.SQLITE_CREATE_VTABLE
+        or raw.SQLITE_DROP_INDEX or raw.SQLITE_DROP_TABLE or raw.SQLITE_DROP_TEMP_INDEX or raw.SQLITE_DROP_TEMP_TABLE
+        or raw.SQLITE_DROP_TEMP_TRIGGER or raw.SQLITE_DROP_TEMP_VIEW or raw.SQLITE_DROP_TRIGGER or raw.SQLITE_DROP_VIEW or raw.SQLITE_DROP_VTABLE
+        or raw.SQLITE_ALTER_TABLE or raw.SQLITE_ATTACH or raw.SQLITE_DETACH or raw.SQLITE_PRAGMA
+        or raw.SQLITE_TRANSACTION or raw.SQLITE_SAVEPOINT or raw.SQLITE_REINDEX or raw.SQLITE_ANALYZE;
+
+    private static bool IsReadOnlyProfilePragma(string? pragma) => pragma is
+        "table_list" or "table_xinfo" or "index_list" or "index_xinfo" or "foreign_key_list";
+
+    private static bool IsReadOnlyProfilePragmaTrace(string statement)
+    {
+        var trimmed = statement.TrimStart();
+        return new[] { "table_list", "table_xinfo", "index_list", "index_xinfo", "foreign_key_list" }
+            .Any(pragma => trimmed.Equals($"-- PRAGMA {pragma}", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith($"-- PRAGMA {pragma}=", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "CopilotAgentObservability.slnx")))
+                return directory.FullName;
+        }
+        throw new InvalidOperationException("Unable to locate repository root.");
     }
 
     private static void AssertStampedVersionTenLineage(SqliteConnection connection, int sourceVersion)
@@ -1460,4 +2086,125 @@ public sealed class SessionSchemaMigrationFixtureTests
     private sealed record MigratedSnapshot(string SemanticSchema, string Rows);
     private sealed record PreflightSnapshot(long Version, string SemanticSchema, string Rows, string JournalMode, FileSnapshot Wal, FileSnapshot Shm);
     private sealed record FileSnapshot(bool Exists, long Length, string Sha256);
+    private sealed record ColdChildResult(int ExitCode, string Output, string Error);
+    private sealed record ColdChildReadiness(int TestHostProcessId, long TestHostStartTimeUtcTicks);
+    private sealed record DatabaseFile(bool Exists, long Length);
+    private sealed record DatabaseFileState(DatabaseFile Database, DatabaseFile Wal, DatabaseFile Shm);
+    private sealed record ColdChildWriteProbe(
+        string Sql,
+        bool Succeeded,
+        int? PrimaryErrorCode,
+        int? ExtendedErrorCode,
+        DatabaseFileState Before,
+        DatabaseFileState After,
+        TimeSpan Elapsed)
+    {
+        public bool IsBusy => PrimaryErrorCode == raw.SQLITE_BUSY;
+    }
+
+    private sealed record ColdChildLivenessSnapshot(
+        bool RootExited,
+        bool TestHostExited,
+        TimeSpan? ElapsedSinceTestHostExit)
+    {
+        public static readonly ColdChildLivenessSnapshot None = new(false, false, null);
+    }
+    private sealed record ColdChildCleanup(
+        bool RootExited,
+        bool StreamsDrained,
+        Exception? KillFailure,
+        Exception? ExitFailure,
+        Exception? DrainFailure,
+        DatabaseFileState Files,
+        ColdChildLivenessSnapshot Liveness,
+        string Output,
+        string Error)
+    {
+        public string Diagnostic => $"root-exited={RootExited}; streams-drained={StreamsDrained}; kill-failure={KillFailure?.GetType().Name ?? "none"}; exit-failure={ExitFailure?.GetType().Name ?? "none"}; drain-failure={DrainFailure?.GetType().Name ?? "none"}; files={Files}; liveness={Liveness}";
+    }
+
+    private sealed class ColdChildTimeoutException : TimeoutException
+    {
+        public ColdChildTimeoutException(TimeSpan timeout, ColdChildReadiness readiness, ColdChildWriteProbe preKillWriteProbe, ColdChildCleanup cleanup, Exception innerException)
+            : base($"Cold child timed out after {timeout}.{BuildColdChildDiagnostic(cleanup)}", innerException)
+        {
+            Readiness = readiness;
+            PreKillWriteProbe = preKillWriteProbe;
+            Cleanup = cleanup;
+        }
+
+        public ColdChildReadiness Readiness { get; }
+        public ColdChildWriteProbe PreKillWriteProbe { get; }
+        public ColdChildCleanup Cleanup { get; }
+    }
+
+    private sealed class ColdChildLivenessMonitor : IDisposable
+    {
+        private readonly Process root;
+        private readonly Process testHost;
+        private DateTimeOffset? testHostExitedAt;
+
+        private ColdChildLivenessMonitor(Process root, Process testHost)
+        {
+            this.root = root;
+            this.testHost = testHost;
+            testHost.EnableRaisingEvents = true;
+            testHost.Exited += (_, _) => testHostExitedAt ??= DateTimeOffset.UtcNow;
+            if (testHost.HasExited) testHostExitedAt = DateTimeOffset.UtcNow;
+        }
+
+        public static ColdChildLivenessMonitor Open(Process root, ColdChildReadiness readiness)
+        {
+            var testHost = Process.GetProcessById(readiness.TestHostProcessId);
+            Assert.Equal(readiness.TestHostStartTimeUtcTicks, testHost.StartTime.ToUniversalTime().Ticks);
+            return new ColdChildLivenessMonitor(root, testHost);
+        }
+
+        public async Task<ColdChildLivenessSnapshot> CaptureAfterExitAsync()
+        {
+            try
+            {
+                await testHost.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                testHostExitedAt ??= DateTimeOffset.UtcNow;
+            }
+            catch (Exception)
+            {
+            }
+            return new ColdChildLivenessSnapshot(
+                SafeHasExited(root),
+                SafeHasExited(testHost),
+                testHostExitedAt is null ? null : DateTimeOffset.UtcNow - testHostExitedAt.Value);
+        }
+
+        public void Dispose() => testHost.Dispose();
+    }
+
+    private sealed class BoundedTextCapture
+    {
+        private const int MaximumLength = 32 * 1024;
+        private readonly StringBuilder builder = new();
+        private readonly object sync = new();
+        private bool truncated;
+
+        public void Append(ReadOnlySpan<char> value)
+        {
+            lock (sync)
+            {
+                var remaining = MaximumLength - builder.Length;
+                if (remaining <= 0)
+                {
+                    truncated = true;
+                    return;
+                }
+                builder.Append(value[..Math.Min(value.Length, remaining)]);
+                truncated |= value.Length > remaining;
+            }
+        }
+
+        public string Snapshot()
+        {
+            lock (sync)
+                return truncated ? builder + "<truncated>" : builder.ToString();
+        }
+    }
 }

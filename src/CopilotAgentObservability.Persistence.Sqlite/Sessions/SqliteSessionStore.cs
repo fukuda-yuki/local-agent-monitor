@@ -1624,11 +1624,7 @@ public sealed class SqliteSessionStore : ISessionStore
     internal static bool IsCurrentSchemaValid(
         SqliteConnection connection,
         SqliteTransaction? transaction) =>
-        SessionSchemaV11Validator.IsValid(
-            connection,
-            transaction,
-            CreateCanonicalVersionTwelveSchema,
-            CurrentSchemaVersion);
+        SessionSchemaV11Validator.IsCurrentV13SchemaValidSelectOnly(connection, transaction);
 
     private static void ValidateExistingSchemaBeforeInitialization(SqliteConnection connection, int? version)
     {
