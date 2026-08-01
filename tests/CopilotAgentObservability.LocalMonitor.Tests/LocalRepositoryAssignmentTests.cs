@@ -20,6 +20,7 @@ public sealed class LocalRepositoryAssignmentTests
     private const string ManualAssignedFingerprint = "a6e12441dab08a4f6b5704897b94a288e99c875c475aea330e3d87b0224498f8";
     private const string ManualUnassignedFingerprint = "a5d77abeb67afa8f1f05f2b83cdff6d347b7a4e4a3014f1357c29e6b5a79d71d";
     private const string WrongManualFingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private const string DeterministicHistoryId = "01900000-0000-7000-8000-000000000901";
 
     [Fact]
     public void RevisionZeroAbsence_ResolvesUnassignedWithoutCreatingRevisionOrHistoryRows()
@@ -108,6 +109,62 @@ public sealed class LocalRepositoryAssignmentTests
                 """));
         Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_assignment_history WHERE operation_key IS NULL;"));
         LocalRepositoryCatalogValidation.Validate(fixture.Connection, transaction: null);
+    }
+
+    [Fact]
+    public void AutomaticReconcile_PersistsTheInjectedDeterministicHistoryId()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.DefineRepository(RfcByteFirstRepository, 1);
+        var context = fixture.PrepareAdmittedContext(SessionOne, RfcByteFirstRepository, 10);
+        var resolver = new LocalRepositoryAssignmentResolver(_ => DeterministicHistoryId);
+
+        using (var transaction = fixture.Connection.BeginTransaction(deferred: false))
+        {
+            var preparation = resolver.PrepareAutomatic(
+                fixture.Connection,
+                transaction,
+                context.RawRecordId,
+                [SessionOne],
+                [context.Assignment],
+                fixture.ReconciliationFingerprint,
+                DateTimeOffset.Parse(Later, System.Globalization.CultureInfo.InvariantCulture));
+            fixture.PublishRepository(RfcByteFirstRepository, transaction);
+            fixture.PublishAdmittedContext(context, transaction);
+            resolver.ApplyAutomatic(fixture.Connection, transaction, preparation);
+            transaction.Commit();
+        }
+
+        Assert.Equal(DeterministicHistoryId, fixture.ScalarText("SELECT history_id FROM session_repository_assignment_history;"));
+    }
+
+    [Fact]
+    public void ApplyAutomatic_RejectsANonUuidV7InjectedHistoryIdBeforeAssignmentWrites()
+    {
+        using var fixture = new CatalogFixture();
+        fixture.CreateSession(SessionOne);
+        fixture.DefineRepository(RfcByteFirstRepository, 1);
+        var context = fixture.PrepareAdmittedContext(SessionOne, RfcByteFirstRepository, 10);
+        var resolver = new LocalRepositoryAssignmentResolver(_ => "01900000-0000-4000-8000-000000000901");
+
+        using var transaction = fixture.Connection.BeginTransaction(deferred: false);
+        var preparation = resolver.PrepareAutomatic(
+            fixture.Connection,
+            transaction,
+            context.RawRecordId,
+            [SessionOne],
+            [context.Assignment],
+            fixture.ReconciliationFingerprint,
+            DateTimeOffset.Parse(Later, System.Globalization.CultureInfo.InvariantCulture));
+        fixture.PublishRepository(RfcByteFirstRepository, transaction);
+        fixture.PublishAdmittedContext(context, transaction);
+
+        var exception = Record.Exception(() => resolver.ApplyAutomatic(fixture.Connection, transaction, preparation));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_assignment_revisions;"));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_assignment_history;"));
+        Assert.IsType<InvalidOperationException>(exception);
+        transaction.Rollback();
     }
 
     [Fact]

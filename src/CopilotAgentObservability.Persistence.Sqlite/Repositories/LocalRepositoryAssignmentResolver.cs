@@ -53,6 +53,18 @@ internal sealed class LocalRepositoryAssignmentResolver
 {
     private const int MaximumCandidateCount = 128;
     private static readonly object PreparationSeal = new();
+    private readonly Func<DateTimeOffset, string> historyIdFactory;
+
+    internal LocalRepositoryAssignmentResolver()
+        : this(static occurredAt => Guid.CreateVersion7(occurredAt).ToString("D", CultureInfo.InvariantCulture))
+    {
+    }
+
+    internal LocalRepositoryAssignmentResolver(Func<DateTimeOffset, string> historyIdFactory)
+    {
+        ArgumentNullException.ThrowIfNull(historyIdFactory);
+        this.historyIdFactory = historyIdFactory;
+    }
 
     internal AutomaticPreparation PrepareAutomatic(
         SqliteConnection connection,
@@ -277,8 +289,18 @@ internal sealed class LocalRepositoryAssignmentResolver
             });
         }
 
+        var pendingWrites = new List<(LocalRepositoryPreparedAssignmentResolution Resolution, string HistoryId)>();
         foreach (var resolution in verifiedResolutions.Where(static item => item.RevisionChanged))
         {
+            var historyId = historyIdFactory(prepared.OccurredAt);
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(historyId))
+                throw new InvalidOperationException("local_repository_assignment_history_id_invalid");
+            pendingWrites.Add((resolution, historyId));
+        }
+
+        foreach (var pendingWrite in pendingWrites)
+        {
+            var resolution = pendingWrite.Resolution;
             var nextRevision = checked(resolution.Revision + 1);
             AdvanceRevision(connection, transaction, resolution.SessionId, resolution.Revision, nextRevision, prepared.OccurredAtText);
             AppendHistory(
@@ -286,8 +308,8 @@ internal sealed class LocalRepositoryAssignmentResolver
                 transaction,
                 resolution,
                 nextRevision,
+                pendingWrite.HistoryId,
                 prepared.ReconciliationFingerprint,
-                prepared.OccurredAt,
                 prepared.OccurredAtText);
         }
 
@@ -655,8 +677,8 @@ internal sealed class LocalRepositoryAssignmentResolver
         SqliteTransaction transaction,
         LocalRepositoryPreparedAssignmentResolution resolution,
         long nextRevision,
+        string historyId,
         string reconciliationFingerprint,
-        DateTimeOffset occurredAt,
         string occurredAtText)
     {
         using var command = connection.CreateCommand();
@@ -675,7 +697,7 @@ internal sealed class LocalRepositoryAssignmentResolver
                 $previous_repository_id,$new_repository_id,'source_reconciliation',NULL,
                 $reconciliation_fingerprint,$occurred_at);
             """;
-        command.Parameters.AddWithValue("$history_id", Guid.CreateVersion7(occurredAt).ToString("D", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$history_id", historyId);
         command.Parameters.AddWithValue("$session_id", resolution.SessionId);
         command.Parameters.AddWithValue("$previous_revision", resolution.Revision);
         command.Parameters.AddWithValue("$new_revision", nextRevision);
