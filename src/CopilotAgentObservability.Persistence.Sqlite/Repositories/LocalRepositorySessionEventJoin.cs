@@ -194,12 +194,8 @@ internal static class LocalRepositorySessionEventJoin
             throw new ArgumentException("The transaction must be active on the supplied open connection.", nameof(transaction));
     }
 
-    private static bool IsMalformedSchemaRead(Exception exception) => exception switch
-    {
-        InvalidCastException or FormatException or OverflowException => true,
-        SqliteException sqlite => sqlite.SqliteErrorCode is 1 or 11 or 20 or 26,
-        _ => false,
-    };
+    private static bool IsMalformedSchemaRead(Exception exception) =>
+        exception is InvalidCastException or FormatException or OverflowException;
 
     private static LocalRepositoryCaptureProvenanceResult SchemaViolation() =>
         new(LocalRepositoryCaptureProvenanceStatus.CatalogSchemaViolation, null);

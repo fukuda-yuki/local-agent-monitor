@@ -107,6 +107,47 @@ public sealed class LocalRepositorySessionJoinTests
     }
 
     [Fact]
+    public void CaptureProvenance_SqliteExecutionErrorEscapesForWorkerRetry()
+    {
+        using var database = new TestDatabase();
+        CreateMinimalSchemas(database.Path);
+        using var connection = Open(database.Path);
+        Execute(connection, "DROP TABLE source_schema_observations;");
+        using var transaction = connection.BeginTransaction();
+
+        var exception = Assert.Throws<SqliteException>(() =>
+            LocalRepositorySessionEventJoin.ReadCaptureProvenance(
+                connection,
+                transaction,
+                RawRecordId,
+                Digest));
+
+        Assert.Equal(1, exception.SqliteErrorCode);
+    }
+
+    [Fact]
+    public void CaptureProvenance_MalformedSelectedScalarRemainsCatalogSchemaViolation()
+    {
+        using var database = new TestDatabase();
+        CreateMinimalSchemas(database.Path);
+        using var connection = Open(database.Path);
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, $"""
+            INSERT INTO source_schema_observations VALUES(
+                {RawRecordId},'payload_sha256','{Digest}','github-copilot-cli',42,'{ObservedAt}');
+            """);
+
+        var result = LocalRepositorySessionEventJoin.ReadCaptureProvenance(
+            connection,
+            transaction,
+            RawRecordId,
+            Digest);
+
+        Assert.Equal(LocalRepositoryCaptureProvenanceStatus.CatalogSchemaViolation, result.Status);
+        Assert.Null(result.Provenance);
+    }
+
+    [Fact]
     public void CaptureProvenance_DuplicateExactRowsAreCatalogSchemaViolation()
     {
         using var database = new TestDatabase();
@@ -252,6 +293,26 @@ public sealed class LocalRepositorySessionJoinTests
         Assert.Equal(System.Data.ConnectionState.Open, connection.State);
         Assert.Same(connection, transaction.Connection);
         SetQueryOnly(connection, enabled: false);
+    }
+
+    [Fact]
+    public void ResolveContext_SqliteExecutionErrorEscapesForWorkerRetry()
+    {
+        using var database = new TestDatabase();
+        CreateMinimalSchemas(database.Path);
+        using var connection = Open(database.Path);
+        Execute(connection, "DROP TABLE session_events;");
+        using var transaction = connection.BeginTransaction();
+
+        var exception = Assert.Throws<SqliteException>(() =>
+            LocalRepositorySessionEventJoin.ResolveContext(
+                connection,
+                transaction,
+                Provenance("github-copilot-cli"),
+                TraceId,
+                SpanId));
+
+        Assert.Equal(1, exception.SqliteErrorCode);
     }
 
     [Fact]
