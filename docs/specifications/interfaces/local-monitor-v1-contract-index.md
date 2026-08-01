@@ -9,7 +9,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Product definition | `docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md` | — |
 | IA/routes/layout/states | `docs/specifications/interfaces/local-monitor-v1-ia.md`, #132 | #135–#140, #145–#146, #167 |
 | Source claims/missing semantics | #129 | #137 and feature owners |
-| Repository catalog/locator/assignment | [`local-repository-catalog.md`](local-repository-catalog.md), #155 | #156 |
+| Repository catalog/locator/assignment | [`local-repository-catalog.md`](local-repository-catalog.md), [DC156-12–19 executable closure](local-repository-catalog-executable.md), #155 | #156 |
 | Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
 | Skill projection validity/re-run | [`skill-projection.md`](../layers/skill-projection.md), [exact-v10 input evidence](../contracts/skill-projection-v1-deleted-before-digest.md), #154 | #154 |
 | Skill v1 correction/v2 transport/body/path snapshot/current file | [`skill-invocation-snapshot.md`](skill-invocation-snapshot.md), #119/#157/#158 | #158 after gate closure |
@@ -52,15 +52,22 @@ telemetry fixes / #154
 
 ## Rules
 
-- Only the Repository locator parser/canonicalization/fingerprint slice is
-  `READY`; full #156 remains `BLOCKED_DECISION` under the explicit gaps in the
-  Repository catalog contract.
+- The complete `local_repository_catalog:1` contract is `READY` under base
+  DC156-01–11 plus executable closure DC156-12–19. The closure supersedes the
+  base document's temporary blocker/status section and fixes automatic exact
+  creation/binding, source/context framing, exact Session Event join,
+  automatic revision history, fixed-frontier queue/recovery, complete wire
+  bytes/bounds, opaque raw-reference durability and the single SQLite snapshot
+  composition seam.
 - #134 alone maps and serializes
-  `GET /api/local-monitor/v1/repositories`. #156 owns its five gated
+  `GET /api/local-monitor/v1/repositories`. #156 owns its five
   management/action routes, not the composite Repository-card read.
 - #156, #161 and #134 use one `ILocalRepositoryScopeSnapshotService`; #161
   composes archive eligibility and #161/#134 add no direct catalog SQL or
   parallel reader.
+- Repository automatic creation uses exact admitted GitHub locator fingerprints
+  only. It never uses name/path/CWD/prompt/time/cardinality, and an archived
+  exact owner is reused without restore or duplication.
 - Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE are never widened.
 - Frozen Session ingest v1 supports `skill.started | skill.completed`;
   `skill.invoked` is unsupported and no other v1 shape, enum, limit, status,
