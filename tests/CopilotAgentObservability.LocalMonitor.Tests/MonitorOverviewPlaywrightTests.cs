@@ -5,23 +5,20 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 /// <summary>
 /// Sprint18 overview page (§6.1): KPI cards, period toggle → sanitized
-/// /api/monitor/overview refetch, TOP5 / recent lists, and the raw/sanitized
-/// prompt-label split (prompt labels render only in the raw-default posture and
-/// client JS never calls the prompt-label route under --sanitized-only).
+/// /api/monitor/overview refetch, TOP5 / recent lists, and raw-default prompt
+/// labels.
 /// </summary>
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorOverviewPlaywrightTests
 {
     private static readonly TimeSpan EventBarrierTimeout = TimeSpan.FromSeconds(10);
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Overview_PeriodToggleAndLists_RespectSanitizedBoundary(bool sanitizedOnly)
+    [Fact]
+    public async Task Overview_PeriodToggleAndLists_UseRawDefaultPromptLabels()
     {
         using var temp = new MonitorTempDirectory();
         SeedRecentTrace(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -75,19 +72,11 @@ public class MonitorOverviewPlaywrightTests
         await page.GotoAsync($"{host.Url}/", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
         // Server-rendered structure: 4 KPI cards, panels, and the recent list with
-        // the prompt label (raw-default) or the shortened TraceId (sanitized).
+        // the raw-default prompt label.
         await Expect(page.Locator(".kpi-grid .kpi-card")).ToHaveCountAsync(4);
         await Expect(page.Locator("#recent-traces .recent-trace-row")).ToHaveCountAsync(1);
         var recentText = await page.Locator("#recent-traces").InnerTextAsync();
-        if (sanitizedOnly)
-        {
-            Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", recentText);
-            Assert.Contains("trace-ov", recentText);
-        }
-        else
-        {
-            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", recentText);
-        }
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", recentText);
 
         // The error KPI links to the error-filtered trace list.
         var errorHref = await page.Locator("#kpi-error-card").GetAttributeAsync("href");
@@ -184,20 +173,9 @@ public class MonitorOverviewPlaywrightTests
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/overview?period=7d", StringComparison.Ordinal));
         Assert.Contains(requestedUrls, url => url.Contains("/api/monitor/trace-list?period=7d", StringComparison.Ordinal));
 
-        if (sanitizedOnly)
-        {
-            // Sanitized context: no prompt content and no raw-bearing fetches.
-            Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", topText);
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("prompt-label", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", await page.ContentAsync());
-        }
-        else
-        {
-            // Raw-default: the client labels TOP5 rows via the prompt-label route.
-            Assert.Contains("SECRET_PROMPT_TEXT_MARKER", topText);
-            Assert.Contains(requestedUrls, url => url.Contains("/traces/trace-ov/prompt-label", StringComparison.Ordinal));
-        }
+        // Raw-default: the client labels TOP5 rows via the prompt-label route.
+        Assert.Contains("SECRET_PROMPT_TEXT_MARKER", topText);
+        Assert.Contains(requestedUrls, url => url.Contains("/traces/trace-ov/prompt-label", StringComparison.Ordinal));
     }
 
     private static async Task<T> WaitForEventAsync<T>(Task<T> eventTask, string timeoutDiagnostic)

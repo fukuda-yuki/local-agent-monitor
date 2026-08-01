@@ -282,15 +282,21 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
     private readonly Func<ValueTask> release;
     private int released;
 
-    internal RetentionReadLease(T value, RetentionRevisionFence revisionFence, Func<ValueTask> release)
+    internal RetentionReadLease(
+        T value,
+        RetentionRevisionFence revisionFence,
+        Func<ValueTask> release,
+        RetentionReadGrant? grant = null)
     {
         Value = value;
         RevisionFence = revisionFence;
         this.release = release;
+        Grant = grant;
     }
 
     internal T Value { get; }
     internal RetentionRevisionFence RevisionFence { get; }
+    internal RetentionReadGrant? Grant { get; }
 
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }
@@ -300,14 +306,20 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
     private readonly Func<ValueTask> release;
     private int released;
 
-    internal RetentionBatchReadLease(T value, RetentionRevisionFence revisionFence, Func<ValueTask> release)
+    internal RetentionBatchReadLease(
+        T value,
+        RetentionRevisionFence revisionFence,
+        Func<ValueTask> release,
+        IReadOnlyList<RetentionReadGrant>? grants = null)
     {
         Value = value;
         RevisionFence = revisionFence;
         this.release = release;
+        Grants = grants ?? [];
     }
 
     internal T Value { get; }
     internal RetentionRevisionFence RevisionFence { get; }
+    internal IReadOnlyList<RetentionReadGrant> Grants { get; }
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }

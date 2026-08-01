@@ -21,6 +21,7 @@ internal sealed class ProjectionWorker : BackgroundService
 
     private readonly IMonitorProjectionStore store;
     private readonly ISourceCompatibilityStore? compatibilityStore;
+    private readonly SkillProjectionWorker? skillProjectionWorker;
     private readonly MonitorHealthState health;
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan pollInterval;
@@ -32,7 +33,8 @@ internal sealed class ProjectionWorker : BackgroundService
         ISourceCompatibilityStore? compatibilityStore = null,
         TimeProvider? timeProvider = null,
         TimeSpan? pollInterval = null,
-        MonitorEventBroker? eventBroker = null)
+        MonitorEventBroker? eventBroker = null,
+        SkillProjectionWorker? skillProjectionWorker = null)
     {
         this.store = store;
         this.compatibilityStore = compatibilityStore;
@@ -40,6 +42,7 @@ internal sealed class ProjectionWorker : BackgroundService
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.pollInterval = pollInterval ?? TimeSpan.FromSeconds(1);
         this.eventBroker = eventBroker;
+        this.skillProjectionWorker = skillProjectionWorker;
     }
 
     public override async Task StartAsync(CancellationToken cancellationToken)
@@ -98,6 +101,16 @@ internal sealed class ProjectionWorker : BackgroundService
 
         try
         {
+            var anyProjected =
+                compatibilityStore?.ReconcileProjectedTraceSourceAttribution() == true;
+            if (skillProjectionWorker is not null)
+            {
+                anyProjected |= await skillProjectionWorker.RunNextAsync(
+                    timeProvider.GetUtcNow(),
+                    cancellationToken).ConfigureAwait(false)
+                    == SkillProjectionWorkOutcome.Published;
+            }
+
             var recordsResult = await store.ListUnprocessedForProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
             if (recordsResult.Disposition == RetentionReadDisposition.Busy)
             {
@@ -105,10 +118,12 @@ internal sealed class ProjectionWorker : BackgroundService
             }
             if (recordsResult.Lease is null)
             {
+                if (anyProjected)
+                {
+                    eventBroker?.PublishProjectionChanged();
+                }
                 return;
             }
-            var anyProjected = false;
-            var compatibilityObservations = new Dictionary<long, SourceCompatibilityRow?>();
             await using (var recordsLease = recordsResult.Lease)
             {
                 var records = recordsLease.Value;
@@ -123,7 +138,7 @@ internal sealed class ProjectionWorker : BackgroundService
                     try
                     {
                         var rawRecordId = record.Id!.Value;
-                        compatibilityObservations[rawRecordId] = ValidateProjectionDisposition(rawRecordId);
+                        _ = ValidateProjectionDisposition(rawRecordId);
                         var disposition = store.GetProjectionDisposition(rawRecordId);
                         if (disposition is not null)
                         {
@@ -134,7 +149,18 @@ internal sealed class ProjectionWorker : BackgroundService
                             }
                             ownedProjectionRevision = disposition.Revision + 1;
                         }
-                        var projection = MonitorProjectionBuilder.Build(CreateProjectionInput(record));
+                        var projectionInput = CreateProjectionInput(record);
+                        var projection = compatibilityStore is null
+                            ? MonitorProjectionBuilder.Build(projectionInput)
+                            : MonitorProjectionBuilder.Build(
+                                projectionInput,
+                                traceId =>
+                                {
+                                    var resolution = compatibilityStore.GetTraceSourceResolution(traceId);
+                                    return resolution?.State == TraceSourceResolutionState.Resolved
+                                        ? resolution.SourceFamily
+                                        : null;
+                                });
                         var projected = ownedProjectionRevision is { } expectedRevision
                             ? store.ApplyProjection(
                                 rawRecordId,
@@ -175,7 +201,6 @@ internal sealed class ProjectionWorker : BackgroundService
                 var status = store.GetProjectionStatus();
                 health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
             }
-
             // Phase 2: span projection (runs after trace projection in the same pass).
             var spanRecordsResult = await store.ListUnprocessedForSpanProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
             if (spanRecordsResult.Disposition == RetentionReadDisposition.Busy)
@@ -184,6 +209,10 @@ internal sealed class ProjectionWorker : BackgroundService
             }
             if (spanRecordsResult.Lease is null)
             {
+                if (anyProjected)
+                {
+                    eventBroker?.PublishProjectionChanged();
+                }
                 return;
             }
             await using var spanRecordsLease = spanRecordsResult.Lease;
@@ -199,15 +228,9 @@ internal sealed class ProjectionWorker : BackgroundService
                 {
                     var projectionInput = CreateProjectionInput(record);
                     var spans = MonitorSpanProjectionBuilder.Build(projectionInput);
-                    var skills = BuildSkillProjection(
-                        GetCompatibilityObservation(
-                            record.Id!.Value,
-                            compatibilityObservations),
-                        projectionInput);
                     var newlyProjected = store.ApplySpanProjection(
                         record.Id!.Value,
                         spans,
-                        skills,
                         timeProvider.GetUtcNow());
                     if (newlyProjected)
                     {
@@ -279,36 +302,4 @@ internal sealed class ProjectionWorker : BackgroundService
     private static RawTelemetryRecord CreateProjectionInput(RawTelemetryRecord record)
         => record with { PayloadJson = OtlpJsonRecognizedPayloadBuilder.Build(record.PayloadJson) };
 
-    private SourceCompatibilityRow? GetCompatibilityObservation(
-        long rawRecordId,
-        IDictionary<long, SourceCompatibilityRow?> observations)
-    {
-        if (!observations.TryGetValue(rawRecordId, out var observation))
-        {
-            observation = compatibilityStore?.GetByRawRecordId(rawRecordId);
-            observations.Add(rawRecordId, observation);
-        }
-        return observation;
-    }
-
-    private MonitorSkillProjectionBatch BuildSkillProjection(
-        SourceCompatibilityRow? observation,
-        RawTelemetryRecord record)
-    {
-        if (observation is null)
-        {
-            return MonitorSkillProjectionBatch.Empty;
-        }
-
-        return MonitorSkillProjectionBuilder.Build(
-            record,
-            observation.SourceSurface,
-            traceId =>
-            {
-                var resolution = compatibilityStore!.GetTraceSourceVersionResolution(traceId);
-                return resolution is null
-                    ? null
-                    : (resolution.State, resolution.SourceApplicationVersion);
-            });
-    }
 }

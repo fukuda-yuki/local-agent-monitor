@@ -86,6 +86,7 @@ internal enum ClaudeSourceCompatibilityClassification
 
 internal enum ClaudeProjectionEvidence
 {
+    Unknown,
     NotStarted,
     Pending,
     Failed,

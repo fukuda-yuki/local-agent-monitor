@@ -43,6 +43,40 @@ internal static class MonitorHost
 
     private static readonly TimeSpan DefaultCommitTimeout = TimeSpan.FromSeconds(5);
     private static readonly JsonSerializerOptions CaseInsensitiveJson = new(JsonSerializerDefaults.Web);
+    private static readonly HashSet<string> HumanPagePaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/",
+        "/alerts",
+        "/backup-restore",
+        "/costs",
+        "/diagnostics",
+        "/historical-analysis",
+        "/historical-import",
+        "/ingestions",
+        "/sanitized-import",
+    };
+    private static readonly HashSet<string> HumanStaticAssetPaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/alert-center.js",
+        "/costs.js",
+        "/monitor-cache-panel.js",
+        "/monitor-diagnostics.js",
+        "/monitor-drawer.js",
+        "/monitor-error-mode.js",
+        "/monitor-flow.js",
+        "/monitor-historical-analysis.js",
+        "/monitor-historical-import.js",
+        "/monitor-inspector.js",
+        "/monitor-overview.js",
+        "/monitor-retention.js",
+        "/monitor-sanitized-import.js",
+        "/monitor-shell.js",
+        "/monitor-span-detail.js",
+        "/monitor-tracelist.js",
+        "/monitor-waterfall.js",
+        "/monitor.css",
+        "/monitor.js",
+    };
 
     public static WebApplication Build(MonitorOptions options)
     {
@@ -100,10 +134,13 @@ internal static class MonitorHost
 
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls(options.Url);
-        // Serve wwwroot/monitor.css and wwwroot/monitor.js from the static web
-        // assets manifest. CreateBuilder only auto-loads it in Development, but the
-        // monitor runs in the default Production environment, so load it explicitly.
-        builder.WebHost.UseStaticWebAssets();
+        if (!options.SanitizedOnly)
+        {
+            // Serve wwwroot/monitor.css and wwwroot/monitor.js from the static web
+            // assets manifest. CreateBuilder only auto-loads it in Development, but the
+            // monitor runs in the default Production environment, so load it explicitly.
+            builder.WebHost.UseStaticWebAssets();
+        }
         builder.WebHost.ConfigureKestrel(kestrelOptions =>
         {
             kestrelOptions.Limits.MaxRequestBodySize = options.MaxRequestBodyBytes;
@@ -119,7 +156,10 @@ internal static class MonitorHost
         var sourceFingerprintRegistry = testOptions?.SourceFingerprintRegistry
             ?? VerifiedSourceFingerprintRegistry.Create([], [], []);
         var eventBroker = new MonitorEventBroker();
-        builder.Services.AddRazorPages();
+        if (!options.SanitizedOnly)
+        {
+            builder.Services.AddRazorPages();
+        }
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<IPricingCatalogProvider>(pricingCatalogProvider);
         builder.Services.AddSingleton(health);
@@ -155,10 +195,22 @@ internal static class MonitorHost
             builder.Services.AddHostedService(_ => worker);
         }
 
+        var projectionRawStore = new RawTelemetryStore(
+            options.DatabasePath,
+            retentionContext,
+            timeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
         var projectionStore = testOptions?.ProjectionStore
-            ?? new RawTelemetryStoreProjectionStore(
-                new RawTelemetryStore(options.DatabasePath, retentionContext, timeProvider, RawTelemetryStoreConnectionOptions.MonitorWriter));
+            ?? new RawTelemetryStoreProjectionStore(projectionRawStore);
         builder.Services.AddSingleton(projectionStore);
+        var skillProjectionStore = new SqliteSkillProjectionStore(
+            options.DatabasePath,
+            projectionRawStore);
+        var skillProjectionWorker = new SkillProjectionWorker(
+            skillProjectionStore,
+            timeProvider: timeProvider);
+        builder.Services.AddSingleton(skillProjectionStore);
+        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath));
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
         var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);
@@ -237,7 +289,8 @@ internal static class MonitorHost
                 health,
                 compatibilityStore,
                 eventBroker: eventBroker,
-                pollInterval: testOptions?.ProjectionPollInterval);
+                pollInterval: testOptions?.ProjectionPollInterval,
+                skillProjectionWorker: skillProjectionWorker);
             builder.Services.AddHostedService(_ => projectionWorker);
         }
         if (testOptions?.StartSessionOtelEnrichment ?? true)
@@ -464,12 +517,6 @@ internal static class MonitorHost
         });
         app.Use(async (context, next) =>
         {
-            if (options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path))
-            {
-                context.Response.StatusCode = StatusCodes.Status404NotFound;
-                return;
-            }
-
             var retentionPath = RetentionMutationRoutes.IsRetentionPath(context.Request.Path);
             var sanitizedExportPath = SanitizedExportRoutes.IsPath(context.Request.Path);
             var rawReplayPath = RawReplayRoutes.IsPath(context.Request.Path);
@@ -478,7 +525,7 @@ internal static class MonitorHost
             var alertCenterPath = AlertCenterRoutes.IsPath(context.Request.Path);
             var sanitizedImportPath = SanitizedImportRoutes.IsPath(context.Request.Path);
             var historicalAnalysisPath = HistoricalAnalysisRoutes.IsPath(context.Request.Path);
-            var runtimeBackupPath = !options.SanitizedOnly && RuntimeBackupRoutes.IsPath(context.Request.Path);
+            var runtimeBackupPath = RuntimeBackupRoutes.IsPath(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath)
             {
@@ -544,13 +591,18 @@ internal static class MonitorHost
                 return;
             }
 
+            if (options.SanitizedOnly
+                && (RuntimeBackupRoutes.IsPath(context.Request.Path)
+                    || IsKnownHumanRequest(context.Request)))
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
             await next();
         });
-        app.UseStaticFiles();
-        app.MapRazorPages();
         DoctorRoutes.Map(app, doctorApplication);
-        DoctorUiRoutes.Map(app, doctorUiApplication);
-        DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
@@ -565,7 +617,12 @@ internal static class MonitorHost
         SanitizedImportRoutes.Map(app, sanitizedImportStore);
         if (!options.SanitizedOnly)
         {
+            app.UseStaticFiles();
+            app.MapRazorPages();
+            DoctorUiRoutes.Map(app, doctorUiApplication);
+            DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
             RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
+            SessionRoutes.MapRawContentRoute(app, sessionStore);
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
@@ -587,9 +644,8 @@ internal static class MonitorHost
             context.Response.ContentType = JsonContentType;
             await context.Response.WriteAsync(MonitorReadinessJson.Serialize(readiness));
         });
-        SessionRoutes.Map(
+        SessionRoutes.MapMachineRoutes(
             app,
-            options,
             sessionEventQueue,
             sessionStore,
             proposalApplyService,
@@ -1322,7 +1378,8 @@ internal static class MonitorHost
                     decodedPayload.PayloadJson,
                     metadata.SourceSurface,
                     sourceFingerprintRegistry);
-                var observation = SourceObservationBatchDraft.Create(
+                var traceSourceResolutions = OtlpTraceSourceResolver.Resolve(decodedPayload.PayloadJson);
+                var observation = SourceObservationBatchDraft.CreateWithTraceSources(
                     Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture),
                     metadata.SourceSurface,
                     metadata.SourceApplicationVersion,
@@ -1332,7 +1389,8 @@ internal static class MonitorHost
                     decision,
                     captureContentState,
                     observedAt,
-                    traceSourceVersionResolutions);
+                    traceSourceVersionResolutions,
+                    traceSourceResolutions);
                 batch = ValidatedIngestionBatch.Create(record, observation);
             }
             catch (UnsupportedOtlpContentTypeException)
@@ -1426,12 +1484,71 @@ internal static class MonitorHost
         {
             await WriteFailureAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed", "Only POST is supported for /v1/traces.");
         });
-        app.MapFallback(async context =>
-        {
-            await WriteFailureAsync(context, StatusCodes.Status404NotFound, "unsupported_endpoint", "Only /v1/traces is supported.");
-        });
+        app.MapFallback(WriteUnsupportedEndpointAsync);
 
         return app;
+    }
+
+    private static Task WriteUnsupportedEndpointAsync(HttpContext context) =>
+        WriteFailureAsync(
+            context,
+            StatusCodes.Status404NotFound,
+            "unsupported_endpoint",
+            "Only /v1/traces is supported.");
+
+    private static bool IsKnownHumanRequest(HttpRequest request)
+    {
+        if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method))
+        {
+            return false;
+        }
+
+        var path = request.Path;
+        var canonicalPagePath = CanonicalHumanPagePath(path);
+        if ((canonicalPagePath is not null
+                && (HumanPagePaths.Contains(canonicalPagePath)
+                    || IsTraceHumanPagePath(canonicalPagePath)
+                    || IsRetentionHumanPagePath(canonicalPagePath)))
+            || (path.Value is { } assetPath && HumanStaticAssetPaths.Contains(assetPath))
+            || path.StartsWithSegments("/repositories")
+            || (path.StartsWithSegments("/sessions") && !SessionRoutes.IsRawContentPath(path))
+            || path.StartsWithSegments("/api/doctor/ui/v1")
+            || path.StartsWithSegments("/api/local-monitor/v1")
+            || path.StartsWithSegments("/vendor"))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? CanonicalHumanPagePath(PathString path)
+    {
+        var value = path.Value;
+        if (value is null || value.Contains("//", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return value.Length > 1 && value.EndsWith("/", StringComparison.Ordinal)
+            ? value[..^1]
+            : value;
+    }
+
+    private static bool IsTraceHumanPagePath(string path)
+    {
+        var segments = path.Split('/', StringSplitOptions.None);
+        return segments is ["", var traces]
+                && string.Equals(traces, "traces", StringComparison.OrdinalIgnoreCase)
+            || segments is ["", var tracePrefix, _]
+                && string.Equals(tracePrefix, "traces", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRetentionHumanPagePath(string path)
+    {
+        var segments = path.Split('/', StringSplitOptions.None);
+        return segments is ["", var retention, _, _]
+            && string.Equals(retention, "retention", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IDoctorHttpApplication CreateDoctorApplication(

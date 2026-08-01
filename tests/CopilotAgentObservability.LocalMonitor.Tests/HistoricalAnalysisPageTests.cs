@@ -4,18 +4,12 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class HistoricalAnalysisPageTests
 {
-    [Theory]
-    [InlineData(false, "raw-default · repository-safe response", "")]
-    [InlineData(true, "sanitized-only", "checked disabled")]
-    public async Task Page_IsNoStoreAndPinsTheHostPosture(
-        bool sanitizedOnly,
-        string expectedPosture,
-        string expectedCheckboxState)
+    [Fact]
+    public async Task RawDefaultPage_IsNoStoreAndPinsTheHostPosture()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(
             temp,
-            sanitizedOnly: sanitizedOnly,
             testOptions: QuietHostOptions());
 
         using var response = await host.Client.GetAsync("/historical-analysis");
@@ -23,21 +17,13 @@ public sealed class HistoricalAnalysisPageTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         var body = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync());
-        Assert.Contains(expectedPosture, body, StringComparison.Ordinal);
+        Assert.Contains("raw-default · repository-safe response", body, StringComparison.Ordinal);
         var idIndex = body.IndexOf("id=\"historical-analysis-sanitized-only\"", StringComparison.Ordinal);
         var inputIndex = body.LastIndexOf("<input", idIndex, StringComparison.Ordinal);
         var checkbox = body[inputIndex..];
         checkbox = checkbox[..checkbox.IndexOf('>')];
-        if (expectedCheckboxState.Length == 0)
-        {
-            Assert.DoesNotContain("checked", checkbox, StringComparison.Ordinal);
-            Assert.DoesNotContain("disabled", checkbox, StringComparison.Ordinal);
-        }
-        else
-        {
-            Assert.Contains("checked", checkbox, StringComparison.Ordinal);
-            Assert.Contains("disabled", checkbox, StringComparison.Ordinal);
-        }
+        Assert.DoesNotContain("checked", checkbox, StringComparison.Ordinal);
+        Assert.DoesNotContain("disabled", checkbox, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -79,5 +65,8 @@ public sealed class HistoricalAnalysisPageTests
         StartProjectionWorker = false,
         StartWriter = false,
         StartRetentionCleanupWorker = false,
+        StartSessionWriter = false,
+        StartSessionOtelEnrichment = false,
+        UseUserSecrets = false,
     };
 }

@@ -127,8 +127,10 @@ are never Session-binding evidence.
 - `GET /sessions/{id}/events/{eventId}/content` is same-origin and
   `Cache-Control: no-store`; expired reads return the canonical `410` /
   `expired_pending_deletion` response.
-- `--sanitized-only` removes raw-bearing routes with `404` while preserving
-  sanitized hierarchy and metadata. It does not reconstruct hidden content.
+- `--sanitized-only` registers no Razor Pages, human static assets, human
+  routes, or `/api/local-monitor/v1/*`. Accepted frozen machine APIs continue
+  to expose sanitized Session hierarchy and metadata; they do not reconstruct
+  hidden content.
 - Sanitized reads and source diagnostics contain only bounded metadata and
   opaque identifiers. They never echo payload fragments or raw exceptions.
 

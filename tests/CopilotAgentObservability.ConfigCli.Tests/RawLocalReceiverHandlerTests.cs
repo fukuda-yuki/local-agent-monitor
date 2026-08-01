@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.ConfigCli;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
@@ -35,6 +36,30 @@ public class RawLocalReceiverHandlerTests
         Assert.Equal(receivedAt, record.ReceivedAt);
         Assert.Equal(JsonTracePayload(), record.PayloadJson);
         Assert.DoesNotContain("StructuralInventory", record.PayloadJson, StringComparison.Ordinal);
+        using var connection = new SqliteConnection(
+            $"Data Source={tempDirectory.DatabasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT
+                (SELECT COUNT(*)
+                 FROM source_trace_attribution_observations
+                 WHERE raw_record_id=$raw_record_id
+                   AND trace_id='11111111111111111111111111111111'
+                   AND cli_candidate_observed=0
+                   AND vscode_candidate_observed=1
+                   AND unknown_candidate_observed=0
+                   AND relevant_evidence_observed=1),
+                (SELECT COUNT(*)
+                 FROM source_trace_attribution_reconciliation_queue
+                 WHERE trace_id='11111111111111111111111111111111');
+            """;
+        command.Parameters.AddWithValue("$raw_record_id", response.RawRecordId);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(1L, reader.GetInt64(0));
+        Assert.Equal(1L, reader.GetInt64(1));
     }
 
     [Fact]

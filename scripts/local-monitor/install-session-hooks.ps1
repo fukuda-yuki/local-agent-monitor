@@ -45,7 +45,12 @@ if (Test-Path -LiteralPath $configPath) {
     }
 
     $marker = $existing.PSObject.Properties['managed_by']
-    if ($null -eq $marker -or $marker.Value -ne $managedBy) {
+    if ($null -eq $marker -or
+        $marker.Value -isnot [string] -or
+        -not [string]::Equals(
+            $marker.Value,
+            $managedBy,
+            [System.StringComparison]::Ordinal)) {
         throw 'hook_config_exists_unmanaged'
     }
 }
@@ -55,7 +60,7 @@ $escapedExecutable = $executablePath.Replace("'", "''")
 $escapedEndpoint = $Endpoint.Replace("'", "''")
 $command = "& '$escapedExecutable' hook-forward --endpoint '$escapedEndpoint' --timeout-ms $TimeoutMs"
 $hooks = [ordered] @{}
-foreach ($eventName in @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop')) {
+foreach ($eventName in @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd')) {
     $hooks[$eventName] = @(
         [ordered] @{
             type = 'command'

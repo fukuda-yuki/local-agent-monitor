@@ -12,14 +12,12 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorDesignViewPlaywrightTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TraceDetail_FlowWaterfallCacheColumn_RenderFromSanitizedSpansOnly(bool sanitizedOnly)
+    [Fact]
+    public async Task TraceDetail_FlowWaterfallCacheColumn_RenderFromSanitizedSpansOnly()
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -32,11 +30,6 @@ public class MonitorDesignViewPlaywrightTests
         page.Request += (_, request) => requestedUrls.Add(request.Url);
 
         await page.GotoAsync($"{host.Url}/traces/{MonitorRichTrace.TraceId}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        if (sanitizedOnly)
-        {
-            Assert.DoesNotContain("SECRET_PROMPT_TEXT_MARKER", await page.ContentAsync());
-        }
-
         // Hex token from the handoff §10 (D042 C2).
         Assert.Equal(
             "#14171e",

@@ -39,19 +39,19 @@ public sealed class SqliteMonitorRuntimeStateStore
         EnsureParentDirectory();
 
         using var connection = OpenConnection();
+        var existingVersion = MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
         ApplyWriteAheadLog(connection);
         using var transaction = connection.BeginTransaction();
-        var existingVersion = MonitorSchemaMigrator.ReadMonitorSchemaVersion(connection, transaction);
-        if (existingVersion > MonitorSchemaVersion)
-        {
-            throw new InvalidOperationException(
-                $"Monitor schema version {existingVersion} is newer than supported version {MonitorSchemaVersion}.");
-        }
-
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
         MonitorSchemaMigrator.EnsureProjectionDispositionSchema(connection, transaction);
         MonitorSchemaMigrator.EnsureRuntimeStateSchema(connection, transaction);
-        MonitorSchemaMigrator.SetMonitorSchemaVersion(connection, transaction, MonitorSchemaVersion);
+        if (existingVersion != MonitorSchemaVersion)
+        {
+            MonitorSchemaMigrator.SetMonitorSchemaVersion(
+                connection,
+                transaction,
+                MonitorSchemaVersion);
+        }
         transaction.Commit();
     }
 

@@ -70,14 +70,12 @@ public class MonitorInspectorPlaywrightTests
         Assert.Equal(2, detailRequestCount);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Inspector_OpensClosesAndRespectsRawBoundary(bool sanitizedOnly)
+    [Fact]
+    public async Task Inspector_OpensClosesAndLoadsRawDetail()
     {
         using var temp = new MonitorTempDirectory();
         MonitorRichTrace.Seed(temp);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartWriter = false,
             StartProjectionWorker = false,
@@ -99,9 +97,8 @@ public class MonitorInspectorPlaywrightTests
         await Expect(page.Locator("#span-inspector")).ToBeHiddenAsync();
 
         // Click the recovered-error tool span: inspector replaces the side panel.
-        var detailResponse = sanitizedOnly
-            ? null
-            : page.WaitForResponseAsync(response => response.Url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
+        var detailResponse = page.WaitForResponseAsync(
+            response => response.Url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
         await page.Locator("#flow-view .tool-card.tool-error").ClickAsync();
         await Expect(page.Locator("#span-inspector")).ToBeVisibleAsync();
         await Expect(page.Locator("#error-panel")).ToBeHiddenAsync();
@@ -110,26 +107,14 @@ public class MonitorInspectorPlaywrightTests
         // 整形 is the default tab.
         await Expect(page.Locator(".inspector-tab.active")).ToHaveTextAsync("整形");
 
-        if (sanitizedOnly)
-        {
-            await Expect(page.Locator(".inspector-note").First).ToContainTextAsync("--sanitized-only");
-            // The raw tab is unavailable and the raw route is never fetched.
-            await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();
-            await Expect(page.Locator(".inspector-note").First).ToContainTextAsync("raw タブは利用できません");
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/detail", StringComparison.Ordinal));
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/raw", StringComparison.OrdinalIgnoreCase));
-        }
-        else
-        {
-            // The formatted view loads from the raw span-detail route (D043).
-            Assert.Contains(requestedUrls, url => url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
-            Assert.Equal(200, (await detailResponse!).Status);
-            await Expect(page.Locator("#span-inspector")).ToContainTextAsync("メタ");
-            // Raw tab shows the OTLP span JSON.
-            await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();
-            await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("\"spanId\"");
-            await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("f201");
-        }
+        // The formatted view loads from the raw span-detail route (D043).
+        Assert.Contains(requestedUrls, url => url.Contains($"/traces/{MonitorRichTrace.TraceId}/spans/f201/detail", StringComparison.Ordinal));
+        Assert.Equal(200, (await detailResponse).Status);
+        await Expect(page.Locator("#span-inspector")).ToContainTextAsync("メタ");
+        // Raw tab shows the OTLP span JSON.
+        await page.Locator(".inspector-tab", new PageLocatorOptions { HasTextString = "raw" }).ClickAsync();
+        await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("\"spanId\"");
+        await Expect(page.Locator(".inspector-raw-json")).ToContainTextAsync("f201");
 
         // Esc closes the inspector and restores the error panel.
         await page.Keyboard.PressAsync("Escape");

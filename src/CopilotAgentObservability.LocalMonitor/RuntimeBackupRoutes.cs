@@ -9,7 +9,10 @@ internal static class RuntimeBackupRoutes
 {
     private static readonly byte[] EmptyRequest = "{}"u8.ToArray();
 
-    internal static bool IsPath(PathString path) => path.StartsWithSegments("/api/runtime-backup/v1") || path == "/backup-restore";
+    internal static bool IsPath(PathString path) =>
+        path.StartsWithSegments("/api/runtime-backup/v1")
+        || path == "/backup-restore"
+        || path == "/backup-restore/";
 
     internal static void Map(WebApplication app, string databasePath, TimeProvider timeProvider)
     {

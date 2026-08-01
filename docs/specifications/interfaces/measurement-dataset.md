@@ -29,7 +29,7 @@ trace_id,experiment_id,client_kind,task_id,task_category,task_run_index,experime
 | --- | --- |
 | `trace_id` | Trace-level reference carried from the source payload when available. |
 | `experiment_id` | Experiment identifier from resource attributes or trace metadata. |
-| `client_kind` | Client family such as `vscode-copilot-chat`, `copilot-cli`, `codex-app`, or `unknown`. |
+| `client_kind` | Resolved client family. For GitHub Copilot traces the only exact mappings are `client.kind=vscode-copilot-chat` or `service.name=copilot-chat` → `vscode-copilot-chat`, and `client.kind=copilot-cli` or `service.name=github-copilot` → `copilot-cli`; unresolved evidence is null. |
 | `task_id` | Optional task identifier used for repeatable comparison. |
 | `task_category` | Optional task grouping. |
 | `task_run_index` | Optional run number for repeated task execution. |
@@ -64,6 +64,19 @@ It must not contain raw prompt, raw response, system prompt text, tool arguments
 The expected collection attributes (`user.id`, `user.email`, `team.id`, `department`, `client.kind`, `experiment.id`) are defined in [../../requirements.md](../../requirements.md) and [../layers/telemetry-ingestion.md](../layers/telemetry-ingestion.md). This follows a **2層モデル**: the 6 attributes remain expected collection metadata, but repository-safe automatic missing-attribute validation covers only `client.kind` and `experiment.id`. This repository-safe dataset omits `user_id`, `user_email`, `team_id`, and `department` columns by design (PII / organization attributes are not repository-safe). `team.id` and `department`, when present, are retained as unknown resource attributes in `unknown_attributes_json` but are not validated as required. PII / organization attribute collection health is observable only on the local monitor side (loopback default-on display).
 
 `trace_id` is not a Resource Attribute but a **source trace reference** required for referential integrity. When missing, a collection health row is emitted (sharing the `missing-required-attribute` health_check_kind in the current implementation), but this is conceptually separate from Resource Attribute required-attribute validation.
+
+Source attribution is trace-scoped across every supplied raw record and every
+Resource block. Exact values are compared with ordinal case sensitivity.
+Duplicate or mixed-key evidence for one family agrees. Evidence for both
+families conflicts; otherwise any unknown value on the exact `client.kind` or
+`service.name` key is unrecognised; otherwise one recognized family resolves;
+otherwise attribution is missing. Resource order, raw-record order, batching,
+and duplicate evidence do not change the result. Consumed `service.name`
+evidence is excluded from `unknown_attributes_json`. Source version, agent,
+model, Repository, path, and time are never attribution evidence.
+`aggregate-measurements` applies the same exact resolver to each
+Langfuse-style trace's `metadata.resourceAttributes`; its legacy input shape
+does not permit arbitrary `client.kind` values to bypass these semantics.
 
 Issue #56 does not treat a dataset row with manually supplied
 `success_status=pass` as an objective Session evaluation. The repository-safe

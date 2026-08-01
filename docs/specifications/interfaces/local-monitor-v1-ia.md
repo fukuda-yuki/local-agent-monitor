@@ -125,7 +125,14 @@ Supplementary entries:
 - `リポジトリを追加`;
 - archived Repository management through Settings.
 
-Identity, locator, assignment, correction and conflict behavior are owned by #155/#156. Archive behavior is owned by #160/#161.
+Identity, locator, assignment, correction and conflict behavior are owned by
+[the Local Repository catalog contract](local-repository-catalog.md) and
+#155/#156. Only its locator parser/canonicalization/fingerprint slice is
+currently implementation-ready; catalog admission, mutation/read routes and
+scope composition remain gated by that contract. #134 alone owns
+`GET /api/local-monitor/v1/repositories`, consuming the one
+`ILocalRepositoryScopeSnapshotService` shared with #156/#161. Archive behavior
+is owned by #160/#161.
 
 ## 6. Session Explorer
 
@@ -451,8 +458,8 @@ Hard validation viewport: **1366×768**.
 
 ### Shared
 
-- header: 56px;
-- page outer padding: 20px;
+- header: 48px;
+- page outer padding: 24px;
 - major gap: 16px;
 - compact gap: 8px;
 - no page-level horizontal scroll.
@@ -522,9 +529,9 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 
 | Area | Contract | Implementation |
 |---|---|---|
-| Repository catalog/assignment | #155 | #156 |
+| Repository catalog/assignment | [catalog contract](local-repository-catalog.md) + #155 | #156 |
 | Skill projection validity | #154 | #154 |
-| Skill body/path snapshot | #157 | #158 |
+| Skill v1 correction/v2 transport/body/path snapshot/current file | [snapshot contract](skill-invocation-snapshot.md) + #119/#157/#158 | #158 after gate closure |
 | Sanitized-only runtime | #159 | #168 |
 | Archive | #160 | #161 |
 | AI scope/history | #162 | #163/#164 |
@@ -540,3 +547,11 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 | Japanese microcopy | this spec | #169 |
 | Cross-cutting validation | this spec | #147 |
 | User documentation | canonical docs | #148 |
+
+The frozen v1 correction is executable independently: `skill.started` and
+`skill.completed` are supported, while `skill.invoked` is unsupported on
+`POST /api/session-ingest/v1/events`; every other v1 route/wire/enum/limit/
+status/response byte remains frozen. The additive v2/snapshot/current-file UI
+and route work is not production-ready until the complete implementation gate
+in the snapshot contract closes. It remains raw-default-only, has no fallback
+or compatibility path, and cannot add a sanitized empty carrier.

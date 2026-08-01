@@ -978,7 +978,9 @@
   waterfallView.addEventListener("click", onSpanClick);
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.selectedSpanId !== null) {
+    if (event.key === "Escape"
+      && !document.querySelector("#settings-modal[open]")
+      && state.selectedSpanId !== null) {
       selectSpan(state.selectedSpanId); // Toggle off.
     }
   });

@@ -38,3 +38,8 @@ internal sealed record TraceSourceVersionResolutionRow(
     string TraceId,
     TraceSourceVersionResolutionState State,
     string? SourceApplicationVersion);
+
+internal sealed record TraceSourceResolutionRow(
+    string TraceId,
+    TraceSourceResolutionState State,
+    string? SourceFamily);

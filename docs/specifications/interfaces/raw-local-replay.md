@@ -30,6 +30,16 @@ The JSON Schema 2020-12 structural contracts are
 [`control.schema.json`](../contracts/raw-local-replay/v1/control.schema.json),
 [`manifest.schema.json`](../contracts/raw-local-replay/v1/manifest.schema.json),
 and [`result.schema.json`](../contracts/raw-local-replay/v1/result.schema.json).
+D069 pins the three target identifiers above and binds their exact derived
+hashes. Therefore these v1 targets retain their pre-Issue-151 byte semantics:
+normalization derives source only from each record's direct `client.kind`,
+retains the prior `service.name` unknown-attribute treatment, and projection
+retains the prior record-local primary-contribution summary. They do not adopt
+the current live trace resolver or cross-record evidence aggregation. Changing
+those semantics requires separately accepted new normalization, projection,
+and dashboard target versions and a new hash contract; this specification
+defines no such versions.
+
 The control schema is a closed union. Export control contains exactly
 `schema_version`, `profile`, `created_at`, `selection`,
 `include_session_content`, `sanitized_only`, `preview_digest`, and `consent`.

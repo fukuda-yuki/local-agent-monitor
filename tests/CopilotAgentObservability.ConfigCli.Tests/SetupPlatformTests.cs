@@ -545,10 +545,10 @@ public sealed class SetupPlatformTests
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
         using var barrier = platform.AddBarrier("checkpoint:before-final-verification");
 
-        var task = Task.Run(() => platform.Execution.Checkpoint("before-final-verification"));
+        var task = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("before-final-verification"));
         try
         {
-            await Task.Run(() => barrier.WaitUntilReached(CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => barrier.WaitUntilReached(CancellationToken.None));
             Assert.False(task.IsCompleted);
             barrier.Release();
             await task;
@@ -646,11 +646,11 @@ public sealed class SetupPlatformTests
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
         using var barrier = platform.AddBarrier("environment.set:VALUE");
         var tasks = Enumerable.Range(0, workerCount)
-            .Select(index => Task.Run(() => platform.UserEnvironment.Set("VALUE", index.ToString())))
+            .Select(index => RunBlockingBarrierParticipant(() => platform.UserEnvironment.Set("VALUE", index.ToString())))
             .ToArray();
         try
         {
-            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
             barrier.Release();
             await Task.WhenAll(tasks);
         }
@@ -689,7 +689,7 @@ public sealed class SetupPlatformTests
         using var barrier = platform.AddBarrier("checkpoint:faulting");
         platform.InjectFault("checkpoint:faulting", new IOException("synthetic"));
 
-        var task = Task.Run(() => platform.Execution.Checkpoint("faulting"));
+        var task = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("faulting"));
         try
         {
             await Assert.ThrowsAsync<IOException>(() => task);
@@ -709,11 +709,11 @@ public sealed class SetupPlatformTests
         using var cancellation = new CancellationTokenSource();
         using var barrier = platform.AddBarrier("checkpoint:cancellable", cancellation.Token);
         using var hostGuard = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var task = Task.Run(() => platform.Execution.Checkpoint("cancellable"));
+        var task = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("cancellable"));
 
         try
         {
-            await Task.Run(() => barrier.WaitUntilReached(hostGuard.Token));
+            await RunBlockingBarrierParticipant(() => barrier.WaitUntilReached(hostGuard.Token));
             cancellation.Cancel();
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
@@ -732,11 +732,11 @@ public sealed class SetupPlatformTests
         using var previous = platform.AddBarrier("checkpoint:reused");
         previous.Dispose();
         using var current = platform.AddBarrier("checkpoint:reused");
-        var task = Task.Run(() => platform.Execution.Checkpoint("reused"));
+        var task = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("reused"));
 
         try
         {
-            await Task.Run(() => current.WaitUntilReached(CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => current.WaitUntilReached(CancellationToken.None));
             Assert.False(task.IsCompleted);
             current.Release();
             await task;
@@ -755,18 +755,18 @@ public sealed class SetupPlatformTests
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
         using var previous = platform.AddBarrier("checkpoint:reused");
         SetupTestBarrier? current = null;
-        var previousTask = Task.Run(() => platform.Execution.Checkpoint("reused"));
+        var previousTask = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("reused"));
         Task? currentTask = null;
 
         try
         {
-            await Task.Run(() => previous.WaitUntilReached(CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => previous.WaitUntilReached(CancellationToken.None));
             previous.Dispose();
             current = platform.AddBarrier("checkpoint:reused");
-            currentTask = Task.Run(() => platform.Execution.Checkpoint("reused"));
+            currentTask = RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("reused"));
 
             await previousTask;
-            await Task.Run(() => current.WaitUntilReached(CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => current.WaitUntilReached(CancellationToken.None));
             Assert.False(currentTask.IsCompleted);
             current.Release();
             await currentTask;
@@ -786,12 +786,12 @@ public sealed class SetupPlatformTests
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
         using var barrier = platform.AddBarrier("checkpoint:many");
         var tasks = Enumerable.Range(0, workerCount)
-            .Select(_ => Task.Run(() => platform.Execution.Checkpoint("many")))
+            .Select(_ => RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("many")))
             .ToArray();
 
         try
         {
-            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
             Assert.All(tasks, task => Assert.False(task.IsCompleted));
             barrier.Release();
             await Task.WhenAll(tasks);
@@ -810,12 +810,12 @@ public sealed class SetupPlatformTests
         var platform = new SetupTestPlatform(DateTimeOffset.UnixEpoch);
         using var barrier = platform.AddBarrier("checkpoint:dispose");
         var tasks = Enumerable.Range(0, workerCount)
-            .Select(_ => Task.Run(() => platform.Execution.Checkpoint("dispose")))
+            .Select(_ => RunBlockingBarrierParticipant(() => platform.Execution.Checkpoint("dispose")))
             .ToArray();
 
         try
         {
-            await Task.Run(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
+            await RunBlockingBarrierParticipant(() => barrier.WaitUntilArrivals(workerCount, CancellationToken.None));
             barrier.Dispose();
             await Task.WhenAll(tasks);
         }
@@ -942,6 +942,13 @@ public sealed class SetupPlatformTests
         Assert.NotNull(reacquired);
         reacquired!.Dispose();
     }
+
+    private static Task RunBlockingBarrierParticipant(Action action) =>
+        Task.Factory.StartNew(
+            action,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
 
     private static async Task ObserveWorkersAsync(params Task?[] tasks)
     {

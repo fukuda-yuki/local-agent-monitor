@@ -9,9 +9,38 @@ namespace CopilotAgentObservability.Telemetry;
 /// </summary>
 internal static class MonitorProjectionBuilder
 {
-    public static MonitorRecordProjection Build(RawTelemetryRecord record)
+    public static MonitorRecordProjection Build(RawTelemetryRecord record) =>
+        BuildCore(
+            record,
+            resolveTraceSource: null,
+            frozenRawReplayV1: false);
+
+    public static MonitorRecordProjection Build(
+        RawTelemetryRecord record,
+        Func<string, string?> resolveTraceSource)
     {
-        var rows = RawMeasurementNormalizer.Normalize(record.PayloadJson);
+        ArgumentNullException.ThrowIfNull(resolveTraceSource);
+        return BuildCore(
+            record,
+            resolveTraceSource,
+            frozenRawReplayV1: false);
+    }
+
+    internal static MonitorRecordProjection BuildRawReplayV1(
+        RawTelemetryRecord record) =>
+        BuildCore(
+            record,
+            resolveTraceSource: null,
+            frozenRawReplayV1: true);
+
+    private static MonitorRecordProjection BuildCore(
+        RawTelemetryRecord record,
+        Func<string, string?>? resolveTraceSource,
+        bool frozenRawReplayV1)
+    {
+        var rows = frozenRawReplayV1
+            ? RawMeasurementNormalizer.NormalizeRawReplayV1(record.PayloadJson)
+            : RawMeasurementNormalizer.Normalize(record.PayloadJson);
         var (totalSpans, spansByTrace, metadataByTrace) = CountSpansAndMetadata(record.PayloadJson);
 
         var contributions = new List<MonitorTraceContribution>();
@@ -27,7 +56,7 @@ internal static class MonitorProjectionBuilder
             metadataByTrace.TryGetValue(row.TraceId, out var metadata);
             contributions.Add(new MonitorTraceContribution(
                 TraceId: row.TraceId,
-                ClientKind: row.ClientKind,
+                ClientKind: resolveTraceSource is null ? row.ClientKind : resolveTraceSource(row.TraceId),
                 ExperimentId: row.ExperimentId,
                 TaskId: row.TaskId,
                 TaskCategory: row.TaskCategory,
@@ -41,12 +70,29 @@ internal static class MonitorProjectionBuilder
                 RepoSnapshot: metadata?.RepoSnapshot));
         }
 
-        var primary = contributions.FirstOrDefault(c => string.Equals(c.TraceId, record.TraceId, StringComparison.Ordinal))
-            ?? contributions.FirstOrDefault();
+        string? clientKind;
+        if (frozenRawReplayV1)
+        {
+            var primary = contributions.FirstOrDefault(contribution =>
+                    string.Equals(
+                        contribution.TraceId,
+                        record.TraceId,
+                        StringComparison.Ordinal))
+                ?? contributions.FirstOrDefault();
+            clientKind = primary?.ClientKind;
+        }
+        else
+        {
+            var clientKinds = contributions
+                .Select(contribution => contribution.ClientKind)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            clientKind = clientKinds.Length == 1 ? clientKinds[0] : null;
+        }
 
         return new MonitorRecordProjection(
             TraceId: record.TraceId,
-            ClientKind: primary?.ClientKind,
+            ClientKind: clientKind,
             SpanCount: totalSpans,
             TraceContributions: contributions);
     }

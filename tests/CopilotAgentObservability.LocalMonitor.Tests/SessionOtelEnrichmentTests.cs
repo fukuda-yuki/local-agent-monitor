@@ -88,6 +88,103 @@ public sealed class SessionOtelEnrichmentTests
     }
 
     [Fact]
+    public void ProcessNextBatch_RechecksSourceInsideWriteAfterConflictConsumesPendingRetry()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string spanId = "1111111111111111";
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore().CreateMonitorSchema();
+        var sourceStore = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        sourceStore.CreateSchema();
+        var seedStore = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
+        seedStore.CreateSchema();
+        var now = new DateTimeOffset(2026, 7, 30, 0, 0, 0, TimeSpan.Zero);
+        InsertProjectedSpanWithPayload(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            traceId,
+            spanId,
+            "copilot-cli",
+            "generic-repo",
+            now,
+            BuildOtelPayload(traceId, spanId));
+        long rawRecordId;
+        using (var connection = new SqliteConnection(
+                   $"Data Source={temp.DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                $"SELECT raw_record_id FROM monitor_spans WHERE trace_id='{traceId}';";
+            rawRecordId = (long)command.ExecuteScalar()!;
+        }
+        Execute(
+            temp.DatabasePath,
+            $"""
+            UPDATE source_trace_attribution_observations
+            SET cli_candidate_observed=1,
+                relevant_evidence_observed=1
+            WHERE raw_record_id={rawRecordId}
+              AND trace_id='{traceId}';
+            """);
+        sourceStore.ReconcileProjectedTraceSourceAttribution();
+        var checkpointCalls = 0;
+        var raceStore = new SqliteSessionStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            new FixedTimeProvider(now),
+            phase =>
+            {
+                if (phase != "before-session-write"
+                    || Interlocked.Increment(ref checkpointCalls) != 1)
+                {
+                    return;
+                }
+                Execute(
+                    temp.DatabasePath,
+                    $"""
+                    INSERT INTO source_trace_attribution_observations
+                    VALUES({rawRecordId + 1000},'{traceId}',0,1,0,1);
+                    INSERT INTO source_trace_attribution_reconciliation_queue
+                    VALUES('{traceId}');
+                    """);
+                Assert.True(sourceStore.ReconcileProjectedTraceSourceAttribution());
+            });
+
+        var processed = new SqliteSessionOtelEnricher(
+            temp.DatabasePath,
+            raceStore,
+            temp.RetentionContext,
+            new FixedTimeProvider(now)).ProcessNextBatch(100);
+
+        Assert.Equal(1, processed);
+        Assert.Equal(1, checkpointCalls);
+        var session = Assert.Single(raceStore.ListMostRecent(10));
+        var detail = Assert.IsType<SessionDetail>(
+            raceStore.GetDetail(session.SessionId));
+        var @event = Assert.Single(
+            detail.Events,
+            item => item.SourceAdapter == "otel-exact");
+        var run = Assert.Single(detail.Runs);
+        Assert.Null(@event.SourceSurface);
+        Assert.Null(run.SourceSurface);
+        Assert.Equal(SessionMatchKind.None, @event.MatchKind);
+        Assert.Equal($"{traceId}/{spanId}", @event.SourceEventId);
+        Assert.Equal(traceId, @event.TraceId);
+        Assert.Equal(@event.RunId, run.RunId);
+        Assert.Empty(detail.NativeIds);
+        Assert.Equal(
+            0L,
+            Count(
+                temp.DatabasePath,
+                "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+        Assert.Equal(
+            1L,
+            raceStore.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!
+                .ProjectionCursor);
+    }
+
+    [Fact]
     public void ProcessNextBatch_GenericPathPreservesReachabilityCountsAndAdapterLabels()
     {
         using var temp = new MonitorTempDirectory();
@@ -530,6 +627,16 @@ public sealed class SessionOtelEnrichmentTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.ExecuteNonQuery();
+    }
+
+    private static long Count(string databasePath, string sql)
+    {
+        using var connection = new SqliteConnection(
+            $"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (long)command.ExecuteScalar()!;
     }
 
     private static void InsertProjectedSpan(string databasePath, RetentionCatalogContext retentionContext, string traceId, string spanId, string? conversationId, string clientKind, string repository, DateTimeOffset time)

@@ -4,12 +4,198 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SourceCompatibilityIngestionTests
 {
+    [Fact]
+    public async Task Projection_CrossRecordSourceConflictClearsTraceAndContributingIngestions()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+        });
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var sourceStore = new SqliteSourceCompatibilityStore(
+            temp.DatabasePath,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var worker = new ProjectionWorker(projectionStore, health, sourceStore);
+
+        var first = await host.Client.PostAsync(
+            "/v1/traces",
+            JsonContent(SourcePayload(traceId, "1111111111111111", "github-copilot")));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await worker.RunProjectionPassAsync();
+
+        var second = await host.Client.PostAsync(
+            "/v1/traces",
+            JsonContent(SourcePayload(traceId, "2222222222222222", "copilot-chat")));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        await worker.RunProjectionPassAsync();
+        var duplicate = await host.Client.PostAsync(
+            "/v1/traces",
+            JsonContent(SourcePayload(traceId, "1111111111111111", "github-copilot")));
+        Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+        await worker.RunProjectionPassAsync();
+
+        Assert.Equal(
+            new TraceSourceResolutionRow(traceId, TraceSourceResolutionState.Conflicting, null),
+            sourceStore.GetTraceSourceResolution(traceId));
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        using (var trace = connection.CreateCommand())
+        {
+            trace.CommandText = "SELECT client_kind FROM monitor_traces WHERE trace_id=$trace_id;";
+            trace.Parameters.AddWithValue("$trace_id", traceId);
+            Assert.Equal(DBNull.Value, trace.ExecuteScalar());
+        }
+        using (var ingestions = connection.CreateCommand())
+        {
+            ingestions.CommandText = "SELECT COUNT(*) FROM monitor_ingestions WHERE client_kind IS NULL;";
+            Assert.Equal(3L, ingestions.ExecuteScalar());
+        }
+    }
+
+    [Fact]
+    public async Task Projection_SourceConflictClearsOnlyExactOtelSessionSurfacesAndPreservesIdentity()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string nativeSessionId = "synthetic-conversation-1";
+        var now = new DateTimeOffset(2026, 7, 30, 0, 0, 0, TimeSpan.Zero);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            StartSessionOtelEnrichment = false,
+            UseUserSecrets = false,
+            TimeProvider = new FixedTimeProvider(now),
+        });
+        var sessionStore = new SqliteSessionStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            new FixedTimeProvider(now));
+        var sessionId = Guid.CreateVersion7();
+        sessionStore.Write(new(new(
+            new ObservedSession(
+                sessionId,
+                ObservedSessionStatus.Unknown,
+                SessionCompleteness.Unbound,
+                Repository: null,
+                Workspace: null,
+                StartedAt: null,
+                EndedAt: null,
+                LastSeenAt: now,
+                SessionRawRetentionState.NotCaptured,
+                CreatedAt: now,
+                UpdatedAt: now),
+            [new SessionNativeId(
+                sessionId,
+                SessionSourceSurface.CopilotCli,
+                nativeSessionId,
+                SessionBindingKind.Native,
+                now)],
+            [],
+            []), []));
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var sourceStore = new SqliteSourceCompatibilityStore(
+            temp.DatabasePath,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var worker = new ProjectionWorker(projectionStore, health, sourceStore);
+        var enricher = new SqliteSessionOtelEnricher(
+            temp.DatabasePath,
+            sessionStore,
+            temp.RetentionContext,
+            new FixedTimeProvider(now));
+
+        var first = await host.Client.PostAsync(
+            "/v1/traces",
+            JsonContent(SourcePayloadWithConversation(
+                traceId,
+                "1111111111111111",
+                "github-copilot",
+                nativeSessionId)));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        await worker.RunProjectionPassAsync();
+        Assert.Equal(1, enricher.ProcessNextBatch(100));
+
+        var beforeConflict = Assert.IsType<SessionDetail>(
+            sessionStore.GetDetail(sessionId));
+        var beforeSession = beforeConflict.Session;
+        var beforeNative = Assert.Single(beforeConflict.NativeIds);
+        var beforeEvent = Assert.Single(
+            beforeConflict.Events,
+            item => item.SourceAdapter == "otel-exact");
+        var beforeRun = Assert.Single(
+            beforeConflict.Runs,
+            item => item.RunId == beforeEvent.RunId);
+        Assert.Equal(SessionSourceSurface.CopilotCli, beforeEvent.SourceSurface);
+        Assert.Equal(SessionSourceSurface.CopilotCli, beforeRun.SourceSurface);
+        Assert.Equal(SessionMatchKind.ConversationId, beforeEvent.MatchKind);
+
+        var second = await host.Client.PostAsync(
+            "/v1/traces",
+            JsonContent(SourcePayloadWithConversation(
+                traceId,
+                "2222222222222222",
+                "copilot-chat",
+                nativeSessionId)));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.True(sourceStore.ReconcileProjectedTraceSourceAttribution());
+
+        var afterReconciliation = Assert.IsType<SessionDetail>(
+            sessionStore.GetDetail(sessionId));
+        Assert.Equal(beforeSession, afterReconciliation.Session);
+        Assert.Equal(beforeNative, Assert.Single(afterReconciliation.NativeIds));
+        var reconciledEvent = Assert.Single(
+            afterReconciliation.Events,
+            item => item.EventId == beforeEvent.EventId);
+        var reconciledRun = Assert.Single(
+            afterReconciliation.Runs,
+            item => item.RunId == beforeRun.RunId);
+        Assert.Null(reconciledEvent.SourceSurface);
+        Assert.Null(reconciledRun.SourceSurface);
+        Assert.Equal(
+            beforeEvent with { SourceSurface = null },
+            reconciledEvent);
+        Assert.Equal(
+            beforeRun with { SourceSurface = null },
+            reconciledRun);
+
+        await worker.RunProjectionPassAsync();
+        Assert.Equal(1, enricher.ProcessNextBatch(100));
+
+        var completed = Assert.IsType<SessionDetail>(
+            sessionStore.GetDetail(sessionId));
+        Assert.Equal(beforeNative, Assert.Single(completed.NativeIds));
+        Assert.All(
+            completed.Events.Where(item => item.SourceAdapter == "otel-exact"),
+            item => Assert.Null(item.SourceSurface));
+        Assert.All(
+            completed.Runs.Where(item => item.TraceId == traceId),
+            item => Assert.Null(item.SourceSurface));
+        Assert.Equal(
+            2,
+            completed.Events.Count(item => item.SourceAdapter == "otel-exact"));
+        Assert.Contains(
+            completed.Events,
+            item => item.EventId == beforeEvent.EventId
+                && item.MatchKind == beforeEvent.MatchKind
+                && item.SourceEventId == beforeEvent.SourceEventId);
+    }
+
     [Fact]
     public async Task PostTraces_ResolvesResourceScopedSourceVersionIndependentlyForEachTrace()
     {
@@ -220,14 +406,17 @@ public sealed class SourceCompatibilityIngestionTests
     }
 
     [Fact]
-    public async Task TraceSourceVersionPersistence_DoesNotChangeMonitorApiResponseBytes()
+    public async Task TraceSourceAuthorities_DoNotChangeFrozenPublicResponseBytes()
     {
         const string traceId = "11111111111111111111111111111111";
         using var temp = new MonitorTempDirectory();
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
         {
             StartProjectionWorker = false,
+            StartSessionOtelEnrichment = false,
             UseUserSecrets = false,
+            TimeProvider = time,
         });
         var response = await host.Client.PostAsync("/v1/traces", JsonContent(EquivalentJson()));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -250,29 +439,95 @@ public sealed class SourceCompatibilityIngestionTests
             "/api/monitor/summary",
             "/api/monitor/overview",
             "/api/monitor/trace-list",
+            "/api/session-workspace/sessions",
+            "/api/session-workspace/status",
+            "/health/ready",
         ];
         var before = await CaptureResponses(host.Client, paths);
+        var beforeSse = await CaptureSseConnectBytes(host.Client);
 
+        long sourceObservationId;
+        string retainedPayload;
+        TraceSourceVersionResolutionState currentState;
+        string? currentVersion;
         using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False"))
         {
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                UPDATE source_trace_version_observations
-                SET resolution_state = 'unrecognised', source_application_version = 'safe-unknown'
-                WHERE trace_id = $trace_id;
+                SELECT version.source_observation_id,raw.payload_json,
+                       version.resolution_state,version.source_application_version
+                FROM source_trace_version_observations AS version
+                JOIN source_schema_observations AS source
+                  ON source.id=version.source_observation_id
+                JOIN raw_records AS raw
+                  ON raw.id=source.raw_record_id
+                WHERE version.trace_id=$trace_id
                 """;
             command.Parameters.AddWithValue("$trace_id", traceId);
-            Assert.Equal(1, command.ExecuteNonQuery());
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read());
+            sourceObservationId = reader.GetInt64(0);
+            retainedPayload = reader.GetString(1);
+            currentState = reader.GetString(2) switch
+            {
+                "resolved" => TraceSourceVersionResolutionState.Resolved,
+                "missing" => TraceSourceVersionResolutionState.Missing,
+                "unrecognised" => TraceSourceVersionResolutionState.Unrecognised,
+                "conflicting" => TraceSourceVersionResolutionState.Conflicting,
+                _ => throw new InvalidOperationException("Unexpected trace source state."),
+            };
+            currentVersion = reader.IsDBNull(3) ? null : reader.GetString(3);
+            Assert.False(reader.Read());
         }
+        var reconciliationRegistry = currentState == TraceSourceVersionResolutionState.Resolved
+            ? VerifiedSourceFingerprintRegistry.Create(
+                [
+                    VerifiedSourceFingerprintEvidence.Create(
+                        "github-copilot-cli",
+                        currentVersion!,
+                        new string('a', 64)),
+                ],
+                [],
+                [])
+            : VerifiedSourceFingerprintRegistry.Create([], [], []);
+        var reconciliation = new SourceCompatibilityReconciler(
+                temp.DatabasePath,
+                SourceCompatibilityReconciliationAuthority.Create(
+                [
+                    new(
+                        "resolver-frozen-byte-1",
+                        "registry-frozen-byte-1",
+                        reconciliationRegistry),
+                ]),
+                time)
+            .Reconcile(SourceCompatibilityReconciliationRequest.Create(
+                "frozen-byte-no-op",
+                sourceObservationId,
+                traceId,
+                0,
+                currentState == TraceSourceVersionResolutionState.Unrecognised
+                    ? SourceCompatibilityReconciliationTrigger.RegistryRevision
+                    : SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-frozen-byte-1",
+                "registry-frozen-byte-1",
+                SkillProjectionGenerationParticipant.CurrentProjectorVersion));
+        Assert.Equal(SourceCompatibilityReconciliationOutcome.NoChange, reconciliation.Outcome);
 
         var after = await CaptureResponses(host.Client, paths);
+        var afterSse = await CaptureSseConnectBytes(host.Client);
         for (var index = 0; index < paths.Length; index++)
         {
             Assert.Equal(before[index].StatusCode, after[index].StatusCode);
-            Assert.Equal(before[index].Body, after[index].Body);
+            Assert.True(
+                before[index].Body.AsSpan().SequenceEqual(after[index].Body),
+                $"Frozen response bytes changed for {paths[index]}."
+                + $"\nBefore: {Encoding.UTF8.GetString(before[index].Body)}"
+                + $"\nAfter: {Encoding.UTF8.GetString(after[index].Body)}");
         }
+        Assert.Equal(": connected\n\n"u8.ToArray(), beforeSse);
+        Assert.Equal(beforeSse, afterSse);
 
         static async Task<(HttpStatusCode StatusCode, byte[] Body)[]> CaptureResponses(
             HttpClient client,
@@ -285,6 +540,20 @@ public sealed class SourceCompatibilityIngestionTests
                 responses.Add((response.StatusCode, await response.Content.ReadAsByteArrayAsync()));
             }
             return responses.ToArray();
+        }
+
+        static async Task<byte[]> CaptureSseConnectBytes(HttpClient client)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/events");
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            var bytes = new byte[": connected\n\n"u8.Length];
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await stream.ReadExactlyAsync(bytes, timeout.Token);
+            return bytes;
         }
     }
 
@@ -816,6 +1085,35 @@ public sealed class SourceCompatibilityIngestionTests
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 
+    private static string SourcePayload(string traceId, string spanId, string serviceName) =>
+        """
+        {"resourceSpans":[{"resource":{"attributes":[
+          {"key":"service.name","value":{"stringValue":"SERVICE_NAME"}}
+        ]},"scopeSpans":[{"spans":[
+          {"traceId":"TRACE_ID","spanId":"SPAN_ID","name":"chat gpt-4o"}
+        ]}]}]}
+        """
+        .Replace("TRACE_ID", traceId, StringComparison.Ordinal)
+        .Replace("SPAN_ID", spanId, StringComparison.Ordinal)
+        .Replace("SERVICE_NAME", serviceName, StringComparison.Ordinal);
+
+    private static string SourcePayloadWithConversation(
+        string traceId,
+        string spanId,
+        string serviceName,
+        string conversationId) =>
+        SourcePayload(traceId, spanId, serviceName).Replace(
+            "\"name\":\"chat gpt-4o\"",
+            """
+            "name":"chat gpt-4o","attributes":[
+              {"key":"gen_ai.conversation.id","value":{"stringValue":"CONVERSATION_ID"}}
+            ]
+            """.Replace(
+                "CONVERSATION_ID",
+                conversationId,
+                StringComparison.Ordinal),
+            StringComparison.Ordinal);
+
     private static string ReadSharedDatabaseText(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -827,6 +1125,11 @@ public sealed class SourceCompatibilityIngestionTests
     private sealed class ThrowingSourceMetadataProvider(string marker) : IOtlpTraceSourceMetadataProvider
     {
         public OtlpTraceSourceMetadata GetMetadata() => throw new InvalidOperationException(marker);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 
     private static string EquivalentJson() =>

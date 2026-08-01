@@ -7,14 +7,12 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 [Collection(PlaywrightBrowserPathCollection.Name)]
 public class MonitorAgentExecutionPlaywrightTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TraceDetail_ClaudeContentDisabledHidesRawControlsAndNullTokenCard(bool sanitizedOnly)
+    [Fact]
+    public async Task TraceDetail_ClaudeContentDisabledHidesRawControlsAndNullTokenCard()
     {
         using var temp = new MonitorTempDirectory();
         Seed(temp, ExactGraphPayload);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: DisabledWorkers);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers);
         PlaywrightBrowserPath.ConfigureDefault();
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
@@ -125,14 +123,12 @@ public class MonitorAgentExecutionPlaywrightTests
         await Expect(page.Locator("#trace-detail-root")).Not.ToContainTextAsync("推定");
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TraceDetail_RendersNestedParallelAgentsAndAgentInspector(bool sanitizedOnly)
+    [Fact]
+    public async Task TraceDetail_RendersNestedParallelAgentsAndAgentInspector()
     {
         using var temp = new MonitorTempDirectory();
         Seed(temp, ExactGraphPayload);
-        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: DisabledWorkers);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: DisabledWorkers);
         var graphResponse = await host.Client.GetAsync($"/api/monitor/traces/{TraceId}/agent-graph");
         Assert.True(graphResponse.IsSuccessStatusCode, await graphResponse.Content.ReadAsStringAsync());
         PlaywrightBrowserPath.ConfigureDefault();
@@ -183,18 +179,9 @@ public class MonitorAgentExecutionPlaywrightTests
         await Expect(page.Locator("#span-inspector")).ToContainTextAsync("relationship source");
         await Expect(page.Locator("#span-inspector")).ToContainTextAsync("parent_span");
 
-        if (sanitizedOnly)
-        {
-            await Expect(page.Locator("#span-inspector")).ToContainTextAsync("sanitized な Agent 詳細");
-            Assert.DoesNotContain(requestedUrls, url => url.Contains("/spans/a100/detail", StringComparison.Ordinal));
-            Assert.DoesNotContain("RAW_AGENT_INSTRUCTION", await page.ContentAsync());
-        }
-        else
-        {
-            Assert.Contains(requestedUrls, url => url.Contains($"/traces/{TraceId}/spans/a100/detail", StringComparison.Ordinal));
-            await Expect(page.Locator("#span-inspector")).ToContainTextAsync("RAW_AGENT_INSTRUCTION");
-            await Expect(page.Locator("#span-inspector")).ToContainTextAsync("RAW_AGENT_RESPONSE");
-        }
+        Assert.Contains(requestedUrls, url => url.Contains($"/traces/{TraceId}/spans/a100/detail", StringComparison.Ordinal));
+        await Expect(page.Locator("#span-inspector")).ToContainTextAsync("RAW_AGENT_INSTRUCTION");
+        await Expect(page.Locator("#span-inspector")).ToContainTextAsync("RAW_AGENT_RESPONSE");
 
         await page.Locator("#view-toggle .view-btn[data-view='waterfall']").ClickAsync();
         await Expect(page.Locator("#waterfall-view .wf-agent")).ToHaveCountAsync(4);

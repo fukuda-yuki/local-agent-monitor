@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
@@ -140,25 +139,69 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
     private static string CaptureNonRetentionEvidence(string path)
     {
         using var connection = Open(path);
-        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        using var objects = connection.CreateCommand();
-        objects.CommandText = """
-            SELECT type,name,tbl_name,COALESCE(sql,'')
-            FROM sqlite_master
-            WHERE name NOT LIKE 'sqlite_%'
-              AND name NOT LIKE 'retention_%'
-              AND tbl_name NOT LIKE 'retention_%'
-              AND name NOT LIKE 'monitor_skill_%'
-              AND name NOT LIKE 'IX_monitor_skill_%'
-              AND tbl_name NOT LIKE 'monitor_skill_%'
-            ORDER BY type,name;
-            """;
-        using var reader = objects.ExecuteReader();
+        var evidence = new List<string>();
+        using (var objects = connection.CreateCommand())
+        {
+            objects.CommandText = """
+                SELECT type,name,tbl_name,COALESCE(sql,'')
+                FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%'
+                  AND name NOT LIKE 'retention_%'
+                  AND tbl_name NOT LIKE 'retention_%'
+                  AND name NOT LIKE 'source_%'
+                  AND tbl_name NOT LIKE 'source_%'
+                  AND name NOT LIKE 'skill_projection_%'
+                  AND tbl_name NOT LIKE 'skill_projection_%'
+                  AND name NOT LIKE 'monitor_skill_%'
+                  AND name NOT LIKE 'IX_monitor_skill_%'
+                  AND tbl_name NOT LIKE 'monitor_skill_%'
+                ORDER BY type,name;
+                """;
+            using var reader = objects.ExecuteReader();
+            while (reader.Read())
+            {
+                evidence.Add(
+                    "object|"
+                    + string.Join(
+                        '|',
+                        Enumerable.Range(0, reader.FieldCount)
+                            .Select(reader.GetString)));
+            }
+        }
+        AppendTableRows(evidence, connection, "source_schema_observations");
+        AppendTableRows(evidence, connection, "source_unknown_observations");
+        AppendTableRows(evidence, connection, "source_trace_version_observations");
+        return string.Join('\n', evidence);
+    }
+
+    private static void AppendTableRows(
+        List<string> evidence,
+        SqliteConnection connection,
+        string table)
+    {
+        if (Scalar<long>(
+                connection.DataSource,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;",
+                ("$name", table)) == 0)
+            return;
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT * FROM {table} ORDER BY rowid;";
+        using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++) Append(digest, reader.GetString(ordinal));
+            var values = new string[reader.FieldCount];
+            for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+            {
+                values[ordinal] = reader.IsDBNull(ordinal)
+                    ? "<null>"
+                    : reader.GetValue(ordinal) is byte[] bytes
+                        ? Convert.ToBase64String(bytes)
+                        : Convert.ToString(
+                            reader.GetValue(ordinal),
+                            System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+            }
+            evidence.Add($"row|{table}|" + string.Join('|', values));
         }
-        return Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
     }
 
     private static string ManifestFixtureHash(string manifestPath)
@@ -193,7 +236,6 @@ public sealed class RetentionWorkerMigrationQueryPlanTests
         return connection;
     }
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-    private static void Append(IncrementalHash digest, string value) { var bytes = Encoding.UTF8.GetBytes(value); digest.AppendData(BitConverter.GetBytes(bytes.Length)); digest.AppendData(bytes); }
     private static void DeleteDatabaseFiles(string path) { foreach (var candidate in new[] { path, path + "-wal", path + "-shm" }) if (File.Exists(candidate)) File.Delete(candidate); }
 
     private sealed record WorkerMigrationEvidence(long Version, bool HasDeletionStartedAt, long WorkerStateCount, string WorkerIndexes, string StoreInstanceId);

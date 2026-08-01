@@ -17,6 +17,11 @@ Optional:
 
 - Issue #51 Session events from `copilot-sdk-stream` or
   `copilot-compatible-hook`, accepted by the installed Local Monitor only.
+- The accepted but production-blocked Skill-only v2 transport from
+  `copilot-sdk-stream`; it is not an installed or registered source until every
+  gate in
+  [Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md)
+  is closed.
 
 Planned / blocked candidate:
 
@@ -543,6 +548,40 @@ before a breaking vocabulary or semantic change. This checklist is not an
 authorization to change the existing receiver, adapter, persistence, migration,
 HTTP, proxy, or UI DTO in Issue #61.
 
+### GitHub Copilot observed-leaf promotion
+
+Issue #125 promotes only evidence-supported leaves inside the existing v1
+manifest shape. The controlled evidence and bounded claims are:
+
+| Surface and leaf | Exact producer/capture/acquisition evidence | Bounded manifest claim |
+| --- | --- | --- |
+| `github-copilot-cli` `source_version_detector` | Raw OTLP scan of `data/issue-129-cli-capture.db`: 4 traces / 14 spans. Resource `service.version` is present per trace and resolves to `1.0.74` or `1.0.75`; this is trace-scoped evidence, not a capture-wide version assignment. | `available` |
+| `github-copilot-cli` `timing_ttft.ttft` | The same raw OTLP capture contains `gen_ai.response.time_to_first_chunk` on 1 / 14 spans. | `available`; carrying-span evidence only, not a general per-run latency guarantee. |
+| `github-copilot-vscode` `timing_ttft.ttft` | Raw OTLP scan of the current `data/issue-127-vscode-capture.db` from extension `0.58.0`: 24 traces / 55 spans, with `copilot_chat.time_to_first_token` and `gen_ai.response.time_to_first_chunk` each on 15 / 55 spans. The extraction supplied no producer version, so producer `service.version` was not supplied. An older raw-only `data/monitor-live-validation-vscode.db` capture from extension `0.54.0` has 18 raw OTLP spans, zero monitor projection, and both fields on 9 / 18 spans. | `available`; carrying-span evidence only, not a general per-run latency guarantee. |
+| `github-copilot-vscode` `content_capture_gate` | In the current extension `0.58.0` capture, `copilot_chat.user_request` occurs on 18 / 55 raw OTLP spans even though `captureContent` was not enabled. | `unknown`; content was observed but gate behavior was not verified. |
+
+These are leaf-scoped observations. Model/token, retry/attempt, tool-call,
+permission, error, Agent ownership, prompt/response, file/diff, and every other
+uncited leaf retain their prior value. No Skill category is added to the
+manifest schema. Issue #116 used Claude-specific adapter evidence from live
+print-mode OTel and an exercised Hook path; it is a different evidence
+authority, none of its evidence is copied here, and the Claude manifest remains
+byte-identical. Unknown relevant attribute values continue to fail closed under
+Issue #151, while detection of unknown attribute keys remains open in Issue
+#152.
+
+Runtime selection consumes Issue #151's exact `TraceSourceResolutionDraft`;
+there is no second resolver or database reader:
+
+| Resolution | Selected manifest |
+| --- | --- |
+| `Resolved` with family `copilot-cli` | `github-copilot-cli` |
+| `Resolved` with family `vscode-copilot-chat` | `github-copilot-vscode` |
+| missing, conflicting, unrecognised, absent, or any other family | selects no manifest |
+
+Selection is fail closed: there is no guess, default, first-record choice,
+compatibility shim, or fallback.
+
 ### Copilot CLI Skill projection
 
 The Skill projection is source-scoped to `github-copilot-cli`. Its
@@ -581,27 +620,63 @@ is invalid. Traces in one ingest batch may resolve to different source versions.
 A missing, conflicting, or unrecognised source version fails closed and produces
 no Skill projection for that trace.
 
+Base version observations are immutable. A separate later resolved observation
+does not neutralize a missing observation. The sole accepted correction path is
+an exact append-only decoder/registry interpretation supersession through
+`SourceCompatibilityReconciler`; aggregation, framing, revision and transaction
+rules are canonical in
+[Source Compatibility Reconciliation](source-compatibility-reconciliation.md).
+
 This projection contract changes no `/api/monitor/*` or
 `/api/session-workspace/*` v1 shape, ordering, or bytes; no
 `session_events.content_state` value; and no closed raw-bearing surface.
 
-The projection pipeline evaluates the source-version gate once, when it writes
-the projection, and never re-evaluates it. A stored Skill projection therefore
-does not by itself establish that its trace still resolves to a recognised
-source version. At read time, any consumer of Skill projections must
-independently re-check the trace's current source-version resolution before
-making a Skill claim. A trace that does not currently resolve to `Resolved`
-supplies no Skill claim regardless of stored rows.
+Issue #154 replaces the installed one-shot Skill writer with independent
+`skill_projection:1`. Its OTel arm uses trace generations:
+source-compatibility changes immediately invalidate prior OTel claims, persist
+an exact ordered input frontier, and enqueue a deterministic rerun in the same
+transaction. Ordinary OTel ingestion uses the same transaction-aware generation
+participant. OTel publication rechecks the current compatibility revision,
+resolved state, desired generation, exact frontier, projector version, queue
+lease and Retention operation leases. The independent SDK Session/Event arm is
+not trace-generation-bound and remains unavailable until #158 fixes and
+implements its exact wire writer and accepted registry seed. A raw snapshot
+cannot resurrect an invalid claim.
 
-A trace whose source version is unresolved when its record is projected is not
-revisited. A later resolution does not produce a projection for it.
+The old pre-release Skill rows and Skill-only completion marker are discarded;
+they are not copied, backfilled or served through a compatibility reader.
+Unrelated span, Session, raw, source-observation and Retention data is retained.
+The generation, queue, retry, read and transition contract is canonical in
+[Skill Projection](skill-projection.md).
 
-Records already span-projected before the schema version that introduced Skill
-projection are not backfilled. Skill projection applies to records projected
-after that point.
+## Local Repository observation admission
 
-Re-evaluation, re-projection, and backfill are tracked separately in Issue #154.
-A Skill read surface depends on Issue #154.
+The sole Repository catalog/assignment authority is
+[Local Repository Catalog and Session Assignment](../interfaces/local-repository-catalog.md).
+V1 considers only OTel scalar-string values from:
+
+```text
+vcs.repository.url.full
+copilot_chat.repo.remote_url
+```
+
+It applies exact duplicate-key rejection and span-over-resource precedence;
+invalid or duplicate higher-precedence data never falls back to resource
+attributes. Equal canonical locators retain distinct provenance without
+creating multiple assignment candidates. Unequal same-scope or cross-span
+locators produce conflict, not a guessed assignment. Names, paths, CWD,
+prompts, timestamps, source labels, future manifest candidates and Issue #152
+unknown-key drift are not admission authorities.
+
+Admission must hold a Retention operation lease before parsing and bind only to
+one exact existing Session. Once admitted, canonical locator, fingerprint,
+display casing and bounded provenance are catalog-owned metadata that survive
+source raw expiry without reconstructing raw content. Automatic
+admission/reconciliation remains blocked: its creation/binding lifecycle,
+identity framing, exact Session join, automatic-revision history, durable
+frontier and raw-reference shape are not yet executable. Only the six-form
+GitHub locator parser, canonicalization and fingerprint are currently `READY`;
+ingestion must not add a scan-on-read, queue, fallback or heuristic join.
 
 ## Session Event Ingestion And Enrichment
 
@@ -618,6 +693,33 @@ surfaces `copilot-sdk`, `copilot-cli`, `vscode`, and `hook-unknown`. It requires
 a 1 MiB request limit. It returns `204` only after commit. Fixed error mapping,
 the envelope/event shape, and read interfaces are defined in
 [Canvas Session workspace](../interfaces/canvas-session-workspace.md).
+
+The frozen v1 supported set includes `skill.started` and `skill.completed`.
+`skill.invoked` is unsupported on this route and uses the existing unsupported
+Event behavior. No route, header/body version, envelope/event shape, source
+enum, 1 MiB/100-event limit, validation order, status/error bytes, `204`
+behavior or Workspace response byte changes with this correction.
+
+The accepted additive SDK Skill transport is:
+
+```text
+POST /api/session-ingest/v2/events
+```
+
+It is raw-default-only, JSON, header/body version 2, exactly one
+`skill.invoked` Event from `copilot-sdk-stream` / `copilot-sdk`, with an
+8,388,608-byte inclusive request limit and the mandatory compatibility
+provenance defined by
+[Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md).
+It has no retry, redirect, fallback, compatibility writer or dual transport.
+Production parser/writer and host registration remain `BLOCKED_DECISION`:
+the exact outer envelope/event inventory, nullability, order and SDK/local
+mapping; complete error/status/media/`405` bytes; repository schema,
+fingerprint and registry seed; equality receipt and storage byte domains;
+classification/nullability/name/path mapping; success/discovery literals; and
+historical-to-discovery identity proof are not yet fixed. Ingestion must not
+derive them from v1 DTOs, runtime reflection, serializer defaults or encounter
+order.
 
 The installed Local Monitor also provides:
 
@@ -803,7 +905,8 @@ by VS Code and Copilot CLI.
 The startup wrapper must preserve the Local Monitor run boundary:
 
 - only loopback HTTP URLs are accepted (`127.0.0.1`, `localhost`, or `::1`).
-- `--sanitized-only` remains available for metadata-only always-on runs.
+- `--sanitized-only` remains available for receiver/health/machine-API-only
+  always-on runs without a human UI.
 - wrapper logs record only operational facts such as start/stop time, process id,
   exit code, configured URL, health result, and deterministic error code.
 - wrapper logs and state files do not contain raw monitor content, credentials,
@@ -878,6 +981,41 @@ vscode-copilot-chat
 copilot-cli
 codex-app
 ```
+
+### Trace source attribution
+
+Current GitHub Copilot producers may omit `client.kind`. The receiver therefore
+uses one trace-scoped resolver shared with measurement normalization. It walks
+each `resourceSpans` block and assigns that block's evidence to every trace in
+the block. Only these ordinal, case-sensitive pairs are recognized:
+
+| Evidence | Family |
+| --- | --- |
+| `client.kind=vscode-copilot-chat` | `vscode-copilot-chat` |
+| `client.kind=copilot-cli` | `copilot-cli` |
+| `service.name=copilot-chat` | `vscode-copilot-chat` |
+| `service.name=github-copilot` | `copilot-cli` |
+
+The persisted aggregate preserves whether each recognized family, an unknown
+exact candidate, and any relevant key were observed. Both families conflict;
+otherwise unknown evidence is unrecognised; otherwise one family resolves;
+otherwise attribution is missing. No unresolved state falls back to a
+record-global trace/resource value or to source version, agent, model,
+Repository, path, Session, or time. Source-version resolution remains a
+separate trace-scoped authority.
+
+Validated adapter ingestion commits the per-raw/per-trace evidence and an
+idempotent durable trace-reconciliation queue entry in the same transaction as
+raw, Retention catalog, and source-compatibility rows. The supported
+`ingest-raw` and `raw-local-receiver` direct raw-store paths call the same
+evidence writer and atomically commit raw, Retention, evidence, and queue work;
+they create no source-compatibility row without a validated adapter batch. A
+later conflicting record therefore clears the trace, every contributing
+ingestion owner, and only exact OTel-derived Session event/run source surfaces.
+Reconciliation runs before each projection pass, is scoped to queued
+identities, retains queue entries on rollback, and may publish only the pass's
+single existing projection-change SSE notification. Native Session bindings
+and non-source identity fields are never rewritten.
 
 Recommended:
 

@@ -152,7 +152,7 @@ $startScript = '.\scripts\start.ps1'
 $monitorUrl = 'http://127.0.0.1:4320'
 $db = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\raw-store.db'
 $installRoot = Join-Path $env:LOCALAPPDATA 'CopilotAgentObservability\LocalMonitor\app'
-$sanitizedOnly = $false # Use $true only when restoring the metadata-only instance.
+$sanitizedOnly = $false # Use $true only when restoring a receiver-only instance.
 $startParameters = @{
     Mode = 'Published'
     Url = $monitorUrl
@@ -227,8 +227,9 @@ For all newly started processes under the current Windows user, use:
 .\scripts\local-monitor\install-user-env.ps1
 ```
 
-Use `-SanitizedOnly` on `start.ps1` or `install-startup-task.ps1` to run the
-metadata-only monitor posture.
+Use `-SanitizedOnly` on `start.ps1` or `install-startup-task.ps1` to run a
+receiver/health/machine-API-only host. It does not register Razor Pages, human
+static assets, human routes, or `/api/local-monitor/v1/*`.
 
 ## Packaging
 

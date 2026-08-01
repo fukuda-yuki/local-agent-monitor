@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -51,7 +52,7 @@ public sealed class MonitorSkillProjectionTests
                 """
                 SELECT trace_id, span_id, skill_name, skill_source, invocation_trigger,
                        source_application_version, session_id
-                FROM monitor_skill_invocations;
+                FROM skill_projection_invocations;
                 """;
             using var reader = command.ExecuteReader();
             Assert.True(reader.Read());
@@ -69,7 +70,7 @@ public sealed class MonitorSkillProjectionTests
             ["probe-marker-skill", "other-skill"],
             ReadStrings(
                 connection,
-                "SELECT skill_name FROM monitor_skill_inventory_names ORDER BY name_ordinal;"));
+                "SELECT skill_name FROM skill_projection_inventory_names ORDER BY name_ordinal;"));
         Assert.Equal(
             "2|2|0|1.0.74",
             Scalar<string>(
@@ -77,14 +78,14 @@ public sealed class MonitorSkillProjectionTests
                 """
                 SELECT observed_name_count || '|' || retained_name_count || '|' ||
                        names_truncated || '|' || source_application_version
-                FROM monitor_skill_inventories;
+                FROM skill_projection_inventories;
                 """));
         Assert.Equal(
             0L,
             Scalar<long>(
                 connection,
                 """
-                SELECT COUNT(*) FROM monitor_skill_invocations
+                SELECT COUNT(*) FROM skill_projection_invocations
                 WHERE skill_name LIKE '%SKILL.md%' OR skill_source LIKE '%SKILL.md%' OR invocation_trigger LIKE '%SKILL.md%';
                 """));
     }
@@ -105,11 +106,11 @@ public sealed class MonitorSkillProjectionTests
         using var projected = await ProjectAsync(payload, "github-copilot-cli", [RecognisedVersion]);
         using var connection = Open(projected.DatabasePath);
 
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_invocations;"));
     }
 
     [Fact]
-    public async Task RedeliveredSpanAcrossRawRecords_StoresOneInvocation()
+    public async Task RedeliveredSpanAcrossRawRecords_ProjectsEachExactRawInput()
     {
         var payload = SkillPayload(
             """{"key":"service.version","value":{"stringValue":"1.0.74"}},""",
@@ -123,7 +124,7 @@ public sealed class MonitorSkillProjectionTests
         using var connection = Open(projected.DatabasePath);
 
         Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records;"));
-        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+        Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_invocations;"));
     }
 
     [Fact]
@@ -154,7 +155,7 @@ public sealed class MonitorSkillProjectionTests
             0L,
             Scalar<long>(
                 withoutSpanIdConnection,
-                "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+                "SELECT COUNT(*) FROM skill_projection_invocations;"));
 
         using var withEmptySpanId = await ProjectAsync(
             payloadWithEmptySpanId,
@@ -165,7 +166,7 @@ public sealed class MonitorSkillProjectionTests
             0L,
             Scalar<long>(
                 withEmptySpanIdConnection,
-                "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+                "SELECT COUNT(*) FROM skill_projection_invocations;"));
 
         using var withSpanId = await ProjectAsync(
             payloadWithSpanId,
@@ -176,7 +177,7 @@ public sealed class MonitorSkillProjectionTests
             1L,
             Scalar<long>(
                 withSpanIdConnection,
-                "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+                "SELECT COUNT(*) FROM skill_projection_invocations;"));
     }
 
     [Theory]
@@ -204,9 +205,9 @@ public sealed class MonitorSkillProjectionTests
         using var projected = await ProjectAsync(payload, "github-copilot-cli", recognisedVersions);
         using var connection = Open(projected.DatabasePath);
 
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_invocations;"));
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_inventories;"));
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_inventory_names;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_inventories;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_inventory_names;"));
     }
 
     [Fact]
@@ -219,8 +220,8 @@ public sealed class MonitorSkillProjectionTests
         using var projected = await ProjectAsync(payload, "github-copilot-vscode", [RecognisedVersion]);
         using var connection = Open(projected.DatabasePath);
 
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_invocations;"));
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_inventories;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_inventories;"));
     }
 
     [Fact]
@@ -242,10 +243,10 @@ public sealed class MonitorSkillProjectionTests
                 connection,
                 """
                 SELECT observed_name_count || '|' || retained_name_count || '|' || names_truncated
-                FROM monitor_skill_inventories;
+                FROM skill_projection_inventories;
                 """));
-        Assert.Equal(100L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_inventory_names;"));
-        Assert.Equal(256L, Scalar<long>(connection, "SELECT MAX(length(skill_name)) FROM monitor_skill_inventory_names;"));
+        Assert.Equal(100L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_inventory_names;"));
+        Assert.Equal(256L, Scalar<long>(connection, "SELECT MAX(length(skill_name)) FROM skill_projection_inventory_names;"));
     }
 
     [Fact]
@@ -261,15 +262,15 @@ public sealed class MonitorSkillProjectionTests
         using var projected = await ProjectAsync(payload, "github-copilot-cli", [RecognisedVersion]);
         using var connection = Open(projected.DatabasePath);
 
-        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM monitor_skill_invocations;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM skill_projection_invocations;"));
         Assert.Equal(["safe-skill"], ReadStrings(
             connection,
-            "SELECT skill_name FROM monitor_skill_inventory_names ORDER BY name_ordinal;"));
+            "SELECT skill_name FROM skill_projection_inventory_names ORDER BY name_ordinal;"));
         Assert.DoesNotContain(
             unsafeIdentifier,
             string.Join('|', ReadStrings(
                 connection,
-                "SELECT skill_name FROM monitor_skill_inventory_names ORDER BY name_ordinal;")),
+                "SELECT skill_name FROM skill_projection_inventory_names ORDER BY name_ordinal;")),
             StringComparison.Ordinal);
     }
 
@@ -291,12 +292,12 @@ public sealed class MonitorSkillProjectionTests
             "safe-skill",
             Scalar<string>(
                 connection,
-                "SELECT skill_name FROM monitor_skill_invocations;"));
+                "SELECT skill_name FROM skill_projection_invocations;"));
         Assert.Equal(
             ["safe-skill"],
             ReadStrings(
                 connection,
-                "SELECT skill_name FROM monitor_skill_inventory_names ORDER BY name_ordinal;"));
+                "SELECT skill_name FROM skill_projection_inventory_names ORDER BY name_ordinal;"));
     }
 
     [Theory]
@@ -346,7 +347,7 @@ public sealed class MonitorSkillProjectionTests
 
         var storedSessionId = Scalar<string?>(
             connection,
-            "SELECT session_id FROM monitor_skill_invocations;");
+            "SELECT session_id FROM skill_projection_invocations;");
         Assert.Equal(expectedBound ? sessionId : null, storedSessionId);
     }
 
@@ -398,19 +399,9 @@ public sealed class MonitorSkillProjectionTests
             "/api/monitor/overview",
             "/api/monitor/trace-list",
         ];
-        var withSkills = await CaptureResponses(host.Client, paths);
-        using (var connection = Open(temp.DatabasePath))
-        using (var command = connection.CreateCommand())
-        {
-            command.CommandText =
-                """
-                DELETE FROM monitor_skill_inventory_names;
-                DELETE FROM monitor_skill_inventories;
-                DELETE FROM monitor_skill_invocations;
-                """;
-            command.ExecuteNonQuery();
-        }
         var withoutSkills = await CaptureResponses(host.Client, paths);
+        await RunSkillProjectionAsync(temp.DatabasePath, temp.TimeProvider);
+        var withSkills = await CaptureResponses(host.Client, paths);
 
         Assert.Equal(withSkills.Length, withoutSkills.Length);
         for (var index = 0; index < withSkills.Length; index++)
@@ -441,6 +432,7 @@ public sealed class MonitorSkillProjectionTests
             await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: sanitizedOnly, testOptions: new MonitorHostTestOptions
             {
                 StartProjectionWorker = false,
+                StartSessionOtelEnrichment = false,
                 UseUserSecrets = false,
                 SourceFingerprintRegistry = registry,
                 SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
@@ -468,6 +460,7 @@ public sealed class MonitorSkillProjectionTests
                     temp.DatabasePath,
                     RawTelemetryStoreConnectionOptions.MonitorWriter));
             await worker.RunProjectionPassAsync();
+            await RunSkillProjectionAsync(temp.DatabasePath, temp.TimeProvider);
             return temp;
         }
         catch
@@ -475,6 +468,37 @@ public sealed class MonitorSkillProjectionTests
             temp.Dispose();
             throw;
         }
+    }
+
+    private static async Task RunSkillProjectionAsync(
+        string databasePath,
+        TimeProvider timeProvider)
+    {
+        var retentionContext = RetentionCatalogContext.AdoptExistingCatalogV1(databasePath);
+        var rawStore = new RawTelemetryStore(
+            databasePath,
+            retentionContext,
+            timeProvider,
+            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var worker = new SkillProjectionWorker(
+            new SqliteSkillProjectionStore(databasePath, rawStore),
+            timeProvider: timeProvider);
+        var now = timeProvider.GetUtcNow();
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if (await worker.RunNextAsync(now) is SkillProjectionWorkOutcome.NoWork)
+                return;
+            if (timeProvider is MutableTimeProvider mutable)
+            {
+                mutable.Advance(TimeSpan.FromMinutes(5));
+                now = mutable.GetUtcNow();
+            }
+            else
+            {
+                now = now.AddMinutes(5);
+            }
+        }
+        Assert.Fail("Skill projection did not reach a stable no-work state.");
     }
 
     private static string SkillPayload(

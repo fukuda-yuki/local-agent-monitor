@@ -60,6 +60,14 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                 throw new IngestionCommitFailedException();
             }
 
+            var priorTraceResolutions = batch.Observation.TraceSourceVersionResolutions
+                .ToDictionary(
+                    static resolution => resolution.TraceId,
+                    resolution => SourceCompatibilityReconciler.ReadEffectiveTrace(
+                        connection,
+                        transaction,
+                        resolution.TraceId),
+                    StringComparer.Ordinal);
             var ownerToken = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
             var rawRecordId = RawTelemetryRecordSql.Insert(connection, transaction, batch.RawRecord, ownerToken);
             writeFailureInjector?.Invoke(IngestionCommitWritePhase.AfterRawRecordInsert);
@@ -69,7 +77,17 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                 connection,
                 transaction,
                 rawRecordId,
+                batch.RawRecord.PayloadJson,
                 batch.Observation);
+            foreach (var resolution in batch.Observation.TraceSourceVersionResolutions)
+            {
+                SkillProjectionGenerationParticipant.AdmitOrdinaryObservation(
+                    connection,
+                    transaction,
+                    resolution.TraceId,
+                    priorTraceResolutions[resolution.TraceId],
+                    batch.Observation.ObservedAt);
+            }
             InsertProjectionDisposition(connection, transaction, rawRecordId, batch.RawRecord.ReceivedAt);
             writeFailureInjector?.Invoke(IngestionCommitWritePhase.BeforeCommit);
             transaction.Commit();

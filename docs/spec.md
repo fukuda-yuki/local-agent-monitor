@@ -45,7 +45,7 @@ Profile selector は `CAO_COLLECTION_PROFILE` とし、詳細は
 
 `raw-local-receiver` は Langfuse なしで VS Code からこの repository の local receiver へ直接 telemetry を送信する profile であり、Sprint7 の実装対象とする。
 
-Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
+Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
 
 Human page route ownership:
 
@@ -68,11 +68,41 @@ state; `node` resolves its exact execution and `analysis` never names a mutable
 contract from the IA. Draft cohort checkboxes remain transient until the server
 creates an opaque comparison snapshot ID.
 
-`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository reads are owned by #155/#156, Workspace reads by #133/#134, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository catalog/assignment and its gated management routes are owned by #155/#156; #134 alone owns and serializes the composite `GET /api/local-monitor/v1/repositories` Workspace read. #156, #161 and #134 share one `ILocalRepositoryScopeSnapshotService`; #161 composes archive eligibility and neither #161 nor #134 adds direct catalog SQL or a second reader. Other Workspace reads are owned by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+
+The accepted #119/#157/#158 Skill foundation is canonical in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+Frozen Session ingest v1 supports `skill.started` and `skill.completed`;
+`skill.invoked` remains an unsupported v1 Event. That correction changes no
+v1 route, wire shape, enum, limit, status mapping, entity byte or response byte.
+The additive Skill-only v2 transport, snapshot component, raw-local reads,
+current-file discovery and backup/sanitized composition are accepted
+foundation only. Production v2 parsing, persistence, migration, routes and
+registration remain `BLOCKED_DECISION` until the interface's complete
+implementation gate is closed; no serializer default, heuristic, fallback,
+compatibility writer or dual path may fill a blocked value.
+
+The Repository catalog contract is accepted but only its exact six-form GitHub
+locator parser, canonicalization and domain-separated fingerprint are currently
+`READY`. `local_repository_catalog:1`, automatic admission/reconciliation,
+assignment mutations and management reads, scope composition, and backup
+registration remain `BLOCKED_DECISION` until the canonical contract closes its
+automatic creation/binding, identity framing and exact Session join,
+automatic-revision history, reconciliation frontier, complete wire,
+raw-reference durability, and single-read-transaction composition gaps. No
+schema, route, history action, response carrier, compatibility path or
+heuristic binding may be inferred. V1 admission remains limited to
+`vcs.repository.url.full` and `copilot_chat.repo.remote_url`; Issue #152 remains
+unresolved.
 
 Old human-route disposition is exact: `/` changes from Overview to Repository selection; `/traces` retires when Session Explorer ships; `/traces/{traceId}` remains low-level technical evidence; raw record/span/event routes remain focused technical evidence; `/historical-analysis` retires when #164 integrates its backend into Repository-local AI while `/api/historical-analysis/v1/*` remains frozen; diagnostics, historical import, backup/restore and retention remain focused detail flows opened from Settings. No indefinite redirect, dual page path or permissive fallback is added.
 
-Execution order is the contract-index graph: telemetry prerequisites and #154; then #156/#158/#161/#168; then #134; then shell/routes/Repository/Session detail/Settings/Compare/AI implementations; then #169; #147; #148. Compare formula is delegated only to #165, AI persistence only to #162, and sanitized-only composition only to #159.
+Execution order is the contract-index graph: telemetry prerequisites and #154;
+then only the contract-released slices of #156/#158/#161/#168; then #134 after
+all of its input gates; then shell/routes/Repository/Session
+detail/Settings/Compare/AI implementations; then #169; #147; #148. Compare
+formula is delegated only to #165, AI persistence only to #162, and
+sanitized-only composition only to #159.
 
 The installed pre-v1 Console/trace-first UI and its additive monitor projection/routes remain implementation history and frozen compatibility surfaces until their owning replacement Issue ships. Their existence does not make them current product IA or authorize a second reader. Windows startup, self-contained Release ZIP distribution, raw OTLP ingestion, SQLite persistence, health/readiness, retention, export/import, replay, backup and Canvas contracts remain unchanged by Issue #118.
 
@@ -368,10 +398,22 @@ contract major with matching schema and manifests. A manifest/schema version
 match and unknown field rejection are mandatory; a consumer must not silently
 accept a mismatched or extended document.
 
-This is a documentation and committed-contract release only. It does not
-change the Issue #51 Session / Run / Event identity, the Issue #49 Agent
-ownership interpretation, or any receiver, adapter, database, migration, HTTP,
-proxy, or UI DTO. The semantic rules and canonical locations are defined by
+The original Issue #61 work was a documentation and committed-contract release
+only. Issue #125 revises exactly four observed values inside the existing v1
+shape: GitHub Copilot CLI source-version detection and TTFT become `available`,
+GitHub Copilot VS Code TTFT becomes `available`, and the unverified VS Code
+content-capture gate becomes `unknown`. All other manifest leaves remain
+unchanged. Runtime selection consumes the exact Issue #151 trace-source
+resolution: only a resolved `copilot-cli` or `vscode-copilot-chat` family maps
+to its corresponding manifest; missing, conflicting, unrecognised, or absent
+resolution selects none. No source guess, default, first-record choice,
+compatibility shim, fallback, or duplicate resolver is permitted, and Issue
+#152 remains the separate owner of unknown attribute-key drift.
+
+These revisions do not change the Issue #51 Session / Run / Event identity,
+the Issue #49 Agent ownership interpretation, or any receiver, adapter,
+database, migration, HTTP, proxy, or UI DTO. The semantic rules and canonical
+locations are defined by
 [telemetry ingestion](specifications/layers/telemetry-ingestion.md),
 [raw-store normalization](specifications/layers/raw-store-normalization.md),
 [Canvas Session workspace](specifications/interfaces/canvas-session-workspace.md),
@@ -915,7 +957,11 @@ identity is `(source_adapter, source_event_id)`, and nested trace contributions
 are canonical-sorted. HTTP transient archive/preview bytes have fixed
 count/byte/TTL limits with idle sweeping, provider errors cross a closed mapping,
 and unsupported request media types return HTTP 415 with the serialized JSON
-error code `unsupported_media_type`.
+error code `unsupported_media_type`. D069's pinned v1 normalization,
+projection, dashboard identifiers and hashes retain their pre-Issue-151
+record-local source derivation; adopting current cross-record source
+attribution requires separately accepted new target versions.
+
 ## Runtime backup and restore
 
 Issue #88 defines the raw-bearing `local-runtime-backup` profile separately from
@@ -965,6 +1011,74 @@ batch-level source-version label and distinguishes resolved, missing,
 conflicting, and unrecognised states. No unresolved state falls back to the
 batch label.
 
+Issue #154 keeps those base trace-version observations immutable and adds
+append-only exact interpretation revisions. Only
+`SourceCompatibilityReconciler` may append one, from either decoder replay of
+the same retained bytes or registry recognition of an already retained token.
+`missing + resolved` remains missing unless the exact missing base observation
+is superseded. A semantic change atomically advances the trace compatibility
+revision, invalidates any current OTel Skill claim, persists one exact ordered
+input frontier/generation/queue row and records its idempotency receipt.
+These source-compatibility objects advance the Monitor component from exact v10
+to v11; `skill_projection:1` remains a separate component and holds no duplicate
+current-revision authority.
+
+The independent `skill_projection:1` component is the single current-valid
+Skill claim authority. Its OTel arm reruns only its persisted trace frontier
+under Retention operation leases and publishes only after revision, resolved
+state, desired generation, frontier, projector version, queue lease and
+Retention leases still match. Its independent SDK Session/Event claim subspace
+has no trace-generation dependency: current validity requires exact local
+Session/Event/source identity plus exact application, adapter, normalization,
+payload-schema and schema-fingerprint tuple acceptance by the current registry.
+The arms merge only when producer trace ID and span ID both exactly match; an
+unlinked same-Session pair is not added and yields `null` count with
+`certification_pending`. The obsolete pre-release Skill rows are discarded
+without copy, backfill, dual readers or deletion of unrelated
+Session/raw/Retention data. #158 must still pin and implement its wire writer
+and accepted registry seed before SDK claim admission is available.
+Canonical details are
+[source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
+and [Skill projection](specifications/layers/skill-projection.md). Issue #152
+unknown attribute-key drift remains unresolved.
+
+The SDK transport and retained raw snapshot are separately governed by
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+That interface retains #154 as the sole current-valid claim authority and
+permits cross-arm composition only for exact producer trace ID plus span ID.
+Its v2 outer envelope/event inventory and mapping, complete error/status/media/
+`405` bytes, producer schema/fingerprint/registry seed, equality-receipt and
+content byte domains, multi-fault/nullability/name/path classification,
+success/discovery literals, and historical-to-discovery handle identity proof
+remain unsettled together. Consequently #119 v2 and #158 production are not
+implementation-ready. Raw-local registration is raw-default only; the complete
+snapshot namespace is excluded from sanitized export/import without an empty
+carrier or fallback.
+
+Monitor schema v10 adds a private per-raw-record/per-trace source-attribution
+evidence authority and a durable trace reconciliation queue. The shared
+trace-scoped resolver recognizes only the four exact mappings pinned in the
+measurement and ingestion specifications and aggregates evidence as
+conflicting before unrecognised before one resolved family before missing.
+Validated adapter ingestion persists evidence and its queue entry atomically
+with raw, Retention, and source-schema rows. Supported direct raw-store writers
+persist the same evidence and queue atomically with raw and Retention without
+fabricating source-schema rows. Every projection pass reconciles only queued
+trace, contributing-ingestion, and exact OTel Session source-surface rows,
+removes queue entries only in the same successful transaction, and retries an
+aborted pass without projecting new raw rows. A pass emits at most one
+projection SSE notification. Startup may transition existing attribution only
+from Retention-authorized, fully represented raw/span evidence; incomplete,
+read-denied, or partially retained contributing records leave prior
+attribution untouched. That historical transition changes only
+`monitor_ingestions.client_kind` and `monitor_traces.client_kind`, creates no
+queue work, and is state/byte idempotent. A database already declaring v10 must
+have the exact evidence table, named index, and queue authority or startup
+fails before mutation. A database declaring an older Monitor version must have
+none of those v10-owned names; any exact-shaped, populated, or malformed
+collision fails before journal-mode or schema mutation and is likewise rejected
+by runtime-backup preflight.
+
 Issues #63-#65 add Claude Code through a source-specific adapter without
 changing source identifiers. OTel owns trace/span identity, parentage, and
 timing. Hook data owns native lifecycle and explicit event identity and cannot
@@ -981,6 +1095,9 @@ sanitized. The canonical contract is
 | --- | --- |
 | 実装仕様入口 | [specifications/README.md](specifications/README.md) |
 | Telemetry ingestion | [specifications/layers/telemetry-ingestion.md](specifications/layers/telemetry-ingestion.md) |
+| Source compatibility reconciliation | [specifications/layers/source-compatibility-reconciliation.md](specifications/layers/source-compatibility-reconciliation.md) |
+| Skill projection | [specifications/layers/skill-projection.md](specifications/layers/skill-projection.md) |
+| Skill invocation snapshot | [specifications/interfaces/skill-invocation-snapshot.md](specifications/interfaces/skill-invocation-snapshot.md) |
 | Raw store and normalization | [specifications/layers/raw-store-normalization.md](specifications/layers/raw-store-normalization.md) |
 | Candidate pipeline | [specifications/layers/candidate-pipeline.md](specifications/layers/candidate-pipeline.md) |
 | Dashboard publishing | [specifications/layers/dashboard-publishing.md](specifications/layers/dashboard-publishing.md) |
@@ -989,6 +1106,7 @@ sanitized. The canonical contract is
 | Local Monitor v1 authority index | [specifications/interfaces/local-monitor-v1-contract-index.md](specifications/interfaces/local-monitor-v1-contract-index.md) |
 | Local Monitor v1 IA, routes and states | [specifications/interfaces/local-monitor-v1-ia.md](specifications/interfaces/local-monitor-v1-ia.md) |
 | Local Monitor v1 security supplement | [specifications/interfaces/local-monitor-v1-security.md](specifications/interfaces/local-monitor-v1-security.md) |
+| Local Repository catalog and Session assignment | [specifications/interfaces/local-repository-catalog.md](specifications/interfaces/local-repository-catalog.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
 | Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
@@ -1049,7 +1167,9 @@ Publicly documented interfaces are:
   accepted Local Monitor v1 contract owners; all routes are no-store, closed and
   bounded, mutations require same-origin plus CSRF, and the entire namespace is
   absent in `--sanitized-only`. It does not widen or duplicate frozen
-  `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE.
+  `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. #134 is the sole HTTP
+  owner of `GET /api/local-monitor/v1/repositories`; #156 owns only its gated
+  management/action routes and the catalog/assignment core.
 - Frozen Local Ingestion Monitor machine endpoints: `POST /v1/traces`, `GET /api/monitor/ingestions`, `GET /api/monitor/traces`, `GET /api/monitor/traces/{traceId}/spans`, `GET /api/monitor/summary`, `GET /api/monitor/overview?period=today|7d|30d`, `GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`, `GET /health/live`, `GET /health/ready`, and the SSE notification stream. Issue #118 does not change their shape, ordering, bytes or availability. `/api/monitor/*` and SSE remain sanitized and contain no raw/PII. `/health/ready` returns `503` for sustained saturation (transient backpressure is `degraded` with `2xx`) with the machine-readable `status` / `checks` / `degraded_reasons` body; default thresholds remain ingestion-stall `10s` and projection-lag `60s` where configurable. These endpoints are compatibility inputs, not an alternate Local Monitor v1 page reader or IA authority.
 - Historical import CLI commands:
   `historical-import preview --database <monitor.db> --request <request.json>`,

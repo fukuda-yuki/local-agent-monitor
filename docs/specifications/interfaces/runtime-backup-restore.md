@@ -223,6 +223,21 @@ byte-preserving v1-to-v2 migration; exact v2 is validated. It then ensures
 `runtime_backup` v1 and `pricing` v1 in their fixed order before snapshot
 capture. A partial/malformed/future engine or pricing-without-engine vector is
 rejected, not repaired.
+Declared Monitor v10 additionally requires the source-attribution evidence
+authority and durable reconciliation queue minimum shapes. Issue #154 advances
+the current Monitor component to v11. Exact v10 is its only supported
+predecessor; v11 additionally requires the append-only interpretation
+supersession/head/current-revision/receipt authority and base-observation
+update/delete/parent-cascade guards. The online snapshot, manifest table
+counts, inspection, preview, and restore preserve every pending source and
+Skill queue row; backup never consumes reconciliation work.
+Issue #154 additionally includes immutable trace-version base observations,
+interpretation supersession ledger/heads, trace compatibility revisions and
+the complete independent `skill_projection:1` namespace. A captured Skill
+queue lease is data, not permission to resume as the old worker: restore
+converts `leased` to `pending` for the same generation, clears lease owner and
+expiry, and preserves attempt count. Backup never consumes or reconstructs a
+generation frontier.
 It opens the source with pooling
 disabled and a bounded busy timeout, creates a same-directory private temporary
 SQLite file, and invokes `SqliteConnection.BackupDatabase`. It never copies a
@@ -276,8 +291,92 @@ describes.
 unchanged runtime-backup owner. The fixed migration tail is
 `historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
 -> `runtime_backup` -> `pricing`, preserving #79 -> #86 -> #88 as an unchanged
-subsequence before #95. It does not reserve or change Session 13, Monitor 7,
-Retention 1, or a Retention store kind.
+subsequence before #95. The runtime-backup owner itself does not reserve or
+change Session 13, current Monitor v11 (or its exact supported v10
+predecessor), Retention 1, or a Retention store kind. The separate #154 Monitor
+v10-to-v11 migration owns the source-compatibility change described above.
+
+`skill_projection:1` is an independent Local Monitor component, not a Retention
+kind and not part of `runtime_backup`'s historical Wave 3 tail. Its dependency
+position is after Monitor v11/source interpretation and Retention, and before the
+accepted future `skill_invocation_snapshot:1` and Workspace projection
+components:
+
+```text
+monitor v11/source base observations
+  -> interpretation ledger/head
+  -> retention
+  -> skill_projection
+  -> skill_invocation_snapshot
+```
+
+An exact supported older database or backup without the component initializes
+an empty `skill_projection:1` and discards the recognized obsolete pre-release
+Skill tables/Skill-only marker without copying rows. A partial, newer or
+unknown intermediate Skill namespace fails before mutation. This transition
+does not delete Session, raw, source-observation, span, Retention or unrelated
+component data. Validation requires contiguous interpretation revisions,
+matching heads/trace revisions, exact frontier hashes, consistent
+generation/queue state pairs, valid desired/current pointers and unique OTel
+claim keys. It also validates every SDK claim's exact local Session/Event
+foreign key, existing `(source_adapter, source_event_id)` identity, source
+surface equality, complete mandatory-application/adapter/normalization/payload-
+schema/fingerprint tuple, payload digest and claim uniqueness. Registry
+rejection restores the row as non-current rather than rewriting it. The owning
+rules are
+[Source Compatibility Reconciliation](../layers/source-compatibility-reconciliation.md)
+and [Skill Projection](../layers/skill-projection.md).
+
+`skill_invocation_snapshot:1` is likewise independent, not a Retention kind,
+and remains unregistered while the #158 implementation gate is open. It owns
+only invocation index/metadata and equality receipts. Existing Session Event
+content owns and backs up historical body/path bytes exactly once; the snapshot
+component adds no raw-content copy or sanitized carrier. An older exact
+supported backup with no component initializes it empty; declared partial or
+newer-than-v1 state fails closed. Restore validation requires the exact
+`skill.invoked` parent Event/content/claim ownership, unique
+`(session_id,event_id)`, digest/size/state consistency, and insert-or-identical
+receipt behavior fixed by
+[Skill Invocation Snapshot](skill-invocation-snapshot.md). Those exact byte
+domains and collision semantics remain blocked, so migration/registration is
+not production-ready. OTel-only `not_captured` observations have no row to
+backup.
+
+### Local Repository catalog component
+
+The accepted future component is `local_repository_catalog:1`, ordered
+immediately after Session and before `local_archive`. The relevant dependency
+order is:
+
+```text
+monitor
+session
+local_repository_catalog
+local_archive
+retention
+skill_projection
+skill_invocation_snapshot
+local_workspace_projection
+```
+
+Its namespace contains every catalog, immutable locator/head, observation,
+manual override, assignment revision/history, Repository history and durable
+operation-receipt table defined by
+[Local Repository Catalog and Session Assignment](local-repository-catalog.md).
+An exact supported older backup without the component initializes an empty v1
+catalog. A present partial, newer or unknown table/enum namespace fails closed.
+Validation recomputes locator fingerprints and verifies unique ownership,
+heads, observation references, overrides, contiguous revisions, exact receipt
+bytes and append-only completeness.
+
+The component can restore without source raw content; retained catalog-owned
+metadata survives and provenance availability resolves to `unknown` or
+`expired` without reconstructing raw. The whole component is excluded from
+sanitized evidence export/import. Production registration is not yet
+authorized: automatic-revision history and raw-reference durability are among
+the catalog's explicit unresolved blockers, so backup code must not invent an
+intermediate component shape.
+
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather
@@ -428,6 +527,21 @@ unchanged; in particular, restore does not call Retention initialization first
 and allow its Monitor DDL to mutate a rejected candidate. Missing older
 supported components are created only in staging after this gate. Preview never
 mutates the destination.
+
+An exact Monitor v9 archive contains none of the three v10-owned attribution
+names: the evidence table, its named trace index, and the durable queue. Any
+empty, populated, exact-shaped, or malformed collision is
+`restore_incompatible` during read-only preflight and is never advertised as a
+supported migration. For an exact v9 source, staging creates the evidence
+authority and durable queue. Source-attribution evidence may be persisted from
+a raw payload only when its canonical Retention entry still authorizes reading
+and its ownership receipt matches; this includes authorized unprojected backlog
+so its first v10 projection can use that evidence. Rewriting existing projected
+Monitor attribution additionally requires complete, exact ordinal/trace/span
+projection membership. Historical migration leaves the queue empty.
+Incomplete, missing, expired, or read-denied evidence retains the archived
+projection values. A restored v10 database must pass the current
+authority-shape gate, and a repeated current startup is state/byte idempotent.
 
 Retention v1 preflight requires the production ancillary reservation, member,
 capture/legacy journal, and blocker column sets. Staging then runs the

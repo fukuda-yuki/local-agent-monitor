@@ -8,6 +8,8 @@
 | Layer | Spec |
 | --- | --- |
 | Telemetry ingestion | [layers/telemetry-ingestion.md](layers/telemetry-ingestion.md) |
+| Source compatibility reconciliation | [layers/source-compatibility-reconciliation.md](layers/source-compatibility-reconciliation.md) |
+| Skill projection | [layers/skill-projection.md](layers/skill-projection.md) |
 | Raw store and normalization | [layers/raw-store-normalization.md](layers/raw-store-normalization.md) |
 | Candidate pipeline | [layers/candidate-pipeline.md](layers/candidate-pipeline.md) |
 | Dashboard publishing | [layers/dashboard-publishing.md](layers/dashboard-publishing.md) |
@@ -21,6 +23,8 @@
 | Local Monitor v1 contract authority index | [interfaces/local-monitor-v1-contract-index.md](interfaces/local-monitor-v1-contract-index.md) |
 | Local Monitor v1 IA, routes and states | [interfaces/local-monitor-v1-ia.md](interfaces/local-monitor-v1-ia.md) |
 | Local Monitor v1 security supplement | [interfaces/local-monitor-v1-security.md](interfaces/local-monitor-v1-security.md) |
+| Skill invocation snapshot | [interfaces/skill-invocation-snapshot.md](interfaces/skill-invocation-snapshot.md) |
+| Local Repository catalog and Session assignment | [interfaces/local-repository-catalog.md](interfaces/local-repository-catalog.md) |
 | Collection profiles | [interfaces/collection-profiles.md](interfaces/collection-profiles.md) |
 | Config CLI | [interfaces/config-cli.md](interfaces/config-cli.md) |
 | Configuration setup | [interfaces/configuration-setup.md](interfaces/configuration-setup.md) |

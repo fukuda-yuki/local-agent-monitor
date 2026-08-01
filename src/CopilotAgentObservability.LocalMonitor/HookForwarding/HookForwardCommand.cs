@@ -24,9 +24,12 @@ internal static class HookForwardCommand
             ["UserPromptSubmit"] = "UserPromptSubmit",
             ["PreToolUse"] = "PreToolUse",
             ["PostToolUse"] = "PostToolUse",
+            ["PostToolUseFailure"] = "PostToolUseFailure",
+            ["PermissionRequest"] = "PermissionRequest",
             ["SubagentStart"] = "SubagentStart",
             ["SubagentStop"] = "SubagentStop",
             ["Stop"] = "Stop",
+            ["SessionEnd"] = "SessionEnd",
         };
 
     public static async Task<int> RunAsync(

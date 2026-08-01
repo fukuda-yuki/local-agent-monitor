@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -89,8 +90,8 @@ public sealed class SourceCapabilityContractTests
             AssertManifestHeader(manifests["codex-app"], "codex-app", "not-implemented", "planned", "preview");
             AssertManifestHeader(manifests["codex-cli"], "codex-cli", "not-implemented", "planned", "preview");
 
-            AssertAvailabilityMatrix(manifests["github-copilot-vscode"], CopilotAvailabilityMatrix());
-            AssertAvailabilityMatrix(manifests["github-copilot-cli"], CopilotAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["github-copilot-vscode"], CopilotVsCodeAvailabilityMatrix());
+            AssertAvailabilityMatrix(manifests["github-copilot-cli"], CopilotCliAvailabilityMatrix());
             var claudeAvailability = UnknownAvailabilityMatrix();
             claudeAvailability["source_version_detector"] = "available";
             claudeAvailability["signals.trace"] = "available";
@@ -116,6 +117,28 @@ public sealed class SourceCapabilityContractTests
             {
                 manifest.Dispose();
             }
+        }
+    }
+
+    [Fact]
+    public void Repository_manifests_have_the_reviewed_repository_canonical_hashes()
+    {
+        var expectedHashes = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["claude-code.json"] = "a1841de0c2a319ced6d8f3ff50de5d24db87f6b5c3c94c4bc4d8c7affa444e61",
+            ["codex-app.json"] = "4dfa3ac2b5c89ce98abb70d561c0098880c9d8acf5b16765ba329e0b495f3c0b",
+            ["codex-cli.json"] = "ec01f759b2ab5730543576571cbc3855c27bf293c527c87d2272384407be8803",
+            ["github-copilot-cli.json"] = "d4d427f7f6f248d884b05c8fbb52f0b5b5953321a9b2929d04eceea0d7467901",
+            ["github-copilot-vscode.json"] = "4a84528a107d50757db05bded787f8f7fee1052f2675f974458d34f921ce3077",
+        };
+
+        var manifestPaths = Directory.GetFiles(ManifestsDirectory, "*.json")
+            .ToDictionary(path => Path.GetFileName(path)!, StringComparer.Ordinal);
+
+        Assert.Equal(expectedHashes.Keys.Order(StringComparer.Ordinal), manifestPaths.Keys.Order(StringComparer.Ordinal));
+        foreach (var (fileName, expectedHash) in expectedHashes)
+        {
+            Assert.Equal(expectedHash, RepositoryCanonicalSha256(File.ReadAllBytes(manifestPaths[fileName])));
         }
     }
 
@@ -686,11 +709,74 @@ public sealed class SourceCapabilityContractTests
             workspaceReasonCaps[reason]);
     }
 
+    [Fact]
+    public void Canonical_documents_pin_the_issue_125_observed_leaf_provenance_and_runtime_selection()
+    {
+        var requirements = ReadRepositoryDocument("docs/requirements.md");
+        var specification = ReadRepositoryDocument("docs/spec.md");
+        var telemetryContract = GetMarkdownSection(
+            ReadRepositoryDocument("docs/specifications/layers/telemetry-ingestion.md"),
+            "## Source capability semantic contract v1",
+            "\n## Session Event Ingestion And Enrichment");
+
+        Assert.Contains("Issue #125", requirements, StringComparison.Ordinal);
+        Assert.Contains("Issue #125", specification, StringComparison.Ordinal);
+
+        string[] requiredEvidence =
+        [
+            "data/issue-129-cli-capture.db",
+            "4 traces / 14 spans",
+            "`service.version`",
+            "`1.0.74`",
+            "`1.0.75`",
+            "trace-scoped",
+            "`gen_ai.response.time_to_first_chunk`",
+            "1 / 14",
+            "data/issue-127-vscode-capture.db",
+            "extension `0.58.0`",
+            "24 traces / 55 spans",
+            "producer `service.version` was not supplied",
+            "`copilot_chat.time_to_first_token`",
+            "15 / 55",
+            "`copilot_chat.user_request`",
+            "18 / 55",
+            "data/monitor-live-validation-vscode.db",
+            "extension `0.54.0`",
+            "18 raw OTLP spans",
+            "zero monitor projection",
+            "9 / 18",
+            "carrying-span evidence only",
+            "`captureContent` was not enabled",
+            "Issue #116",
+            "Issue #152",
+            "`TraceSourceResolutionDraft`",
+            "`copilot-cli`",
+            "`vscode-copilot-chat`",
+            "`github-copilot-cli`",
+            "`github-copilot-vscode`",
+            "selects no manifest",
+            "no guess, default, first-record choice, compatibility shim, or fallback",
+        ];
+
+        foreach (var evidence in requiredEvidence)
+        {
+            Assert.Contains(evidence, telemetryContract, StringComparison.Ordinal);
+        }
+    }
+
     private static string ReadRepositoryDocument(string relativePath)
     {
         var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", relativePath.Replace('/', Path.DirectorySeparatorChar));
         Assert.True(File.Exists(path), $"Missing canonical Issue #61 document: {relativePath}");
         return File.ReadAllText(path).ReplaceLineEndings("\n");
+    }
+
+    private static string RepositoryCanonicalSha256(byte[] bytes)
+    {
+        var text = new UTF8Encoding(false, true).GetString(bytes);
+        var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized))).ToLowerInvariant();
     }
 
     private static string GetMarkdownSection(string document, string heading, string? endHeading)
@@ -950,10 +1036,10 @@ public sealed class SourceCapabilityContractTests
         }
     }
 
-    private static Dictionary<string, string> CopilotAvailabilityMatrix()
+    private static Dictionary<string, string> CopilotCliAvailabilityMatrix()
     {
         var availability = UnknownAvailabilityMatrix();
-        availability["source_version_detector"] = "unavailable";
+        availability["source_version_detector"] = "available";
         availability["signals.trace"] = "available";
         availability["signals.hook"] = "available";
         availability["signals.sdk_event"] = "unavailable";
@@ -962,7 +1048,16 @@ public sealed class SourceCapabilityContractTests
         availability["trace_span_identity.span_id"] = "available";
         availability["trace_span_identity.parentage"] = "available";
         availability["timing_ttft.timing"] = "available";
+        availability["timing_ttft.ttft"] = "available";
         availability["content_capture_gate"] = "available";
+        return availability;
+    }
+
+    private static Dictionary<string, string> CopilotVsCodeAvailabilityMatrix()
+    {
+        var availability = CopilotCliAvailabilityMatrix();
+        availability["source_version_detector"] = "unavailable";
+        availability["content_capture_gate"] = "unknown";
         return availability;
     }
 

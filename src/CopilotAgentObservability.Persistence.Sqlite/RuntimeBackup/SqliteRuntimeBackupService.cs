@@ -32,12 +32,13 @@ public sealed class SqliteRuntimeBackupService
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
-        ["monitor"] = 9,
+        ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
         ["sanitized_import"] = 1,
         ["session"] = 13,
+        ["skill_projection"] = 1,
     };
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
     private static readonly string[] RetentionStates = ["expiring", "retained_by_policy", "expired_pending_deletion", "deletion_queued", "deleting", "deleted", "deletion_failed"];
@@ -46,6 +47,7 @@ public sealed class SqliteRuntimeBackupService
         "monitor",
         "session",
         "retention",
+        "skill_projection",
         "doctor",
         "alert_engine",
         "alert_lifecycle",
@@ -222,6 +224,11 @@ public sealed class SqliteRuntimeBackupService
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!HasValidPricingParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (versions.ContainsKey("skill_projection")
+                && (!versions.TryGetValue("monitor", out var monitorVersion) || monitorVersion < 11
+                    || !versions.TryGetValue("retention", out var retentionVersion)
+                    || retentionVersion != SupportedComponents["retention"]))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             return new(true, null, versions, []);
         }
         catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
@@ -343,6 +350,11 @@ public sealed class SqliteRuntimeBackupService
             if (versions.ContainsKey("sanitized_import") && !versions.ContainsKey("historical_import"))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!HasValidPricingParents(versions))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (versions.ContainsKey("skill_projection")
+                && (!versions.TryGetValue("monitor", out var monitorVersion) || monitorVersion < 11
+                    || !versions.TryGetValue("retention", out var retentionVersion)
+                    || retentionVersion != SupportedComponents["retention"]))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
@@ -1182,7 +1194,7 @@ public sealed class SqliteRuntimeBackupService
                 || !HasColumns(connection, "monitor_ingestions", "id", "raw_record_id", "received_at", "source", "projected_at")
                 || !HasColumns(connection, "monitor_traces", "id", "trace_id", "projected_at")
                 || !HasColumns(connection, "monitor_spans", "id", "raw_record_id", "trace_id", "span_ordinal", "projected_at")
-                || monitor >= 9 && !HasColumns(
+                || monitor is >= 9 and < 11 && !HasColumns(
                     connection,
                     "monitor_skill_invocations",
                     "id",
@@ -1196,7 +1208,7 @@ public sealed class SqliteRuntimeBackupService
                     "invocation_trigger",
                     "source_application_version",
                     "projected_at")
-                || monitor >= 9 && !HasColumns(
+                || monitor is >= 9 and < 11 && !HasColumns(
                     connection,
                     "monitor_skill_inventories",
                     "id",
@@ -1208,13 +1220,48 @@ public sealed class SqliteRuntimeBackupService
                     "names_truncated",
                     "source_application_version",
                     "projected_at")
-                || monitor >= 9 && !HasColumns(
+                || monitor is >= 9 and < 11 && !HasColumns(
                     connection,
                     "monitor_skill_inventory_names",
                     "raw_record_id",
                     "trace_id",
                     "name_ordinal",
-                    "skill_name"))) return false;
+                    "skill_name")
+                || monitor >= 10 && !HasColumns(
+                    connection,
+                    "source_trace_attribution_observations",
+                    "raw_record_id",
+                    "trace_id",
+                    "cli_candidate_observed",
+                    "vscode_candidate_observed",
+                    "unknown_candidate_observed",
+                    "relevant_evidence_observed")
+                || monitor >= 10 && !HasColumns(
+                    connection,
+                    "source_trace_attribution_reconciliation_queue",
+                    "trace_id"))) return false;
+        if (versions.ContainsKey("monitor"))
+        {
+            try
+            {
+                MonitorSchemaMigrator.ValidateBeforeInitialization(connection);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+        if (versions.ContainsKey("skill_projection"))
+        {
+            try
+            {
+                SkillProjectionSchemaV1.Validate(connection, transaction: null);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
         if (versions.ContainsKey("retention")
             && (!HasColumns(connection, "retention_component_versions", "component", "version")
                 || !HasColumns(connection, "retention_store_instances", "id", "store_instance_id")
@@ -1337,6 +1384,17 @@ public sealed class SqliteRuntimeBackupService
         {
             foreach (var trigger in PricingSchemaV1.OwnedObjects.Where(item => item.Type == "trigger"))
                 allowed[trigger.Name] = (trigger.TableName, trigger.Sql);
+        }
+        if (versions.TryGetValue("monitor", out var sourceMonitorVersion)
+            && sourceMonitorVersion >= 11)
+        {
+            foreach (var trigger in SourceCompatibilitySchemaV11.TriggerDefinitions)
+                allowed[trigger.Name] = (trigger.Table, trigger.Sql);
+        }
+        if (versions.ContainsKey("skill_projection"))
+        {
+            foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)
+                allowed[trigger.Name] = (trigger.Table, trigger.Sql);
         }
 
         var actual = new HashSet<string>(StringComparer.Ordinal);
@@ -1499,6 +1557,19 @@ public sealed class SqliteRuntimeBackupService
             ["runtime_backup_receipts_no_replace"] = "runtime_backup",
             ["first_trace_evidence_navigation"] = "first_trace_navigation",
         };
+        foreach (var table in SkillProjectionSchemaV1.TableNames)
+            owners[table] = "skill_projection";
+        foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)
+            owners[trigger.Name] = "skill_projection";
+        if (versions.TryGetValue("monitor", out var monitorVersion)
+            && monitorVersion is >= 9 and < 11
+            && !versions.ContainsKey("skill_projection"))
+        {
+            foreach (var table in SkillProjectionSchemaV1.ObsoleteTableNames)
+                owners[table] = "monitor";
+            foreach (var index in SkillProjectionSchemaV1.ObsoleteIndexNames)
+                owners[index] = "monitor";
+        }
         foreach (var item in PricingSchemaV1.OwnedObjects)
             owners[item.Name] = "pricing";
         var prefixes = new[]
@@ -1511,6 +1582,9 @@ public sealed class SqliteRuntimeBackupService
             "runtime_backup_",
             "pricing_",
             "first_trace_",
+            "skill_projection_",
+            "monitor_skill_",
+            "IX_monitor_skill_",
         };
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT name FROM sqlite_schema WHERE type IN ('table','index','trigger','view') ORDER BY name;";
@@ -2142,6 +2216,7 @@ public sealed class SqliteRuntimeBackupService
             if (!versions.ContainsKey("session") || versions["session"] < SupportedComponents["session"])
                 SqliteSessionStore.InitializeSchema(connection, transaction);
             new RetentionCatalogStore(path, timeProvider).InitializeForWrite(connection, transaction);
+            SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
             EnsureDoctorSchema(connection, transaction);
             SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
             HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);

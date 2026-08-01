@@ -2405,7 +2405,7 @@ public sealed class SetupStorageTests
     {
         var version = "1.0.0+" + new string('a', 122);
         var fixedValue = "a" + new string('b', 127);
-        var historicalManifest = LoadHistoricalManifest();
+        var historicalManifest = LoadShippedV1HistoricalManifest();
         var targets = Enumerable.Range(1, 16).Select(targetIndex =>
         {
             var members = Enumerable.Range(1, 32)
@@ -2477,7 +2477,7 @@ public sealed class SetupStorageTests
         SetupOperation.Replace,
         SetupEffectiveSource.UserSetting,
         "http://127.0.0.1:4320",
-        LoadHistoricalManifest(),
+        LoadShippedV1HistoricalManifest(),
         null,
         [new SetupMemberChangeResult("github.copilot.chat.otel.enabled", SetupOperation.Replace, "present_different", "configured_loopback", "none", false)]);
 
@@ -2506,7 +2506,7 @@ public sealed class SetupStorageTests
             new SetupStatusGuidance("caller_managed_sample", "dotnet"), []),
     };
 
-    private static JsonElement LoadHistoricalManifest()
+    private static JsonElement LoadShippedV1HistoricalManifest()
     {
         var manifestPath = Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs", "specifications", "contracts",
@@ -2514,6 +2514,8 @@ public sealed class SetupStorageTests
         var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
         manifest["support_status"] = "planned";
         manifest["stability"] = "preview";
+        manifest["timing_ttft"]!["ttft"]!["availability"] = "unknown";
+        manifest["content_capture_gate"]!["availability"] = "available";
         using var document = JsonDocument.Parse(manifest.ToJsonString());
         return document.RootElement.Clone();
     }

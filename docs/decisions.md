@@ -2796,3 +2796,179 @@ stores/behavior, raw ingestion, export/import, replay, backup, retention and
 technical evidence routes remain unchanged. Historical records are retained;
 they do not regain current product authority. Sentence-level Japanese copy is
 deferred to #169.
+
+## D076: Source observations stay immutable and Skill claims use fenced generations
+
+Status: Accepted (2026-07-31)
+
+Issue #154 adopts DC154-01. A trace-scoped source-version base observation is an
+immutable capture fact. It is neither updated nor neutralized by an unrelated
+later observation. Effective aggregation remains fail-closed: conflicting or
+multiple exact tokens, then unrecognised, then all-resolved with one token,
+then missing. Consequently `missing + resolved = missing`.
+
+Only the internal `SourceCompatibilityReconciler` may append an interpretation
+revision for the exact `(source_observation_id, trace_id)`. Decoder revision may
+recover an exact version from the same retained bytes and is the only way to
+resolve missing. Registry revision may recognise an already retained exact
+token. There is no HTTP/manual repair surface, version-entry fallback or
+generic repository mutation. Base and ledger rows are protected from direct
+update/delete and parent-cascade deletion.
+
+One SQLite transaction appends a meaningful revision, moves its exact head,
+increments the trace compatibility revision, invalidates the current OTel Skill
+claim, persists one exact ordered input frontier/generation/queue row and saves
+the idempotency receipt. Ordinary validated OTel ingestion uses the same
+transaction-aware generation participant. The worker processes only that
+frontier under renewable exact Retention operation leases and publishes only
+after compatibility, resolved state, desired generation, queue lease,
+Retention leases, frontier and projector version still match. Raw expiry
+produces `input_unavailable`, never a shortened or empty successful projection.
+The source-compatibility ledger/head/revision/receipt and immutability guards
+advance exact Monitor v10 to v11. `skill_projection:1` is independent and does
+not duplicate the current trace revision authority.
+
+Skill claims are owned by the independent `skill_projection:1` component and
+one current read service. Its closed source-arm seam is
+`otel_trace_span | sdk_session_event`. OTel alone uses trace
+SourceCompatibility generations. The SDK arm is a non-generation-bound exact
+Session/Event claim that carries local Session/Event identity, producer Event
+identity, source adapter/surface/application version, adapter/normalization
+versions, payload schema/fingerprint/digest and nullable producer trace/span.
+The current registry accepts the complete exact tuple; trace/span are not
+required for SDK claim validity. Arms merge only when producer trace ID and span
+ID both exactly match. Otherwise same-Session positive observations are not
+added: count is `null` and state is `certification_pending`.
+#157/#158 own the SDK transport/snapshot writer and accepted registry seed, may
+not create a second projection authority, and remain blocked until those
+contracts are fixed. A raw snapshot cannot resurrect a stale claim, and
+name/path/time/cardinality cannot link the arms.
+
+The pre-release Skill projection has no compatibility or backfill obligation.
+The recognized transition drops obsolete Skill-owned tables/markers, creates
+one empty current component, and removes the old reader/writer. It preserves
+unrelated Session, raw, source-observation, span and Retention data. Older
+supported backups may initialize an empty component; partial/newer/unknown
+intermediate state fails closed. Full contracts are
+`docs/specifications/layers/source-compatibility-reconciliation.md` and
+`docs/specifications/layers/skill-projection.md`.
+
+This decision does not implement or resolve Issue #152 and does not modify
+frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE bytes.
+
+## D077: Repository catalog and assignment use one exact gated authority
+
+Status: Accepted (2026-07-31)
+
+Local Monitor v1 adopts
+`docs/specifications/interfaces/local-repository-catalog.md` as the canonical
+Repository identity, GitHub locator, observation provenance, Session
+assignment, mutation, scope and backup contract. Exact opaque identities and
+the accepted locator grammar replace every name/path/CWD/prompt/time/
+cardinality heuristic. V1 observes only `vcs.repository.url.full` and
+`copilot_chat.repo.remote_url`; Issue #152 unknown attribute-key drift remains
+unresolved.
+
+The independent future component is `local_repository_catalog:1`. It keeps
+immutable locator rows and movable heads, exact observation provenance, manual
+overrides and assignment revisions, append-only history and durable exact-byte
+idempotency receipts. Catalog-owned canonical locator, fingerprint, display
+casing, safe label and bounded provenance survive source raw expiry without
+reconstructing source raw. The component is excluded from sanitized evidence
+export/import.
+
+#134 is the sole HTTP owner of
+`GET /api/local-monitor/v1/repositories`. #156 owns the catalog/assignment core
+and only its five management/action routes after their gates. #161 composes
+archive eligibility and #134 consumes the result through the same
+`ILocalRepositoryScopeSnapshotService`; neither adds direct catalog SQL or a
+second reader. Archive meaning remains #160/#161-owned.
+
+Only the exact six-form GitHub locator parser, canonicalization and
+domain-separated fingerprint are currently `READY`. Production schema,
+automatic admission/reconciliation, assignment mutation/read routes, scope
+composition and backup registration remain `BLOCKED_DECISION` until the
+canonical contract closes automatic creation/binding, identity framing and
+exact Session join, automatic-revision history, reconciliation frontier,
+complete wire bytes, durable raw-reference shape and single-transaction
+composition. Implementations do not invent intermediate tables, history
+actions, wire carriers, compatibility paths, fallback readers or permissive
+parsers.
+
+The future backup dependency order places `local_repository_catalog`
+immediately after Session and before `local_archive`, Retention, Skill
+projection/snapshot and Workspace projection. Older component-absent state may
+initialize empty; partial, newer or unknown state fails closed. Frozen
+`/api/monitor/*`, `/api/session-workspace/*` v1 and SSE bytes remain unchanged,
+and the human routes remain raw-default-only.
+
+## D078: Skill invocation snapshot foundation is accepted while production v2 stays blocked
+
+Status: Accepted foundation / production v2 blocked (2026-07-31)
+
+Issues #119, #157 and #158 adopt DC158-01 through DC158-11 through
+`docs/specifications/interfaces/skill-invocation-snapshot.md`.
+The frozen `POST /api/session-ingest/v1/events` supported set contains
+`skill.started` and `skill.completed`; `skill.invoked` is unsupported and uses
+the existing unsupported-event path. This corrects only event membership. It
+does not change the v1 route, header/body version, envelope/event shape,
+adapter/surface enum, 1 MiB body or 1..100 batch limit, content-state
+vocabulary, validation/status/error entity bytes, queue/commit/`204` behavior,
+or `/api/session-workspace/*` response bytes.
+
+The accepted additive direction is raw-default-only
+`POST /api/session-ingest/v2/events` for exactly one SDK `skill.invoked` Event,
+the independently versioned `skill_invocation_snapshot:1` component,
+historical body/path reads, an explicit current-file POST using configuration
+and discovery authority, and backup/raw-local/sanitized composition. Snapshot
+metadata and equality receipts do not copy historical body/path bytes already
+owned by Session Event content. The writer is one atomic seven-authority
+transaction; partial Event, content, Retention, snapshot, claim, receipt or
+invalid-claim state cannot remain.
+
+Startup `SkillDiscovery.ProjectPaths` and
+`SkillDiscovery.SkillDirectories` are the sole discovery-root authority.
+`ServerSkillsApi.DiscoverAsync` receives only those validated roots. Historical
+path/CWD, Repository locator, prompt, workspace label, timestamp and out-of-root
+results never create a root, and the service never opens the historical path
+directly. Only an accepted discovery result may enter the platform no-follow
+handle walk; exact name/path comparison and filesystem-identity proof stay in
+the decision gate.
+
+Issue #154 remains the sole current-valid Skill claim authority. SDK claim validity
+uses exact Session/Event/source identity and the complete current-registry
+compatibility tuple without requiring trace/span. OTel and SDK arms merge only
+when producer trace ID and span ID both match exactly. Trace-only, name, path,
+time, cardinality, Session co-membership and discovery output do not link
+claims. A raw snapshot cannot create or resurrect a stale/invalid claim, and
+OTel-only `not_captured` produces no snapshot row.
+
+Production v2 parsing/persistence, `skill_invocation_snapshot:1` migration,
+raw-local routes and host registration remain `BLOCKED_DECISION` until the
+canonical interface fixes all of:
+
+1. exact outer envelope/event property inventory, order, nullability and
+   SDK/local/provenance mapping;
+2. complete validation/status/error contract, exact entity/media/`405` bytes
+   and insert-or-identical conflict behavior;
+3. checked-in producer schema bytes, fingerprint domain/value, registry seed
+   and revision behavior;
+4. equality receipt key/framing/input/result byte domains and conflicts;
+5. payload digest/size and Session content/body/path storage byte domains plus
+   backup validation;
+6. total multi-fault precedence, nullable matrix, path/name rules,
+   projection-validity mapping and historical-read errors;
+7. success schema literals/presence, discovery root framing/hash,
+   current-file media/parameters and method precedence; and
+8. normalized historical name/path-to-discovery comparison, root/relative
+   handle-walker identity, persistence choice and Windows/Unix file identity
+   proof.
+
+No blocked value is inferred from the SDK, runtime reflection, v1 DTOs,
+serializer defaults, encounter order, secret-filtered content or
+implementation convenience. No v1 retry, fallback, compatibility writer,
+permissive parser or dual transport exists. `--sanitized-only` registers no v2
+writer, snapshot/current-file service or snapshot raw-local route. Sanitized
+export/import excludes the complete namespace and emits no empty carrier.
+Issue #152 remains unresolved, and frozen Monitor/Workspace/SSE contracts remain
+unchanged.

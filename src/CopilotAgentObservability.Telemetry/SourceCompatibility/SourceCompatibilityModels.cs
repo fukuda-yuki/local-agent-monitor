@@ -635,7 +635,8 @@ public sealed class SourceObservationBatchDraft
         SourceCompatibilityDecision decision,
         SourceCaptureContentState captureContentState,
         DateTimeOffset observedAt,
-        TraceSourceVersionResolutionDraft[] traceSourceVersionResolutions)
+        TraceSourceVersionResolutionDraft[] traceSourceVersionResolutions,
+        TraceSourceResolutionDraft[] traceSourceResolutions)
     {
         IngestBatchId = ingestBatchId;
         SourceSurface = sourceSurface;
@@ -647,6 +648,7 @@ public sealed class SourceObservationBatchDraft
         CaptureContentState = captureContentState;
         ObservedAt = observedAt;
         TraceSourceVersionResolutions = Array.AsReadOnly(traceSourceVersionResolutions);
+        TraceSourceResolutions = Array.AsReadOnly(traceSourceResolutions);
     }
 
     public string IngestBatchId { get; }
@@ -664,6 +666,7 @@ public sealed class SourceObservationBatchDraft
     public SourceCaptureContentState CaptureContentState { get; }
     public DateTimeOffset ObservedAt { get; }
     public IReadOnlyList<TraceSourceVersionResolutionDraft> TraceSourceVersionResolutions { get; }
+    internal IReadOnlyList<TraceSourceResolutionDraft> TraceSourceResolutions { get; }
 
     public static SourceObservationBatchDraft Create(
         string ingestBatchId,
@@ -700,7 +703,53 @@ public sealed class SourceObservationBatchDraft
         }
         return new SourceObservationBatchDraft(
             ingestBatchId, sourceSurface, sourceApplicationVersion, sourceAdapter, adapterVersion,
-            inventory, decision, captureContentState, observedAt, traceResolutions);
+            inventory, decision, captureContentState, observedAt, traceResolutions, []);
+    }
+
+    internal static SourceObservationBatchDraft CreateWithTraceSources(
+        string ingestBatchId,
+        string sourceSurface,
+        string? sourceApplicationVersion,
+        string sourceAdapter,
+        string adapterVersion,
+        SourceStructuralInventory inventory,
+        SourceCompatibilityDecision decision,
+        SourceCaptureContentState captureContentState,
+        DateTimeOffset observedAt,
+        IEnumerable<TraceSourceVersionResolutionDraft>? traceSourceVersionResolutions = null,
+        IEnumerable<TraceSourceResolutionDraft>? traceSourceResolutions = null)
+    {
+        var draft = Create(
+            ingestBatchId,
+            sourceSurface,
+            sourceApplicationVersion,
+            sourceAdapter,
+            adapterVersion,
+            inventory,
+            decision,
+            captureContentState,
+            observedAt,
+            traceSourceVersionResolutions);
+        var sourceResolutions = traceSourceResolutions?.ToArray() ?? [];
+        if (sourceResolutions.Any(item => item is null)
+            || sourceResolutions.Select(item => item.TraceId).Distinct(StringComparer.Ordinal).Count() != sourceResolutions.Length)
+        {
+            throw new ArgumentException(
+                "Trace source resolutions must be non-null and unique by trace ID.",
+                nameof(traceSourceResolutions));
+        }
+        return new SourceObservationBatchDraft(
+            draft.IngestBatchId,
+            draft.SourceSurface,
+            draft.SourceApplicationVersion,
+            draft.SourceAdapter,
+            draft.AdapterVersion,
+            draft.Inventory,
+            draft.Decision,
+            draft.CaptureContentState,
+            draft.ObservedAt,
+            draft.TraceSourceVersionResolutions.ToArray(),
+            sourceResolutions);
     }
 }
 

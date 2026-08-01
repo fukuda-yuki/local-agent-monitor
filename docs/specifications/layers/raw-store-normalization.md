@@ -57,7 +57,9 @@ fixtures rather than captured raw Copilot payloads.
 Normalization must:
 
 - preserve trace-level reference IDs.
-- derive `client_kind`, task and experiment attributes when present.
+- derive `client_kind` with the exact trace-scoped source resolver defined in
+  `telemetry-ingestion.md`, aggregating all supplied raw records before emitting
+  a trace row; derive task and experiment attributes when present.
 - classify common logical categories such as LLM call, tool call, permission, file operation, shell command, error, user interaction.
 - handle unknown span names without failing only because span names drift.
 - produce unknown span / attribute evidence for collection health.
@@ -106,6 +108,18 @@ Sanitized projections:
   remain unprocessed or inflate projection lag.
 - a single raw record whose payload carries multiple `trace_id`s fans out to one
   `monitor_traces` row per `trace_id`; it is not collapsed to a primary trace.
+- source attribution evidence is stored privately per raw record and trace in
+  `source_trace_attribution_observations`, together with an idempotent trace
+  entry in `source_trace_attribution_reconciliation_queue`. A validated adapter
+  batch commits raw, Retention, source-schema evidence, attribution evidence,
+  and queue work in one transaction. The supported direct raw-store writers
+  (`ingest-raw` and `raw-local-receiver`) use the same attribution writer and
+  atomically commit raw, Retention, attribution evidence, and queue work; they
+  do not fabricate a source-schema observation. Boolean evidence is
+  OR-aggregated across Resource blocks and records, so record order, batching,
+  and duplicates cannot select a first/last value. The projection worker
+  reconciles queued traces and contributing ingestions to the current aggregate
+  resolution, including null when a conflict or unknown appears.
 - the cursor read API (`GET /api/monitor/ingestions` / `GET /api/monitor/traces`)
   reads the projection tables only — never `raw_records.payload_json` — and its
   request / response / cursor shape is pinned in
@@ -127,6 +141,51 @@ names that overlap the normalized measurement dataset follow
 [../interfaces/measurement-dataset.md](../interfaces/measurement-dataset.md)
 semantics. Later milestones may add columns only additively (bump
 `schema_version` + `ALTER TABLE ADD COLUMN`); existing columns are stable.
+
+Monitor schema v10 adds
+`source_trace_attribution_observations(raw_record_id, trace_id,
+cli_candidate_observed, vscode_candidate_observed,
+unknown_candidate_observed, relevant_evidence_observed)` and
+`source_trace_attribution_reconciliation_queue(trace_id)`. The evidence table
+intentionally has no foreign key to `raw_records`: retained diagnostic evidence
+survives raw retention, while migration completeness is checked separately.
+Runtime evidence insertion and queueing are atomic with the owning raw write
+and its Retention registration. Queue removal is atomic with successful
+projection reconciliation; a failed transaction retains the queue entry for an
+idle-pass retry. Empty-queue passes open no write transaction.
+
+The v10 startup transition reads only raw rows whose canonical Retention
+catalog entry currently authorizes reading and whose ownership receipt still
+matches. It inserts evidence idempotently and recomputes only the two
+`client_kind` columns. An ingestion row is changed only when its raw row is
+present and parseable. A trace row is changed only when projected span count
+equals its complete span membership, every contributing ingestion has
+completed span projection, and every contributing raw row is present,
+parseable, represented by evidence, and has the exact ordinal/trace/span
+identity of its projected spans. Otherwise prior attribution is left
+untouched. Historical migration does not enqueue reconciliation. It never
+changes spans, counts, tokens, timing, dispositions, projection timestamps,
+Skill rows, Sessions, SSE, or public response shapes; a second startup is
+state/byte idempotent.
+
+A database declaring Monitor v10 must already have the exact attribution table
+constraints, named trace index, and reconciliation queue primary key. Every
+Monitor initializer rejects a malformed authority or future Monitor version
+before journal-mode changes, schema repair, or any other database mutation.
+A database declaring an older Monitor version must contain none of those three
+v10-owned object names; even an exact empty or populated v10-shaped object is an
+incomplete version vector and is rejected before mutation rather than adopted
+or cleared.
+
+Runtime reconciliation updates only queued `monitor_traces`, the ingestion rows
+owned by their contributing raw records, and exact `otel-exact` / `otel.span`
+Session event/run `source_surface` values. It never changes Session identity,
+binding, match kind, native IDs, content, or other event/run fields. The Session
+writer re-reads the authoritative trace family inside its write transaction so
+a delayed exact OTel enrichment cannot reintroduce a stale surface after the
+queue was consumed. Each worker pass reconciles before new projection; failure
+aborts that pass, and all changes in one pass produce at most one SSE
+notification.
 
 `monitor_ingestions` (one row per ingested `raw_records` row; drives the live
 ingestion list and the `/api/monitor/ingestions` cursor):
@@ -746,6 +805,31 @@ one composite lease inside that same transaction: a denied, stale, missing, or
 busy member returns no partial value and no synthetic marker. Callers keep the
 returned lease until their actual raw use completes, then dispose it exactly
 once.
+
+Issue #154 Skill reprojection is one such composite operation. Its generation
+persists the exact ordered raw identity/digest frontier before a worker runs.
+The worker acquires an operation lease for every frontier member and holds it
+through response-free projection publication. Publication rechecks the queue
+lease and every Retention lease in the same transaction as current-pointer
+assignment. It never searches for a different/current raw set, shortens a
+frontier after expiry, or publishes partial rows. Authoritative expiry,
+deletion or read denial produces `input_unavailable` and no current Skill
+claim. The complete participant and retry contract is
+[Skill Projection](skill-projection.md).
+
+The accepted future `skill_invocation_snapshot:1` component is a separate
+index/metadata and equality-receipt owner over exact Session Event content; it
+is not a raw store kind and does not copy historical body/path bytes. The sole
+v2 writer must commit Session Event identity/content, Retention ownership,
+snapshot metadata, #154 SDK claim or invalid-claim state, and equality receipt
+as the one seven-authority transaction defined by
+[Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md).
+No partial Event, content, Retention item, snapshot, claim state or receipt may
+survive failure. An OTel-only `not_captured` observation has no snapshot row,
+and a retained snapshot cannot create or resurrect a stale/invalid #154 claim.
+The component migration and writer remain blocked with the v2 wire/registry/
+byte-domain/classification/discovery gate; no compatibility, fallback,
+scan-on-read or second raw-content carrier is authorized.
 
 An access or operation lease whose shared-read transaction commits before the
 item expiry boundary keeps its bounded lease duration across that boundary.

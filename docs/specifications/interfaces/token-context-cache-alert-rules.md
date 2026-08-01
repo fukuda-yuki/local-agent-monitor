@@ -112,14 +112,14 @@ decision. Counts use unit `turns`, ratios use unit `ratio`, and utilization uses
 unit `fraction`. Raw prompts, responses, system/tool bodies, model-generated
 text, paths, and comparable-key values never enter a receipt.
 
-Current-source negative fixtures load and validate the exact committed Issue
-#61 manifests rather than selecting only a `source_surface` string. The frozen
-fixture revisions are:
+Current-source negative fixtures load and validate the exact committed v1
+manifests reviewed through Issues #116 and #125 rather than selecting only a
+`source_surface` string. The frozen fixture revisions are:
 
 | Source surface | Manifest | Repository-canonical SHA-256 |
 | --- | --- | --- |
-| `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `a7d95b86d240ef737e2e0b2d6493c10b0cda73c2ee8cb6a3fb7f82b6fae8b0cd` |
-| `github-copilot-cli` | `contracts/source-capabilities/v1/manifests/github-copilot-cli.json` | `3bf709c3b6cf312ab988913bc21637802a44b898cafd13eb2c9822e78918f419` |
+| `github-copilot-vscode` | `contracts/source-capabilities/v1/manifests/github-copilot-vscode.json` | `4a84528a107d50757db05bded787f8f7fee1052f2675f974458d34f921ce3077` |
+| `github-copilot-cli` | `contracts/source-capabilities/v1/manifests/github-copilot-cli.json` | `d4d427f7f6f248d884b05c8fbb52f0b5b5953321a9b2929d04eceea0d7467901` |
 | `claude-code` | `contracts/source-capabilities/v1/manifests/claude-code.json` | `a1841de0c2a319ced6d8f3ff50de5d24db87f6b5c3c94c4bc4d8c7affa444e61` |
 
 Manifest drift fails the fixture until the changed capability declaration is

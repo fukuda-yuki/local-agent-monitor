@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class MonitorSchemaMigrationFixtureTests
 {
-    private const int CurrentMonitorSchemaVersion = 9;
+    private const int CurrentMonitorSchemaVersion = 11;
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateMonitorSchemaFixtures/GenerateMonitorSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/monitor";
 
     public static TheoryData<int, string> HistoricalSchemas => new()
@@ -64,7 +64,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
     [Theory]
     [MemberData(nameof(HistoricalSchemas))]
-    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v9_state_across_two_restarts(int version, string sourceCommit)
+    public void Historical_fixture_has_reproducible_provenance_and_preserves_complete_v11_state_across_two_restarts(int version, string sourceCommit)
     {
         Assert.Equal(CurrentMonitorSchemaVersion, SqliteSourceCompatibilityStore.MonitorSchemaVersion);
 
@@ -257,7 +257,12 @@ public sealed class MonitorSchemaMigrationFixtureTests
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM raw_records WHERE typeof(retention_owner_token) <> 'blob' OR length(retention_owner_token) <> 32;"));
         Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='retention_raw_records_token_immutable';"));
 
-        Assert.Equal(new[] { $"s:monitor|i:{CurrentMonitorSchemaVersion}" }, ReadRows(connection, "schema_version"));
+        Assert.Equal(
+            new[]
+            {
+                $"s:monitor|i:{CurrentMonitorSchemaVersion}",
+            },
+            ReadRows(connection, "schema_version"));
         Assert.Equal(sentinels.RawRecordId, Scalar<long>(connection, "SELECT id FROM raw_records WHERE id=$id;", sentinels.RawRecordId));
         Assert.Equal(new[] { $"i:{sentinels.IngestionId}|i:{sentinels.RawRecordId}|s:2026-07-12T00:00:00.0000000+00:00|s:raw-otlp|s:{sentinels.TraceId}|<null>|<null>|s:2026-07-12T00:00:01.0000000+00:00|<null>" }, ReadRows(connection, "monitor_ingestions"));
 
@@ -272,9 +277,18 @@ public sealed class MonitorSchemaMigrationFixtureTests
         Assert.Empty(ReadRows(connection, "source_schema_observations"));
         Assert.Empty(ReadRows(connection, "source_unknown_observations"));
         Assert.Empty(ReadRows(connection, "source_trace_version_observations"));
-        Assert.Empty(ReadRows(connection, "monitor_skill_invocations"));
-        Assert.Empty(ReadRows(connection, "monitor_skill_inventories"));
-        Assert.Empty(ReadRows(connection, "monitor_skill_inventory_names"));
+        Assert.Empty(ReadRows(connection, "source_trace_attribution_observations"));
+        Assert.Empty(ReadRows(connection, "source_trace_attribution_reconciliation_queue"));
+        Assert.Equal(
+            0L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'monitor_skill_%' OR name LIKE 'IX_monitor_skill_%';"));
+        Assert.Equal(
+            0L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'skill_projection_%';"));
         Assert.Equal(
             new[] { $"i:{sentinels.RawRecordId}|s:completed|i:1|s:2026-07-12T00:00:01.0000000+00:00" },
             ReadRows(connection, "monitor_projection_dispositions"));

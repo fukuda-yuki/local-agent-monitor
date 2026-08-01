@@ -1,178 +1,142 @@
-// Local Ingestion Monitor — shell (sidebar status badge + diagnostics popover).
-//
-// Sanitized boundary: this script reads only /health/ready and the sanitized
-// /api/monitor/* JSON. It never fetches a raw-bearing route and never inserts
-// raw payloads or PII into the DOM. All DOM nodes are built with
-// createElement / textContent; no markup strings are ever injected.
+// The shared shell reads only readiness. Settings section content and URL state
+// remain extension-owned so this host cannot become a second route authority.
 (() => {
   "use strict";
 
-  const badge = document.getElementById("status-badge");
-  if (!badge) return; // Shell absent (non-layout page) — no-op.
-
-  const badgeDot = document.getElementById("status-badge-dot");
-  const badgeText = document.getElementById("status-badge-text");
-  const popover = document.getElementById("status-popover");
-  const popoverDot = document.getElementById("popover-dot");
-  const popoverTitle = document.getElementById("popover-title");
-  const popoverEndpoint = document.getElementById("popover-endpoint");
-  const pipelineList = document.getElementById("popover-pipeline");
-  const reasonLine = document.getElementById("popover-reason");
-  const endpointLabel = document.getElementById("sidebar-endpoint");
-  const traceCount = document.getElementById("sidebar-trace-count");
-
-  if (endpointLabel) endpointLabel.textContent = window.location.host;
-
-  /* ── Receive-status badge (/health/ready) ── */
+  const receiverAction = document.getElementById("receiver-status-action");
+  const receiverDot = document.getElementById("receiver-status-dot");
+  const receiverText = document.getElementById("receiver-status-text");
+  const settingsAction = document.getElementById("settings-action");
+  const modal = document.getElementById("settings-modal");
+  const closeAction = document.getElementById("settings-modal-close");
+  if (!receiverAction || !settingsAction || !modal || !closeAction) return;
 
   const DISPLAY = {
-    ready: { cls: "healthy", badge: "正常 · 受信中", title: "受信できます — ready" },
-    degraded: { cls: "degraded", badge: "注意 · 受信中", title: "注意 — degraded" },
-    not_ready: { cls: "unhealthy", badge: "異常 · 要確認", title: "受信できません — not_ready" },
-    unreachable: { cls: "unhealthy", badge: "未接続", title: "モニターに到達できません" },
+    ready: { cls: "healthy", label: "正常 · 受信中" },
+    degraded: { cls: "degraded", label: "注意 · 受信中" },
+    not_ready: { cls: "unhealthy", label: "異常 · 要確認" },
+    unreachable: { cls: "unhealthy", label: "未接続" },
   };
 
-  let lastHealth = null;
-  let lastHttpStatus = null;
+  let settingsInvoker = null;
 
-  function setStates(kind) {
+  function setReceiverState(kind) {
     const display = DISPLAY[kind] ?? DISPLAY.unreachable;
-    for (const dot of [badgeDot, popoverDot]) {
-      if (!dot) continue;
-      dot.classList.remove("healthy", "degraded", "unhealthy");
-      dot.classList.add(display.cls);
+    if (receiverDot) {
+      receiverDot.classList.remove("healthy", "degraded", "unhealthy");
+      receiverDot.classList.add(display.cls);
     }
-    badge.classList.remove("degraded", "unhealthy");
-    if (display.cls !== "healthy") badge.classList.add(display.cls);
-    if (badgeText) badgeText.textContent = display.badge;
-    if (popoverTitle) popoverTitle.textContent = display.title;
-    badge.setAttribute("aria-label", `受信ステータス: ${display.badge}`);
+    receiverAction.classList.remove("degraded", "unhealthy");
+    if (display.cls !== "healthy") receiverAction.classList.add(display.cls);
+    if (receiverText) receiverText.textContent = display.label;
+    receiverAction.setAttribute("aria-label", `受信ステータス: ${display.label}`);
   }
 
   async function refreshHealth() {
     try {
-      const resp = await fetch("/health/ready", { cache: "no-store" });
-      lastHttpStatus = resp.status;
-      if (!resp.ok && resp.status !== 503) throw new Error("non-ok");
-      lastHealth = await resp.json();
-      const status = (lastHealth.status || "").toLowerCase();
-      setStates(status === "ready" ? "ready" : status === "degraded" ? "degraded" : "not_ready");
+      const response = await fetch("/health/ready", { cache: "no-store" });
+      if (!response.ok && response.status !== 503) throw new Error("unavailable");
+      const health = await response.json();
+      const status = (health.status || "").toLowerCase();
+      setReceiverState(
+        status === "ready"
+          ? "ready"
+          : status === "degraded"
+            ? "degraded"
+            : "not_ready");
     } catch {
-      lastHealth = null;
-      lastHttpStatus = null;
-      setStates("unreachable");
+      setReceiverState("unreachable");
     }
-    if (popoverEndpoint) {
-      popoverEndpoint.textContent = lastHttpStatus === null
-        ? "/health/ready → ?"
-        : `/health/ready → ${lastHttpStatus}`;
+  }
+
+  function openSettings(invoker, section) {
+    settingsInvoker = invoker;
+    if (section === null) {
+      delete modal.dataset.requestedSection;
+    } else {
+      modal.dataset.requestedSection = section;
     }
-    renderPipeline();
+    modal.showModal();
+    document.dispatchEvent(new CustomEvent("cao-settings-open", {
+      detail: { section },
+    }));
+    closeAction.focus({ preventScroll: true });
   }
 
-  /* ── Pipeline summary rows (handoff §5: 受信 / 書き込みキュー / Projection / DB) ── */
-
-  function stageState(ok, detail) {
-    return { ok: ok === true, detail };
+  function closeSettings() {
+    if (modal.open) modal.close();
   }
 
-  function pipelineStages(health) {
-    const checks = (health && health.checks) || {};
-    const projectionDetail = [
-      checks.projection_backlog != null ? `残 ${checks.projection_backlog}` : null,
-      checks.projection_lag_seconds != null ? `遅延 ${Math.round(checks.projection_lag_seconds)}s` : null,
-    ].filter(Boolean).join(" · ");
-    return [
-      { label: "① 受信 (OTLP)", state: stageState(checks.ingestion_accepting && checks.loopback_bound, "") },
-      { label: "② 書き込みキュー", state: stageState(checks.writer_running, "") },
-      { label: "③ Projection", state: stageState(checks.projection_worker_running, projectionDetail) },
-      { label: "④ DB / migration", state: stageState(checks.db_open && checks.migration_complete, "") },
-    ];
+  receiverAction.addEventListener("click", () => openSettings(receiverAction, "receiver"));
+  settingsAction.addEventListener("click", () => openSettings(settingsAction, null));
+  closeAction.addEventListener("click", closeSettings);
+
+  modal.addEventListener("cancel", event => {
+    if (event.target !== modal) return;
+    event.preventDefault();
+    closeSettings();
+  });
+
+  modal.addEventListener("close", () => {
+    delete modal.dataset.requestedSection;
+    const returnTarget = settingsInvoker;
+    settingsInvoker = null;
+    if (returnTarget && returnTarget.isConnected) {
+      returnTarget.focus({ preventScroll: true });
+    }
+  });
+
+  function isSequentialRadio(radio) {
+    if (radio.type !== "radio" || !radio.name) return true;
+    const group = Array.from(modal.querySelectorAll("input[type='radio']"))
+      .filter(candidate => candidate.name === radio.name
+        && candidate.form === radio.form
+        && !candidate.matches(":disabled")
+        && !candidate.closest("[inert]"));
+    const checked = group.find(candidate => candidate.checked);
+    return checked ? checked === radio : group[0] === radio;
   }
 
-  function renderPipeline() {
-    if (!pipelineList) return;
-    pipelineList.replaceChildren();
-    if (!lastHealth) {
-      const row = document.createElement("li");
-      row.textContent = "モニターの状態を取得できません。プロセスが起動しているか確認してください。";
-      pipelineList.append(row);
-      if (reasonLine) reasonLine.hidden = true;
+  function sequentialControls() {
+    return Array.from(modal.querySelectorAll(
+      "a[href], button, input:not([type='hidden']), select, textarea, [contenteditable]:not([contenteditable='false']), [tabindex]"))
+      .map((element, index) => ({ element, index, tabIndex: element.tabIndex }))
+      .filter(candidate => candidate.tabIndex >= 0
+        && !candidate.element.matches(":disabled")
+        && !candidate.element.closest("[inert], [hidden]")
+        && candidate.element.getClientRects().length > 0
+        && getComputedStyle(candidate.element).visibility === "visible"
+        && isSequentialRadio(candidate.element))
+      .sort((left, right) => {
+        const leftOrder = left.tabIndex === 0 ? Number.MAX_SAFE_INTEGER : left.tabIndex;
+        const rightOrder = right.tabIndex === 0 ? Number.MAX_SAFE_INTEGER : right.tabIndex;
+        return leftOrder - rightOrder || left.index - right.index;
+      })
+      .map(candidate => candidate.element);
+  }
+
+  // Chromium contains modal focus but does not consistently wrap at both
+  // boundaries. Intermediate sequential navigation remains browser-owned.
+  modal.addEventListener("keydown", event => {
+    if (event.key !== "Tab") return;
+    const controls = sequentialControls();
+    if (controls.length === 0) {
+      event.preventDefault();
+      modal.focus({ preventScroll: true });
       return;
     }
 
-    for (const stage of pipelineStages(lastHealth)) {
-      const row = document.createElement("li");
-      const label = document.createElement("span");
-      label.textContent = stage.label;
-      const state = document.createElement("span");
-      state.className = "pipeline-state" + (stage.state.ok ? "" : " unhealthy");
-      state.textContent = stage.state.ok
-        ? (stage.state.detail ? `OK · ${stage.state.detail}` : "OK")
-        : "NG";
-      row.append(label, state);
-      pipelineList.append(row);
-    }
-
-    if (reasonLine) {
-      const reasons = Array.isArray(lastHealth.degraded_reasons) ? lastHealth.degraded_reasons : [];
-      if (reasons.length > 0) {
-        reasonLine.textContent = `理由: ${reasons.join(", ")} — 詳細診断で対処を確認してください。`;
-        reasonLine.hidden = false;
-      } else {
-        reasonLine.hidden = true;
-      }
-    }
-  }
-
-  /* ── Popover open / close ── */
-
-  function setPopoverOpen(open) {
-    if (!popover) return;
-    popover.hidden = !open;
-    badge.setAttribute("aria-expanded", open ? "true" : "false");
-  }
-
-  badge.addEventListener("click", () => {
-    const opening = popover ? popover.hidden : false;
-    setPopoverOpen(opening);
-    if (opening) refreshHealth();
-  });
-
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && popover && !popover.hidden) {
-      setPopoverOpen(false);
-      badge.focus();
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
     }
   });
-
-  document.addEventListener("click", (event) => {
-    if (!popover || popover.hidden) return;
-    if (event.target instanceof Node
-      && !popover.contains(event.target)
-      && !badge.contains(event.target)) {
-      setPopoverOpen(false);
-    }
-  });
-
-  /* ── Sidebar trace-count badge (sanitized total from /api/monitor/trace-list) ── */
-
-  async function refreshTraceCount() {
-    if (!traceCount) return;
-    try {
-      const resp = await fetch("/api/monitor/trace-list?limit=1", { cache: "no-store" });
-      if (!resp.ok) return;
-      const page = await resp.json();
-      if (typeof page.total_matched === "number") {
-        traceCount.textContent = String(page.total_matched);
-      }
-    } catch {
-      // Leave the count empty when the API is unavailable.
-    }
-  }
 
   refreshHealth();
-  refreshTraceCount();
   setInterval(refreshHealth, 30000);
-  document.addEventListener("cao-monitor-refresh", refreshTraceCount);
 })();

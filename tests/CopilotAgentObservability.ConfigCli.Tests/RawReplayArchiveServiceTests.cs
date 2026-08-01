@@ -34,6 +34,69 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
+    public void FrozenV1Targets_PreservePreSourceAttributionDerivedHashes()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string payload =
+            """
+            {"resourceSpans":[{"resource":{"attributes":[
+              {"key":"client.kind","value":{"stringValue":"legacy-client"}},
+              {"key":"service.name","value":{"stringValue":"github-copilot"}}
+            ]},"scopeSpans":[{"spans":[
+              {"traceId":"11111111111111111111111111111111","spanId":"2222222222222222","name":"chat"}
+            ]}]}]}
+            """;
+        var timestamp = new DateTimeOffset(2026, 7, 23, 0, 0, 0, TimeSpan.Zero);
+        var record = new RawReplayRecord(
+            11,
+            "raw-otlp",
+            traceId,
+            timestamp,
+            null,
+            payload,
+            1,
+            new(
+                "test",
+                "1.0",
+                "otlp-json",
+                "adapter-v1",
+                "schema-v1",
+                new string('b', 64),
+                "supported",
+                "available",
+                "not_applied_raw_otlp",
+                RawReplayContractVersions.CredentialScanner));
+        var snapshot = new RawReplaySnapshot(
+            "snapshot-v1",
+            timestamp,
+            "monitor-v1",
+            [record],
+            [],
+            ["session_event_content_not_requested"]);
+        var request = Request() with
+        {
+            CreatedAt = timestamp,
+            Selection = new(RawRecordIds: [11]),
+        };
+
+        var preview = new RawReplayArchiveService().Preview(snapshot, request);
+
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal("raw-measurement-normalization.v1", preview.NormalizationVersion);
+        Assert.Equal("raw-replay-monitor-projection.v1", preview.ProjectionVersion);
+        Assert.Equal("raw-replay-dashboard.v1", preview.DashboardVersion);
+        Assert.Equal(
+            "b44e05fffd5baca51cb8ed08ef7718d41d77445982272defc65d40a7fa5a1578",
+            preview.ExpectedNormalizedSha256);
+        Assert.Equal(
+            "e1cb12141f88dafa046986218f843e7fcad09033a374a2f9f5750da6093536d5",
+            preview.ExpectedProjectionSha256);
+        Assert.Equal(
+            "5da47617fd9aba511d71adb4548daa62dac8c20926b10c8859d2a42663a7937b",
+            preview.ExpectedDashboardSha256);
+    }
+
+    [Fact]
     public void Create_round_trips_allowed_session_content_with_original_identity_and_timestamps()
     {
         var service = new RawReplayArchiveService();

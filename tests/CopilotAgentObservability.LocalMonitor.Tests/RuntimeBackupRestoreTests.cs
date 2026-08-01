@@ -1,9 +1,11 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Analysis;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
@@ -14,6 +16,369 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class RuntimeBackupRestoreTests
 {
+    [Fact]
+    public void Current_deleted_before_digest_authority_round_trips_exactly()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCurrentMarkerDatabase(temp.Source);
+        var bundle = Path.Combine(temp.Root, "marker-round-trip.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        var restored = service.Restore(
+            bundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(restored.Success, restored.ErrorCode);
+        using var connection = temp.Open(temp.Target);
+        Assert.Equal("deleted_before_digest_v10", temp.Scalar<string>(
+            connection,
+            "SELECT input_evidence_kind FROM source_schema_observations;"));
+        Assert.Equal(1L, temp.Scalar<long>(
+            connection,
+            "SELECT raw_payload_sha256 IS NULL FROM source_schema_observations;"));
+        Assert.Equal("input_unavailable", temp.Scalar<string>(
+            connection,
+            "SELECT lifecycle FROM skill_projection_generations;"));
+        Assert.Equal("input_unavailable", temp.Scalar<string>(
+            connection,
+            "SELECT outcome FROM source_compatibility_reconciliation_receipts;"));
+        Assert.Equal(
+            SkillProjectionHashing.FrontierDigest(
+                RestoreTemp.MarkerTraceId,
+                [new SkillProjectionFrontierInput(
+                    1,
+                    1,
+                    SkillProjectionInputEvidenceKind.DeletedBeforeDigestV10,
+                    null)]),
+            temp.Scalar<string>(
+                connection,
+                "SELECT input_frontier_sha256 FROM skill_projection_generations;"));
+        SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+        SkillProjectionSchemaV1.Validate(connection, transaction: null);
+    }
+
+    [Theory]
+    [InlineData("receipt-fingerprint")]
+    [InlineData("marker-with-digest")]
+    [InlineData("marker-with-raw")]
+    [InlineData("frontier-mismatch")]
+    [InlineData("non-terminal")]
+    [InlineData("projected-row")]
+    [InlineData("current-pointer")]
+    [InlineData("pointerless-head-without-source-revision")]
+    [InlineData("pointerless-head-with-source-revision")]
+    public void Marker_contradiction_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCurrentMarkerDatabase(temp.Source);
+        var valid = Path.Combine(temp.Root, "marker-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+        var malicious = temp.CreateSkillProjectionContradictionArchive(valid, contradiction);
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        var before = temp.CanonicalDatabaseHash(temp.Target);
+
+        var inspection = service.Inspect(malicious);
+        var preview = service.Preview(malicious, temp.Target);
+        var restore = service.Restore(
+            malicious,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, inspection.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restore.ErrorCode);
+        Assert.Equal(before, temp.CanonicalDatabaseHash(temp.Target));
+    }
+
+    [Fact]
+    public void Resolved_pointerless_superseded_head_is_restore_incompatible_without_target_mutation()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateResolvedSkillProjectionDatabase(temp.Source);
+        var valid = Path.Combine(temp.Root, "resolved-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+        var malicious = temp.CreateSkillProjectionContradictionArchive(
+            valid,
+            "resolved-pointerless-superseded");
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        var before = temp.CanonicalDatabaseHash(temp.Target);
+
+        var inspection = service.Inspect(malicious);
+        var preview = service.Preview(malicious, temp.Target);
+        var restore = service.Restore(
+            malicious,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, inspection.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restore.ErrorCode);
+        Assert.Equal(before, temp.CanonicalDatabaseHash(temp.Target));
+    }
+
+    [Theory]
+    [InlineData("old-worker-input-unavailable")]
+    [InlineData("worker-input-unavailable-projected-rows")]
+    public void Payload_input_unavailable_contradiction_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreatePayloadInputUnavailableDatabase(
+            temp.Source,
+            withSuccessor: contradiction == "old-worker-input-unavailable");
+        var valid = Path.Combine(temp.Root, "payload-input-unavailable-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+        var malicious = temp.CreateSkillProjectionContradictionArchive(valid, contradiction);
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        var before = temp.CanonicalDatabaseHash(temp.Target);
+
+        var inspection = service.Inspect(malicious);
+        var preview = service.Preview(malicious, temp.Target);
+        var restore = service.Restore(
+            malicious,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, inspection.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restore.ErrorCode);
+        Assert.Equal(before, temp.CanonicalDatabaseHash(temp.Target));
+    }
+
+    [Theory]
+    [InlineData("older-same-revision-current")]
+    [InlineData("recomputed-desired-subset")]
+    [InlineData("marker-omitted-current-projection")]
+    public void Desired_frontier_contradiction_is_rejected_by_schema(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: contradiction == "marker-omitted-current-projection");
+
+        temp.ApplySkillProjectionContradiction(temp.Source, contradiction);
+        using var connection = temp.Open(temp.Source);
+        SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+        Assert.Throws<InvalidOperationException>(
+            () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
+    }
+
+    [Theory]
+    [InlineData("older-same-revision-current")]
+    [InlineData("recomputed-desired-subset")]
+    [InlineData("marker-omitted-current-projection")]
+    public void Desired_frontier_contradiction_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: contradiction == "marker-omitted-current-projection");
+        var valid = Path.Combine(temp.Root, $"frontier-{contradiction}-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateSkillProjectionStateContradictionArchive(
+            valid,
+            contradiction);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
+    [Theory]
+    [InlineData("pending-projected-rows")]
+    [InlineData("superseded-unpublished-projected-rows")]
+    public void Unpublished_projection_rows_are_rejected_by_schema(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: false,
+            observationCount: contradiction == "pending-projected-rows" ? 1 : 2);
+
+        temp.ApplySkillProjectionContradiction(temp.Source, contradiction);
+        using var connection = temp.Open(temp.Source);
+        SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+        Assert.Throws<InvalidOperationException>(
+            () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
+    }
+
+    [Theory]
+    [InlineData("pending-projected-rows")]
+    [InlineData("superseded-unpublished-projected-rows")]
+    public void Unpublished_projection_rows_are_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: false,
+            observationCount: contradiction == "pending-projected-rows" ? 1 : 2);
+        var valid = Path.Combine(temp.Root, $"projection-state-{contradiction}-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateSkillProjectionStateContradictionArchive(
+            valid,
+            contradiction);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
+    [Theory]
+    [InlineData("unequal-queue-counters")]
+    [InlineData("completed-zero-counters")]
+    [InlineData("retry-pending-without-retry-fields")]
+    public void Unreachable_queue_state_is_rejected_by_schema(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: false,
+            observationCount: 1);
+
+        temp.ApplySkillProjectionContradiction(temp.Source, contradiction);
+        using var connection = temp.Open(temp.Source);
+        SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+        Assert.Throws<InvalidOperationException>(
+            () => SkillProjectionSchemaV1.Validate(connection, transaction: null));
+    }
+
+    [Theory]
+    [InlineData("unequal-queue-counters")]
+    [InlineData("completed-zero-counters")]
+    [InlineData("retry-pending-without-retry-fields")]
+    public void Unreachable_queue_state_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateCompleteDesiredFrontierDatabase(
+            temp.Source,
+            marker: false,
+            observationCount: 1);
+        var valid = Path.Combine(temp.Root, $"queue-state-{contradiction}-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateSkillProjectionStateContradictionArchive(
+            valid,
+            contradiction);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
+    [Fact]
+    public void Marker_registry_supersession_relabelled_as_decoder_is_rejected_by_source_schema()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateMarkerRegistrySupersessionDatabase(temp.Source);
+
+        temp.RelabelMarkerRegistrySupersessionAsDecoder(temp.Source);
+        using var connection = temp.Open(temp.Source);
+        Assert.Throws<InvalidOperationException>(
+            () => SourceCompatibilitySchemaV11.Validate(connection, transaction: null));
+    }
+
+    [Fact]
+    public void Marker_registry_supersession_relabelled_as_decoder_is_restore_incompatible_without_target_mutation()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateMarkerRegistrySupersessionDatabase(temp.Source);
+        var valid = Path.Combine(temp.Root, "marker-registry-supersession-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateMarkerSupersessionContradictionArchive(valid);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
+    [Fact]
+    public void Published_superseded_projection_remains_schema_valid_and_round_trips()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreatePublishedSupersededSkillProjectionDatabase(temp.Source);
+        var archive = Path.Combine(temp.Root, "published-superseded-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        Assert.True(service.CreateAndPublish(temp.Source, archive).Success);
+        var restore = service.Restore(
+            archive,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(restore.Success, restore.ErrorCode);
+        using var connection = temp.Open(temp.Target);
+        Assert.Equal("superseded", temp.Scalar<string>(
+            connection,
+            "SELECT lifecycle FROM skill_projection_generations WHERE generation_id=1;"));
+        Assert.Equal("completed", temp.Scalar<string>(
+            connection,
+            "SELECT state FROM skill_projection_queue WHERE generation_id=1;"));
+        Assert.Equal(1L, temp.Scalar<long>(
+            connection,
+            "SELECT COUNT(*) FROM skill_projection_invocations WHERE generation_id=1;"));
+        SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+        SkillProjectionSchemaV1.Validate(connection, transaction: null);
+    }
+
+    [Theory]
+    [InlineData("unsanitized-otel-skill-value")]
+    [InlineData("coherent-negative-generated-identities")]
+    public void Persisted_skill_boundary_contradiction_is_restore_incompatible_without_target_mutation(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreatePublishedSupersededSkillProjectionDatabase(temp.Source);
+        var valid = Path.Combine(temp.Root, $"skill-boundary-{contradiction}-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, valid).Success);
+
+        var malicious = temp.CreateSkillProjectionStateContradictionArchive(
+            valid,
+            contradiction);
+        temp.AssertArchiveDatabaseChecksumMatchesManifest(malicious);
+        AssertRestoreIncompatibleWithoutTargetMutation(temp, service, malicious);
+    }
+
+    private static void AssertRestoreIncompatibleWithoutTargetMutation(
+        RestoreTemp temp,
+        SqliteRuntimeBackupService service,
+        string malicious)
+    {
+        temp.CreateDatabase(temp.Target, "old", includeRaw: false);
+        var before = temp.CanonicalDatabaseHash(temp.Target);
+
+        var inspection = service.Inspect(malicious);
+        var preview = service.Preview(malicious, temp.Target);
+        var restore = service.Restore(
+            malicious,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, inspection.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.False(restore.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restore.ErrorCode);
+        Assert.Equal(before, temp.CanonicalDatabaseHash(temp.Target));
+    }
+
     [Fact]
     public void Runtime_backup_schema_can_be_added_to_the_current_database()
     {
@@ -462,6 +827,131 @@ public sealed class RuntimeBackupRestoreTests
         using var restored = temp.Open(destination);
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1';"));
+    }
+
+    [Fact]
+    public void Monitor_v9_archive_preview_and_restore_migrate_retained_trace_source_attribution_once()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "monitor-v9-source", includeRaw: true);
+        temp.ConvertToMonitorV9WithRetainedTraceSourceEvidence(traceId);
+        var bundle = Path.Combine(temp.Root, "monitor-v9-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var preflight = service.PreflightForMigration(temp.Source);
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        var preview = service.Preview(bundle, temp.Target);
+        var restored = service.Restore(
+            bundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(preflight.Success, Describe(preflight));
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(9, preview.SourceComponentVersions["monitor"]);
+        Assert.Contains("monitor:9->11", preview.MigrationSteps);
+        Assert.True(restored.Success, restored.ErrorCode);
+        using (var verification = temp.Open(temp.Target))
+        {
+            Assert.Equal(11L, temp.Scalar<long>(
+                verification,
+                "SELECT version FROM schema_version WHERE component='monitor';"));
+            Assert.Equal("copilot-cli", temp.Scalar<string>(
+                verification,
+                $"SELECT client_kind FROM monitor_traces WHERE trace_id='{traceId}';"));
+            Assert.Equal("copilot-cli", temp.Scalar<string>(
+                verification,
+                "SELECT client_kind FROM monitor_ingestions WHERE raw_record_id=1;"));
+            Assert.Equal(1L, temp.Scalar<long>(
+                verification,
+                $"SELECT COUNT(*) FROM source_trace_attribution_observations WHERE raw_record_id=1 AND trace_id='{traceId}' AND cli_candidate_observed=1 AND vscode_candidate_observed=0 AND unknown_candidate_observed=0 AND relevant_evidence_observed=1;"));
+            Assert.Equal(0L, temp.Scalar<long>(
+                verification,
+                "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+            Assert.Equal(1L, temp.Scalar<long>(
+                verification,
+                "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1' AND state='expiring' AND read_denied_at IS NULL AND expires_at='9999-12-31T23:59:59.9999999+00:00';"));
+        }
+        var firstStartupHash = temp.CanonicalDatabaseHash(temp.Target);
+
+        new SqliteSourceCompatibilityStore(temp.Target).CreateSchema();
+
+        Assert.Equal(
+            firstStartupHash,
+            temp.CanonicalDatabaseHash(temp.Target));
+        using var secondStartup = temp.Open(temp.Target);
+        Assert.Equal(1L, temp.Scalar<long>(
+            secondStartup,
+            "SELECT COUNT(*) FROM source_trace_attribution_observations;"));
+        Assert.Equal(0L, temp.Scalar<long>(
+            secondStartup,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+    }
+
+    [Fact]
+    public void Monitor_v9_preflight_rejects_extra_obsolete_skill_authority_without_mutation()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "monitor-v9-extra-skill", includeRaw: true);
+        temp.ConvertToMonitorV9WithRetainedTraceSourceEvidence(traceId);
+        using (var connection = temp.Open(temp.Source))
+        {
+            temp.Execute(
+                connection,
+                "CREATE TABLE MoNiToR_SkIlL_ShAdOw(id INTEGER PRIMARY KEY);");
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock)
+            .PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Current_monitor_v10_backup_and_restore_preserve_pending_trace_source_reconciliation()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "monitor-v10-pending-source", includeRaw: false);
+        using (var source = temp.Open(temp.Source))
+        {
+            temp.Execute(
+                source,
+                $"INSERT INTO source_trace_attribution_reconciliation_queue(trace_id) VALUES('{traceId}');");
+            temp.Execute(source, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var bundle = Path.Combine(temp.Root, "monitor-v10-pending-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var created = service.CreateAndPublish(temp.Source, bundle);
+        var inspection = service.Inspect(bundle);
+        var preview = service.Preview(bundle, temp.Target);
+        var restored = service.Restore(
+            bundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.True(inspection.Success, inspection.ErrorCode);
+        Assert.Equal(
+            1L,
+            inspection.RowCounts["source_trace_attribution_reconciliation_queue"]);
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.Equal(
+            1L,
+            preview.RowCounts!["source_trace_attribution_reconciliation_queue"]);
+        Assert.True(restored.Success, restored.ErrorCode);
+        using var verification = temp.Open(temp.Target);
+        Assert.Equal(traceId, temp.Scalar<string>(
+            verification,
+            "SELECT trace_id FROM source_trace_attribution_reconciliation_queue;"));
     }
 
     [Fact]
@@ -1285,6 +1775,133 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
     }
 
+    [Theory]
+    [InlineData("source_trace_attribution_observations")]
+    [InlineData("source_trace_attribution_reconciliation_queue")]
+    public void Read_only_preflight_rejects_monitor_v10_without_trace_source_attribution_authority(
+        string table)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "missing-attribution-authority", includeRaw: false);
+        using (var connection = temp.Open(temp.Source))
+        {
+            temp.Execute(connection, $"DROP TABLE {table};");
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock).PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Theory]
+    [InlineData("wrong-pk")]
+    [InlineData("wrong-check")]
+    [InlineData("missing-index")]
+    [InlineData("wrong-index")]
+    [InlineData("wrong-queue-pk")]
+    public void Read_only_preflight_rejects_monitor_v10_with_malformed_trace_source_attribution_authority(
+        string corruption)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "malformed-attribution-authority", includeRaw: false);
+        using (var connection = temp.Open(temp.Source))
+        {
+            if (corruption is "wrong-pk" or "wrong-check")
+            {
+                temp.Execute(
+                    connection,
+                    """
+                    DROP INDEX IX_source_trace_attribution_observations_trace_id;
+                    DROP TABLE source_trace_attribution_observations;
+                    """);
+                var tableSql = corruption switch
+                {
+                    "wrong-pk" => SqliteSourceCompatibilityStore.TraceSourceAttributionTableSql.Replace(
+                        "PRIMARY KEY (raw_record_id, trace_id)",
+                        "PRIMARY KEY (raw_record_id)",
+                        StringComparison.Ordinal),
+                    "wrong-check" => SqliteSourceCompatibilityStore.TraceSourceAttributionTableSql.Replace(
+                        "cli_candidate_observed IN (0, 1)",
+                        "cli_candidate_observed IN (0, 1, 2)",
+                        StringComparison.Ordinal),
+                    _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+                };
+                temp.Execute(connection, tableSql);
+                temp.Execute(
+                    connection,
+                    SqliteSourceCompatibilityStore.TraceSourceAttributionIndexSql);
+            }
+            else if (corruption is "missing-index" or "wrong-index")
+            {
+                temp.Execute(
+                    connection,
+                    "DROP INDEX IX_source_trace_attribution_observations_trace_id;");
+                if (corruption == "wrong-index")
+                {
+                    temp.Execute(
+                        connection,
+                        """
+                        CREATE INDEX IX_source_trace_attribution_observations_trace_id
+                        ON source_trace_attribution_observations(raw_record_id, trace_id);
+                        """);
+                }
+            }
+            else if (corruption == "wrong-queue-pk")
+            {
+                temp.Execute(
+                    connection,
+                    "DROP TABLE source_trace_attribution_reconciliation_queue;");
+                temp.Execute(
+                    connection,
+                    SqliteSourceCompatibilityStore.TraceSourceReconciliationQueueTableSql.Replace(
+                        "trace_id TEXT NOT NULL PRIMARY KEY",
+                        "trace_id TEXT NOT NULL",
+                        StringComparison.Ordinal));
+            }
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var result = new SqliteRuntimeBackupService(temp.Clock)
+            .PreflightForMigration(temp.Source);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Preflight_and_preview_reject_monitor_v9_with_v10_owned_authority_without_mutation()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "current-source", includeRaw: false);
+        var bundle = Path.Combine(temp.Root, "current-source.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, bundle).Success);
+        temp.CreateDatabase(temp.Target, "colliding-v9-target", includeRaw: false);
+        using (var connection = temp.Open(temp.Target))
+        {
+            temp.Execute(
+                connection,
+                "UPDATE schema_version SET version=9 WHERE component='monitor';");
+            temp.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Target));
+
+        var preflight = service.PreflightForMigration(temp.Target);
+        var preview = service.Preview(bundle, temp.Target);
+
+        Assert.False(preflight.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preflight.ErrorCode);
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
+    }
+
     [Fact]
     public void Read_only_preflight_accepts_the_current_wave_3_component_vector()
     {
@@ -1445,7 +2062,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.False(result.PreRestoreBackupCreated);
         var preflight = service.PreflightForMigration(destination);
         Assert.True(preflight.Success, preflight.ErrorCode);
-        Assert.Equal(9, preflight.ComponentVersions!["monitor"]);
+        Assert.Equal(11, preflight.ComponentVersions!["monitor"]);
         Assert.Equal(13, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
@@ -1462,6 +2079,7 @@ public sealed class RuntimeBackupRestoreTests
 
     private sealed class RestoreTemp : IDisposable
     {
+        internal const string MarkerTraceId = "11111111111111111111111111111111";
         internal RestoreTemp()
         {
             Root = Path.Combine(Path.GetTempPath(), $"runtime-restore-tests-{Guid.NewGuid():N}");
@@ -1496,6 +2114,1013 @@ public sealed class RuntimeBackupRestoreTests
             item.Parameters.AddWithValue("$id", new string('a', 32)); item.Parameters.AddWithValue("$store", new string('2', 32)); item.Parameters.AddWithValue("$receipt", receipt); item.ExecuteNonQuery();
         }
 
+        internal void CreateCurrentMarkerDatabase(string path)
+        {
+            CreateDatabase(path, "marker", includeRaw: true);
+            new RetentionCatalogStore(
+                    RetentionCatalogContext.AdoptExistingCatalogV1(path),
+                    Clock)
+                .CreateSchema();
+            var input = new SkillProjectionFrontierInput(
+                1,
+                1,
+                SkillProjectionInputEvidenceKind.DeletedBeforeDigestV10,
+                null);
+            var frontier = SkillProjectionHashing.FrontierDigest(MarkerTraceId, [input]);
+            var request = SourceCompatibilityReconciliationRequest.Create(
+                "marker-backup-operation",
+                1,
+                MarkerTraceId,
+                0,
+                SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-2",
+                "registry-1",
+                SkillProjectionGenerationParticipant.CurrentProjectorVersion);
+            var fingerprint = SkillProjectionHashing.ReconciliationFingerprint(request, input);
+            using (var connection = Open(path))
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText =
+                    """
+                    INSERT INTO source_schema_observations(
+                        id,observation_id,raw_record_id,raw_payload_sha256,
+                        input_evidence_kind,ingest_batch_id,source_surface,
+                        source_application_version,source_adapter,adapter_version,
+                        schema_fingerprint,inventory_hash,compatibility_state,
+                        reason_code,next_action,capture_content_state,unknown_span_count,
+                        unknown_event_count,unknown_attribute_count,overflow_distinct_count,
+                        overflow_occurrence_count,observed_at)
+                    VALUES(
+                        1,'marker-observation',1,NULL,'deleted_before_digest_v10',
+                        'marker-batch','github-copilot-cli','1.0.74','github-copilot-otel',
+                        'adapter-1',NULL,NULL,'supported',NULL,'none','available',
+                        0,0,0,0,0,'2026-07-31T00:00:00.0000000+00:00');
+                    INSERT INTO source_trace_version_observations(
+                        source_observation_id,trace_id,resolution_state,
+                        source_application_version)
+                    VALUES(1,$trace_id,'resolved','1.0.74');
+                    INSERT INTO source_trace_compatibility_revisions(
+                        trace_id,current_revision,current_effective_state,
+                        current_exact_version,updated_at)
+                    VALUES(
+                        $trace_id,0,'resolved','1.0.74',
+                        '2026-07-31T00:00:00.0000000+00:00');
+                    INSERT INTO skill_projection_generations(
+                        generation_id,trace_id,compatibility_revision,
+                        input_frontier_sha256,projector_version,lifecycle,
+                        created_at,updated_at)
+                    VALUES(
+                        1,$trace_id,0,$frontier,'skill-projector-1','input_unavailable',
+                        '2026-07-31T00:00:00.0000000+00:00',
+                        '2026-07-31T00:00:00.0000000+00:00');
+                    INSERT INTO skill_projection_generation_inputs(
+                        generation_id,input_ordinal,source_observation_id,raw_record_id,
+                        input_evidence_kind,raw_payload_sha256)
+                    VALUES(1,0,1,1,'deleted_before_digest_v10',NULL);
+                    INSERT INTO skill_projection_trace_heads(
+                        trace_id,desired_generation_id,current_generation_id,updated_at)
+                    VALUES(
+                        $trace_id,1,NULL,'2026-07-31T00:00:00.0000000+00:00');
+                    INSERT INTO skill_projection_queue(
+                        generation_id,trace_id,compatibility_revision,
+                        input_frontier_sha256,projector_version,state,attempt_count,
+                        lease_generation,error_code)
+                    VALUES(
+                        1,$trace_id,0,$frontier,'skill-projector-1','input_unavailable',
+                        0,0,'skill_projection_input_unavailable');
+                    INSERT INTO source_compatibility_reconciliation_receipts(
+                        operation_key,request_fingerprint,source_observation_id,trace_id,
+                        expected_interpretation_revision,raw_record_id,input_evidence_kind,
+                        raw_payload_sha256,resolver_revision,registry_revision,
+                        projector_version,outcome,resulting_supersession_id,
+                        resulting_interpretation_revision,resulting_compatibility_revision,
+                        resulting_generation_id,created_at)
+                    VALUES(
+                        'marker-backup-operation',$fingerprint,1,$trace_id,0,1,
+                        'deleted_before_digest_v10',NULL,'resolver-2','registry-1',
+                        'skill-projector-1','input_unavailable',NULL,0,NULL,NULL,
+                        '2026-07-31T00:00:00.0000000+00:00');
+                    INSERT INTO skill_projection_operation_receipts(
+                        operation_key,semantic_fingerprint,outcome,generation_id,created_at)
+                    VALUES(
+                        'marker-backup-operation',$fingerprint,'input_unavailable',NULL,
+                        '2026-07-31T00:00:00.0000000+00:00');
+                    """;
+                command.Parameters.AddWithValue("$trace_id", MarkerTraceId);
+                command.Parameters.AddWithValue("$frontier", frontier);
+                command.Parameters.AddWithValue("$fingerprint", fingerprint);
+                command.ExecuteNonQuery();
+            }
+            DeleteRawAndTombstone(path);
+        }
+
+        internal void CreateResolvedSkillProjectionDatabase(string path)
+        {
+            CreateDatabase(path, "resolved-skill", includeRaw: false);
+            new SqliteSourceCompatibilityStore(path).CreateSchema();
+            new SqliteIngestionCommitStore(path).Commit(
+                CreateResolvedSkillProjectionBatch(
+                    "resolved-skill-batch",
+                    Clock.GetUtcNow()));
+        }
+
+        internal void CreateCompleteDesiredFrontierDatabase(
+            string path,
+            bool marker,
+            int observationCount = 2)
+        {
+            if (observationCount is < 1 or > 2)
+                throw new ArgumentOutOfRangeException(nameof(observationCount));
+            if (marker)
+            {
+                CreateCurrentMarkerDatabase(path);
+                new SqliteSourceCompatibilityStore(path).CreateSchema();
+            }
+            else
+            {
+                CreateResolvedSkillProjectionDatabase(path);
+            }
+            if (observationCount == 2)
+            {
+                new SqliteIngestionCommitStore(path).Commit(
+                    CreateResolvedSkillProjectionBatch(
+                        marker ? "marker-successor" : "resolved-skill-successor",
+                        Clock.GetUtcNow().AddSeconds(1)));
+            }
+            using var validation = Open(path);
+            SourceCompatibilitySchemaV11.Validate(validation, transaction: null);
+            SkillProjectionSchemaV1.Validate(validation, transaction: null);
+        }
+
+        internal void CreatePublishedSupersededSkillProjectionDatabase(string path)
+        {
+            CreateDatabase(path, "published-superseded", includeRaw: false);
+            new SqliteSourceCompatibilityStore(path).CreateSchema();
+            new SqliteIngestionCommitStore(path).Commit(
+                CreateResolvedSkillProjectionBatch(
+                    "published-superseded-first",
+                    Clock.GetUtcNow(),
+                    PublishedSkillPayload));
+            var retention = RetentionCatalogContext.AdoptExistingCatalogV1(path);
+            var worker = new SkillProjectionWorker(
+                new SqliteSkillProjectionStore(
+                    path,
+                    new RawTelemetryStore(path, retention)));
+            Assert.Equal(
+                SkillProjectionWorkOutcome.Published,
+                worker.RunNextAsync(Clock.GetUtcNow().AddSeconds(1)).GetAwaiter().GetResult());
+            new SqliteIngestionCommitStore(path).Commit(
+                CreateResolvedSkillProjectionBatch(
+                    "published-superseded-successor",
+                    Clock.GetUtcNow().AddSeconds(2)));
+            using var validation = Open(path);
+            SourceCompatibilitySchemaV11.Validate(validation, transaction: null);
+            SkillProjectionSchemaV1.Validate(validation, transaction: null);
+        }
+
+        internal void CreateMarkerRegistrySupersessionDatabase(string path)
+        {
+            CreateCurrentMarkerDatabase(path);
+            using (var connection = Open(path))
+            {
+                Execute(
+                    connection,
+                    """
+                    DROP TRIGGER source_trace_version_observations_update_rejected;
+                    DROP TRIGGER source_compatibility_reconciliation_receipts_delete_rejected;
+                    DROP TRIGGER skill_projection_operation_receipts_delete_rejected;
+                    UPDATE source_trace_version_observations
+                    SET resolution_state='unrecognised';
+                    UPDATE source_trace_compatibility_revisions
+                    SET current_effective_state='unrecognised';
+                    DELETE FROM source_compatibility_reconciliation_receipts;
+                    DELETE FROM skill_projection_operation_receipts;
+                    DELETE FROM skill_projection_trace_heads;
+                    DELETE FROM skill_projection_queue;
+                    DELETE FROM skill_projection_generation_inputs;
+                    DELETE FROM skill_projection_generations;
+                    CREATE TRIGGER source_trace_version_observations_update_rejected
+                    BEFORE UPDATE ON source_trace_version_observations
+                    BEGIN SELECT RAISE(ABORT,'source_trace_version_observation_immutable'); END;
+                    CREATE TRIGGER source_compatibility_reconciliation_receipts_delete_rejected
+                    BEFORE DELETE ON source_compatibility_reconciliation_receipts
+                    BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;
+                    CREATE TRIGGER skill_projection_operation_receipts_delete_rejected
+                    BEFORE DELETE ON skill_projection_operation_receipts
+                    BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;
+                    """);
+            }
+            var registry = VerifiedSourceFingerprintRegistry.Create(
+            [
+                VerifiedSourceFingerprintEvidence.Create(
+                    "github-copilot-cli",
+                    "1.0.74",
+                    new string('a', 64)),
+            ],
+            [],
+            []);
+            var reconciler = new SourceCompatibilityReconciler(
+                path,
+                SourceCompatibilityReconciliationAuthority.Create(
+                [
+                    new SourceCompatibilityAcceptedRevision(
+                        "resolver-2",
+                        "registry-2",
+                        registry),
+                ]),
+                Clock);
+            var result = reconciler.Reconcile(
+                SourceCompatibilityReconciliationRequest.Create(
+                    "marker-registry-change",
+                    1,
+                    MarkerTraceId,
+                    0,
+                    SourceCompatibilityReconciliationTrigger.RegistryRevision,
+                    "resolver-2",
+                    "registry-2",
+                    SkillProjectionGenerationParticipant.CurrentProjectorVersion));
+            Assert.Equal(SourceCompatibilityReconciliationOutcome.Changed, result.Outcome);
+            using var validation = Open(path);
+            SourceCompatibilitySchemaV11.Validate(validation, transaction: null);
+            SkillProjectionSchemaV1.Validate(validation, transaction: null);
+        }
+
+        internal void CreatePayloadInputUnavailableDatabase(
+            string path,
+            bool withSuccessor)
+        {
+            CreateResolvedSkillProjectionDatabase(path);
+            var at = Clock.GetUtcNow();
+            using (var connection = Open(path))
+            using (var deny = connection.CreateCommand())
+            {
+                deny.CommandText =
+                    """
+                    UPDATE retention_items
+                    SET state='expired_pending_deletion',
+                        read_denied_at=$at,
+                        queued_at=$at,
+                        revision=revision+1
+                    WHERE store_kind='raw_record' AND source_item_id='1';
+                    """;
+                deny.Parameters.AddWithValue("$at", at.AddSeconds(1).ToString("O"));
+                Assert.Equal(1, deny.ExecuteNonQuery());
+            }
+            var retention = RetentionCatalogContext.AdoptExistingCatalogV1(path);
+            var worker = new SkillProjectionWorker(
+                new SqliteSkillProjectionStore(
+                    path,
+                    new RawTelemetryStore(path, retention)));
+            Assert.Equal(
+                SkillProjectionWorkOutcome.InputUnavailable,
+                worker.RunNextAsync(at.AddSeconds(2)).GetAwaiter().GetResult());
+            if (withSuccessor)
+            {
+                new SqliteIngestionCommitStore(path).Commit(
+                    CreateResolvedSkillProjectionBatch(
+                        "resolved-skill-successor",
+                        at.AddSeconds(3)));
+            }
+            using var validation = Open(path);
+            SourceCompatibilitySchemaV11.Validate(validation, transaction: null);
+            SkillProjectionSchemaV1.Validate(validation, transaction: null);
+        }
+
+        private static ValidatedIngestionBatch CreateResolvedSkillProjectionBatch(
+            string batchId,
+            DateTimeOffset at,
+            string payload = "{}")
+        {
+            var inventory = OtlpJsonStructuralWalker.Build(payload, at);
+            var decision = SourceCompatibilityEvaluator.Assess(
+                "github-copilot-cli",
+                "1.0.74",
+                inventory,
+                observedRecognizedCount: 1,
+                VerifiedSourceFingerprintRegistry.Create([], [], []));
+            var observation = SourceObservationBatchDraft.Create(
+                batchId,
+                "github-copilot-cli",
+                "1.0.74",
+                "github-copilot-otel",
+                "adapter-1",
+                inventory,
+                decision,
+                SourceCaptureContentState.Available,
+                at,
+                [TraceSourceVersionResolutionDraft.Create(
+                    MarkerTraceId,
+                    TraceSourceVersionResolutionState.Resolved,
+                    "1.0.74")]);
+            return ValidatedIngestionBatch.Create(
+                new RawTelemetryRecord(
+                    null,
+                    RawTelemetrySources.RawOtlp,
+                    MarkerTraceId,
+                    at,
+                    ResourceAttributesJson: null,
+                    PayloadJson: payload),
+                observation);
+        }
+
+        private static readonly string PublishedSkillPayload =
+            """
+            {"resourceSpans":[{
+              "resource":{"attributes":[
+                {"key":"service.version","value":{"stringValue":"1.0.74"}},
+                {"key":"client.kind","value":{"stringValue":"copilot-cli"}}
+              ]},
+              "scopeSpans":[{"spans":[{
+                "traceId":"TRACE_ID",
+                "spanId":"3333333333333333",
+                "attributes":[
+                  {"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},
+                  {"key":"gen_ai.tool.name","value":{"stringValue":"skill"}},
+                  {"key":"github.copilot.skill.name","value":{"stringValue":"safe-skill"}},
+                  {"key":"github.copilot.context.skills","value":{"arrayValue":{"values":[
+                    {"stringValue":"safe-skill"}
+                  ]}}}
+                ]
+              }]}]
+            }]}
+            """
+            .Replace("TRACE_ID", MarkerTraceId, StringComparison.Ordinal);
+
+        internal void ApplySkillProjectionContradiction(
+            string path,
+            string contradiction)
+        {
+            using var connection = Open(path);
+            var desiredGenerationId = Scalar<long>(
+                connection,
+                "SELECT desired_generation_id FROM skill_projection_trace_heads;");
+            if (contradiction == "older-same-revision-current")
+            {
+                var olderGenerationId = Scalar<long>(
+                    connection,
+                    "SELECT MIN(generation_id) FROM skill_projection_generations;");
+                Execute(
+                    connection,
+                    $"""
+                    UPDATE skill_projection_generations
+                    SET lifecycle=CASE
+                        WHEN generation_id={olderGenerationId} THEN 'current'
+                        ELSE 'superseded'
+                    END;
+                    UPDATE skill_projection_queue
+                    SET state=CASE
+                            WHEN generation_id={olderGenerationId} THEN 'completed'
+                            ELSE 'superseded'
+                        END,
+                        attempt_count=CASE
+                            WHEN generation_id={olderGenerationId} THEN 1
+                            ELSE attempt_count
+                        END,
+                        lease_generation=CASE
+                            WHEN generation_id={olderGenerationId} THEN 1
+                            ELSE lease_generation
+                        END,
+                        lease_owner=NULL,
+                        lease_expires_at=NULL,
+                        next_attempt_at=NULL,
+                        error_code=NULL;
+                    UPDATE skill_projection_trace_heads
+                    SET desired_generation_id={olderGenerationId},
+                        current_generation_id={olderGenerationId};
+                    """);
+            }
+            else if (contradiction == "recomputed-desired-subset")
+            {
+                KeepOnlyNewestPayloadInput(connection, desiredGenerationId);
+            }
+            else if (contradiction == "marker-omitted-current-projection")
+            {
+                var payloadInput = KeepOnlyNewestPayloadInput(
+                    connection,
+                    desiredGenerationId);
+                Execute(
+                    connection,
+                    $"""
+                    DELETE FROM skill_projection_queue
+                    WHERE generation_id<>{desiredGenerationId};
+                    DELETE FROM skill_projection_generation_inputs
+                    WHERE generation_id<>{desiredGenerationId};
+                    DELETE FROM skill_projection_generations
+                    WHERE generation_id<>{desiredGenerationId};
+                    UPDATE skill_projection_generations
+                    SET lifecycle='current'
+                    WHERE generation_id={desiredGenerationId};
+                    UPDATE skill_projection_queue
+                    SET state='completed',attempt_count=1,lease_generation=1,
+                        lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL,
+                        error_code=NULL
+                    WHERE generation_id={desiredGenerationId};
+                    UPDATE skill_projection_trace_heads
+                    SET current_generation_id={desiredGenerationId};
+                    """);
+                AddProjectedRows(
+                    connection,
+                    desiredGenerationId,
+                    payloadInput.RawRecordId);
+            }
+            else if (contradiction == "pending-projected-rows")
+            {
+                AddProjectedRows(
+                    connection,
+                    desiredGenerationId,
+                    Scalar<long>(
+                        connection,
+                        $"SELECT raw_record_id FROM skill_projection_generation_inputs WHERE generation_id={desiredGenerationId} LIMIT 1;"));
+            }
+            else if (contradiction == "superseded-unpublished-projected-rows")
+            {
+                var supersededGenerationId = Scalar<long>(
+                    connection,
+                    "SELECT MIN(generation_id) FROM skill_projection_generations;");
+                AddProjectedRows(
+                    connection,
+                    supersededGenerationId,
+                    Scalar<long>(
+                        connection,
+                        $"SELECT raw_record_id FROM skill_projection_generation_inputs WHERE generation_id={supersededGenerationId} LIMIT 1;"));
+            }
+            else if (contradiction == "unequal-queue-counters")
+            {
+                Execute(
+                    connection,
+                    "UPDATE skill_projection_queue SET attempt_count=1,lease_generation=2;");
+            }
+            else if (contradiction == "completed-zero-counters")
+            {
+                Execute(
+                    connection,
+                    $"""
+                    UPDATE skill_projection_generations SET lifecycle='current';
+                    UPDATE skill_projection_queue
+                    SET state='completed',attempt_count=0,lease_generation=0,
+                        lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL,
+                        error_code=NULL;
+                    UPDATE skill_projection_trace_heads
+                    SET current_generation_id={desiredGenerationId};
+                    """);
+            }
+            else if (contradiction == "retry-pending-without-retry-fields")
+            {
+                Execute(
+                    connection,
+                    """
+                    UPDATE skill_projection_generations SET lifecycle='retry_pending';
+                    UPDATE skill_projection_queue
+                    SET state='pending',attempt_count=1,lease_generation=1,
+                        lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL,
+                        error_code=NULL;
+                    """);
+            }
+            else if (contradiction == "unsanitized-otel-skill-value")
+            {
+                var updateTrigger = Assert.Single(
+                    SkillProjectionSchemaV1.TriggerDefinitions,
+                    trigger => trigger.Name == "skill_projection_invocations_update_rejected");
+                Execute(connection, $"DROP TRIGGER {updateTrigger.Name};");
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText =
+                        "UPDATE skill_projection_invocations SET skill_name=$unsafe;";
+                    command.Parameters.AddWithValue("$unsafe", @"C:\synthetic\SKILL.md");
+                    Assert.True(command.ExecuteNonQuery() >= 1);
+                }
+                Execute(connection, updateTrigger.Sql);
+            }
+            else if (contradiction == "coherent-negative-generated-identities")
+            {
+                var affectedTables = new HashSet<string>(StringComparer.Ordinal)
+                {
+                    "skill_projection_operation_receipts",
+                    "skill_projection_invocations",
+                    "skill_projection_inventories",
+                    "skill_projection_inventory_names",
+                };
+                var updateTriggers = SkillProjectionSchemaV1.TriggerDefinitions
+                    .Where(trigger => affectedTables.Contains(trigger.Table)
+                        && trigger.Name.EndsWith("_update_rejected", StringComparison.Ordinal))
+                    .ToArray();
+                foreach (var trigger in updateTriggers)
+                    Execute(connection, $"DROP TRIGGER {trigger.Name};");
+                Execute(
+                    connection,
+                    """
+                    PRAGMA foreign_keys=OFF;
+                    PRAGMA ignore_check_constraints=ON;
+                    UPDATE skill_projection_inventory_names
+                    SET inventory_id=-inventory_id;
+                    UPDATE skill_projection_inventories
+                    SET inventory_id=-inventory_id,generation_id=-generation_id;
+                    UPDATE skill_projection_invocations
+                    SET invocation_id=-invocation_id,generation_id=-generation_id;
+                    UPDATE skill_projection_generation_inputs
+                    SET generation_id=-generation_id;
+                    UPDATE skill_projection_trace_heads
+                    SET desired_generation_id=CASE
+                            WHEN desired_generation_id IS NULL THEN NULL
+                            ELSE -desired_generation_id
+                        END,
+                        current_generation_id=CASE
+                            WHEN current_generation_id IS NULL THEN NULL
+                            ELSE -current_generation_id
+                        END;
+                    UPDATE skill_projection_queue
+                    SET generation_id=-generation_id;
+                    UPDATE skill_projection_operation_receipts
+                    SET generation_id=CASE
+                        WHEN generation_id IS NULL THEN NULL
+                        ELSE -generation_id
+                    END;
+                    UPDATE skill_projection_generations
+                    SET generation_id=-generation_id;
+                    PRAGMA ignore_check_constraints=OFF;
+                    PRAGMA foreign_keys=ON;
+                    """);
+                foreach (var trigger in updateTriggers)
+                    Execute(connection, trigger.Sql);
+            }
+            else
+            {
+                throw new ArgumentOutOfRangeException(nameof(contradiction));
+            }
+            Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        private static SkillProjectionFrontierInput KeepOnlyNewestPayloadInput(
+            SqliteConnection connection,
+            long generationId)
+        {
+            using var select = connection.CreateCommand();
+            select.CommandText =
+                $"""
+                SELECT source_observation_id,raw_record_id,raw_payload_sha256
+                FROM skill_projection_generation_inputs
+                WHERE generation_id={generationId}
+                  AND input_evidence_kind='payload_sha256'
+                ORDER BY raw_record_id DESC,source_observation_id DESC
+                LIMIT 1;
+                """;
+            using var reader = select.ExecuteReader();
+            Assert.True(reader.Read());
+            var input = new SkillProjectionFrontierInput(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                SkillProjectionInputEvidenceKind.PayloadSha256,
+                reader.GetString(2));
+            reader.Close();
+            var frontier = SkillProjectionHashing.FrontierDigest(
+                MarkerTraceId,
+                [input]);
+            using var update = connection.CreateCommand();
+            update.CommandText =
+                """
+                DELETE FROM skill_projection_generation_inputs
+                WHERE generation_id=$generation_id;
+                INSERT INTO skill_projection_generation_inputs(
+                    generation_id,input_ordinal,source_observation_id,raw_record_id,
+                    input_evidence_kind,raw_payload_sha256)
+                VALUES(
+                    $generation_id,0,$source_observation_id,$raw_record_id,
+                    'payload_sha256',$raw_payload_sha256);
+                UPDATE skill_projection_generations
+                SET input_frontier_sha256=$frontier
+                WHERE generation_id=$generation_id;
+                UPDATE skill_projection_queue
+                SET input_frontier_sha256=$frontier
+                WHERE generation_id=$generation_id;
+                """;
+            update.Parameters.AddWithValue("$generation_id", generationId);
+            update.Parameters.AddWithValue("$source_observation_id", input.SourceObservationId);
+            update.Parameters.AddWithValue("$raw_record_id", input.RawRecordId);
+            update.Parameters.AddWithValue("$raw_payload_sha256", input.RawPayloadSha256!);
+            update.Parameters.AddWithValue("$frontier", frontier);
+            update.ExecuteNonQuery();
+            return input;
+        }
+
+        private void AddProjectedRows(
+            SqliteConnection connection,
+            long generationId,
+            long rawRecordId) =>
+            Execute(
+                connection,
+                $"""
+                INSERT INTO skill_projection_invocations(
+                    generation_id,source_arm,raw_record_id,trace_id,span_id,
+                    span_ordinal,session_id,skill_name,skill_source,
+                    invocation_trigger,source_application_version,projected_at)
+                VALUES(
+                    {generationId},'otel_trace_span',{rawRecordId},'{MarkerTraceId}',
+                    '4444444444444444',7,NULL,'forged-skill',NULL,NULL,
+                    '1.0.74','2026-07-23T02:04:00.0000000+00:00');
+                INSERT INTO skill_projection_inventories(
+                    generation_id,source_arm,raw_record_id,trace_id,session_id,
+                    observed_name_count,retained_name_count,names_truncated,
+                    source_application_version,projected_at)
+                VALUES(
+                    {generationId},'otel_trace_span',{rawRecordId},'{MarkerTraceId}',NULL,
+                    1,1,0,'1.0.74','2026-07-23T02:04:00.0000000+00:00');
+                INSERT INTO skill_projection_inventory_names(
+                    inventory_id,name_ordinal,skill_name)
+                VALUES(last_insert_rowid(),0,'forged-skill');
+                """);
+
+        internal void RelabelMarkerRegistrySupersessionAsDecoder(string path)
+        {
+            using var connection = Open(path);
+            Execute(
+                connection,
+                """
+                DROP TRIGGER source_trace_version_interpretation_supersessions_update_rejected;
+                UPDATE source_trace_version_interpretation_supersessions
+                SET reason='decoder_revision';
+                CREATE TRIGGER source_trace_version_interpretation_supersessions_update_rejected
+                BEFORE UPDATE ON source_trace_version_interpretation_supersessions
+                BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;
+                PRAGMA wal_checkpoint(TRUNCATE);
+                """);
+        }
+
+        internal string CreateSkillProjectionStateContradictionArchive(
+            string valid,
+            string contradiction)
+        {
+            var output = Path.Combine(Root, $"skill-state-{contradiction}.zip");
+            byte[] manifest;
+            byte[] database;
+            using (var archive = ZipFile.OpenRead(valid))
+            {
+                manifest = Read(archive.GetEntry("manifest.json")!);
+                database = Read(archive.GetEntry("database.sqlite")!);
+            }
+            var mutatedPath = Path.Combine(Root, $".skill-state-{contradiction}.sqlite");
+            File.WriteAllBytes(mutatedPath, database);
+            ApplySkillProjectionContradiction(mutatedPath, contradiction);
+            database = File.ReadAllBytes(mutatedPath);
+            File.Delete(mutatedPath);
+            manifest = ReplaceDatabaseHash(manifest, database);
+            if (contradiction is
+                "recomputed-desired-subset" or
+                "marker-omitted-current-projection" or
+                "pending-projected-rows" or
+                "superseded-unpublished-projected-rows")
+            {
+                var parsed = RuntimeBackupJson.ParseManifest(manifest);
+                var rows = parsed.RowCounts.ToDictionary(
+                    static item => item.Key,
+                    static item => item.Value,
+                    StringComparer.Ordinal);
+                if (contradiction == "recomputed-desired-subset")
+                {
+                    rows["skill_projection_generation_inputs"]--;
+                }
+                else if (contradiction == "marker-omitted-current-projection")
+                {
+                    rows["skill_projection_generations"]--;
+                    rows["skill_projection_generation_inputs"] -= 2;
+                    rows["skill_projection_queue"]--;
+                    rows["skill_projection_invocations"]++;
+                    rows["skill_projection_inventories"]++;
+                    rows["skill_projection_inventory_names"]++;
+                }
+                else
+                {
+                    rows["skill_projection_invocations"]++;
+                    rows["skill_projection_inventories"]++;
+                    rows["skill_projection_inventory_names"]++;
+                }
+                manifest = RuntimeBackupJson.WriteManifest(
+                    parsed with { RowCounts = rows });
+            }
+            using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+            Write(target, "manifest.json", manifest);
+            Write(target, "database.sqlite", database);
+            return output;
+        }
+
+        internal string CreateMarkerSupersessionContradictionArchive(string valid)
+        {
+            const string contradiction = "marker-registry-labelled-decoder";
+            var output = Path.Combine(Root, $"{contradiction}.zip");
+            byte[] manifest;
+            byte[] database;
+            using (var archive = ZipFile.OpenRead(valid))
+            {
+                manifest = Read(archive.GetEntry("manifest.json")!);
+                database = Read(archive.GetEntry("database.sqlite")!);
+            }
+            var mutatedPath = Path.Combine(Root, $".{contradiction}.sqlite");
+            File.WriteAllBytes(mutatedPath, database);
+            RelabelMarkerRegistrySupersessionAsDecoder(mutatedPath);
+            database = File.ReadAllBytes(mutatedPath);
+            File.Delete(mutatedPath);
+            manifest = ReplaceDatabaseHash(manifest, database);
+            using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+            Write(target, "manifest.json", manifest);
+            Write(target, "database.sqlite", database);
+            return output;
+        }
+
+        internal string CreateSkillProjectionContradictionArchive(
+            string valid,
+            string contradiction)
+        {
+            var output = Path.Combine(Root, $"marker-{contradiction}.zip");
+            byte[] manifest;
+            byte[] database;
+            using (var archive = ZipFile.OpenRead(valid))
+            {
+                manifest = Read(archive.GetEntry("manifest.json")!);
+                database = Read(archive.GetEntry("database.sqlite")!);
+            }
+            var mutatedPath = Path.Combine(Root, $".marker-{contradiction}.sqlite");
+            File.WriteAllBytes(mutatedPath, database);
+            using (var connection = Open(mutatedPath))
+            {
+                if (contradiction == "receipt-fingerprint")
+                {
+                    Execute(
+                        connection,
+                        $"""
+                        DROP TRIGGER source_compatibility_reconciliation_receipts_update_rejected;
+                        DROP TRIGGER skill_projection_operation_receipts_update_rejected;
+                        UPDATE source_compatibility_reconciliation_receipts
+                        SET request_fingerprint='{new string('f', 64)}';
+                        UPDATE skill_projection_operation_receipts
+                        SET semantic_fingerprint='{new string('f', 64)}';
+                        CREATE TRIGGER source_compatibility_reconciliation_receipts_update_rejected
+                        BEFORE UPDATE ON source_compatibility_reconciliation_receipts
+                        BEGIN SELECT RAISE(ABORT,'source_compatibility_append_only'); END;
+                        CREATE TRIGGER skill_projection_operation_receipts_update_rejected
+                        BEFORE UPDATE ON skill_projection_operation_receipts
+                        BEGIN SELECT RAISE(ABORT,'skill_projection_append_only'); END;
+                        """);
+                }
+                else if (contradiction == "marker-with-digest")
+                {
+                    Execute(
+                        connection,
+                        $"""
+                        DROP TRIGGER source_schema_observations_projection_input_update_rejected;
+                        PRAGMA ignore_check_constraints=ON;
+                        UPDATE source_schema_observations
+                        SET raw_payload_sha256='{new string('a', 64)}';
+                        PRAGMA ignore_check_constraints=OFF;
+                        CREATE TRIGGER source_schema_observations_projection_input_update_rejected
+                        BEFORE UPDATE OF input_evidence_kind,raw_payload_sha256 ON source_schema_observations
+                        WHEN OLD.input_evidence_kind IS NOT NEW.input_evidence_kind
+                          OR OLD.raw_payload_sha256 IS NOT NEW.raw_payload_sha256
+                        BEGIN SELECT RAISE(ABORT,'source_projection_input_immutable'); END;
+                        """);
+                }
+                else if (contradiction == "marker-with-raw")
+                {
+                    Execute(
+                        connection,
+                        $$"""
+                        INSERT INTO raw_records(
+                            id,source,trace_id,received_at,resource_attributes_json,
+                            payload_json,schema_version,retention_owner_token)
+                        VALUES(
+                            1,'raw-otlp','{{MarkerTraceId}}',
+                            '2026-07-31T00:00:00.0000000+00:00','{}','{}',1,
+                            randomblob(32));
+                        """);
+                }
+                else if (contradiction == "frontier-mismatch")
+                {
+                    Execute(
+                        connection,
+                        $"""
+                        UPDATE skill_projection_generations
+                        SET input_frontier_sha256='{new string('f', 64)}';
+                        UPDATE skill_projection_queue
+                        SET input_frontier_sha256='{new string('f', 64)}';
+                        """);
+                }
+                else if (contradiction == "non-terminal")
+                {
+                    Execute(
+                        connection,
+                        """
+                        UPDATE skill_projection_generations SET lifecycle='pending';
+                        UPDATE skill_projection_queue
+                        SET state='pending',error_code=NULL;
+                        """);
+                }
+                else if (contradiction == "projected-row")
+                {
+                    Execute(
+                        connection,
+                        $"""
+                        INSERT INTO skill_projection_invocations(
+                            generation_id,source_arm,raw_record_id,trace_id,span_id,
+                            span_ordinal,session_id,skill_name,skill_source,
+                            invocation_trigger,source_application_version,projected_at)
+                        VALUES(
+                            1,'otel_trace_span',1,'{MarkerTraceId}',
+                            '2222222222222222',0,NULL,'forged-skill',NULL,NULL,
+                            '1.0.74','2026-07-31T00:01:00.0000000+00:00');
+                        """);
+                }
+                else if (contradiction == "current-pointer")
+                {
+                    Execute(
+                        connection,
+                        """
+                        UPDATE skill_projection_generations SET lifecycle='current';
+                        UPDATE skill_projection_queue
+                        SET state='completed',error_code=NULL;
+                        UPDATE skill_projection_trace_heads
+                        SET current_generation_id=desired_generation_id;
+                        """);
+                }
+                else if (contradiction == "resolved-pointerless-superseded")
+                {
+                    Execute(
+                        connection,
+                        """
+                        UPDATE skill_projection_generations
+                        SET lifecycle='superseded';
+                        UPDATE skill_projection_queue
+                        SET state='superseded',
+                            lease_owner=NULL,
+                            lease_expires_at=NULL,
+                            next_attempt_at=NULL,
+                            error_code=NULL;
+                        UPDATE skill_projection_trace_heads
+                        SET desired_generation_id=NULL,
+                            current_generation_id=NULL;
+                        """);
+                }
+                else if (contradiction == "old-worker-input-unavailable")
+                {
+                    Execute(
+                        connection,
+                        """
+                        UPDATE skill_projection_generations
+                        SET lifecycle='input_unavailable'
+                        WHERE generation_id=(
+                            SELECT MIN(generation_id)
+                            FROM skill_projection_generations);
+                        UPDATE skill_projection_queue
+                        SET state='input_unavailable',
+                            error_code='retention_input_unavailable'
+                        WHERE generation_id=(
+                            SELECT MIN(generation_id)
+                            FROM skill_projection_generations);
+                        """);
+                }
+                else if (contradiction == "worker-input-unavailable-projected-rows")
+                {
+                    Execute(
+                        connection,
+                        $"""
+                        INSERT INTO skill_projection_invocations(
+                            generation_id,source_arm,raw_record_id,trace_id,span_id,
+                            span_ordinal,session_id,skill_name,skill_source,
+                            invocation_trigger,source_application_version,projected_at)
+                        VALUES(
+                            1,'otel_trace_span',1,'{MarkerTraceId}',
+                            '2222222222222222',0,NULL,'forged-skill',NULL,NULL,
+                            '1.0.74','2026-07-23T02:04:00.0000000+00:00');
+                        INSERT INTO skill_projection_inventories(
+                            generation_id,source_arm,raw_record_id,trace_id,session_id,
+                            observed_name_count,retained_name_count,names_truncated,
+                            source_application_version,projected_at)
+                        VALUES(
+                            1,'otel_trace_span',1,'{MarkerTraceId}',NULL,
+                            1,1,0,'1.0.74','2026-07-23T02:04:00.0000000+00:00');
+                        INSERT INTO skill_projection_inventory_names(
+                            inventory_id,name_ordinal,skill_name)
+                        VALUES(last_insert_rowid(),0,'forged-skill');
+                        """);
+                }
+                else if (contradiction is
+                    "pointerless-head-without-source-revision" or
+                    "pointerless-head-with-source-revision")
+                {
+                    Execute(
+                        connection,
+                        """
+                        UPDATE skill_projection_trace_heads
+                        SET desired_generation_id=NULL,current_generation_id=NULL;
+                        DELETE FROM skill_projection_queue;
+                        DELETE FROM skill_projection_generation_inputs;
+                        DELETE FROM skill_projection_generations;
+                        """);
+                    if (contradiction == "pointerless-head-without-source-revision")
+                    {
+                        Execute(
+                            connection,
+                            "DELETE FROM source_trace_compatibility_revisions;");
+                    }
+                }
+                else
+                {
+                    throw new ArgumentOutOfRangeException(nameof(contradiction));
+                }
+                Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            database = File.ReadAllBytes(mutatedPath);
+            File.Delete(mutatedPath);
+            manifest = ReplaceDatabaseHash(manifest, database);
+            if (contradiction is
+                "marker-with-raw" or
+                "projected-row" or
+                "worker-input-unavailable-projected-rows" or
+                "pointerless-head-without-source-revision" or
+                "pointerless-head-with-source-revision")
+            {
+                var parsed = RuntimeBackupJson.ParseManifest(manifest);
+                var rows = parsed.RowCounts.ToDictionary(
+                    static item => item.Key,
+                    static item => item.Value,
+                    StringComparer.Ordinal);
+                if (contradiction == "marker-with-raw")
+                {
+                    rows["raw_records"]++;
+                }
+                else if (contradiction == "projected-row")
+                {
+                    rows["skill_projection_invocations"]++;
+                }
+                else if (contradiction == "worker-input-unavailable-projected-rows")
+                {
+                    rows["skill_projection_invocations"]++;
+                    rows["skill_projection_inventories"]++;
+                    rows["skill_projection_inventory_names"]++;
+                }
+                else
+                {
+                    rows["skill_projection_queue"]--;
+                    rows["skill_projection_generation_inputs"]--;
+                    rows["skill_projection_generations"]--;
+                    if (contradiction == "pointerless-head-without-source-revision")
+                        rows["source_trace_compatibility_revisions"]--;
+                }
+                manifest = RuntimeBackupJson.WriteManifest(parsed with { RowCounts = rows });
+            }
+            using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+            Write(target, "manifest.json", manifest);
+            Write(target, "database.sqlite", database);
+            return output;
+        }
+
+        internal void AssertArchiveDatabaseChecksumMatchesManifest(string path)
+        {
+            using var archive = ZipFile.OpenRead(path);
+            var manifest = RuntimeBackupJson.ParseManifest(
+                Read(archive.GetEntry("manifest.json")!));
+            var database = Read(archive.GetEntry("database.sqlite")!);
+            Assert.Equal(manifest.DatabaseSize, database.LongLength);
+            Assert.Equal(
+                manifest.DatabaseSha256,
+                Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant());
+        }
+
+        private static byte[] Read(ZipArchiveEntry entry)
+        {
+            using var stream = entry.Open();
+            using var memory = new MemoryStream();
+            stream.CopyTo(memory);
+            return memory.ToArray();
+        }
+
+        private static byte[] ReplaceDatabaseHash(byte[] manifest, byte[] database)
+        {
+            using var document = JsonDocument.Parse(manifest);
+            var oldHash = document.RootElement
+                .GetProperty("snapshot")
+                .GetProperty("snapshot_id")
+                .GetString()!;
+            var oldSize = document.RootElement
+                .GetProperty("files")[0]
+                .GetProperty("size")
+                .GetInt64();
+            var newHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
+            var json = Encoding.UTF8.GetString(manifest)
+                .Replace(oldHash, newHash, StringComparison.Ordinal)
+                .Replace(
+                    $"\"size\":{oldSize}",
+                    $"\"size\":{database.LongLength}",
+                    StringComparison.Ordinal);
+            return Encoding.UTF8.GetBytes(json);
+        }
+
+        private static void Write(ZipArchive archive, string name, byte[] bytes)
+        {
+            var entry = archive.CreateEntry(name, CompressionLevel.NoCompression);
+            entry.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            entry.ExternalAttributes = 0;
+            using var stream = entry.Open();
+            stream.Write(bytes);
+        }
+
         internal void CreatePreRetentionDatabase(string path, string value)
         {
             using var connection = Open(path);
@@ -1506,6 +3131,155 @@ public sealed class RuntimeBackupRestoreTests
             var token = SHA256.HashData([7]);
             using (var raw = connection.CreateCommand()) { raw.CommandText = "INSERT INTO raw_records(id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version,retention_owner_token) VALUES(1,'raw-otlp',NULL,'2026-01-01T00:00:00.0000000+00:00','{}','{\"secret\":\"private\"}',1,$token);"; raw.Parameters.AddWithValue("$token", token); raw.ExecuteNonQuery(); }
             Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        internal void ConvertToMonitorV9WithRetainedTraceSourceEvidence(
+            string traceId)
+        {
+            const string spanId = "2222222222222222";
+            new SqliteSourceCompatibilityStore(Source).CreateSchema();
+            using var connection = Open(Source);
+            var payload =
+                """
+                {"resourceSpans":[{"resource":{"attributes":[
+                  {"key":"service.name","value":{"stringValue":"github-copilot"}}
+                ]},"scopeSpans":[{"spans":[
+                  {"traceId":"TRACE_ID","spanId":"SPAN_ID","name":"chat gpt-4o"}
+                ]}]}]}
+                """
+                .Replace("TRACE_ID", traceId, StringComparison.Ordinal)
+                .Replace("SPAN_ID", spanId, StringComparison.Ordinal);
+            using (var raw = connection.CreateCommand())
+            {
+                raw.CommandText =
+                    """
+                    UPDATE raw_records
+                    SET trace_id=$trace_id,
+                        payload_json=$payload
+                    WHERE id=1;
+                    """;
+                raw.Parameters.AddWithValue("$trace_id", traceId);
+                raw.Parameters.AddWithValue("$payload", payload);
+                raw.ExecuteNonQuery();
+            }
+            Execute(
+                connection,
+                $"""
+                DROP TABLE IF EXISTS skill_projection_sdk_claims;
+                DROP TABLE IF EXISTS skill_projection_inventory_names;
+                DROP TABLE IF EXISTS skill_projection_inventories;
+                DROP TABLE IF EXISTS skill_projection_invocations;
+                DROP TABLE IF EXISTS skill_projection_operation_receipts;
+                DROP TABLE IF EXISTS skill_projection_queue;
+                DROP TABLE IF EXISTS skill_projection_trace_heads;
+                DROP TABLE IF EXISTS skill_projection_generation_inputs;
+                DROP TABLE IF EXISTS skill_projection_generations;
+                DELETE FROM schema_version WHERE component='skill_projection';
+                DROP TABLE source_compatibility_reconciliation_receipts;
+                DROP TABLE source_trace_version_interpretation_heads;
+                DROP TABLE source_trace_version_interpretation_supersessions;
+                DROP TABLE source_trace_compatibility_revisions;
+                DROP TRIGGER IF EXISTS source_schema_observations_insert_no_replace;
+                DROP TRIGGER IF EXISTS source_trace_version_observations_insert_no_replace;
+                DROP TRIGGER source_trace_version_observations_update_rejected;
+                DROP TRIGGER source_trace_version_observations_delete_rejected;
+                DROP TRIGGER source_schema_observations_trace_version_child_delete_rejected;
+                DROP TRIGGER source_schema_observations_projection_input_update_rejected;
+                ALTER TABLE source_schema_observations
+                DROP COLUMN input_evidence_kind;
+                ALTER TABLE source_schema_observations
+                DROP COLUMN raw_payload_sha256;
+                CREATE TABLE monitor_skill_invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_record_id INTEGER NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    span_id TEXT NULL,
+                    span_ordinal INTEGER NOT NULL,
+                    session_id TEXT NULL,
+                    skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
+                    skill_source TEXT NULL CHECK (skill_source IS NULL OR length(skill_source) BETWEEN 1 AND 256),
+                    invocation_trigger TEXT NULL CHECK (invocation_trigger IS NULL OR length(invocation_trigger) BETWEEN 1 AND 256),
+                    source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
+                    projected_at TEXT NOT NULL,
+                    UNIQUE(raw_record_id, span_ordinal),
+                    UNIQUE(trace_id, span_id)
+                );
+                CREATE TABLE monitor_skill_inventories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_record_id INTEGER NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    session_id TEXT NULL,
+                    observed_name_count INTEGER NOT NULL CHECK (observed_name_count >= 0),
+                    retained_name_count INTEGER NOT NULL CHECK (retained_name_count BETWEEN 0 AND 100),
+                    names_truncated INTEGER NOT NULL CHECK (names_truncated IN (0, 1)),
+                    source_application_version TEXT NOT NULL CHECK (length(source_application_version) BETWEEN 1 AND 256),
+                    projected_at TEXT NOT NULL,
+                    UNIQUE(raw_record_id, trace_id)
+                );
+                CREATE TABLE monitor_skill_inventory_names (
+                    raw_record_id INTEGER NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    name_ordinal INTEGER NOT NULL CHECK (name_ordinal BETWEEN 0 AND 99),
+                    skill_name TEXT NOT NULL CHECK (length(skill_name) BETWEEN 1 AND 256),
+                    PRIMARY KEY(raw_record_id, trace_id, name_ordinal),
+                    FOREIGN KEY(raw_record_id, trace_id)
+                        REFERENCES monitor_skill_inventories(raw_record_id, trace_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IX_monitor_skill_invocations_trace_id
+                    ON monitor_skill_invocations(trace_id,id);
+                CREATE INDEX IX_monitor_skill_invocations_session_id
+                    ON monitor_skill_invocations(session_id,id);
+                CREATE INDEX IX_monitor_skill_inventories_trace_id
+                    ON monitor_skill_inventories(trace_id,id);
+                CREATE INDEX IX_monitor_skill_inventories_session_id
+                    ON monitor_skill_inventories(session_id,id);
+                UPDATE retention_items
+                SET expires_at='9999-12-31T23:59:59.9999999+00:00',
+                    state='expiring',
+                    read_denied_at=NULL,
+                    queued_at=NULL
+                WHERE store_kind='raw_record' AND source_item_id='1';
+                INSERT INTO monitor_ingestions(
+                    raw_record_id,received_at,source,trace_id,client_kind,span_count,
+                    projected_at,span_projected_at)
+                VALUES(
+                    1,'2026-01-01T00:00:00.0000000+00:00','raw-otlp','{traceId}',
+                    'legacy-family',1,'2026-01-01T00:00:01.0000000+00:00',
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_traces(
+                    trace_id,client_kind,span_count,projected_at)
+                VALUES(
+                    '{traceId}','legacy-family',1,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_spans(
+                    raw_record_id,trace_id,span_id,span_ordinal,projected_at)
+                VALUES(
+                    1,'{traceId}','{spanId}',0,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                INSERT INTO monitor_projection_dispositions(
+                    raw_record_id,state,revision,updated_at)
+                VALUES(
+                    1,'completed',1,
+                    '2026-01-01T00:00:01.0000000+00:00');
+                DROP INDEX IX_source_trace_attribution_observations_trace_id;
+                DROP TABLE source_trace_attribution_observations;
+                DROP TABLE source_trace_attribution_reconciliation_queue;
+                UPDATE schema_version
+                SET version=9
+                WHERE component='monitor';
+                PRAGMA wal_checkpoint(TRUNCATE);
+                """);
+        }
+
+        internal byte[] CanonicalDatabaseHash(string path)
+        {
+            using (var connection = Open(path))
+            {
+                Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+                Execute(connection, "PRAGMA journal_mode=DELETE;");
+            }
+            return SHA256.HashData(File.ReadAllBytes(path));
         }
 
         internal void DeleteRawAndTombstone(string path)

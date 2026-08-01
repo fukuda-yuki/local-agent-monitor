@@ -10,6 +10,10 @@ internal interface ISourceCompatibilityStore
 
     TraceSourceVersionResolutionRow? GetTraceSourceVersionResolution(string traceId) => null;
 
+    TraceSourceResolutionRow? GetTraceSourceResolution(string traceId) => null;
+
+    bool ReconcileProjectedTraceSourceAttribution() => false;
+
     SourceCompatibilityRow? GetByObservationId(string observationId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(observationId);

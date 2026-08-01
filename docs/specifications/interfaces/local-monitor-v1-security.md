@@ -54,17 +54,53 @@ Authority: #133/#134.
 
 ### Skill
 
-- historical Skill body and definition path captured by exact `skill.invoked` Session event;
+- historical Skill body and definition path captured only by the accepted
+  additive v2 exact `skill.invoked` Session Event/snapshot transaction;
 - current file only after explicit POST action and current inventory/path/root/reparse validation.
 
-Authority: #157/#158. Historical snapshot and current file are never substituted for one another.
+Frozen Session ingest v1 supports `skill.started | skill.completed` and treats
+`skill.invoked` as unsupported without changing any other v1 wire, limit,
+status or response bytes. Authority:
+[Skill Invocation Snapshot](skill-invocation-snapshot.md), #157/#158.
+Historical snapshot and current file are never substituted for one another.
+Invocation/inventory claim validity is independently owned by
+[Skill Projection](../layers/skill-projection.md). A retained snapshot cannot
+resurrect a claim. OTel claims require a current resolved compatibility
+revision/generation; SDK Session/Event claims instead require exact persisted
+source identity and current-registry acceptance of their complete compatibility
+tuple, without requiring trace/span. OTel projection workers hold exact
+Retention operation leases through their publish fence; an unavailable input
+publishes no OTel claim.
+Cross-arm linkage requires exact producer trace ID and span ID together;
+name/path/time/cardinality and Session co-membership never link claims.
+Production v2 writer, snapshot migration, discovery/current-file service and
+raw-local routes remain unregistered until every decision gate in the snapshot
+interface is closed.
+Startup configuration is the sole current-file discovery-root authority:
+`SkillDiscovery.ProjectPaths` (at most 16) and
+`SkillDiscovery.SkillDirectories` (at most 32). `DiscoverAsync` receives only
+those validated roots. Historical path/CWD, Repository locator, prompt,
+workspace, time and out-of-root results never create a root, and the service
+never opens the historical path directly. Only an exact accepted discovery
+result proceeds through the platform no-follow handle walk; the final
+name/path comparison and filesystem-identity proof remain blocked decisions.
 
 ### Repository
 
 - canonical GitHub locator only in a dedicated management read;
 - standard Repository cards and Session rows do not return raw locator/path/owner.
+- admitted canonical locator, fingerprint, display casing and bounded
+  provenance are catalog-owned durable raw-local metadata after raw expiry;
+  they do not reconstruct the raw body or expose the internal raw-record
+  reference;
+- Repository management routes and catalog data are absent in receiver-only
+  and `--sanitized-only` composition and excluded from sanitized evidence
+  export/import.
 
-Authority: #155/#156.
+Authority:
+[Local Repository Catalog and Session Assignment](local-repository-catalog.md),
+#155/#156. #134 alone owns the composite
+`GET /api/local-monitor/v1/repositories` route.
 
 ### AI
 
@@ -96,6 +132,8 @@ This namespace is raw-default human-UI support, not a sanitized public API.
 - expiry/delete denial is rechecked at read time;
 - derived raw instruction labels cannot outlive their source content;
 - Skill body/path index may outlive content only as digest/provenance/expired state;
+- sanitized Skill invocation/inventory rows are readable only through the
+  current-valid #154 projection authority;
 - archive does not extend retention;
 - Session AI report content uses analysis retention;
 - node/Repository/Compare AI operational content is deleted after 24 hours and is not backed up;

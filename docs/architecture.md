@@ -41,6 +41,48 @@ Session sanitized events -----------------> timeline as Session / unowned
 This path does not replace or alter the OTLP receiver and existing monitor
 projection.
 
+Issue #154 separates immutable source-version observation from current
+interpretation and current Skill claims. OTel and SDK enter the same claim/read
+authority through different predicates:
+
+```text
+validated retained OTel input
+  -> immutable trace-version observation
+  -> SourceCompatibilityReconciler (decoder/registry revision only)
+  -> append-only interpretation head + trace compatibility revision
+  -> exact OTel Skill generation/frontier/queue
+  -> Retention-fenced worker
+
+exact SDK Session/Event + full compatibility tuple
+  -> seven-authority Skill snapshot transaction (after #158 gate closure)
+  -> independent SDK claim subspace (no trace generation)
+
+OTel current claim + SDK current claim
+  -> single current-valid Skill read service
+  -> merge only on exact producer trace ID + span ID
+```
+
+Ordinary validated OTel ingestion and the reconciler call the same
+transaction-aware generation participant. The worker cannot discover a
+different raw set at run time, and a raw Skill snapshot cannot become claim
+authority.
+
+The installed Session ingest v1 keeps its frozen wire and supports
+`skill.started | skill.completed`; `skill.invoked` is unsupported there. The
+accepted Skill-only v2 writer, `skill_invocation_snapshot:1`, historical
+body/path reader, discovery/current-file service and raw-local routes are
+additive raw-default-only components. Their production registration remains
+blocked by the complete decision gate in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md);
+there is no v1 fallback, compatibility writer or dual path.
+Current-file discovery takes roots only from startup
+`SkillDiscovery.ProjectPaths` / `SkillDiscovery.SkillDirectories`, calls
+`ServerSkillsApi.DiscoverAsync` with those roots, and opens only an accepted
+discovery result through a platform no-follow handle walk. Historical
+path/CWD, Repository locator, prompt, workspace or time never creates a root,
+and the historical path is never opened directly. Exact name/path comparison
+and handle-identity proof remain part of the production gate.
+
 Issue #79 adds a separate historical-observation path:
 
 ```text
@@ -132,9 +174,14 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   detail or deterministic Repository Session Compare. Unified Settings owns
   receiver, AI, Repository, archive, storage/backup and diagnostics entry.
 - `/api/local-monitor/v1/*` is the human-UI composition namespace. It reuses the
-  #155/#156 Repository owner, #133/#134 Workspace reads, #157/#158 Skill raw
-  detail, #160/#161 archive, #165/#166 Compare and #162/#163/#164 AI owners. It
-  does not duplicate their readers or widen `/api/monitor/*`,
+  [single Repository catalog/assignment authority](specifications/interfaces/local-repository-catalog.md),
+  #133/#134 Workspace reads,
+  [#157/#158 Skill snapshot/raw detail](specifications/interfaces/skill-invocation-snapshot.md),
+  #160/#161 archive,
+  #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
+  `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
+  `ILocalRepositoryScopeSnapshotService` and do not duplicate catalog readers.
+  It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
 - AI-independent observation/investigation/Compare remains complete without an
   LLM. Optional GitHub Copilot SDK execution crosses an explicit bounded
@@ -254,6 +301,42 @@ to Config CLI and no new Local Monitor route.
 - raw content は secret-filter 後に metadata と分離して保存し、capture から
   90 日で expiry。Retention catalog v1 が item-level physical cleanup を所有し、
   pin / delete-now は Issue #90 に残す。
+
+### Source Compatibility Reconciliation And Skill Projection
+
+- `source_trace_version_observations` remains immutable. The sole
+  `SourceCompatibilityReconciler` appends exact interpretation revisions and
+  updates heads; it offers no HTTP/manual repair surface.
+- These objects advance the Monitor source-compatibility owner from exact v10
+  to v11; `skill_projection:1` remains independent. Its OTel generation stores
+  only the trace revision it consumed, and its SDK claim subspace stores no
+  trace revision.
+- Effective trace aggregation remains fail-closed:
+  conflicting/multiple token, then unrecognised, then all-resolved-one-token,
+  then missing. A separate resolved observation does not hide missing.
+- `skill_projection:1` independently owns OTel generations, ordered input
+  frontiers, queue/lease state, current pointers and sanitized rows, plus the
+  non-generation-bound exact SDK Session/Event claim subspace. It is not a
+  second raw store or Retention owner.
+- An OTel compatibility or eligible-frontier change invalidates current OTel
+  claims and schedules one generation in the same SQLite transaction. OTel
+  publication rechecks all revision/frontier/projector/queue/Retention fences.
+- SDK current validity uses the complete exact
+  source-application/adapter/normalization/payload-schema/fingerprint registry
+  tuple. Cross-arm merge requires exact producer trace and span IDs; #158 still
+  owns and must fix the SDK wire writer and accepted registry seed.
+- The pre-release Skill tables are destructively retired without old-row
+  backfill or deletion of unrelated Session/raw/Retention data.
+- Canonical details are
+  [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
+  and [Skill projection](specifications/layers/skill-projection.md). The
+  accepted transport/snapshot/read/discovery composition and all remaining
+  blockers are canonical in
+  [Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+  `skill_invocation_snapshot:1` owns index/metadata and equality receipts only;
+  Session Event content remains the sole historical body/path-byte owner. The
+  complete namespace is absent from sanitized export/import and emits no empty
+  carrier.
 
 ### Historical Import Subsystem
 
@@ -570,7 +653,11 @@ Copilot client
 
 - OTel emit の確認。
 - span tree、prompt、response、tool arguments、tool results、token usage、duration、error の確認。
-- `client.kind` と `experiment.id` による識別。
+- trace-scoped exact `client.kind` / `service.name` source attribution と
+  `experiment.id` による識別。source version、agent/model、Repository、path、
+  time は source-family fallback に使用しない。raw と同時に evidence /
+  durable reconciliation identity を保存し、後続 conflict は対象 trace と
+  contributing ingestion の source 表示を再調整する。
 
 ### Raw Data Loop
 
@@ -622,10 +709,29 @@ and lower completeness. Ephemeral usage is aggregated; reasoning and deltas are
 not persisted. OTel enrichment runs after existing projection and leaves the
 OTLP receiver, trace/span schema, and readiness contract unchanged.
 
+### OTel Skill Projection Reconciliation Loop
+
+```text
+ordinary exact ingest or accepted interpretation revision
+  -> one atomic compatibility/frontier generation participant
+  -> immediate current OTel-claim invalidation
+  -> persisted exact generation frontier + queue
+  -> composite Retention operation lease
+  -> fenced deterministic publish
+  -> current-valid OTel Skill claim read
+```
+
+An unresolved trace produces no current OTel claim. An
+expired/deleted/read-denied frontier becomes `input_unavailable`; it is not
+shortened or converted to an empty successful projection. Independent SDK
+claims join the same read authority through the arm predicate described above,
+not through this loop.
+
 ### Local Monitor v1 Investigation Loop
 
 ```text
 exact Repository catalog/assignment
+  -> one coherent Repository/archive scope snapshot
   -> Repository selection
   -> bounded Session Explorer read
   -> exact Session snapshot
@@ -637,6 +743,16 @@ two explicit Session cohorts
   -> deterministic #165 formulas and exact drill-down
   -> optional AI interpretation of the accepted receipt
 ```
+
+`local_repository_catalog:1` is the future exact Repository identity and
+Session-assignment component. It owns immutable locator/head/history,
+observation provenance, manual overrides and revisions, durable operation
+receipts and catalog-owned raw-expiry metadata. Repository identity is never
+derived from name, path, CWD, prompt, time or cardinality. Only the exact
+GitHub locator parser/canonicalization/fingerprint is currently executable;
+production schema, admission/reconciliation, routes, scope composition and
+backup registration remain blocked by the canonical contract's explicit
+unknowns. Issue #152 remains unresolved.
 
 Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
 exact. Missing facts remain missing. Archive changes default eligibility only;
@@ -883,6 +999,20 @@ backup files are excluded by contract. The HTTP/UI surface can create and
 inspect but never restores a live database; restore authority is offline CLI
 only. Details are canonical in
 [Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md).
+
+The accepted future `local_repository_catalog:1` component is ordered
+immediately after Session and before `local_archive`, followed by Retention,
+`skill_projection:1`, `skill_invocation_snapshot:1` and Workspace projection.
+The snapshot component backs up index/metadata and equality receipts while
+existing Session Event content backs up body/path bytes exactly once; older
+component-absent state initializes empty and partial/newer state fails closed.
+Its registration remains blocked with #158. The catalog component backs up all
+catalog-owned tables and durable receipts; an older absent component
+initializes empty while partial/newer/unknown shapes fail closed. Catalog
+metadata may restore without source raw and reports unavailable provenance
+without reconstructing content. The component is excluded from sanitized
+evidence export/import. Registration remains gated by the unresolved catalog
+schema/history and raw-reference decisions.
 
 ## 5. Aspire AppHost Boundary
 

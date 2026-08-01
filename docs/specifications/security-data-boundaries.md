@@ -101,9 +101,10 @@ The v1 raw-local set is closed to:
   content;
 - Tool input, result and error;
 - exact Sub-agent input and Event/error/permission content when captured;
-- historical Skill body and definition path captured by the exact
-  `skill.invoked` event, plus a separately labelled current file after explicit
-  POST and current inventory/path/root/reparse validation;
+- historical Skill body and definition path captured only by the accepted
+  additive v2 exact `skill.invoked` Event/snapshot transaction, plus a
+  separately labelled current file after explicit POST and current
+  inventory/path/root/reparse validation;
 - canonical Repository locator only in the dedicated management read;
 - immutable Session AI report content and transient node/Repository/Compare AI
   results;
@@ -117,6 +118,69 @@ outlive content only with an explicit expired state. Archive does not extend
 retention. Session AI reports use analysis retention; node/Repository/Compare
 AI operational content and deterministic Compare snapshots expire after 24
 hours and are not backed up.
+
+Frozen `POST /api/session-ingest/v1/events` supports `skill.started` and
+`skill.completed`; `skill.invoked` is unsupported and follows the existing
+unsupported-event behavior. This correction changes no other v1 route, wire,
+enum, limit, status mapping, error entity, success or Workspace response byte.
+The additive Skill v2 writer, snapshot component, raw-local routes and
+current-file discovery are raw-default-only and remain unregistered until the
+complete decision gate in
+[Skill Invocation Snapshot](interfaces/skill-invocation-snapshot.md)
+is closed. There is no v1 retry, compatibility writer, fallback or dual path.
+
+Repository catalog and assignment follow the closed
+[Local Repository Catalog and Session Assignment](interfaces/local-repository-catalog.md)
+boundary. Repository identity is exact and opaque; name, path, CWD, prompt,
+time, cardinality and adjacent source labels are never identity or assignment
+evidence. V1 observes only `vcs.repository.url.full` and
+`copilot_chat.repo.remote_url`, with span-over-resource precedence, no
+invalid-higher-scope fallback and no Issue #152 drift claim. Admitted canonical
+locator, fingerprint, display casing, safe label and bounded provenance become
+catalog-owned durable raw-local metadata and may survive source raw expiry.
+They do not reconstruct source raw and standard reads, URLs, logs and
+repository-safe outputs never expose the locator or internal raw-record
+reference.
+
+The catalog is absent from sanitized evidence export/import. Its management
+routes exist only in raw-default composition, are same-origin/no-store, and
+mutations additionally require CSRF and durable idempotency. #134 alone owns
+`GET /api/local-monitor/v1/repositories`; #156 owns only its gated
+management/action routes and the catalog core of the single
+`ILocalRepositoryScopeSnapshotService` shared with #161/#134. Only the locator
+parser/canonicalization/fingerprint is currently implementation-ready. No
+catalog schema, admission/reconciliation path, mutation/read route, scope
+composition or backup registration is authorized until every blocker in the
+catalog contract is closed.
+
+Sanitized Skill invocation/inventory claims are independently current-valid.
+The sole #154 read service applies arm-specific predicates. An OTel claim
+requires a generation revision equal to the trace's current compatibility
+revision, current `resolved` SourceCompatibility and the current generation
+pointer. An SDK Session/Event claim does not require trace/span or an OTel
+generation; it requires exact local/source Event identity and current-registry
+acceptance of its full source-application/adapter/normalization/payload-schema/
+fingerprint tuple. A raw snapshot, body, path or digest cannot create or
+resurrect a stale claim. OTel reprojection reads only its persisted exact
+frontier under a composite Retention operation lease and publishes only after
+rechecking that lease, its queue lease, revision, frontier and projector
+version. Expired/deleted/read-denied OTel input yields `input_unavailable` and
+no claim.
+
+The two arms compose only when producer trace ID and span ID both match
+exactly. Trace-only, name, path, time, cardinality, Session co-membership and
+discovery output are not linkage evidence. The snapshot namespace and all
+body/path/current-file fields are excluded from sanitized export/import, and
+no empty carrier represents their absence.
+
+The append-only reconciliation ledger and Skill projection queues contain only
+local runtime metadata/digests and exact internal identities. They must not be
+copied into logs, screenshots, Issues, docs, static artifacts or
+repository-safe evidence. The obsolete pre-release Skill projection may be
+destroyed without deleting unrelated raw/Session/Retention data. Full
+authority is
+[Source Compatibility Reconciliation](layers/source-compatibility-reconciliation.md)
+and [Skill Projection](layers/skill-projection.md).
 
 `/api/local-monitor/v1/*` is raw-default human-UI support, not a sanitized
 public API. Responses are no-store; mutations require same-origin and CSRF;
@@ -1137,10 +1201,11 @@ reclaimed. Thus dormant bytes cannot regain authority or be used after the
 five-minute lifetime.
 
 The current workflow accepts only `metadata_only`. `--sanitized-only` remains
-the Local Monitor display posture and is not a substitute for probe consent;
-the historical-import page and sanitized workflow routes remain available in
-that mode because they expose no source body. Both current adapters read no
-content, return `content_risk = not_read`, and cannot issue confirmation.
+the Local Monitor receiver-only host posture and is not a substitute for probe
+consent. The historical-import page is not registered in that posture; accepted
+metadata-only workflow machine routes remain available because they expose no
+source body. Both current adapters read no content, return
+`content_risk = not_read`, and cannot issue confirmation.
 `include_content` is rejected before a source probe. A later content profile
 must be specified separately, secret-filter into existing
 `session_event_content`, and register through #89; it may not create an import
@@ -1404,8 +1469,9 @@ It never performs heuristic history lookup and never returns a raw body.
 
 Raw-default is a validation profile, not authorization to return raw content.
 Both raw-default and `--sanitized-only` responses are repository-safe;
-sanitized-only retains safe preview/status/navigation and preserves unavailable
-or expired state. A `--sanitized-only` host accepts only an exact
+sanitized-only retains the frozen preview/status/resolution machine APIs and
+preserves unavailable or expired state, but does not register the standalone
+human page. A `--sanitized-only` host accepts only an exact
 `selection.sanitized_only=true` historical-analysis preview; `false` is
 rejected as `400 invalid_historical_analysis_request` before the #72 owner
 opens a snapshot or reads descriptors and is never silently rewritten.
@@ -1712,8 +1778,9 @@ All cost responses are `Cache-Control: no-store`; CORS remains off. Every
 request passes loopback Host validation and same-origin checks. Writes require
 strict JSON, fixed size/cardinality bounds, and the existing CSRF header.
 Errors use fixed codes without rejected identifiers or values. Sanitized-only
-mode keeps metadata-only cost views and actions available but grants no raw
-read and does not enable a provider adapter.
+mode keeps metadata-only cost machine reads and actions available, but the
+`/costs` human page is absent; the posture grants no raw read and does not
+enable a provider adapter.
 
 The current Issue #61 manifests do not authorize a complete positive production
 estimate. The default adapter therefore returns an explicit unavailable state.

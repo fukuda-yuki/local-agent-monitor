@@ -8,6 +8,7 @@ internal static class MeasurementSanitizer
     {
         "experiment.id",
         "client.kind",
+        "service.name",
         "task.id",
         "task.category",
         "task.run_index",
@@ -44,11 +45,26 @@ internal static class MeasurementSanitizer
     }
 
     public static void AddUnknownResourceAttributes(JsonObject unknown, JsonObject resourceAttributes)
+        => AddUnknownResourceAttributes(
+            unknown,
+            resourceAttributes,
+            serviceNameIsMapped: true);
+
+    internal static void AddUnknownResourceAttributes(
+        JsonObject unknown,
+        JsonObject resourceAttributes,
+        bool serviceNameIsMapped)
     {
         var unknownResourceAttributes = new JsonObject();
         foreach (var property in resourceAttributes)
         {
-            if (!MappedResourceAttributeKeys.Contains(property.Key) && !IsUnsafeKey(property.Key))
+            var isMapped = MappedResourceAttributeKeys.Contains(property.Key)
+                && (serviceNameIsMapped
+                    || !string.Equals(
+                        property.Key,
+                        "service.name",
+                        StringComparison.Ordinal));
+            if (!isMapped && !IsUnsafeKey(property.Key))
             {
                 var value = property.Value is null
                     ? null
