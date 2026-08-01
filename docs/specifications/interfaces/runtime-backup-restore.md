@@ -344,7 +344,7 @@ backup.
 
 ### Local Repository catalog component
 
-The accepted future component is `local_repository_catalog:1`, ordered
+The registered `local_repository_catalog:1` component is ordered
 immediately after Session and before `local_archive`. The relevant dependency
 order is:
 
@@ -360,9 +360,10 @@ local_workspace_projection
 ```
 
 Its namespace contains every catalog, immutable locator/head, observation,
-manual override, assignment revision/history, Repository history and durable
-operation-receipt table defined by
-[Local Repository Catalog and Session Assignment](local-repository-catalog.md).
+reconciliation cursor/queue, manual override, assignment revision/history,
+Repository history, opaque raw provenance and durable operation-receipt table
+defined by [Local Repository Catalog and Session Assignment](local-repository-catalog.md)
+and its [DC156-12–19 executable closure](local-repository-catalog-executable.md).
 An exact supported older backup without the component initializes an empty v1
 catalog. A present partial, newer or unknown table/enum namespace fails closed.
 Validation recomputes locator fingerprints and verifies unique ownership,
@@ -372,10 +373,9 @@ bytes and append-only completeness.
 The component can restore without source raw content; retained catalog-owned
 metadata survives and provenance availability resolves to `unknown` or
 `expired` without reconstructing raw. The whole component is excluded from
-sanitized evidence export/import. Production registration is not yet
-authorized: automatic-revision history and raw-reference durability are among
-the catalog's explicit unresolved blockers, so backup code must not invent an
-intermediate component shape.
+sanitized evidence export/import. The complete registered DC156-01–19 contract
+is `READY_FOR_IMPLEMENTATION`; backup registration and restore follow that
+exact component shape without an intermediate schema.
 
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`

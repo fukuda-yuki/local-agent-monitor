@@ -126,10 +126,11 @@ Supplementary entries:
 - archived Repository management through Settings.
 
 Identity, locator, assignment, correction and conflict behavior are owned by
-[the Local Repository catalog contract](local-repository-catalog.md) and
-#155/#156. Only its locator parser/canonicalization/fingerprint slice is
-currently implementation-ready; catalog admission, mutation/read routes and
-scope composition remain gated by that contract. #134 alone owns
+[the Local Repository catalog contract](local-repository-catalog.md), its
+[DC156-12–19 executable closure](local-repository-catalog-executable.md), and
+#155/#156. The complete registered DC156-01–19 contract is
+`READY_FOR_IMPLEMENTATION`; #156 owns the catalog/assignment core and scope
+composition. #134 alone owns
 `GET /api/local-monitor/v1/repositories`, consuming the one
 `ILocalRepositoryScopeSnapshotService` shared with #156/#161. Archive behavior
 is owned by #160/#161.

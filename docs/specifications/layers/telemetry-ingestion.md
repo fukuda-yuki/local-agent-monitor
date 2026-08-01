@@ -652,7 +652,8 @@ The generation, queue, retry, read and transition contract is canonical in
 ## Local Repository observation admission
 
 The sole Repository catalog/assignment authority is
-[Local Repository Catalog and Session Assignment](../interfaces/local-repository-catalog.md).
+[Local Repository Catalog and Session Assignment](../interfaces/local-repository-catalog.md)
+and its [DC156-12–19 executable closure](../interfaces/local-repository-catalog-executable.md).
 V1 considers only OTel scalar-string values from:
 
 ```text
@@ -671,12 +672,11 @@ unknown-key drift are not admission authorities.
 Admission must hold a Retention operation lease before parsing and bind only to
 one exact existing Session. Once admitted, canonical locator, fingerprint,
 display casing and bounded provenance are catalog-owned metadata that survive
-source raw expiry without reconstructing raw content. Automatic
-admission/reconciliation remains blocked: its creation/binding lifecycle,
-identity framing, exact Session join, automatic-revision history, durable
-frontier and raw-reference shape are not yet executable. Only the six-form
-GitHub locator parser, canonicalization and fingerprint are currently `READY`;
-ingestion must not add a scan-on-read, queue, fallback or heuristic join.
+source raw expiry without reconstructing raw content. The complete registered
+DC156-01–19 contract is `READY_FOR_IMPLEMENTATION`; automatic
+admission/reconciliation follows its exact creation/binding lifecycle, identity
+framing, Session join, revision history, durable frontier and raw-reference
+rules. Ingestion must not add a scan-on-read, queue, fallback or heuristic join.
 
 ## Session Event Ingestion And Enrichment
 

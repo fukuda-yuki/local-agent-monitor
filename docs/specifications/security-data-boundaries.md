@@ -136,22 +136,25 @@ time, cardinality and adjacent source labels are never identity or assignment
 evidence. V1 observes only `vcs.repository.url.full` and
 `copilot_chat.repo.remote_url`, with span-over-resource precedence, no
 invalid-higher-scope fallback and no Issue #152 drift claim. Admitted canonical
-locator, fingerprint, display casing, safe label and bounded provenance become
-catalog-owned durable raw-local metadata and may survive source raw expiry.
-They do not reconstruct source raw and standard reads, URLs, logs and
-repository-safe outputs never expose the locator or internal raw-record
-reference.
+locator, fingerprint, validated Repository display casing/name and bounded
+exact provenance become catalog-owned durable raw-local metadata and may
+survive source raw expiry. They are not Session label evidence: v1 stores no
+observed-label candidate and assignment bytes always contain
+`observed_label_candidates:[]`. They do not reconstruct source raw and standard
+reads, URLs, logs and repository-safe outputs never expose the locator or
+internal raw-record reference.
 
 The catalog is absent from sanitized evidence export/import. Its management
 routes exist only in raw-default composition, are same-origin/no-store, and
 mutations additionally require CSRF and durable idempotency. #134 alone owns
 `GET /api/local-monitor/v1/repositories`; #156 owns only its gated
 management/action routes and the catalog core of the single
-`ILocalRepositoryScopeSnapshotService` shared with #161/#134. Only the locator
-parser/canonicalization/fingerprint is currently implementation-ready. No
-catalog schema, admission/reconciliation path, mutation/read route, scope
-composition or backup registration is authorized until every blocker in the
-catalog contract is closed.
+`ILocalRepositoryScopeSnapshotService` shared with #161/#134. The complete
+registered DC156-01–19 contract is `READY_FOR_IMPLEMENTATION` in the
+[catalog contract](interfaces/local-repository-catalog.md) and its
+[executable closure](interfaces/local-repository-catalog-executable.md); #156
+owns catalog schema, admission/reconciliation, management/action routes, scope
+composition and backup registration within that contract.
 
 Sanitized Skill invocation/inventory claims are independently current-valid.
 The sole #154 read service applies arm-specific predicates. An OTel claim
