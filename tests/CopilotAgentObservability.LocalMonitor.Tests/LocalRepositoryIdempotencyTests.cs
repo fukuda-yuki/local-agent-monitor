@@ -1,4 +1,5 @@
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Repositories;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -170,13 +171,19 @@ public sealed class LocalRepositoryIdempotencyTests
     {
         using var fixture = new LocalRepositoryCatalogFixture();
         var key = fixture.Key(60);
-        var original = Encoding.UTF8.GetBytes("{\"stable\":true}");
+        byte[]? original = null;
+        string? expectedEntity = null;
         var prepared = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedCreate>>(
             fixture.Application.PrepareCreate(new("One", null))).Prepared;
 
         var fresh = Assert.IsType<LocalRepositoryMutationSucceeded>(await fixture.Application.ExecutePreparedAsync(
-            prepared, key, _ => original, CancellationToken.None));
-        original[2] = (byte)'X';
+            prepared, key, repository =>
+            {
+                original = LocalRepositoryCatalogFixture.RepositoryEntity(repository).ToArray();
+                expectedEntity = Encoding.UTF8.GetString(original);
+                return original;
+            }, CancellationToken.None));
+        original![2] = (byte)'X';
         var firstCopy = fresh.Response.CopyEntity();
         firstCopy[2] = (byte)'Y';
 
@@ -197,7 +204,7 @@ public sealed class LocalRepositoryIdempotencyTests
         Assert.False(fresh.IsReplay);
         Assert.True(replay.IsReplay);
         Assert.False(writerCalled);
-        Assert.Equal("{\"stable\":true}", Encoding.UTF8.GetString(fresh.Response.CopyEntity()));
+        Assert.Equal(expectedEntity, Encoding.UTF8.GetString(fresh.Response.CopyEntity()));
         Assert.Equal(fresh.Response.CopyEntity(), replay.Response.CopyEntity());
         Assert.NotSame(replay.Response.CopyEntity(), replay.Response.CopyEntity());
     }
@@ -380,6 +387,86 @@ public sealed class LocalRepositoryIdempotencyTests
         fixture.Execute($"UPDATE local_repository_operation_receipts SET status_code=201 WHERE operation_key='{key}';");
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await replay());
+    }
+
+    [Theory]
+    [InlineData("rename")]
+    [InlineData("set_locator")]
+    [InlineData("session_action")]
+    public async Task CanonicalOther200Kind_FaultsBeforeFingerprintAndWriterForEveryArm(string arm)
+    {
+        using var fixture = new LocalRepositoryCatalogFixture();
+        var repository = fixture.Repository(await fixture.CreateAsync("One", null, fixture.Key(75)));
+        var key = fixture.Key(76);
+        var writerCalled = false;
+        Func<ValueTask<LocalRepositoryMutationResult>> replay;
+        byte[] otherKind;
+
+        switch (arm)
+        {
+            case "rename":
+                _ = await fixture.RenameAsync(repository.RepositoryId, 1, "Two", key);
+                var rename = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedRename>>(
+                    fixture.Application.PrepareRename(new(repository.RepositoryId, 1, "Two"))).Prepared;
+                replay = () => fixture.Application.ExecutePreparedAsync(
+                    rename,
+                    key,
+                    value =>
+                    {
+                        writerCalled = true;
+                        return LocalRepositoryCatalogFixture.RepositoryEntity(value);
+                    },
+                    CancellationToken.None);
+                otherKind = LocalRepositoryJson.WriteAssignment(new LocalRepositoryAssignmentSnapshot(
+                    LocalRepositoryCatalogFixture.SessionId(75), 0, "unassigned", "none", null, [], null)).ToArray();
+                break;
+            case "set_locator":
+                _ = await fixture.SetLocatorAsync(repository.RepositoryId, 1, "https://github.com/example/two", key);
+                var locator = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedSetLocator>>(
+                    fixture.Application.PrepareSetGitHubLocator(new(repository.RepositoryId, 1, "https://github.com/example/two"))).Prepared;
+                replay = () => fixture.Application.ExecutePreparedAsync(
+                    locator,
+                    key,
+                    value =>
+                    {
+                        writerCalled = true;
+                        return LocalRepositoryCatalogFixture.RepositoryEntity(value);
+                    },
+                    CancellationToken.None);
+                otherKind = LocalRepositoryJson.WriteAssignment(new LocalRepositoryAssignmentSnapshot(
+                    LocalRepositoryCatalogFixture.SessionId(76), 0, "unassigned", "none", null, [], null)).ToArray();
+                break;
+            case "session_action":
+                var sessionId = LocalRepositoryCatalogFixture.SessionId(77);
+                fixture.CreateSession(sessionId);
+                var action = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedSessionAction>>(
+                    fixture.Application.PrepareSessionAction(new(sessionId, 0, "assign", repository.RepositoryId))).Prepared;
+                _ = await fixture.Application.ExecutePreparedAsync(
+                    action, key, LocalRepositoryCatalogFixture.AssignmentEntity, CancellationToken.None);
+                var replayAction = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedSessionAction>>(
+                    fixture.Application.PrepareSessionAction(new(sessionId, 0, "assign", repository.RepositoryId))).Prepared;
+                replay = () => fixture.Application.ExecutePreparedAsync(
+                    replayAction,
+                    key,
+                    value =>
+                    {
+                        writerCalled = true;
+                        return LocalRepositoryCatalogFixture.AssignmentEntity(value);
+                    },
+                    CancellationToken.None);
+                otherKind = LocalRepositoryJson.WriteRepository(200, repository).ToArray();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(arm));
+        }
+
+        fixture.Execute("DROP TRIGGER local_repository_operation_receipts_update_rejected; PRAGMA ignore_check_constraints=ON;");
+        fixture.ExecuteUnchecked($"UPDATE local_repository_operation_receipts SET response_entity=X'{Convert.ToHexString(otherKind)}',request_fingerprint=X'00' WHERE operation_key='{key}';");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () => await replay());
+
+        Assert.Equal("local_repository_success_entity_invalid", error.Message);
+        Assert.False(writerCalled);
     }
 
     [Fact]

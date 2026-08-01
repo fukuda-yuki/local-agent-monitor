@@ -1,5 +1,8 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using CopilotAgentObservability.Telemetry.Repositories;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
@@ -25,33 +28,91 @@ internal enum LocalRepositoryMutationFailure
 
 internal delegate ReadOnlyMemory<byte> LocalRepositorySuccessEntityWriter<in T>(T snapshot);
 
+internal enum LocalRepositoryMutationEntityKind
+{
+    Repository,
+    Assignment,
+}
+
+internal sealed record LocalRepositoryDecodedMutationEntity(
+    LocalRepositoryMutationEntityKind Kind,
+    string TargetId,
+    long Revision,
+    string? State);
+
 internal sealed class LocalRepositoryExactResponse
 {
     internal const string SuccessContentType = "application/json; charset=utf-8";
     internal const string SuccessCacheControl = "no-store";
+    internal const int MaximumEntityBytes = 16_384;
+
+    internal static class RepositoryV1
+    {
+        internal const string SchemaVersionProperty = "schema_version";
+        internal const string SchemaVersion = "local-repository.v1";
+        internal const string RepositoryId = "repository_id";
+        internal const string DisplayName = "display_name";
+        internal const string Revision = "revision";
+        internal const string CreatedAt = "created_at";
+        internal const string UpdatedAt = "updated_at";
+    }
+
+    internal static class AssignmentV1
+    {
+        internal const string SchemaVersionProperty = "schema_version";
+        internal const string SchemaVersion = "local-session-repository-assignment.v1";
+        internal const string SessionId = "session_id";
+        internal const string AssignmentRevision = "assignment_revision";
+        internal const string State = "state";
+        internal const string Authority = "authority";
+        internal const string RepositoryId = "repository_id";
+        internal const string ConflictingRepositoryIds = "conflicting_repository_ids";
+        internal const string ObservedLabelCandidates = "observed_label_candidates";
+        internal const string UpdatedAt = "updated_at";
+    }
+
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly JsonDocumentOptions DocumentOptions = new()
+    {
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow,
+        MaxDepth = 4,
+    };
+    private static readonly JsonWriterOptions WriterOptions = new()
+    {
+        Indented = false,
+        SkipValidation = false,
+        Encoder = JavaScriptEncoder.Default,
+    };
     private readonly byte[] entity;
 
-    private LocalRepositoryExactResponse(int statusCode, byte[] entity) =>
-        (StatusCode, this.entity) = (statusCode, entity);
+    private LocalRepositoryExactResponse(
+        int statusCode,
+        byte[] entity,
+        LocalRepositoryDecodedMutationEntity decoded) =>
+        (StatusCode, this.entity, Decoded) = (statusCode, entity, decoded);
 
     internal int StatusCode { get; }
     internal string ContentType => SuccessContentType;
     internal string CacheControl => SuccessCacheControl;
+    internal LocalRepositoryDecodedMutationEntity Decoded { get; }
 
     internal byte[] CopyEntity() => entity.ToArray();
 
-    internal static LocalRepositoryExactResponse CreateSuccess(int operationOwnedStatusCode, ReadOnlyMemory<byte> entity)
+    internal static LocalRepositoryExactResponse CreateSuccess(
+        int operationOwnedStatusCode,
+        LocalRepositoryMutationEntityKind expectedKind,
+        ReadOnlyMemory<byte> entity)
     {
-        if (operationOwnedStatusCode is not (200 or 201))
-            throw new ArgumentOutOfRangeException(nameof(operationOwnedStatusCode));
-        var copy = entity.ToArray();
-        ValidateEntity(copy);
-        return new(operationOwnedStatusCode, copy);
+        var decoded = ValidateMutationEntity(operationOwnedStatusCode, entity.Span);
+        if (decoded.Kind != expectedKind)
+            throw InvalidEntity();
+        return new(operationOwnedStatusCode, entity.ToArray(), decoded);
     }
 
     internal static LocalRepositoryExactResponse FromStored(
         int expectedStatusCode,
+        LocalRepositoryMutationEntityKind expectedKind,
         int statusCode,
         string contentType,
         string cacheControl,
@@ -63,26 +124,283 @@ internal sealed class LocalRepositoryExactResponse
         {
             throw new InvalidOperationException("local_repository_receipt_envelope_corrupt");
         }
-        return CreateSuccess(statusCode, entity);
+        ArgumentNullException.ThrowIfNull(entity);
+        return CreateSuccess(statusCode, expectedKind, entity);
     }
 
-    private static void ValidateEntity(ReadOnlySpan<byte> entity)
+    internal static LocalRepositoryDecodedMutationEntity ValidateMutationEntity(
+        int statusCode,
+        ReadOnlySpan<byte> entity)
     {
-        if (entity.IsEmpty
+        if (statusCode is not (200 or 201)
+            || entity.IsEmpty
+            || entity.Length > MaximumEntityBytes
             || entity[^1] == (byte)'\n'
             || entity.Length >= 3 && entity[0] == 0xef && entity[1] == 0xbb && entity[2] == 0xbf)
         {
-            throw new InvalidOperationException("local_repository_success_entity_invalid");
+            throw InvalidEntity();
         }
         try
         {
             _ = StrictUtf8.GetCharCount(entity);
+            using var document = JsonDocument.Parse(entity.ToArray(), DocumentOptions);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw InvalidEntity();
+
+            var enumerator = root.EnumerateObject();
+            if (!enumerator.MoveNext()
+                || !string.Equals(enumerator.Current.Name, RepositoryV1.SchemaVersionProperty, StringComparison.Ordinal)
+                || enumerator.Current.Value.ValueKind != JsonValueKind.String)
+            {
+                throw InvalidEntity();
+            }
+
+            var schemaVersion = enumerator.Current.Value.GetString();
+            var decoded = schemaVersion switch
+            {
+                RepositoryV1.SchemaVersion when statusCode is 200 or 201 => DecodeRepository(root),
+                AssignmentV1.SchemaVersion when statusCode == 200 => DecodeAssignment(root),
+                _ => throw InvalidEntity(),
+            };
+            var canonical = EncodeCanonical(root, decoded.Kind);
+            if (!entity.SequenceEqual(canonical))
+                throw InvalidEntity();
+            return decoded;
         }
         catch (DecoderFallbackException exception)
         {
-            throw new InvalidOperationException("local_repository_success_entity_invalid", exception);
+            throw InvalidEntity(exception);
+        }
+        catch (JsonException exception)
+        {
+            throw InvalidEntity(exception);
         }
     }
+
+    private static LocalRepositoryDecodedMutationEntity DecodeRepository(JsonElement root)
+    {
+        if (!TryGetExactValues(
+                root,
+                [
+                    RepositoryV1.SchemaVersionProperty,
+                    RepositoryV1.RepositoryId,
+                    RepositoryV1.DisplayName,
+                    RepositoryV1.Revision,
+                    RepositoryV1.CreatedAt,
+                    RepositoryV1.UpdatedAt,
+                ],
+                out var values)
+            || !TryExactString(values[0], RepositoryV1.SchemaVersion, out _)
+            || !TryString(values[1], out var repositoryId)
+            || !TryString(values[2], out var displayName)
+            || !TryPositiveInt64(values[3], out var revision)
+            || !TryString(values[4], out var createdAt)
+            || !TryString(values[5], out var updatedAt)
+            || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId)
+            || !LocalRepositoryCatalogValidation.IsDisplayName(displayName!)
+            || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(createdAt)
+            || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(updatedAt))
+        {
+            throw InvalidEntity();
+        }
+        return new(LocalRepositoryMutationEntityKind.Repository, repositoryId!, revision, null);
+    }
+
+    private static LocalRepositoryDecodedMutationEntity DecodeAssignment(JsonElement root)
+    {
+        if (!TryGetExactValues(
+                root,
+                [
+                    AssignmentV1.SchemaVersionProperty,
+                    AssignmentV1.SessionId,
+                    AssignmentV1.AssignmentRevision,
+                    AssignmentV1.State,
+                    AssignmentV1.Authority,
+                    AssignmentV1.RepositoryId,
+                    AssignmentV1.ConflictingRepositoryIds,
+                    AssignmentV1.ObservedLabelCandidates,
+                    AssignmentV1.UpdatedAt,
+                ],
+                out var values)
+            || !TryExactString(values[0], AssignmentV1.SchemaVersion, out _)
+            || !TryString(values[1], out var sessionId)
+            || !TryNonNegativeInt64(values[2], out var revision)
+            || !TryString(values[3], out var state)
+            || !TryString(values[4], out var authority)
+            || !TryNullableString(values[5], out var repositoryId)
+            || !TryUuidArray(values[6], out var conflicts)
+            || !IsEmptyArray(values[7])
+            || !TryNullableString(values[8], out var updatedAt)
+            || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId)
+            || repositoryId is not null && !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId)
+            || updatedAt is not null && !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(updatedAt)
+            || !IsValidAssignment(revision, state!, authority!, repositoryId, conflicts, updatedAt))
+        {
+            throw InvalidEntity();
+        }
+        return new(LocalRepositoryMutationEntityKind.Assignment, sessionId!, revision, state);
+    }
+
+    private static byte[] EncodeCanonical(JsonElement root, LocalRepositoryMutationEntityKind kind)
+    {
+        var values = kind == LocalRepositoryMutationEntityKind.Repository
+            ? GetExactValues(root, 6)
+            : GetExactValues(root, 9);
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
+        {
+            writer.WriteStartObject();
+            if (kind == LocalRepositoryMutationEntityKind.Repository)
+            {
+                writer.WriteString(RepositoryV1.SchemaVersionProperty, RepositoryV1.SchemaVersion);
+                writer.WriteString(RepositoryV1.RepositoryId, values[1].GetString());
+                writer.WriteString(RepositoryV1.DisplayName, values[2].GetString());
+                writer.WriteNumber(RepositoryV1.Revision, values[3].GetInt64());
+                writer.WriteString(RepositoryV1.CreatedAt, values[4].GetString());
+                writer.WriteString(RepositoryV1.UpdatedAt, values[5].GetString());
+            }
+            else
+            {
+                writer.WriteString(AssignmentV1.SchemaVersionProperty, AssignmentV1.SchemaVersion);
+                writer.WriteString(AssignmentV1.SessionId, values[1].GetString());
+                writer.WriteNumber(AssignmentV1.AssignmentRevision, values[2].GetInt64());
+                writer.WriteString(AssignmentV1.State, values[3].GetString());
+                writer.WriteString(AssignmentV1.Authority, values[4].GetString());
+                WriteNullableString(writer, AssignmentV1.RepositoryId, values[5].GetString());
+                writer.WriteStartArray(AssignmentV1.ConflictingRepositoryIds);
+                foreach (var value in values[6].EnumerateArray())
+                    writer.WriteStringValue(value.GetString());
+                writer.WriteEndArray();
+                writer.WriteStartArray(AssignmentV1.ObservedLabelCandidates);
+                writer.WriteEndArray();
+                WriteNullableString(writer, AssignmentV1.UpdatedAt, values[8].GetString());
+            }
+            writer.WriteEndObject();
+        }
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    private static bool IsValidAssignment(
+        long revision,
+        string state,
+        string authority,
+        string? repositoryId,
+        IReadOnlyList<string> conflicts,
+        string? updatedAt)
+    {
+        var validState = (state, authority, repositoryId) switch
+        {
+            ("assigned", "automatic" or "manual", not null) => conflicts.Count == 0,
+            ("unassigned", "none", null) => conflicts.Count == 0,
+            ("explicitly_unassigned", "manual", null) => conflicts.Count == 0,
+            ("conflict", "automatic", null) => conflicts.Count is >= 2 and <= 128,
+            _ => false,
+        };
+        return validState
+            && (revision == 0
+                ? state == "unassigned" && authority == "none" && repositoryId is null && conflicts.Count == 0 && updatedAt is null
+                : updatedAt is not null);
+    }
+
+    private static bool TryUuidArray(JsonElement value, out IReadOnlyList<string> result)
+    {
+        result = [];
+        if (value.ValueKind != JsonValueKind.Array)
+            return false;
+        var ids = new List<string>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (!TryString(item, out var id)
+                || !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(id)
+                || ids.Count == 128
+                || ids.Count > 0 && CompareUuidRfcBytes(ids[^1], id!) >= 0)
+            {
+                return false;
+            }
+            ids.Add(id!);
+        }
+        result = ids;
+        return true;
+    }
+
+    private static int CompareUuidRfcBytes(string left, string right)
+    {
+        Span<byte> leftBytes = stackalloc byte[16];
+        Span<byte> rightBytes = stackalloc byte[16];
+        _ = Guid.Parse(left).TryWriteBytes(leftBytes, bigEndian: true, out _);
+        _ = Guid.Parse(right).TryWriteBytes(rightBytes, bigEndian: true, out _);
+        return leftBytes.SequenceCompareTo(rightBytes);
+    }
+
+    private static bool IsEmptyArray(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Array && !value.EnumerateArray().MoveNext();
+
+    private static bool TryGetExactValues(JsonElement root, string[] expected, out JsonElement[] values)
+    {
+        values = new JsonElement[expected.Length];
+        if (root.ValueKind != JsonValueKind.Object)
+            return false;
+        var index = 0;
+        foreach (var property in root.EnumerateObject())
+        {
+            if (index == expected.Length || !string.Equals(property.Name, expected[index], StringComparison.Ordinal))
+                return false;
+            values[index++] = property.Value;
+        }
+        return index == expected.Length;
+    }
+
+    private static JsonElement[] GetExactValues(JsonElement root, int count)
+    {
+        var values = new JsonElement[count];
+        var index = 0;
+        foreach (var property in root.EnumerateObject())
+            values[index++] = property.Value;
+        return values;
+    }
+
+    private static bool TryExactString(JsonElement value, string expected, out string? actual) =>
+        TryString(value, out actual) && string.Equals(actual, expected, StringComparison.Ordinal);
+
+    private static bool TryString(JsonElement value, out string? result)
+    {
+        result = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return result is not null;
+    }
+
+    private static bool TryNullableString(JsonElement value, out string? result)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            result = null;
+            return true;
+        }
+        return TryString(value, out result);
+    }
+
+    private static bool TryPositiveInt64(JsonElement value, out long result)
+    {
+        result = 0;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out result) && result >= 1;
+    }
+
+    private static bool TryNonNegativeInt64(JsonElement value, out long result)
+    {
+        result = 0;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out result) && result >= 0;
+    }
+
+    private static void WriteNullableString(Utf8JsonWriter writer, string property, string? value)
+    {
+        if (value is null)
+            writer.WriteNull(property);
+        else
+            writer.WriteString(property, value);
+    }
+
+    private static InvalidOperationException InvalidEntity(Exception? inner = null) =>
+        new("local_repository_success_entity_invalid", inner);
 }
 
 internal abstract record LocalRepositoryMutationResult;

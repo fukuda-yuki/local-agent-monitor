@@ -152,6 +152,19 @@ public sealed class LocalRepositoryLocatorParserTests
         Assert.Equal("github.com/owner/repository.git", upperLocator.CanonicalLocator);
     }
 
+    [Fact]
+    public void ExactTupleAuthority_AcceptsLogicalRepositoryEndingInLowercaseGitWithoutTransportReparse()
+    {
+        Assert.True(GitHubRepositoryLocatorParser.IsExact(
+            "github.com/owner/repository.git",
+            "Owner",
+            "Repository.git"));
+        Assert.False(GitHubRepositoryLocatorParser.IsExact(
+            "github.com/owner/repository",
+            "Owner",
+            "Repository.git"));
+    }
+
     [Theory]
     [MemberData(nameof(RejectedLocatorForms))]
     public void TryParse_RejectsForbiddenOrUnsupportedSyntax(string input)

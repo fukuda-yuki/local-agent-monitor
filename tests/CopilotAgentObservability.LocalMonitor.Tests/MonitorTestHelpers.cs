@@ -275,6 +275,16 @@ internal sealed class RunningMonitorHost(
             .Select(endpoint => endpoint.RoutePattern.RawText ?? string.Empty)
             .ToArray();
 
+    public IReadOnlyList<(string Method, string Pattern)> RouteMethods =>
+        ((Microsoft.AspNetCore.Routing.IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<Microsoft.AspNetCore.Routing.RouteEndpoint>()
+            .SelectMany(endpoint => endpoint.Metadata
+                .GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()?
+                .HttpMethods
+                .Select(method => (method, endpoint.RoutePattern.RawText ?? string.Empty)) ?? [])
+            .ToArray();
+
     public string Url { get; } = url;
 
     public async ValueTask DisposeAsync()

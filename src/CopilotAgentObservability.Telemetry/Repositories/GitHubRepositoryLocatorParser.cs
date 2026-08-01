@@ -42,12 +42,10 @@ public static class GitHubRepositoryLocatorParser
 
     internal static bool IsExact(
         string? canonicalLocator,
-        string? locatorSha256,
         string? displayOwner,
         string? displayRepository)
     {
         if (canonicalLocator is null
-            || locatorSha256 is null
             || displayOwner is null
             || displayRepository is null
             || !IsOwner(displayOwner)
@@ -56,9 +54,24 @@ public static class GitHubRepositoryLocatorParser
             return false;
         }
 
-        ComputeIdentity(displayOwner, displayRepository, out var expectedCanonicalLocator, out var expectedLocatorSha256);
-        return string.Equals(canonicalLocator, expectedCanonicalLocator, StringComparison.Ordinal)
-            && string.Equals(locatorSha256, expectedLocatorSha256, StringComparison.Ordinal);
+        ComputeIdentity(displayOwner, displayRepository, out var expectedCanonicalLocator, out _);
+        return string.Equals(canonicalLocator, expectedCanonicalLocator, StringComparison.Ordinal);
+    }
+
+    internal static bool IsExact(
+        string? canonicalLocator,
+        string? locatorSha256,
+        string? displayOwner,
+        string? displayRepository)
+    {
+        if (!IsExact(canonicalLocator, displayOwner, displayRepository)
+            || locatorSha256 is null)
+        {
+            return false;
+        }
+
+        ComputeIdentity(displayOwner!, displayRepository!, out _, out var expectedLocatorSha256);
+        return string.Equals(locatorSha256, expectedLocatorSha256, StringComparison.Ordinal);
     }
 
     private static void ComputeIdentity(string owner, string repository, out string canonicalLocator, out string locatorSha256)

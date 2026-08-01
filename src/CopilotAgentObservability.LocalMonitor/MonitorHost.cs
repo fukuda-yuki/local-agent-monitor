@@ -13,6 +13,7 @@ using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Pricing;
 using CopilotAgentObservability.LocalMonitor.Retention;
+using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -222,6 +223,7 @@ internal static class MonitorHost
         ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
+        LocalRepositoryCatalogApplication? localRepositoryApplication = null;
         var historicalImportStore = new SqliteHistoricalImportStore(options.DatabasePath);
         historicalImportStore.CreateSchema();
         IHistoricalImportApplication historicalImportApplication = testOptions?.HistoricalImportApplication
@@ -363,6 +365,33 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
+        if (!options.SanitizedOnly
+            && (testOptions is null || testOptions.LocalRepositoryApplicationFactory is not null))
+        {
+            if (testOptions?.LocalRepositoryApplicationFactory is { } localRepositoryApplicationFactory)
+            {
+                localRepositoryApplication = localRepositoryApplicationFactory(options.DatabasePath, timeProvider);
+            }
+            else
+            {
+                using (var localRepositoryConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = options.DatabasePath,
+                    Pooling = false,
+                }.ToString()))
+                {
+                    localRepositoryConnection.Open();
+                    LocalRepositoryCatalogSchemaV1.Ensure(localRepositoryConnection);
+                }
+                var localRepositoryQueue = new SqliteLocalRepositoryReconciliationStore(options.DatabasePath, timeProvider);
+                var localRepositoryStore = new SqliteLocalRepositoryCatalogStore(
+                    options.DatabasePath,
+                    localRepositoryQueue,
+                    new LocalRepositoryAssignmentResolver(),
+                    timeProvider);
+                localRepositoryApplication = new LocalRepositoryCatalogApplication(localRepositoryStore);
+            }
+        }
         var pricingStore = new SqlitePricingStore(options.DatabasePath, timeProvider);
         var providerCatalog = pricingCatalogProvider.Catalog;
         var providerCatalogBytes = pricingCatalogProvider.CanonicalCatalogBytes.ToArray();
@@ -526,8 +555,10 @@ internal static class MonitorHost
             var sanitizedImportPath = SanitizedImportRoutes.IsPath(context.Request.Path);
             var historicalAnalysisPath = HistoricalAnalysisRoutes.IsPath(context.Request.Path);
             var runtimeBackupPath = RuntimeBackupRoutes.IsPath(context.Request.Path);
+            var localRepositoryPath = LocalRepositoryRoutes.IsNamespacePath(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
-                || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath)
+                || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
+                || localRepositoryPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -592,7 +623,8 @@ internal static class MonitorHost
             }
 
             if (options.SanitizedOnly
-                && (RuntimeBackupRoutes.IsPath(context.Request.Path)
+                && (localRepositoryPath
+                    || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
                 context.Response.Headers.CacheControl = "no-store";
@@ -602,6 +634,13 @@ internal static class MonitorHost
 
             await next();
         });
+        if (!options.SanitizedOnly)
+        {
+            app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
+                context,
+                next,
+                ((IEndpointRouteBuilder)app).DataSources));
+        }
         DoctorRoutes.Map(app, doctorApplication);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
         RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
@@ -617,6 +656,10 @@ internal static class MonitorHost
         SanitizedImportRoutes.Map(app, sanitizedImportStore);
         if (!options.SanitizedOnly)
         {
+            if (localRepositoryApplication is not null)
+            {
+                LocalRepositoryRoutes.Map(app, localRepositoryApplication);
+            }
             app.UseStaticFiles();
             app.MapRazorPages();
             DoctorUiRoutes.Map(app, doctorUiApplication);
@@ -1484,7 +1527,9 @@ internal static class MonitorHost
         {
             await WriteFailureAsync(context, StatusCodes.Status405MethodNotAllowed, "method_not_allowed", "Only POST is supported for /v1/traces.");
         });
-        app.MapFallback(WriteUnsupportedEndpointAsync);
+        testOptions?.AdditionalEndpoints?.Invoke(app);
+        app.MapFallback(WriteUnsupportedEndpointAsync)
+            .WithMetadata(LocalRepositoryRoutes.FallbackMarker);
 
         return app;
     }
@@ -2195,6 +2240,10 @@ internal sealed class MonitorHostTestOptions
     public IReadOnlyDictionary<string, string?>? ConfigurationValues { get; init; }
 
     public bool UseUserSecrets { get; init; } = true;
+
+    public Func<string, TimeProvider, LocalRepositoryCatalogApplication>? LocalRepositoryApplicationFactory { get; init; }
+
+    public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
 }
 
 internal sealed record AnalysisStartPayload(

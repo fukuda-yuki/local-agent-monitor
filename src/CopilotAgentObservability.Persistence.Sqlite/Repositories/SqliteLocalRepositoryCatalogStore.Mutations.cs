@@ -29,7 +29,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var receipt = ReadReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, 201);
+            var receipt = ReadReceipt(
+                connection,
+                transaction,
+                validOperationKey,
+                mutation.RequestFingerprint,
+                201,
+                LocalRepositoryMutationEntityKind.Repository);
             if (receipt is not null)
             {
                 transaction.Commit();
@@ -57,7 +63,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             callbackActive = true;
             var entity = writeEntity(snapshot);
             callbackActive = false;
-            var response = LocalRepositoryExactResponse.CreateSuccess(201, entity);
+            var response = LocalRepositoryExactResponse.CreateSuccess(
+                201,
+                LocalRepositoryMutationEntityKind.Repository,
+                entity);
             InsertReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, response, timestamp);
             transaction.Commit();
             return ValueTask.FromResult<LocalRepositoryMutationResult>(new LocalRepositoryMutationSucceeded(response, false));
@@ -88,7 +97,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var receipt = ReadReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, 200);
+            var receipt = ReadReceipt(
+                connection,
+                transaction,
+                validOperationKey,
+                mutation.RequestFingerprint,
+                200,
+                LocalRepositoryMutationEntityKind.Repository);
             if (receipt is not null)
             {
                 transaction.Commit();
@@ -113,7 +128,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             callbackActive = true;
             var entity = writeEntity(snapshot);
             callbackActive = false;
-            var response = LocalRepositoryExactResponse.CreateSuccess(200, entity);
+            var response = LocalRepositoryExactResponse.CreateSuccess(
+                200,
+                LocalRepositoryMutationEntityKind.Repository,
+                entity);
             InsertReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, response, Timestamp(now));
             transaction.Commit();
             return ValueTask.FromResult<LocalRepositoryMutationResult>(new LocalRepositoryMutationSucceeded(response, false));
@@ -144,7 +162,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var receipt = ReadReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, 200);
+            var receipt = ReadReceipt(
+                connection,
+                transaction,
+                validOperationKey,
+                mutation.RequestFingerprint,
+                200,
+                LocalRepositoryMutationEntityKind.Repository);
             if (receipt is not null)
             {
                 transaction.Commit();
@@ -198,7 +222,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             callbackActive = true;
             var entity = writeEntity(snapshot);
             callbackActive = false;
-            var response = LocalRepositoryExactResponse.CreateSuccess(200, entity);
+            var response = LocalRepositoryExactResponse.CreateSuccess(
+                200,
+                LocalRepositoryMutationEntityKind.Repository,
+                entity);
             InsertReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, response, Timestamp(now));
             transaction.Commit();
             return ValueTask.FromResult<LocalRepositoryMutationResult>(new LocalRepositoryMutationSucceeded(response, false));
@@ -229,7 +256,13 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var receipt = ReadReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, 200);
+            var receipt = ReadReceipt(
+                connection,
+                transaction,
+                validOperationKey,
+                mutation.RequestFingerprint,
+                200,
+                LocalRepositoryMutationEntityKind.Assignment);
             if (receipt is not null)
             {
                 transaction.Commit();
@@ -267,7 +300,10 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             callbackActive = true;
             var entity = writeEntity(snapshot);
             callbackActive = false;
-            var response = LocalRepositoryExactResponse.CreateSuccess(200, entity);
+            var response = LocalRepositoryExactResponse.CreateSuccess(
+                200,
+                LocalRepositoryMutationEntityKind.Assignment,
+                entity);
             InsertReceipt(connection, transaction, validOperationKey, mutation.RequestFingerprint, response, Timestamp(now));
             transaction.Commit();
             return ValueTask.FromResult<LocalRepositoryMutationResult>(new LocalRepositoryMutationSucceeded(response, false));
@@ -397,7 +433,8 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         SqliteTransaction transaction,
         string operationKey,
         string requestFingerprint,
-        int expectedStatusCode)
+        int expectedStatusCode,
+        LocalRepositoryMutationEntityKind expectedKind)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -412,6 +449,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             return null;
         var response = LocalRepositoryExactResponse.FromStored(
             expectedStatusCode,
+            expectedKind,
             reader.GetInt32(1),
             reader.GetString(2),
             reader.GetString(3),

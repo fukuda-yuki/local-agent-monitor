@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Repositories;
 using Microsoft.Data.Sqlite;
@@ -314,16 +315,16 @@ internal sealed class LocalRepositoryCatalogFixture : IDisposable
             CancellationToken.None);
 
     internal static ReadOnlyMemory<byte> RepositoryEntity(LocalRepositoryMutationRepository repository) =>
-        Encoding.UTF8.GetBytes($"{{\"id\":\"{repository.RepositoryId}\",\"revision\":{repository.Revision}}}");
+        LocalRepositoryJson.WriteRepository(200, repository);
 
     internal static ReadOnlyMemory<byte> AssignmentEntity(LocalRepositoryMutationAssignment assignment) =>
-        Encoding.UTF8.GetBytes($"{{\"session\":\"{assignment.SessionId}\",\"revision\":{assignment.Revision}}}");
+        LocalRepositoryJson.WriteAssignment(assignment);
 
     internal LocalRepositoryMutationRepository Repository(LocalRepositoryMutationResult result)
     {
         var response = Assert.IsType<LocalRepositoryMutationSucceeded>(result).Response;
         using var document = System.Text.Json.JsonDocument.Parse(response.CopyEntity());
-        var id = document.RootElement.GetProperty("id").GetString()!;
+        var id = document.RootElement.GetProperty(LocalRepositoryExactResponse.RepositoryV1.RepositoryId).GetString()!;
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT display_name,revision,created_at,updated_at FROM local_repositories WHERE repository_id=$id;";
