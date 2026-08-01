@@ -744,15 +744,15 @@ two explicit Session cohorts
   -> optional AI interpretation of the accepted receipt
 ```
 
-`local_repository_catalog:1` is the future exact Repository identity and
+`local_repository_catalog:1` is the exact Repository identity and
 Session-assignment component. It owns immutable locator/head/history,
 observation provenance, manual overrides and revisions, durable operation
-receipts and catalog-owned raw-expiry metadata. Repository identity is never
-derived from name, path, CWD, prompt, time or cardinality. Only the exact
-GitHub locator parser/canonicalization/fingerprint is currently executable;
-production schema, admission/reconciliation, routes, scope composition and
-backup registration remain blocked by the canonical contract's explicit
-unknowns. Issue #152 remains unresolved.
+receipts and catalog-owned raw-expiry metadata. The complete DC156-01–19
+contract is `READY_FOR_IMPLEMENTATION` under the [Repository catalog
+authority](specifications/interfaces/local-repository-catalog.md) and its
+[DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+Repository identity is never derived from name, path, CWD, prompt, time or
+cardinality. Issue #152 remains unresolved.
 
 Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
 exact. Missing facts remain missing. Archive changes default eligibility only;
@@ -1000,7 +1000,7 @@ inspect but never restores a live database; restore authority is offline CLI
 only. Details are canonical in
 [Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md).
 
-The accepted future `local_repository_catalog:1` component is ordered
+The accepted `local_repository_catalog:1` component is ordered
 immediately after Session and before `local_archive`, followed by Retention,
 `skill_projection:1`, `skill_invocation_snapshot:1` and Workspace projection.
 The snapshot component backs up index/metadata and equality receipts while
@@ -1011,8 +1011,10 @@ catalog-owned tables and durable receipts; an older absent component
 initializes empty while partial/newer/unknown shapes fail closed. Catalog
 metadata may restore without source raw and reports unavailable provenance
 without reconstructing content. The component is excluded from sanitized
-evidence export/import. Registration remains gated by the unresolved catalog
-schema/history and raw-reference decisions.
+evidence export/import. Its complete DC156-01–19 implementation contract is
+`READY_FOR_IMPLEMENTATION` under the [Repository catalog
+authority](specifications/interfaces/local-repository-catalog.md) and its
+[DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
 
 ## 5. Aspire AppHost Boundary
 

@@ -2884,16 +2884,12 @@ archive eligibility and #134 consumes the result through the same
 `ILocalRepositoryScopeSnapshotService`; neither adds direct catalog SQL or a
 second reader. Archive meaning remains #160/#161-owned.
 
-Only the exact six-form GitHub locator parser, canonicalization and
-domain-separated fingerprint are currently `READY`. Production schema,
-automatic admission/reconciliation, assignment mutation/read routes, scope
-composition and backup registration remain `BLOCKED_DECISION` until the
-canonical contract closes automatic creation/binding, identity framing and
-exact Session join, automatic-revision history, reconciliation frontier,
-complete wire bytes, durable raw-reference shape and single-transaction
-composition. Implementations do not invent intermediate tables, history
-actions, wire carriers, compatibility paths, fallback readers or permissive
-parsers.
+The complete DC156-01–19 contract is `READY_FOR_IMPLEMENTATION` under
+[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)
+and its [DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+Implementations consume those authorities without inventing intermediate
+tables, history actions, wire carriers, compatibility paths, fallback readers
+or permissive parsers.
 
 The future backup dependency order places `local_repository_catalog`
 immediately after Session and before `local_archive`, Retention, Skill

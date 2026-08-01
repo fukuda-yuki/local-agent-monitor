@@ -82,16 +82,13 @@ registration remain `BLOCKED_DECISION` until the interface's complete
 implementation gate is closed; no serializer default, heuristic, fallback,
 compatibility writer or dual path may fill a blocked value.
 
-The Repository catalog contract is accepted but only its exact six-form GitHub
-locator parser, canonicalization and domain-separated fingerprint are currently
-`READY`. `local_repository_catalog:1`, automatic admission/reconciliation,
-assignment mutations and management reads, scope composition, and backup
-registration remain `BLOCKED_DECISION` until the canonical contract closes its
-automatic creation/binding, identity framing and exact Session join,
-automatic-revision history, reconciliation frontier, complete wire,
-raw-reference durability, and single-read-transaction composition gaps. No
-schema, route, history action, response carrier, compatibility path or
-heuristic binding may be inferred. V1 admission remains limited to
+The complete DC156-01–19 Repository catalog contract is
+`READY_FOR_IMPLEMENTATION` under [Local Repository Catalog and Session
+Assignment](specifications/interfaces/local-repository-catalog.md) and its
+[DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+Implementers consume those authorities exactly; no schema, route, history
+action, response carrier, compatibility path or heuristic binding may be
+inferred. V1 admission remains limited to
 `vcs.repository.url.full` and `copilot_chat.repo.remote_url`; Issue #152 remains
 unresolved.
 
