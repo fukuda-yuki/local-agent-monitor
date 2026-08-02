@@ -10,6 +10,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Telemetry.Repositories;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -410,18 +411,33 @@ public sealed class RuntimeBackupRestoreTests
         using var lease = initialization.Lease!;
         Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Target)));
         using (var database = temp.Open(temp.Target))
+        {
             Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM schema_version WHERE component='runtime_backup';"));
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM schema_version WHERE component IN ('session','local_repository_catalog');"));
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM sqlite_schema WHERE name='local_repositories' OR name LIKE 'local_repository_%' OR name LIKE 'session_repository_%';"));
+        }
         var competing = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Target);
         Assert.False(competing.Result.Success);
         Assert.Equal(RuntimeBackupErrorCodes.MonitorMustBeStopped, competing.Result.ErrorCode);
         Assert.Null(competing.Lease);
+        using (var database = temp.Open(temp.Target))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
         new SqliteSessionStore(temp.Target).CreateSchema();
 
         var completed = service.CompleteMonitorInitialization(lease);
 
         Assert.True(completed.Success, completed.ErrorCode);
         using (var database = temp.Open(temp.Target))
+        {
             Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='runtime_backup';"));
+            Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
+            foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
+                Assert.Equal(0L, temp.Scalar<long>(database, $"SELECT COUNT(*) FROM \"{table}\";"));
+        }
     }
 
     [Theory]
@@ -804,6 +820,16 @@ public sealed class RuntimeBackupRestoreTests
         Assert.DoesNotContain("historical_instruction_analysis", archivedSource.ComponentVersions!.Keys);
         Assert.DoesNotContain("historical_import", archivedSource.ComponentVersions.Keys);
         Assert.DoesNotContain("sanitized_import", archivedSource.ComponentVersions.Keys);
+        Assert.DoesNotContain("session", archivedSource.ComponentVersions.Keys);
+        Assert.DoesNotContain("local_repository_catalog", archivedSource.ComponentVersions.Keys);
+        var archivedSteps = archivedSource.MigrationSteps!.ToArray();
+        var session = Array.IndexOf(archivedSteps, "session:0->13");
+        var catalog = Array.IndexOf(archivedSteps, "local_repository_catalog:0->1");
+        var retention = Array.IndexOf(archivedSteps, "retention:0->1");
+        var skill = Array.IndexOf(archivedSteps, "skill_projection:0->1");
+        Assert.True(session >= 0 && session < catalog);
+        Assert.True(catalog < retention);
+        Assert.True(retention < skill);
         Assert.Equal(
             [
                 "historical_instruction_analysis:0->1",
@@ -823,10 +849,14 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(1, restoredPreflight.ComponentVersions!["historical_instruction_analysis"]);
         Assert.Equal(1, restoredPreflight.ComponentVersions["historical_import"]);
         Assert.Equal(1, restoredPreflight.ComponentVersions["sanitized_import"]);
+        Assert.Equal(13, restoredPreflight.ComponentVersions["session"]);
+        Assert.Equal(1, restoredPreflight.ComponentVersions["local_repository_catalog"]);
         Assert.Empty(restoredPreflight.MigrationSteps!);
         using var restored = temp.Open(destination);
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1';"));
+        foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
+            Assert.Equal(0L, temp.Scalar<long>(restored, $"SELECT COUNT(*) FROM \"{table}\";"));
     }
 
     [Fact]
@@ -1057,6 +1087,212 @@ public sealed class RuntimeBackupRestoreTests
         using var restored = temp.Open(temp.Target);
         Assert.Equal("old", temp.Scalar<string>(restored, "SELECT value FROM runtime_probe WHERE id=1;"));
         Assert.Equal("2026-01-01T00:00:00.0000000+00:00", temp.Scalar<string>(restored, "SELECT captured_at FROM retention_items;"));
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("history")]
+    public async Task CatalogComposerRejectsCorruptionIntroducedAtArchiveSourcePreflight(string mutation)
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await CreateRestoreCatalogFixtureAsync();
+        var bundle = Path.Combine(temp.Root, $"catalog-p1-{mutation}.zip");
+        var publisher = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(publisher.CreateAndPublish(fixture.DatabasePath, bundle).Success);
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp);
+        var archiveBefore = File.ReadAllBytes(bundle);
+        var targetBefore = File.ReadAllBytes(temp.Target);
+        var injectedRows = -1;
+        var service = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.AfterArchiveExtracted)
+                injectedRows = CorruptCatalogSemantic(ReadOwnedStagePath(temp), mutation);
+        });
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.Equal(1, injectedRows);
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.False(result.PreRestoreBackupCreated);
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        Assert.Equal(targetBefore, File.ReadAllBytes(temp.Target));
+        AssertNoPublishedPreRestore(temp.Root);
+        temp.AssertNoRestoreControls();
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("history")]
+    public async Task CatalogComposerRejectsCorruptCurrentAtPreviewAndRestorePreflight(string mutation)
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await CreateRestoreCatalogFixtureAsync();
+        var bundle = Path.Combine(temp.Root, $"catalog-p2-{mutation}.zip");
+        var service = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(service.CreateAndPublish(fixture.DatabasePath, bundle).Success);
+        _ = temp.CanonicalDatabaseHash(fixture.DatabasePath);
+        var archiveBefore = File.ReadAllBytes(bundle);
+
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp);
+        Assert.Equal(1, CorruptCatalogSemantic(temp.Target, mutation));
+        var previewTargetBefore = File.ReadAllBytes(temp.Target);
+        var preview = service.Preview(bundle, temp.Target);
+
+        Assert.False(preview.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, preview.ErrorCode);
+        Assert.Equal(previewTargetBefore, File.ReadAllBytes(temp.Target));
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        AssertNoPublishedPreRestore(temp.Root);
+
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp, overwrite: true);
+        Assert.Equal(1, CorruptCatalogSemantic(temp.Target, mutation));
+        var restoreTargetBefore = File.ReadAllBytes(temp.Target);
+        var restored = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.False(restored.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, restored.ErrorCode);
+        Assert.False(restored.PreRestoreBackupCreated);
+        Assert.Equal(restoreTargetBefore, File.ReadAllBytes(temp.Target));
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        AssertNoPublishedPreRestore(temp.Root);
+        temp.AssertNoRestoreControls();
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("history")]
+    public async Task CatalogComposerRejectsCorruptionIntroducedAfterStagedMigration(string mutation)
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await CreateRestoreCatalogFixtureAsync();
+        var bundle = Path.Combine(temp.Root, $"catalog-p3-{mutation}.zip");
+        var publisher = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(publisher.CreateAndPublish(fixture.DatabasePath, bundle).Success);
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp);
+        var archiveBefore = File.ReadAllBytes(bundle);
+        var targetBefore = File.ReadAllBytes(temp.Target);
+        var injectedRows = -1;
+        var service = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.AfterMigration)
+                injectedRows = CorruptCatalogSemantic(ReadOwnedStagePath(temp), mutation);
+        });
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.Equal(1, injectedRows);
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        Assert.Equal(targetBefore, File.ReadAllBytes(temp.Target));
+        temp.AssertNoRestoreControls();
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("history")]
+    public async Task CatalogComposerRejectsCorruptionIntroducedAfterSwapAndRestoresOldTarget(string mutation)
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await CreateRestoreCatalogFixtureAsync();
+        var bundle = Path.Combine(temp.Root, $"catalog-p4-{mutation}.zip");
+        var publisher = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(publisher.CreateAndPublish(fixture.DatabasePath, bundle).Success);
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp);
+        var archiveBefore = File.ReadAllBytes(bundle);
+        var targetBefore = File.ReadAllBytes(temp.Target);
+        var injectedRows = -1;
+        var installedBytesChanged = false;
+        var reachedCheckpoints = new List<string>();
+        string? beforeInstalledJournalPhase = null;
+        var beforeInstalledTargetExists = false;
+        var beforeInstalledJournalExists = false;
+        var beforeInstalledRollbackExists = false;
+        var beforeInstalledLockExists = false;
+        var beforeInstalledSidecarExists = false;
+        var service = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            reachedCheckpoints.Add(checkpoint);
+            if (checkpoint != SqliteRuntimeBackupService.CatalogBeforeInstalledValidationCheckpoint)
+                return;
+            using (var journal = JsonDocument.Parse(
+                File.ReadAllBytes(temp.Target + ".runtime-restore-journal.json")))
+            {
+                beforeInstalledJournalPhase = journal.RootElement.GetProperty("phase").GetString();
+            }
+            beforeInstalledTargetExists = File.Exists(temp.Target);
+            beforeInstalledJournalExists = File.Exists(temp.Target + ".runtime-restore-journal.json");
+            beforeInstalledRollbackExists = File.Exists(temp.Target + ".runtime-restore-rollback");
+            beforeInstalledLockExists = File.Exists(temp.Target + ".runtime-restore.lock");
+            beforeInstalledSidecarExists = new[] { "-journal", "-wal", "-shm" }
+                .Any(suffix => File.Exists(temp.Target + suffix));
+            var installedBeforeMutation = File.ReadAllBytes(temp.Target);
+            injectedRows = CorruptAndReplaceInstalledCatalog(temp.Target, mutation);
+            installedBytesChanged = !File.ReadAllBytes(temp.Target).SequenceEqual(installedBeforeMutation);
+        });
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.Equal("prepared", beforeInstalledJournalPhase);
+        Assert.True(beforeInstalledTargetExists);
+        Assert.True(beforeInstalledJournalExists);
+        Assert.True(beforeInstalledRollbackExists);
+        Assert.True(beforeInstalledLockExists);
+        Assert.False(beforeInstalledSidecarExists);
+        Assert.True(
+            reachedCheckpoints.IndexOf(RuntimeBackupCheckpoints.AfterSwap)
+            < reachedCheckpoints.IndexOf(SqliteRuntimeBackupService.CatalogBeforeInstalledValidationCheckpoint));
+        Assert.DoesNotContain(
+            RuntimeBackupCheckpoints.AfterInstalledJournalCandidateFlushed,
+            reachedCheckpoints);
+        Assert.Equal(1, injectedRows);
+        Assert.True(installedBytesChanged);
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRolledBack, result.ErrorCode);
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        Assert.Equal(targetBefore, File.ReadAllBytes(temp.Target));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(
+            temp.Root,
+            ".catalog-installed-*",
+            SearchOption.TopDirectoryOnly));
+        temp.AssertNoRestoreControls();
+    }
+
+    [Fact]
+    public async Task Post_swap_catalog_byte_drift_is_rejected_before_installed_validation()
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = await CreateRestoreCatalogFixtureAsync();
+        var bundle = Path.Combine(temp.Root, "catalog-post-swap-hash.zip");
+        var publisher = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(publisher.CreateAndPublish(fixture.DatabasePath, bundle).Success);
+        CopyCurrentCatalog(fixture.DatabasePath, temp.Target, temp);
+        var archiveBefore = File.ReadAllBytes(bundle);
+        var targetBefore = File.ReadAllBytes(temp.Target);
+        var injectedRows = -1;
+        var installedValidationReached = false;
+        var service = new SqliteRuntimeBackupService(fixture.Clock, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.AfterSwap)
+                injectedRows = CorruptAndReplaceInstalledCatalog(temp.Target, "queue");
+            if (checkpoint == SqliteRuntimeBackupService.CatalogBeforeInstalledValidationCheckpoint)
+                installedValidationReached = true;
+        });
+
+        var result = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions());
+
+        Assert.Equal(1, injectedRows);
+        Assert.False(installedValidationReached);
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreRolledBack, result.ErrorCode);
+        Assert.Equal(archiveBefore, File.ReadAllBytes(bundle));
+        Assert.Equal(targetBefore, File.ReadAllBytes(temp.Target));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(
+            temp.Root,
+            ".catalog-installed-*",
+            SearchOption.TopDirectoryOnly));
+        temp.AssertNoRestoreControls();
     }
 
     [Fact]
@@ -2016,12 +2252,18 @@ public sealed class RuntimeBackupRestoreTests
 
         Assert.True(result.Success, Describe(result));
         var steps = result.MigrationSteps!.ToArray();
+        var session = Array.IndexOf(steps, "session:0->13");
+        var catalog = Array.IndexOf(steps, "local_repository_catalog:0->1");
+        var skill = Array.IndexOf(steps, "skill_projection:0->1");
         var instruction = Array.IndexOf(steps, "historical_instruction_analysis:0->1");
         var historicalImport = Array.IndexOf(steps, "historical_import:0->1");
         var sanitizedImport = Array.IndexOf(steps, "sanitized_import:0->1");
         var runtimeBackup = Array.IndexOf(steps, "runtime_backup:0->1");
         var pricing = Array.IndexOf(steps, "pricing:0->1");
-        Assert.True(instruction >= 0);
+        Assert.True(session >= 0);
+        Assert.True(session < catalog);
+        Assert.True(catalog < skill);
+        Assert.True(skill < instruction);
         Assert.True(instruction < historicalImport);
         Assert.True(historicalImport < sanitizedImport);
         Assert.True(sanitizedImport < runtimeBackup);
@@ -2064,6 +2306,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.True(preflight.Success, preflight.ErrorCode);
         Assert.Equal(11, preflight.ComponentVersions!["monitor"]);
         Assert.Equal(13, preflight.ComponentVersions["session"]);
+        Assert.Equal(1, preflight.ComponentVersions["local_repository_catalog"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
         Assert.Equal(2, preflight.ComponentVersions["alert_engine"]);
@@ -2075,6 +2318,211 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(1, preflight.ComponentVersions["pricing"]);
         Assert.Equal(1, preflight.ComponentVersions["first_trace_navigation"]);
         Assert.Empty(preflight.MigrationSteps!);
+    }
+
+    private static async Task<LocalRepositoryAdmissionFixture> CreateRestoreCatalogFixtureAsync()
+    {
+        var fixture = new LocalRepositoryAdmissionFixture();
+        try
+        {
+            var payload = LocalRepositoryAdmissionFixture.SpanPayload(
+                new LocalRepositoryAdmissionFixture.SpanInput(
+                    LocalRepositoryAdmissionFixture.Trace(1),
+                    LocalRepositoryAdmissionFixture.Span(1),
+                    "https://github.com/Synthetic/RuntimeBackupPhase.git"));
+            await fixture.RunAsync(payload, [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+            fixture.Execute("""
+                INSERT INTO monitor_spans(
+                    raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,
+                    tool_name,tool_type,mcp_tool_name,mcp_server_hash,agent_name,request_model,
+                    response_model,input_tokens,output_tokens,total_tokens,reasoning_tokens,
+                    cache_read_tokens,cache_creation_tokens,status,error_type,finish_reasons,
+                    conversation_id,duration_ms,start_time,end_time,projected_at)
+                SELECT q.raw_record_id,printf('%032x',q.raw_record_id),NULL,NULL,0,
+                       NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+                       NULL,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00.0000000+00:00'
+                FROM local_repository_reconciliation_queue q
+                WHERE NOT EXISTS(SELECT 1 FROM monitor_spans s WHERE s.raw_record_id=q.raw_record_id);
+                INSERT INTO local_repository_reconciliation_state(
+                    projector_key,last_discovered_span_id,updated_at)
+                VALUES(
+                    'local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),
+                    '2026-08-01T00:00:00.0000000+00:00');
+                """);
+            Assert.Equal("completed", fixture.ScalarText(
+                "SELECT state FROM local_repository_reconciliation_queue;"));
+            Assert.True(fixture.ScalarLong(
+                "SELECT COUNT(*) FROM session_repository_assignment_history WHERE cause_kind='source_reconciliation';") > 0);
+            return fixture;
+        }
+        catch
+        {
+            fixture.Dispose();
+            throw;
+        }
+    }
+
+    private static void CopyCurrentCatalog(
+        string source,
+        string target,
+        RestoreTemp temp,
+        bool overwrite = false)
+    {
+        _ = temp.CanonicalDatabaseHash(source);
+        File.Copy(source, target, overwrite);
+        _ = temp.CanonicalDatabaseHash(target);
+    }
+
+    private static string ReadOwnedStagePath(RestoreTemp temp)
+    {
+        using var journal = JsonDocument.Parse(
+            File.ReadAllBytes(temp.Target + ".runtime-restore-journal.json"));
+        Assert.Equal(
+            "runtime-restore-journal.v2",
+            journal.RootElement.GetProperty("schema_version").GetString());
+        var fileName = Assert.IsType<string>(
+            journal.RootElement.GetProperty("stage_file_name").GetString());
+        Assert.Equal(Path.GetFileName(fileName), fileName);
+        Assert.StartsWith(".runtime-restore-stage-", fileName, StringComparison.Ordinal);
+        Assert.EndsWith(".sqlite", fileName, StringComparison.Ordinal);
+        var path = Path.Combine(temp.Root, fileName);
+        Assert.True(File.Exists(path));
+        return path;
+    }
+
+    private static int CorruptCatalogSemantic(string path, string mutation)
+    {
+        var table = mutation switch
+        {
+            "queue" => "local_repository_reconciliation_queue",
+            "history" => "session_repository_assignment_history",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null),
+        };
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using (var foreignKeys = connection.CreateCommand())
+        {
+            foreignKeys.CommandText = "PRAGMA foreign_keys=OFF;";
+            foreignKeys.ExecuteNonQuery();
+        }
+        var triggers = new List<(string Name, string Sql)>();
+        using (var triggerCommand = connection.CreateCommand())
+        {
+            triggerCommand.CommandText = """
+                SELECT name,sql
+                FROM sqlite_schema
+                WHERE type='trigger' AND tbl_name=$table COLLATE BINARY
+                ORDER BY name;
+                """;
+            triggerCommand.Parameters.AddWithValue("$table", table);
+            using var reader = triggerCommand.ExecuteReader();
+            while (reader.Read())
+                triggers.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        int affected;
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            using (var ignoreChecks = connection.CreateCommand())
+            {
+                ignoreChecks.Transaction = transaction;
+                ignoreChecks.CommandText = "PRAGMA ignore_check_constraints=ON;";
+                ignoreChecks.ExecuteNonQuery();
+            }
+            foreach (var trigger in triggers)
+            {
+                using var drop = connection.CreateCommand();
+                drop.Transaction = transaction;
+                drop.CommandText = $"DROP TRIGGER \"{trigger.Name.Replace("\"", "\"\"", StringComparison.Ordinal)}\";";
+                drop.ExecuteNonQuery();
+            }
+            using (var mutationCommand = connection.CreateCommand())
+            {
+                mutationCommand.Transaction = transaction;
+                mutationCommand.CommandText = mutation switch
+                {
+                    "queue" => """
+                        UPDATE local_repository_reconciliation_queue
+                        SET attempt_count=0
+                        WHERE state='completed';
+                        """,
+                    "history" => """
+                        UPDATE session_repository_assignment_history
+                        SET new_assignment_state_sha256=$invalid
+                        WHERE cause_kind='source_reconciliation';
+                        """,
+                    _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null),
+                };
+                if (mutation == "history")
+                    mutationCommand.Parameters.AddWithValue("$invalid", new string('f', 64));
+                affected = mutationCommand.ExecuteNonQuery();
+            }
+            foreach (var trigger in triggers)
+            {
+                using var restore = connection.CreateCommand();
+                restore.Transaction = transaction;
+                restore.CommandText = trigger.Sql;
+                restore.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+        using (var checkpoint = connection.CreateCommand())
+        {
+            checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            checkpoint.ExecuteNonQuery();
+        }
+        using (var journal = connection.CreateCommand())
+        {
+            journal.CommandText = "PRAGMA journal_mode=DELETE;";
+            _ = journal.ExecuteScalar();
+        }
+        return affected;
+    }
+
+    private static int CorruptAndReplaceInstalledCatalog(string target, string mutation)
+    {
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(target)!,
+            $".catalog-installed-mutation-{Guid.NewGuid():N}.sqlite");
+        var displaced = Path.Combine(
+            Path.GetDirectoryName(target)!,
+            $".catalog-installed-displaced-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            File.Copy(target, scratch);
+            var affected = CorruptCatalogSemantic(scratch, mutation);
+            File.Replace(scratch, target, displaced, ignoreMetadataErrors: true);
+            File.Delete(displaced);
+            return affected;
+        }
+        finally
+        {
+            foreach (var path in new[]
+            {
+                scratch,
+                scratch + "-journal",
+                scratch + "-wal",
+                scratch + "-shm",
+                displaced,
+                displaced + "-journal",
+                displaced + "-wal",
+                displaced + "-shm",
+            })
+                if (File.Exists(path))
+                    File.Delete(path);
+        }
+    }
+
+    private static void AssertNoPublishedPreRestore(string root)
+    {
+        var directory = Path.Combine(root, "runtime-backups");
+        if (Directory.Exists(directory))
+            Assert.Empty(Directory.EnumerateFileSystemEntries(directory));
     }
 
     private sealed class RestoreTemp : IDisposable
@@ -3422,10 +3870,10 @@ public sealed class RuntimeBackupRestoreTests
         if (element.ValueKind == JsonValueKind.String) yield return element.GetString()!;
         else if (element.ValueKind == JsonValueKind.Array)
             foreach (var item in element.EnumerateArray())
-            foreach (var value in JsonStrings(item)) yield return value;
+                foreach (var value in JsonStrings(item)) yield return value;
         else if (element.ValueKind == JsonValueKind.Object)
             foreach (var property in element.EnumerateObject())
-            foreach (var value in JsonStrings(property.Value)) yield return value;
+                foreach (var value in JsonStrings(property.Value)) yield return value;
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider { public override DateTimeOffset GetUtcNow() => value; }

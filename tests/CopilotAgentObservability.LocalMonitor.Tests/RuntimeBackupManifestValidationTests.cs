@@ -186,6 +186,24 @@ public sealed class RuntimeBackupManifestValidationTests
         Assert.Equal(RuntimeBackupErrorCodes.ManifestInvalid, exception.Code);
     }
 
+    [Fact]
+    public void Local_repository_catalog_uses_the_component_and_row_count_maps_without_a_cursor_or_carrier()
+    {
+        var manifest = ValidManifest();
+        var parsed = RuntimeBackupJson.ParseManifest(manifest);
+        var json = Encoding.UTF8.GetString(manifest);
+
+        Assert.Equal(13, parsed.ComponentVersions["session"]);
+        Assert.Equal(1, parsed.ComponentVersions["local_repository_catalog"]);
+        foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
+            Assert.Equal(Array.IndexOf(LocalRepositoryCatalogSchemaV1.TableNames, table) + 1, parsed.RowCounts[table]);
+        Assert.DoesNotContain(parsed.ProjectionCursors.Keys, static key =>
+            key.Contains("local_repository", StringComparison.OrdinalIgnoreCase)
+            || key.Contains("repository_catalog", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain("local_repository_catalog_cursor", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("local_repository_catalog_member", json, StringComparison.Ordinal);
+    }
+
     private static byte[] ValidManifest(string proposalState = "absent") => RuntimeBackupJson.WriteManifest(ValidData(proposalState));
 
     private static RuntimeBackupManifestData ValidData(string proposalState = "absent") => new(
@@ -200,8 +218,19 @@ public sealed class RuntimeBackupManifestValidationTests
             new DateTimeOffset(2026, 7, 23, 1, 2, 5, TimeSpan.Zero),
             new Dictionary<string, long?>(StringComparer.Ordinal) { ["monitor"] = 9, ["unavailable"] = null },
             new Dictionary<string, long?>(StringComparer.Ordinal) { ["monitor"] = 11, ["unavailable"] = null }),
-        new Dictionary<string, int>(StringComparer.Ordinal) { ["monitor"] = 7, ["runtime_backup"] = 1 },
-        new Dictionary<string, long>(StringComparer.Ordinal) { ["runtime_probe"] = 1 },
+        new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["local_repository_catalog"] = 1,
+            ["monitor"] = 7,
+            ["runtime_backup"] = 1,
+            ["session"] = 13,
+        },
+        new Dictionary<string, long>(StringComparer.Ordinal)
+        {
+            ["runtime_probe"] = 1,
+        }.Concat(LocalRepositoryCatalogSchemaV1.TableNames.Select((table, index) =>
+                new KeyValuePair<string, long>(table, index + 1)))
+            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal),
         new Dictionary<string, long?>(StringComparer.Ordinal) { ["monitor"] = 10, ["unavailable"] = null },
         new RuntimeBackupRetentionSummary(
             new Dictionary<string, long>(StringComparer.Ordinal)

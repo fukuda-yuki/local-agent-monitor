@@ -18,6 +18,10 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 public sealed class SqliteRuntimeBackupService
 {
+    internal const string CatalogAfterInitializeTailCheckpoint = "catalog-after-initialize-tail";
+    internal const string CatalogAfterMonitorTailCheckpoint = "catalog-after-monitor-tail";
+    internal const string CatalogAfterCreateTailCheckpoint = "catalog-after-create-tail";
+    internal const string CatalogBeforeInstalledValidationCheckpoint = "catalog-before-installed-validation";
     private static readonly DateTimeOffset ArchiveTimestamp = new(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
     private static readonly StringComparison FileNameComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -32,6 +36,7 @@ public sealed class SqliteRuntimeBackupService
         ["first_trace_navigation"] = 1,
         ["historical_import"] = 1,
         ["historical_instruction_analysis"] = 1,
+        ["local_repository_catalog"] = 1,
         ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
@@ -46,6 +51,7 @@ public sealed class SqliteRuntimeBackupService
     [
         "monitor",
         "session",
+        "local_repository_catalog",
         "retention",
         "skill_projection",
         "doctor",
@@ -168,15 +174,10 @@ public sealed class SqliteRuntimeBackupService
         var preparation = PrepareMonitorInitializationWithLease(database);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
         EnsureCurrentBackupTail(database);
+        checkpoint?.Invoke(CatalogAfterMonitorTailCheckpoint);
         using var guard = TryAcquireRecoveryGuard(database);
         if (guard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
-        var result = ValidateMonitorComponentVersions(database);
-        if (result.Success)
-        {
-            using var connection = Open(database, SqliteOpenMode.ReadOnly, immutableReadOnly: false);
-            if (!RuntimeBackupSchemaV1.IsValid(connection, null))
-                result = new(false, RuntimeBackupErrorCodes.RestoreIncompatible, result.ComponentVersions);
-        }
+        var result = PreflightForMigration(database, immutableReadOnly: false);
         return TryRemoveEmptyReadSidecars(database)
             ? result
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
@@ -197,6 +198,7 @@ public sealed class SqliteRuntimeBackupService
         recoveryGuard?.Dispose();
         if (!preflight.Success) return preflight;
         EnsureCurrentBackupTail(database);
+        checkpoint?.Invoke(CatalogAfterInitializeTailCheckpoint);
         using var finalGuard = TryAcquireRecoveryGuard(database);
         if (finalGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var final = PreflightForMigration(database, immutableReadOnly: false);
@@ -213,7 +215,12 @@ public sealed class SqliteRuntimeBackupService
             ValidateIntegrity(connection);
             if (!TableExists(connection, "schema_version")
                 && !TableExists(connection, "retention_component_versions"))
-                return new(true, null, new Dictionary<string, int>(), []);
+            {
+                var emptyVersions = new Dictionary<string, int>(StringComparer.Ordinal);
+                return HasUndeclaredLocalRepositoryCatalogObjects(connection, emptyVersions)
+                    ? new(false, RuntimeBackupErrorCodes.RestoreIncompatible, emptyVersions)
+                    : new(true, null, emptyVersions, []);
+            }
             var versions = ReadComponentVersions(connection, requireSharedSchemaVersion: false);
             foreach (var item in versions)
             {
@@ -228,6 +235,13 @@ public sealed class SqliteRuntimeBackupService
                 && (!versions.TryGetValue("monitor", out var monitorVersion) || monitorVersion < 11
                     || !versions.TryGetValue("retention", out var retentionVersion)
                     || retentionVersion != SupportedComponents["retention"]))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (HasUndeclaredLocalRepositoryCatalogObjects(connection, versions))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (versions.ContainsKey("local_repository_catalog")
+                && (!versions.TryGetValue("session", out var sessionVersion)
+                    || sessionVersion != SupportedComponents["session"]
+                    || !ValidateComponentShapes(database, versions, immutableReadOnly: false)))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             return new(true, null, versions, []);
         }
@@ -256,6 +270,7 @@ public sealed class SqliteRuntimeBackupService
         try
         {
             EnsureCurrentBackupTail(database);
+            checkpoint?.Invoke(CatalogAfterCreateTailCheckpoint);
             if (!PreflightForMigration(database).Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             var result = CreateArchive(database, output, scanRuntimeRoot: true);
             if (!result.Success) return result;
@@ -355,6 +370,10 @@ public sealed class SqliteRuntimeBackupService
                 && (!versions.TryGetValue("monitor", out var monitorVersion) || monitorVersion < 11
                     || !versions.TryGetValue("retention", out var retentionVersion)
                     || retentionVersion != SupportedComponents["retention"]))
+                return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (versions.ContainsKey("local_repository_catalog")
+                && (!versions.TryGetValue("session", out var sessionVersion)
+                    || sessionVersion != SupportedComponents["session"]))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
@@ -690,6 +709,7 @@ public sealed class SqliteRuntimeBackupService
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterSwap);
             if (HasActiveSqliteSidecar(database) || !HashEquals(database, stagedHash))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
+            InvokeCheckpoint(CatalogBeforeInstalledValidationCheckpoint);
             ValidateInstalledDatabase(database, immutableReadOnly: false, expected: stagedFacts);
             if (!HasMatchingRestoreReceipt(database, operationId, context.Result.ArchiveSha256!, immutableReadOnly: false))
                 throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreFailed);
@@ -1188,6 +1208,25 @@ public sealed class SqliteRuntimeBackupService
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly);
         if (!HasColumns(connection, "schema_version", "component", "version")) return false;
         if (!ValidateOwnedComponentNamespaces(connection, versions)) return false;
+        if (versions.ContainsKey("local_repository_catalog"))
+        {
+            if (!versions.TryGetValue("session", out var localRepositorySessionVersion)
+                || localRepositorySessionVersion != SupportedComponents["session"])
+                return false;
+            using var localRepositoryTransaction = connection.BeginTransaction(deferred: true);
+            try
+            {
+                LocalRepositoryCatalogBackupValidation.Validate(connection, localRepositoryTransaction);
+            }
+            catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
+            {
+                return false;
+            }
+            finally
+            {
+                localRepositoryTransaction.Rollback();
+            }
+        }
         if (versions.TryGetValue("monitor", out var monitor)
             && (!HasColumns(connection, "raw_records", "id", "source", "trace_id", "received_at", "payload_json", "schema_version")
                 || monitor >= 7 && !HasColumns(connection, "raw_records", "retention_owner_token")
@@ -1396,6 +1435,11 @@ public sealed class SqliteRuntimeBackupService
             foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)
                 allowed[trigger.Name] = (trigger.Table, trigger.Sql);
         }
+        if (versions.ContainsKey("local_repository_catalog"))
+        {
+            foreach (var trigger in LocalRepositoryCatalogSchemaV1.TriggerDefinitions)
+                allowed[trigger.Name] = (trigger.Table, trigger.Sql);
+        }
 
         var actual = new HashSet<string>(StringComparer.Ordinal);
         using var command = connection.CreateCommand();
@@ -1561,6 +1605,12 @@ public sealed class SqliteRuntimeBackupService
             owners[table] = "skill_projection";
         foreach (var trigger in SkillProjectionSchemaV1.TriggerDefinitions)
             owners[trigger.Name] = "skill_projection";
+        foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
+            owners[table] = "local_repository_catalog";
+        foreach (var index in LocalRepositoryCatalogSchemaV1.IndexNames)
+            owners[index] = "local_repository_catalog";
+        foreach (var trigger in LocalRepositoryCatalogSchemaV1.TriggerDefinitions)
+            owners[trigger.Name] = "local_repository_catalog";
         if (versions.TryGetValue("monitor", out var monitorVersion)
             && monitorVersion is >= 9 and < 11
             && !versions.ContainsKey("skill_projection"))
@@ -1585,6 +1635,10 @@ public sealed class SqliteRuntimeBackupService
             "skill_projection_",
             "monitor_skill_",
             "IX_monitor_skill_",
+            "local_repository_",
+            "session_repository_",
+            "IX_local_repository_",
+            "IX_session_repository_",
         };
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT name FROM sqlite_schema WHERE type IN ('table','index','trigger','view') ORDER BY name;";
@@ -1592,10 +1646,31 @@ public sealed class SqliteRuntimeBackupService
         while (reader.Read())
         {
             var name = reader.GetString(0);
-            if (!prefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) continue;
+            if (!name.Equals("local_repositories", StringComparison.OrdinalIgnoreCase)
+                && !prefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) continue;
             if (!owners.TryGetValue(name, out var owner) || !versions.ContainsKey(owner)) return false;
         }
         return true;
+    }
+
+    private static bool HasUndeclaredLocalRepositoryCatalogObjects(
+        SqliteConnection connection,
+        IReadOnlyDictionary<string, int> versions)
+    {
+        if (versions.ContainsKey("local_repository_catalog")) return false;
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1
+                FROM sqlite_schema
+                WHERE type IN ('table','index','trigger','view')
+                  AND (name='local_repositories' COLLATE NOCASE
+                       OR name LIKE 'local\_repository\_%' ESCAPE '\' COLLATE NOCASE
+                       OR name LIKE 'session\_repository\_%' ESCAPE '\' COLLATE NOCASE
+                       OR name LIKE 'IX\_local\_repository\_%' ESCAPE '\' COLLATE NOCASE
+                       OR name LIKE 'IX\_session\_repository\_%' ESCAPE '\' COLLATE NOCASE));
+            """;
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static void ValidateIntegrity(SqliteConnection connection)
@@ -2215,6 +2290,9 @@ public sealed class SqliteRuntimeBackupService
             MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
             if (!versions.ContainsKey("session") || versions["session"] < SupportedComponents["session"])
                 SqliteSessionStore.InitializeSchema(connection, transaction);
+            LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+            if (versions.ContainsKey("local_repository_catalog"))
+                SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(connection, transaction);
             new RetentionCatalogStore(path, timeProvider).InitializeForWrite(connection, transaction);
             SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
             EnsureDoctorSchema(connection, transaction);
@@ -2328,6 +2406,7 @@ public sealed class SqliteRuntimeBackupService
         EnsureAlertSchemaV2(path);
         using var connection = Open(path, SqliteOpenMode.ReadWrite);
         using var transaction = connection.BeginTransaction(deferred: false);
+        LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
         RuntimeBackupSchemaV1.Ensure(connection, transaction);
         PricingSchemaV1.Ensure(connection, transaction);
         transaction.Commit();

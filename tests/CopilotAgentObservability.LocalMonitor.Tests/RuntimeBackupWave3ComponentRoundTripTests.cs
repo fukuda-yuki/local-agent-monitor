@@ -2,11 +2,16 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
+using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.SanitizedExport;
+using CopilotAgentObservability.Telemetry;
+using CopilotAgentObservability.Telemetry.Repositories;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -17,7 +22,23 @@ public sealed class RuntimeBackupWave3ComponentRoundTripTests
     [
         "historical_instruction_analysis_",
         "historical_import_",
+        "local_repositor",
+        "retention_",
         "sanitized_import_",
+        "session",
+        "session_repository_",
+        "skill_projection_",
+    ];
+    private static readonly HashSet<string> PopulatedPrefixes =
+    [
+        "historical_instruction_analysis_",
+        "historical_import_",
+        "local_repositor",
+        "retention_",
+        "sanitized_import_",
+        "session",
+        "session_repository_",
+        "skill_projection_",
     ];
 
     [Fact]
@@ -25,29 +46,35 @@ public sealed class RuntimeBackupWave3ComponentRoundTripTests
     {
         using var temp = new RoundTripTemp();
         temp.CreateBaseDatabase();
+        temp.SeedRetentionAndSkillProjection();
         var historicalRunId = temp.SeedHistoricalInstructionAnalysis();
         temp.SeedHistoricalImportPreview();
         var sanitizedImportId = temp.SeedSanitizedImport();
+        temp.SeedLocalRepositoryCatalog();
         temp.Checkpoint();
         var expected = ReadSnapshots(temp.Source);
         var service = new SqliteRuntimeBackupService(temp.Clock);
 
         var created = service.CreateAndPublish(temp.Source, temp.Bundle);
         var restored = service.Restore(temp.Bundle, temp.Target, new RuntimeRestoreOptions());
-        var preflight = service.PreflightForMigration(temp.Target);
-        var actual = ReadSnapshots(temp.Target);
 
         Assert.True(created.Success, created.ErrorCode);
         Assert.True(restored.Success, restored.ErrorCode);
+        var preflight = service.PreflightForMigration(temp.Target);
         Assert.True(preflight.Success, Describe(preflight));
         Assert.Equal(1, preflight.ComponentVersions!["historical_instruction_analysis"]);
         Assert.Equal(1, preflight.ComponentVersions["historical_import"]);
         Assert.Equal(1, preflight.ComponentVersions["sanitized_import"]);
+        Assert.Equal(1, preflight.ComponentVersions["local_repository_catalog"]);
+        Assert.Equal(1, preflight.ComponentVersions["retention"]);
+        Assert.Equal(1, preflight.ComponentVersions["skill_projection"]);
         Assert.Empty(preflight.MigrationSteps!);
+        var actual = ReadSnapshots(temp.Target);
         Assert.Equal(expected.Keys, actual.Keys);
         foreach (var prefix in ComponentPrefixes)
         {
-            Assert.True(expected[prefix].RowCounts.Values.Sum() > 0, $"{prefix} must contain owned rows.");
+            if (PopulatedPrefixes.Contains(prefix))
+                Assert.True(expected[prefix].RowCounts.Values.Sum() > 0, $"{prefix} must contain owned rows.");
             Assert.Equal(expected[prefix].RowCounts, actual[prefix].RowCounts);
             Assert.Equal(expected[prefix].Digest, actual[prefix].Digest);
         }
@@ -184,7 +211,178 @@ public sealed class RuntimeBackupWave3ComponentRoundTripTests
                 RetentionSchemaMigrator.Apply(connection, transaction);
                 transaction.Commit();
             }
+            new SqliteSourceCompatibilityStore(Source).CreateSchema();
+            new SqliteSessionStore(Source).CreateSchema();
+            using (var transaction = connection.BeginTransaction())
+            {
+                LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+                SkillProjectionSchemaV1.Ensure(connection, transaction);
+                transaction.Commit();
+            }
         }
+
+        internal void SeedLocalRepositoryCatalog()
+        {
+            const string at = "2026-07-23T03:04:05.0000000+00:00";
+            const string sessionId = "01900000-0000-7000-8000-00000000c001";
+            const string eventId = "01900000-0000-7000-8000-00000000c002";
+            const long rawRecordId = 7001;
+            const string traceId = "11111111111111111111111111111111";
+            const string spanId = "2222222222222222";
+            const string digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            long nextId = 0xc100;
+            string Id(DateTimeOffset _) => $"01900000-0000-7000-8000-{Interlocked.Increment(ref nextId):x12}";
+            var queue = new SqliteLocalRepositoryReconciliationStore(Source, Clock, static () => new string('d', 64));
+            var application = new LocalRepositoryCatalogApplication(new SqliteLocalRepositoryCatalogStore(
+                Source,
+                queue,
+                new LocalRepositoryAssignmentResolver(Id),
+                Clock,
+                Id));
+            var create = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedCreate>>(
+                application.PrepareCreate(new("Runtime Backup Catalog", "https://github.com/Synthetic/WaveThree.git"))).Prepared;
+            var created = application.ExecutePreparedAsync(
+                create,
+                OperationKey(0x41),
+                LocalRepositoryCatalogFixture.RepositoryEntity,
+                CancellationToken.None).GetAwaiter().GetResult();
+            Assert.IsType<LocalRepositoryMutationSucceeded>(created);
+
+            using (var connection = Open(Source))
+            {
+                Execute(connection, $"""
+                    INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
+                    VALUES('{sessionId}','completed','full','{at}','not_captured','{at}','{at}');
+                    INSERT INTO session_events(
+                        event_id,session_id,source_surface,trace_id,source_adapter,source_event_id,
+                        type,occurred_at,content_state,source_application_version)
+                    VALUES(
+                        '{eventId}','{sessionId}','copilot-cli','{traceId}','otel-exact','{traceId}/{spanId}',
+                        'otel.span','{at}','not_captured','1.2.3');
+                    """);
+            }
+            var repositoryId = Text(Source, "SELECT repository_id FROM local_repositories;");
+            var locatorId = Text(Source, "SELECT locator_id FROM local_repository_locators;");
+            var assign = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedSessionAction>>(
+                application.PrepareSessionAction(new(sessionId, 0, "assign", repositoryId))).Prepared;
+            var assigned = application.ExecutePreparedAsync(
+                assign,
+                OperationKey(0x42),
+                LocalRepositoryCatalogFixture.AssignmentEntity,
+                CancellationToken.None).GetAwaiter().GetResult();
+            Assert.IsType<LocalRepositoryMutationSucceeded>(assigned);
+
+            var sourceIdentity = LocalRepositoryIdentityHashing.SourceIdentity(
+                LocalRepositorySourceIdentityInput.Span(rawRecordId, 0, 0, 0, 0, "vcs.repository.url.full"));
+            var contextIdentity = LocalRepositoryIdentityHashing.ContextIdentity(new(
+                sourceIdentity,
+                sessionId,
+                eventId,
+                traceId,
+                spanId));
+            var reconciliationFingerprint = LocalRepositoryIdentityHashing.ReconciliationFingerprint(
+                LocalRepositoryReconciliationEvidence.PayloadSha256(rawRecordId, digest));
+            using var database = Open(Source);
+            using var command = database.CreateCommand();
+            command.CommandText = $"""
+                INSERT INTO source_schema_observations(
+                    observation_id,raw_record_id,input_evidence_kind,raw_payload_sha256,
+                    ingest_batch_id,source_surface,source_application_version,source_adapter,
+                    adapter_version,schema_fingerprint,inventory_hash,compatibility_state,
+                    reason_code,next_action,capture_content_state,unknown_span_count,
+                    unknown_event_count,unknown_attribute_count,overflow_distinct_count,
+                    overflow_occurrence_count,observed_at)
+                VALUES(
+                    'wave3-source-observation',{rawRecordId},'payload_sha256','{digest}',
+                    'wave3-batch','github-copilot-cli','1.2.3','raw-otlp',
+                    '1','synthetic','synthetic','supported',NULL,'none','available',0,0,0,0,0,'{at}');
+                INSERT INTO local_repository_reconciliation_queue(
+                    queue_id,raw_record_id,input_evidence_kind,raw_payload_sha256,projector_version,
+                    reconciliation_fingerprint,state,attempt_count,lease_token,lease_expires_at,
+                    terminal_reason,created_at,updated_at)
+                VALUES(
+                    '01900000-0000-7000-8000-00000000c003',{rawRecordId},'payload_sha256','{digest}',
+                    'local-repository-catalog:1','{reconciliationFingerprint}','completed',1,NULL,NULL,NULL,'{at}','{at}');
+                INSERT INTO session_repository_observations(
+                    observation_id,source_identity_sha256,raw_record_id,raw_payload_sha256,
+                    resource_span_ordinal,scope_span_ordinal,span_ordinal,attribute_ordinal,
+                    scope_kind,attribute_key,value_classification,locator_kind,canonical_locator,
+                    locator_sha256,display_owner,display_repository,source_surface,
+                    source_application_version,observed_at)
+                SELECT
+                    '01900000-0000-7000-8000-00000000c004','{sourceIdentity}',{rawRecordId},'{digest}',
+                    0,0,0,0,'span','vcs.repository.url.full','admitted',kind,canonical_locator,
+                    locator_sha256,display_owner,display_repository,'github-copilot-cli','1.2.3','{at}'
+                FROM local_repository_locators WHERE locator_id='{locatorId}';
+                INSERT INTO session_repository_observation_contexts(
+                    context_id,observation_id,context_identity_sha256,session_event_id,session_id,
+                    trace_id,span_id,admission_state,repository_id,locator_id,observed_at)
+                VALUES(
+                    '01900000-0000-7000-8000-00000000c005',
+                    '01900000-0000-7000-8000-00000000c004','{contextIdentity}','{eventId}','{sessionId}',
+                    '{traceId}','{spanId}','admitted','{repositoryId}','{locatorId}','{at}');
+                INSERT INTO monitor_spans(
+                    raw_record_id,trace_id,span_id,parent_span_id,span_ordinal,operation,category,
+                    tool_name,tool_type,mcp_tool_name,mcp_server_hash,agent_name,request_model,
+                    response_model,input_tokens,output_tokens,total_tokens,reasoning_tokens,
+                    cache_read_tokens,cache_creation_tokens,status,error_type,finish_reasons,
+                    conversation_id,duration_ms,start_time,end_time,projected_at)
+                VALUES(
+                    {rawRecordId},'{traceId}',NULL,NULL,0,
+                    NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+                    NULL,NULL,NULL,NULL,NULL,'{at}');
+                INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at)
+                VALUES('local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),'{at}');
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        internal void SeedRetentionAndSkillProjection()
+        {
+            const string traceId = "33333333333333333333333333333333";
+            const string payload = "{}";
+            var at = Clock.GetUtcNow();
+            var inventory = OtlpJsonStructuralWalker.Build(payload, at);
+            var decision = SourceCompatibilityEvaluator.Assess(
+                "github-copilot-cli",
+                "1.0.74",
+                inventory,
+                observedRecognizedCount: 1,
+                VerifiedSourceFingerprintRegistry.Create([], [], []));
+            var observation = SourceObservationBatchDraft.Create(
+                "wave3-runtime-backup-ingestion",
+                "github-copilot-cli",
+                "1.0.74",
+                "github-copilot-otel",
+                "adapter-1",
+                inventory,
+                decision,
+                SourceCaptureContentState.Available,
+                at,
+                [TraceSourceVersionResolutionDraft.Create(
+                    traceId,
+                    TraceSourceVersionResolutionState.Resolved,
+                    "1.0.74")]);
+            var batch = ValidatedIngestionBatch.Create(
+                new RawTelemetryRecord(
+                    null,
+                    RawTelemetrySources.RawOtlp,
+                    traceId,
+                    at,
+                    ResourceAttributesJson: null,
+                    PayloadJson: payload),
+                observation);
+
+            _ = new SqliteIngestionCommitStore(Source).Commit(batch);
+
+            using var connection = Open(Source);
+            SourceCompatibilitySchemaV11.Validate(connection, transaction: null);
+            SkillProjectionSchemaV1.Validate(connection, transaction: null);
+        }
+
+        private static string OperationKey(byte value) =>
+            "lrc1_" + Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray())
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
         internal long SeedHistoricalInstructionAnalysis()
         {
