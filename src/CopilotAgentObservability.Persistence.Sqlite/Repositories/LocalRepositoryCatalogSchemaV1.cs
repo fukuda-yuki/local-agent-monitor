@@ -91,6 +91,8 @@ internal static class LocalRepositoryCatalogSchemaV1
             name.Equals("local_repositories", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("local_repository_", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("session_repository_", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("IX_local_repository_", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("IX_session_repository_", StringComparison.OrdinalIgnoreCase)
             || table.Equals("local_repositories", StringComparison.OrdinalIgnoreCase)
             || table.StartsWith("local_repository_", StringComparison.OrdinalIgnoreCase)
             || table.StartsWith("session_repository_", StringComparison.OrdinalIgnoreCase));

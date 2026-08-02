@@ -312,6 +312,22 @@ public sealed class LocalRepositoryCatalogSchemaTests
         Assert.Equal(before, ScalarLong(connection, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%repository%';"));
     }
 
+    [Theory]
+    [InlineData("IX_local_repository_extra", false)]
+    [InlineData("IX_SESSION_REPOSITORY_EXTRA", false)]
+    [InlineData("IX_unrelated_extra", true)]
+    public void HasExactOwnedSchema_ReservesCatalogIndexPrefixesOutsideCatalogTables(string indexName, bool expected)
+    {
+        using var database = new TestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+        LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        Execute(connection, "CREATE TABLE raw_records(id INTEGER PRIMARY KEY);");
+        Execute(connection, $"CREATE INDEX {indexName} ON raw_records(id);");
+
+        Assert.Equal(expected, LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(connection, transaction: null));
+    }
+
     [Fact]
     public void Validator_RejectsSemanticIdentityAndCauseReferenceMismatches()
     {
