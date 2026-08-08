@@ -28,6 +28,7 @@ internal sealed record LocalRepositoryQueueLease(
 internal enum LocalRepositoryReconciliationCheckpoint
 {
     BeforeDiscoveryPublication,
+    BeforeDiscoveryRawAvailabilityRead,
     BeforeRawAvailabilityRead,
     AfterRawAvailabilityRead,
     BeforeRetentionRenewalPublication,
@@ -147,6 +148,7 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
             foreach (var rawRecordId in frontier.RawRecordIds)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeDiscoveryRawAvailabilityRead);
                 var read = await rawAvailability.ReadAsync(rawRecordId, null, RetentionReadKind.Operation, cancellationToken).ConfigureAwait(false);
                 if (read.Status == LocalRepositoryRawAvailabilityStatus.Busy)
                     return LocalRepositoryQueueTransitionResult.Busy;

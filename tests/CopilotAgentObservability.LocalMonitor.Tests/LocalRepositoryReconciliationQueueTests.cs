@@ -461,10 +461,15 @@ public sealed class LocalRepositoryReconciliationQueueTests
         new SqliteSessionStore(temp.DatabasePath).CreateSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
         var reader = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
-        var queue = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, temp.TimeProvider);
+        var checkpoint = new CountingDiscoveryRawReadCheckpoint();
+        var queue = new SqliteLocalRepositoryReconciliationStore(
+            temp.DatabasePath,
+            temp.TimeProvider,
+            checkpoint: checkpoint);
         var firstRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{\"resourceSpans\":[]}"));
         InsertSpan(connection, firstRawId, 0, "11111111111111111111111111111111");
         Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, await queue.DiscoverAsync(reader, CancellationToken.None));
+        Assert.Equal(1, checkpoint.Count);
         var firstQueueCount = ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;");
         Execute(connection, "DELETE FROM local_repository_reconciliation_state;");
         var laterRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{\"resourceSpans\":[]}"));
@@ -473,6 +478,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var outcome = await queue.DiscoverAsync(reader, CancellationToken.None);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.Corrupt, outcome);
+        Assert.Equal(1, checkpoint.Count);
         Assert.Equal(firstQueueCount, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
@@ -1798,6 +1804,17 @@ public sealed class LocalRepositoryReconciliationQueueTests
         public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
         {
             if (checkpoint == LocalRepositoryReconciliationCheckpoint.BeforeDiscoveryPublication) clock.Advance(advance);
+        }
+    }
+
+    private sealed class CountingDiscoveryRawReadCheckpoint : ILocalRepositoryReconciliationCheckpoint
+    {
+        internal int Count { get; private set; }
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            if (checkpoint == LocalRepositoryReconciliationCheckpoint.BeforeDiscoveryRawAvailabilityRead)
+                Count++;
         }
     }
 
