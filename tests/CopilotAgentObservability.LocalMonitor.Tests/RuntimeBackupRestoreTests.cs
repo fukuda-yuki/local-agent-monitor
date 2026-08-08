@@ -436,7 +436,13 @@ public sealed class RuntimeBackupRestoreTests
             Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='runtime_backup';"));
             Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
             foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
-                Assert.Equal(0L, temp.Scalar<long>(database, $"SELECT COUNT(*) FROM \"{table}\";"));
+                Assert.Equal(table == "local_repository_reconciliation_state" ? 1L : 0L, temp.Scalar<long>(database, $"SELECT COUNT(*) FROM \"{table}\";"));
+            Assert.Equal(1L, temp.Scalar<long>(database, """
+                SELECT COUNT(*) FROM local_repository_reconciliation_state
+                WHERE projector_key='local-repository-catalog-v1'
+                  AND last_discovered_span_id IS NULL
+                  AND updated_at='1970-01-01T00:00:00.0000000+00:00';
+                """));
         }
     }
 
@@ -856,7 +862,13 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM raw_records;"));
         Assert.Equal(1L, temp.Scalar<long>(restored, "SELECT COUNT(*) FROM retention_items WHERE store_kind='raw_record' AND source_item_id='1';"));
         foreach (var table in LocalRepositoryCatalogSchemaV1.TableNames)
-            Assert.Equal(0L, temp.Scalar<long>(restored, $"SELECT COUNT(*) FROM \"{table}\";"));
+            Assert.Equal(table == "local_repository_reconciliation_state" ? 1L : 0L, temp.Scalar<long>(restored, $"SELECT COUNT(*) FROM \"{table}\";"));
+        Assert.Equal(1L, temp.Scalar<long>(restored, """
+            SELECT COUNT(*) FROM local_repository_reconciliation_state
+            WHERE projector_key='local-repository-catalog-v1'
+              AND last_discovered_span_id IS NULL
+              AND updated_at='1970-01-01T00:00:00.0000000+00:00';
+            """));
     }
 
     [Fact]
@@ -2343,11 +2355,10 @@ public sealed class RuntimeBackupRestoreTests
                        NULL,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00.0000000+00:00'
                 FROM local_repository_reconciliation_queue q
                 WHERE NOT EXISTS(SELECT 1 FROM monitor_spans s WHERE s.raw_record_id=q.raw_record_id);
-                INSERT INTO local_repository_reconciliation_state(
-                    projector_key,last_discovered_span_id,updated_at)
-                VALUES(
-                    'local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),
-                    '2026-08-01T00:00:00.0000000+00:00');
+                UPDATE local_repository_reconciliation_state
+                SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+                    updated_at='2026-08-01T00:00:00.0000000+00:00'
+                WHERE projector_key='local-repository-catalog-v1';
                 """);
             Assert.Equal("completed", fixture.ScalarText(
                 "SELECT state FROM local_repository_reconciliation_queue;"));

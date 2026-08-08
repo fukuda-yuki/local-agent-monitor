@@ -99,7 +99,19 @@ internal sealed class LocalRepositoryReconciliationWorker
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10), timeProvider);
             while (await timer.WaitForNextTickAsync(cancellation.Token).ConfigureAwait(false))
             {
-                var renewed = queue.Heartbeat(lease, retentionLease, timeProvider.GetUtcNow());
+                var at = timeProvider.GetUtcNow().ToUniversalTime();
+                if (at >= lease.LeaseExpiresAt)
+                {
+                    checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.HeartbeatLeaseExpired);
+                    cancellation.Cancel();
+                    return false;
+                }
+                var renewed = queue.Heartbeat(lease, retentionLease, at);
+                if (renewed.Status == LocalRepositoryQueueTransitionResult.Busy)
+                {
+                    checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterHeartbeatBusy);
+                    continue;
+                }
                 if (renewed.Status != LocalRepositoryQueueTransitionResult.Applied || renewed.Lease is null)
                 {
                     cancellation.Cancel();

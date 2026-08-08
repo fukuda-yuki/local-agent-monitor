@@ -647,7 +647,13 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.Equal(13, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
         Assert.All(LocalRepositoryCatalogSchemaV1.TableNames, table =>
-            Assert.Equal(0, ScalarLong(temp.DatabasePath, $"SELECT COUNT(*) FROM \"{table}\";")));
+            Assert.Equal(table == "local_repository_reconciliation_state" ? 1 : 0, ScalarLong(temp.DatabasePath, $"SELECT COUNT(*) FROM \"{table}\";")));
+        Assert.Equal(1, ScalarLong(temp.DatabasePath, """
+            SELECT COUNT(*) FROM local_repository_reconciliation_state
+            WHERE projector_key='local-repository-catalog-v1'
+              AND last_discovered_span_id IS NULL
+              AND updated_at='1970-01-01T00:00:00.0000000+00:00';
+            """));
     }
 
     [Fact]
@@ -3118,7 +3124,13 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.Equal(1, ScalarLong(path,
             "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
         Assert.All(LocalRepositoryCatalogSchemaV1.TableNames, table =>
-            Assert.Equal(0, ScalarLong(path, $"SELECT COUNT(*) FROM \"{table}\";")));
+            Assert.Equal(table == "local_repository_reconciliation_state" ? 1 : 0, ScalarLong(path, $"SELECT COUNT(*) FROM \"{table}\";")));
+        Assert.Equal(1, ScalarLong(path, """
+            SELECT COUNT(*) FROM local_repository_reconciliation_state
+            WHERE projector_key='local-repository-catalog-v1'
+              AND last_discovered_span_id IS NULL
+              AND updated_at='1970-01-01T00:00:00.0000000+00:00';
+            """));
     }
 
     private static void CorruptNewlyInstalledCatalog(string path) =>
@@ -3658,11 +3670,10 @@ public sealed class LocalRepositoryRuntimeBackupTests
                NULL,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00.0000000+00:00'
         FROM local_repository_reconciliation_queue q
         WHERE NOT EXISTS(SELECT 1 FROM monitor_spans s WHERE s.raw_record_id=q.raw_record_id);
-        INSERT INTO local_repository_reconciliation_state(
-            projector_key,last_discovered_span_id,updated_at)
-        VALUES(
-            'local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),
-            '2026-08-01T00:00:00.0000000+00:00');
+        UPDATE local_repository_reconciliation_state
+        SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+            updated_at='2026-08-01T00:00:00.0000000+00:00'
+        WHERE projector_key='local-repository-catalog-v1';
         """);
 
     private static IReadOnlyDictionary<string, string> ReadCatalogSnapshot(string databasePath)
@@ -3825,8 +3836,10 @@ public sealed class LocalRepositoryRuntimeBackupTests
                 command.ExecuteNonQuery();
             }
             Execute(connection, transaction, $"""
-                INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at)
-                VALUES('local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),'{LocalRepositoryAdmissionFixture.ObservedAt}');
+                UPDATE local_repository_reconciliation_state
+                SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+                    updated_at='{LocalRepositoryAdmissionFixture.ObservedAt}'
+                WHERE projector_key='local-repository-catalog-v1';
                 """);
             transaction.Commit();
         }
@@ -3890,8 +3903,10 @@ public sealed class LocalRepositoryRuntimeBackupTests
                 command.ExecuteNonQuery();
             }
             Execute(connection, transaction, $"""
-                INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at)
-                VALUES('local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),'{LocalRepositoryAdmissionFixture.ObservedAt}');
+                UPDATE local_repository_reconciliation_state
+                SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+                    updated_at='{LocalRepositoryAdmissionFixture.ObservedAt}'
+                WHERE projector_key='local-repository-catalog-v1';
                 """);
             transaction.Commit();
             BundlePath = Path.Combine(Path.GetDirectoryName(DatabasePath)!, "lease-catalog.zip");

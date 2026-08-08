@@ -69,14 +69,24 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
         string? projectorKey = null;
         long? frontier = null;
         string? updatedAt = null;
-        using (var command = CreateCommand(connection, transaction, "SELECT projector_key,last_discovered_span_id,updated_at FROM local_repository_reconciliation_state LIMIT 2;"))
+        using (var command = CreateCommand(connection, transaction, """
+            SELECT projector_key,typeof(projector_key),
+                   last_discovered_span_id,typeof(last_discovered_span_id),
+                   updated_at,typeof(updated_at)
+            FROM local_repository_reconciliation_state
+            LIMIT 2;
+            """))
         using (var reader = command.ExecuteReader())
         {
             if (reader.Read())
             {
+                if (reader.GetString(1) != "text"
+                    || reader.GetString(3) is not ("null" or "integer")
+                    || reader.GetString(5) != "text")
+                    RejectRestore();
                 projectorKey = reader.GetString(0);
-                frontier = reader.IsDBNull(1) ? null : reader.GetInt64(1);
-                updatedAt = reader.GetString(2);
+                frontier = reader.IsDBNull(2) ? null : reader.GetInt64(2);
+                updatedAt = reader.GetString(4);
             }
             if (reader.Read())
                 RejectRestore();
@@ -84,11 +94,7 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
 
         var queueCount = ScalarLong(connection, transaction, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;");
         if (projectorKey is null)
-        {
-            if (queueCount != 0)
-                RejectRestore();
-            return;
-        }
+            RejectRestore();
         if (projectorKey != LocalRepositoryCatalogConstants.ProjectorKey
             || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(updatedAt))
             RejectRestore();

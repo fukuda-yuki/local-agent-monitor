@@ -348,33 +348,86 @@ public sealed class LocalRepositoryReconciliationTests
     }
 
     [Fact]
-    public async Task HeartbeatFenceLossDuringPublicationCancelsAndReturnsPendingWithoutRows()
+    public async Task HeartbeatBusyBeforeLocalExpiryKeepsProductionPublicationAuthority()
     {
-        LocalRepositoryAdmissionFixture? fixture = null;
-        var checkpoint = new DelegatingAdmissionCheckpoint((stage) =>
-        {
-            if (stage != LocalRepositoryAdmissionCheckpoint.AfterContexts)
-                return;
-            fixture!.Clock.Advance(TimeSpan.FromSeconds(10));
-            Thread.Sleep(100);
-        });
-        using (fixture = new LocalRepositoryAdmissionFixture(checkpoint))
-        {
-            var outcome = await fixture.RunAsync(
-                LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
-                    LocalRepositoryAdmissionFixture.Trace(1),
-                    LocalRepositoryAdmissionFixture.Span(1),
-                    "https://github.com/Example/HeartbeatLoss")),
-                [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+        using var admission = new HoldingAdmissionCheckpoint();
+        using var heartbeat = new HeartbeatOutcomeCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(admission, heartbeat);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/HeartbeatBusy")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
 
-            Assert.Contains(outcome, new[]
-            {
-                LocalRepositoryReconciliationWorkOutcome.Retrying,
-                LocalRepositoryReconciliationWorkOutcome.StaleOwner,
-            });
-            Assert.Equal("pending", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
-            Assert.Equal(0, fixture.DomainRowCount());
-        }
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(admission.Held.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(heartbeat.Busy.Wait(TimeSpan.FromSeconds(10)));
+        admission.Release.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    [Fact]
+    public async Task HeartbeatAtExactLocalExpiryFencesProductionPublicationUntilRecovery()
+    {
+        using var admission = new HoldingAdmissionCheckpoint();
+        using var heartbeat = new HeartbeatOutcomeCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(admission, heartbeat);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/HeartbeatExpiry")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var firstWork = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(admission.Held.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(30));
+        Assert.True(heartbeat.Expired.Wait(TimeSpan.FromSeconds(10)));
+
+        var competing = await fixture.RunExistingAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Busy, competing);
+        Assert.Equal("leased", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.DomainRowCount());
+
+        admission.Release.Set();
+        var expired = await firstWork.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.StaleOwner, expired);
+        Assert.Equal("leased", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.DomainRowCount());
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+
+        var recovered = await fixture.RunExistingAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, recovered);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(2, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    private static void AssertSinglePublishedGraph(LocalRepositoryAdmissionFixture fixture)
+    {
+        foreach (var table in new[]
+        {
+            "local_repositories",
+            "local_repository_locators",
+            "local_repository_locator_heads",
+            "local_repository_history",
+            "session_repository_observations",
+            "session_repository_observation_contexts",
+            "session_repository_assignment_revisions",
+            "session_repository_assignment_history",
+        })
+            Assert.Equal(1, fixture.ScalarLong($"SELECT COUNT(*) FROM {table};"));
     }
 
     [Fact]
@@ -520,6 +573,48 @@ public sealed class LocalRepositoryReconciliationTests
     private sealed class DelegatingReconciliationCheckpoint(Action<LocalRepositoryReconciliationCheckpoint> action) : ILocalRepositoryReconciliationCheckpoint
     {
         public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint) => action(checkpoint);
+    }
+
+    private sealed class HoldingAdmissionCheckpoint : ILocalRepositoryAdmissionCheckpoint, IDisposable
+    {
+        internal ManualResetEventSlim Held { get; } = new();
+        internal ManualResetEventSlim Release { get; } = new();
+
+        public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryAdmissionCheckpoint.AfterContexts)
+                return;
+            Held.Set();
+            if (!Release.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("Timed out waiting to release the production admission transaction.");
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            Held.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    private sealed class HeartbeatOutcomeCheckpoint : ILocalRepositoryReconciliationCheckpoint, IDisposable
+    {
+        internal ManualResetEventSlim Busy { get; } = new();
+        internal ManualResetEventSlim Expired { get; } = new();
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            if (checkpoint == LocalRepositoryReconciliationCheckpoint.AfterHeartbeatBusy)
+                Busy.Set();
+            else if (checkpoint == LocalRepositoryReconciliationCheckpoint.HeartbeatLeaseExpired)
+                Expired.Set();
+        }
+
+        public void Dispose()
+        {
+            Busy.Dispose();
+            Expired.Dispose();
+        }
     }
 
     private sealed class FinalizationExpiringTimeProvider : TimeProvider

@@ -452,6 +452,32 @@ public sealed class LocalRepositoryReconciliationQueueTests
         Assert.Equal(LocalRepositoryQueueTransitionResult.NoWork, await queue.DiscoverAsync(reader, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task DiscoveryMissingProjectorStateFailsClosedWithoutQueueCursorOrRawPublication()
+    {
+        using var temp = new MonitorTempDirectory();
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        new SqliteSessionStore(temp.DatabasePath).CreateSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        var reader = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        var queue = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, temp.TimeProvider);
+        var firstRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{\"resourceSpans\":[]}"));
+        InsertSpan(connection, firstRawId, 0, "11111111111111111111111111111111");
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, await queue.DiscoverAsync(reader, CancellationToken.None));
+        var firstQueueCount = ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;");
+        Execute(connection, "DELETE FROM local_repository_reconciliation_state;");
+        var laterRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{\"resourceSpans\":[]}"));
+        InsertSpan(connection, laterRawId, 0, "22222222222222222222222222222222");
+
+        var outcome = await queue.DiscoverAsync(reader, CancellationToken.None);
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Corrupt, outcome);
+        Assert.Equal(firstQueueCount, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -493,7 +519,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queue.DiscoverAsync(new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext), cancellation.Token).AsTask());
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state WHERE projector_key='local-repository-catalog-v1' AND last_discovered_span_id IS NULL;"));
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
     }
 
@@ -567,7 +593,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         Assert.Equal(LocalRepositoryQueueTransitionResult.Corrupt, await queue.DiscoverAsync(reader, CancellationToken.None));
 
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state WHERE projector_key='local-repository-catalog-v1' AND last_discovered_span_id IS NULL;"));
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
     }
 
@@ -594,7 +620,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         Assert.Equal(LocalRepositoryQueueTransitionResult.Corrupt, outcome);
         Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
         Assert.Equal(conflicting, ScalarLong(connection, "SELECT raw_record_id FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state WHERE projector_key='local-repository-catalog-v1' AND last_discovered_span_id IS NULL;"));
     }
 
     [Fact]
@@ -620,7 +646,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, outcome);
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state WHERE projector_key='local-repository-catalog-v1' AND last_discovered_span_id IS NULL;"));
     }
 
     [Fact]
@@ -644,7 +670,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.Busy, outcome);
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state;"));
+        Assert.Equal(1, ScalarLong(connection, "SELECT COUNT(*) FROM local_repository_reconciliation_state WHERE projector_key='local-repository-catalog-v1' AND last_discovered_span_id IS NULL;"));
         Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
     }
 
@@ -1180,6 +1206,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
             switch (contradiction)
             {
                 case "queue_without_cursor":
+                    Execute(connection, "DELETE FROM local_repository_reconciliation_state;");
                     break;
                 case "null_frontier_with_queue":
                     InsertDiscoveryCursor(connection, null);
@@ -1194,6 +1221,23 @@ public sealed class LocalRepositoryReconciliationQueueTests
             using var transaction = connection.BeginTransaction(deferred: true);
 
             var error = Assert.Throws<InvalidOperationException>(() => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
+
+            Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
+            transaction.Rollback();
+        }
+    }
+
+    [Fact]
+    public void RestoreRejectsMissingProjectorStateEvenWhenQueueIsEmpty()
+    {
+        using var temp = CreateRestorableQueueDatabase(out var connection);
+        using (connection)
+        {
+            Execute(connection, "DELETE FROM local_repository_reconciliation_state;");
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var error = Assert.Throws<InvalidOperationException>(
+                () => SqliteLocalRepositoryReconciliationStore.ValidateRestorableState(connection, transaction));
 
             Assert.Equal("local_repository_reconciliation_restore_invalid", error.Message);
             transaction.Rollback();
@@ -1404,7 +1448,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
     private static void InsertDiscoveryCursor(SqliteConnection connection, long? frontier)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at) VALUES('local-repository-catalog-v1',$frontier,'2026-08-01T00:00:00.0000000+00:00');";
+        command.CommandText = "UPDATE local_repository_reconciliation_state SET last_discovered_span_id=$frontier,updated_at='2026-08-01T00:00:00.0000000+00:00' WHERE projector_key='local-repository-catalog-v1';";
         command.Parameters.AddWithValue("$frontier", frontier ?? (object)DBNull.Value);
         command.ExecuteNonQuery();
     }

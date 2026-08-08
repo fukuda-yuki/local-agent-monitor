@@ -35,6 +35,26 @@ public sealed class LocalRepositoryCatalogSchemaTests
         LocalRepositoryCatalogValidation.Validate(connection, transaction: null);
     }
 
+    [Fact]
+    public void FreshSchemaSeedsExactlyOneNullableProjectorStateAndRepeatEnsurePreservesIt()
+    {
+        using var database = new TestDatabase();
+        new SqliteSessionStore(database.Path).CreateSchema();
+        using var connection = Open(database.Path);
+
+        LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        LocalRepositoryCatalogSchemaV1.Ensure(connection);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT projector_key,last_discovered_span_id,updated_at FROM local_repository_reconciliation_state;";
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("local-repository-catalog-v1", reader.GetString(0));
+        Assert.True(reader.IsDBNull(1));
+        Assert.Equal("1970-01-01T00:00:00.0000000+00:00", reader.GetString(2));
+        Assert.False(reader.Read());
+    }
+
     [Theory]
     [InlineData("partial")]
     [InlineData("newer")]

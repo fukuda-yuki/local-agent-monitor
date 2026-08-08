@@ -27,11 +27,10 @@ public sealed class LocalRepositoryAutomaticAdmissionValidationTests
                 {prepared.RawRecordId},'{LocalRepositoryAdmissionFixture.Trace(1)}',NULL,NULL,0,
                 NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
                 NULL,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00.0000000+00:00');
-            INSERT INTO local_repository_reconciliation_state(
-                projector_key,last_discovered_span_id,updated_at)
-            VALUES(
-                'local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),
-                '2026-08-01T00:00:00.0000000+00:00');
+            UPDATE local_repository_reconciliation_state
+            SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+                updated_at='2026-08-01T00:00:00.0000000+00:00'
+            WHERE projector_key='local-repository-catalog-v1';
             """);
         using var connection = Open(fixture.DatabasePath);
         using var transaction = connection.BeginTransaction(deferred: true);

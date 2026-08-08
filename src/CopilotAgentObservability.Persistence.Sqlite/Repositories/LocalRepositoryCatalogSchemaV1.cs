@@ -70,6 +70,16 @@ internal static class LocalRepositoryCatalogSchemaV1
             Execute(connection, transaction, definition.Sql);
         foreach (var trigger in TriggerDefinitions)
             Execute(connection, transaction, trigger.Sql.Replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", StringComparison.Ordinal));
+        Execute(connection, transaction, """
+            INSERT INTO local_repository_reconciliation_state(
+                projector_key,
+                last_discovered_span_id,
+                updated_at)
+            VALUES(
+                'local-repository-catalog-v1',
+                NULL,
+                '1970-01-01T00:00:00.0000000+00:00');
+            """);
         Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_repository_catalog',1);");
     }
 

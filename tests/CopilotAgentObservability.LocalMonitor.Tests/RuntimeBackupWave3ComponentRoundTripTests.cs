@@ -331,8 +331,10 @@ public sealed class RuntimeBackupWave3ComponentRoundTripTests
                     {rawRecordId},'{traceId}',NULL,NULL,0,
                     NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
                     NULL,NULL,NULL,NULL,NULL,'{at}');
-                INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at)
-                VALUES('local-repository-catalog-v1',(SELECT MAX(id) FROM monitor_spans),'{at}');
+                UPDATE local_repository_reconciliation_state
+                SET last_discovered_span_id=(SELECT MAX(id) FROM monitor_spans),
+                    updated_at='{at}'
+                WHERE projector_key='local-repository-catalog-v1';
                 """;
             command.ExecuteNonQuery();
         }

@@ -31,6 +31,8 @@ internal enum LocalRepositoryReconciliationCheckpoint
     BeforeRawAvailabilityRead,
     AfterRawAvailabilityRead,
     BeforeRetentionRenewalPublication,
+    AfterHeartbeatBusy,
+    HeartbeatLeaseExpired,
 }
 
 internal interface ILocalRepositoryReconciliationCheckpoint
@@ -200,20 +202,26 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
             {
                 cursor.Transaction = transaction;
                 cursor.CommandText = """
-                    INSERT INTO local_repository_reconciliation_state(projector_key,last_discovered_span_id,updated_at)
-                    VALUES($projector_key,$last_discovered_span_id,$updated_at)
-                    ON CONFLICT(projector_key) DO UPDATE SET last_discovered_span_id=excluded.last_discovered_span_id,updated_at=excluded.updated_at;
+                    UPDATE local_repository_reconciliation_state
+                    SET last_discovered_span_id=$last_discovered_span_id,
+                        updated_at=$updated_at
+                    WHERE projector_key=$projector_key;
                     """;
                 cursor.Parameters.AddWithValue("$projector_key", LocalRepositoryCatalogConstants.ProjectorKey);
                 cursor.Parameters.AddWithValue("$last_discovered_span_id", frontier.SpanIds[^1]);
                 cursor.Parameters.AddWithValue("$updated_at", Timestamp(at));
-                cursor.ExecuteNonQuery();
+                if (cursor.ExecuteNonQuery() != 1)
+                {
+                    transaction.Rollback();
+                    return LocalRepositoryQueueTransitionResult.Corrupt;
+                }
             }
             transaction.Commit();
             return LocalRepositoryQueueTransitionResult.Applied;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return LocalRepositoryQueueTransitionResult.Busy; }
         catch (LocalRepositoryQueueConflictException) { return LocalRepositoryQueueTransitionResult.Corrupt; }
+        catch (LocalRepositoryStateAuthorityException) { return LocalRepositoryQueueTransitionResult.Corrupt; }
         finally
         {
             foreach (var input in prepared) await input.Result.DisposeAsync().ConfigureAwait(false);
@@ -408,14 +416,29 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
 
     private static (List<long> SpanIds, List<long> RawRecordIds) ReadDiscoveryFrontier(SqliteConnection connection, SqliteTransaction transaction)
     {
-        long cursor = 0;
+        long cursor;
         using (var state = connection.CreateCommand())
         {
             state.Transaction = transaction;
-            state.CommandText = "SELECT last_discovered_span_id FROM local_repository_reconciliation_state WHERE projector_key=$projector_key;";
-            state.Parameters.AddWithValue("$projector_key", LocalRepositoryCatalogConstants.ProjectorKey);
-            var value = state.ExecuteScalar();
-            if (value is not null && value is not DBNull) cursor = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+            state.CommandText = """
+                SELECT projector_key,typeof(projector_key),
+                       last_discovered_span_id,typeof(last_discovered_span_id),
+                       updated_at,typeof(updated_at)
+                FROM local_repository_reconciliation_state
+                LIMIT 2;
+                """;
+            using var stateReader = state.ExecuteReader();
+            if (!stateReader.Read()
+                || stateReader.GetString(1) != "text"
+                || stateReader.GetString(0) != LocalRepositoryCatalogConstants.ProjectorKey
+                || stateReader.GetString(3) is not ("null" or "integer")
+                || !stateReader.IsDBNull(2) && stateReader.GetInt64(2) <= 0
+                || stateReader.GetString(5) != "text"
+                || !LocalRepositoryCatalogValidation.IsCanonicalTimestamp(stateReader.GetString(4)))
+                throw new LocalRepositoryStateAuthorityException();
+            cursor = stateReader.IsDBNull(2) ? 0 : stateReader.GetInt64(2);
+            if (stateReader.Read())
+                throw new LocalRepositoryStateAuthorityException();
         }
         using var spans = connection.CreateCommand();
         spans.Transaction = transaction;
@@ -469,5 +492,10 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
     private sealed class LocalRepositoryQueueConflictException : InvalidOperationException
     {
         internal LocalRepositoryQueueConflictException() : base("local_repository_reconciliation_queue_conflict") { }
+    }
+
+    private sealed class LocalRepositoryStateAuthorityException : InvalidOperationException
+    {
+        internal LocalRepositoryStateAuthorityException() : base("local_repository_reconciliation_state_invalid") { }
     }
 }

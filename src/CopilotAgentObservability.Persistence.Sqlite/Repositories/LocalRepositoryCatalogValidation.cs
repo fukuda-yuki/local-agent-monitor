@@ -40,7 +40,31 @@ internal static class LocalRepositoryCatalogValidation
         ValidateMutableRows(connection, transaction);
         ValidateHistoryRows(connection, transaction);
         ValidateReceiptRows(connection, transaction);
+        ValidateReconciliationStateAuthority(connection, transaction);
         ValidateReconciliationQueueRows(connection, transaction);
+    }
+
+    private static void ValidateReconciliationStateAuthority(
+        SqliteConnection connection,
+        SqliteTransaction? transaction)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT projector_key,typeof(projector_key),
+                   last_discovered_span_id,typeof(last_discovered_span_id),
+                   updated_at,typeof(updated_at)
+            FROM local_repository_reconciliation_state
+            LIMIT 2;
+            """);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()
+            || reader.GetString(1) != "text"
+            || reader.GetString(0) != LocalRepositoryCatalogConstants.ProjectorKey
+            || reader.GetString(3) is not ("null" or "integer")
+            || !reader.IsDBNull(2) && reader.GetInt64(2) <= 0
+            || reader.GetString(5) != "text"
+            || !IsCanonicalTimestamp(reader.GetString(4))
+            || reader.Read())
+            Reject();
     }
 
     private static void ValidateRepositoryRows(SqliteConnection connection, SqliteTransaction? transaction)
