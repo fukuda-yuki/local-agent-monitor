@@ -148,6 +148,27 @@ public sealed class SanitizedOnlyHostCompositionTests
         Assert.DoesNotContain(host.RouteMethods, item => item.Pattern.StartsWith("/api/local-monitor/v1", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("/api/local-monitor/v1/repositories")]
+    [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001")]
+    [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001/locators")]
+    [InlineData("/api/local-monitor/v1/session-repository-actions")]
+    [InlineData("/api/local-monitor/v1/sessions/01900000-0000-7000-8000-000000000001/repository-assignment")]
+    public async Task RepositoryManagementNamespace_GetAndHeadRemainEmptyNoStoreNotFound(string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: QuietHost());
+
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
+        {
+            using var response = await host.Client.SendAsync(new HttpRequestMessage(method, path));
+
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+            Assert.True(response.Headers.CacheControl?.NoStore);
+        }
+    }
+
     [Fact]
     public async Task FrozenMachineFallbacks_KeepExactStatusBytesAndContentType()
     {

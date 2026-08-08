@@ -365,32 +365,50 @@ internal static class MonitorHost
         sanitizedImportStore.CreateSchema();
         var initialized = runtimeBackupService.CompleteMonitorInitialization(monitorLease);
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
-        if (!options.SanitizedOnly
-            && (testOptions is null || testOptions.LocalRepositoryApplicationFactory is not null))
+        if (!options.SanitizedOnly)
         {
-            if (testOptions?.LocalRepositoryApplicationFactory is { } localRepositoryApplicationFactory)
-            {
-                localRepositoryApplication = localRepositoryApplicationFactory(options.DatabasePath, timeProvider);
-            }
-            else
-            {
-                using (var localRepositoryConnection = new SqliteConnection(new SqliteConnectionStringBuilder
-                {
-                    DataSource = options.DatabasePath,
-                    Pooling = false,
-                }.ToString()))
-                {
-                    localRepositoryConnection.Open();
-                    LocalRepositoryCatalogSchemaV1.Ensure(localRepositoryConnection);
-                }
-                var localRepositoryQueue = new SqliteLocalRepositoryReconciliationStore(options.DatabasePath, timeProvider);
-                var localRepositoryStore = new SqliteLocalRepositoryCatalogStore(
+            var localRepositoryRawAvailability = new LocalRepositoryRawAvailabilityReader(projectionRawStore, retentionContext);
+            var localRepositoryQueue = new SqliteLocalRepositoryReconciliationStore(options.DatabasePath, timeProvider);
+            var localRepositoryResolver = new LocalRepositoryAssignmentResolver();
+            var localRepositoryStore = new SqliteLocalRepositoryCatalogStore(
+                options.DatabasePath,
+                localRepositoryQueue,
+                localRepositoryResolver,
+                timeProvider);
+            var localRepositoryWorker = new LocalRepositoryReconciliationWorker(
+                localRepositoryQueue,
+                localRepositoryRawAvailability,
+                localRepositoryStore,
+                timeProvider,
+                testOptions?.LocalRepositoryReconciliationCheckpoint);
+            var localRepositoryHostedService = new LocalRepositoryCatalogHostedService(
+                localRepositoryQueue,
+                localRepositoryRawAvailability,
+                localRepositoryWorker,
+                timeProvider,
+                testOptions?.LocalRepositoryCatalogHostedServiceCheckpoint);
+            localRepositoryApplication = testOptions?.LocalRepositoryApplicationFactory?.Invoke(options.DatabasePath, timeProvider)
+                ?? new LocalRepositoryCatalogApplication(localRepositoryStore);
+            testOptions?.LocalRepositoryCatalogCompositionObserver?.Invoke(new(
+                localRepositoryRawAvailability,
+                localRepositoryQueue,
+                localRepositoryResolver,
+                localRepositoryStore,
+                localRepositoryWorker,
+                localRepositoryApplication,
+                localRepositoryHostedService));
+            builder.Services.AddSingleton(localRepositoryRawAvailability);
+            builder.Services.AddSingleton(localRepositoryQueue);
+            builder.Services.AddSingleton(localRepositoryResolver);
+            builder.Services.AddSingleton(localRepositoryStore);
+            builder.Services.AddSingleton(localRepositoryWorker);
+            builder.Services.AddSingleton(localRepositoryApplication);
+            builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
+                new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
-                    localRepositoryQueue,
-                    new LocalRepositoryAssignmentResolver(),
-                    timeProvider);
-                localRepositoryApplication = new LocalRepositoryCatalogApplication(localRepositoryStore);
-            }
+                    services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
+                    services.GetRequiredService<ILocalArchiveEligibilitySnapshotContributor>()));
+            builder.Services.AddHostedService(_ => localRepositoryHostedService);
         }
         var pricingStore = new SqlitePricingStore(options.DatabasePath, timeProvider);
         var providerCatalog = pricingCatalogProvider.Catalog;
@@ -2158,6 +2176,15 @@ internal sealed class FixedOtlpTraceSourceMetadataProvider : IOtlpTraceSourceMet
     public OtlpTraceSourceMetadata GetMetadata() => metadata;
 }
 
+internal sealed record LocalRepositoryCatalogCompositionSnapshot(
+    LocalRepositoryRawAvailabilityReader RawAvailability,
+    SqliteLocalRepositoryReconciliationStore Queue,
+    LocalRepositoryAssignmentResolver Resolver,
+    SqliteLocalRepositoryCatalogStore Store,
+    LocalRepositoryReconciliationWorker Worker,
+    LocalRepositoryCatalogApplication Application,
+    LocalRepositoryCatalogHostedService HostedService);
+
 internal sealed class MonitorHostTestOptions
 {
     public IPricingCatalogProvider? PricingCatalogProvider { get; init; }
@@ -2242,6 +2269,12 @@ internal sealed class MonitorHostTestOptions
     public bool UseUserSecrets { get; init; } = true;
 
     public Func<string, TimeProvider, LocalRepositoryCatalogApplication>? LocalRepositoryApplicationFactory { get; init; }
+
+    public Action<LocalRepositoryCatalogCompositionSnapshot>? LocalRepositoryCatalogCompositionObserver { get; init; }
+
+    public Action<LocalRepositoryCatalogHostedServiceCheckpoint>? LocalRepositoryCatalogHostedServiceCheckpoint { get; init; }
+
+    public ILocalRepositoryReconciliationCheckpoint? LocalRepositoryReconciliationCheckpoint { get; init; }
 
     public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
 }
