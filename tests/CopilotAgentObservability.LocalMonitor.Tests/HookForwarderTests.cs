@@ -9,6 +9,122 @@ public sealed class HookForwarderTests
 {
     private static readonly DateTimeOffset ClaudeCaptureTime = DateTimeOffset.Parse("2026-07-13T12:34:56Z");
 
+    public static TheoryData<string, string> IntegralPermissionRequestTimestamps => new()
+    {
+        { "1", "1970-01-01T00:00:00.0010000+00:00" },
+        { "1.0", "1970-01-01T00:00:00.0010000+00:00" },
+        { "1e3", "1970-01-01T00:00:01.0000000+00:00" },
+        { "1.2e1", "1970-01-01T00:00:00.0120000+00:00" },
+        { "1000e-3", "1970-01-01T00:00:00.0010000+00:00" },
+        { "-0", "1970-01-01T00:00:00.0000000+00:00" },
+        { "0e999999999999999999999999999999", "1970-01-01T00:00:00.0000000+00:00" },
+        { "-62135596800000.0", "0001-01-01T00:00:00.0000000+00:00" },
+        { "2534023007999990e-1", "9999-12-31T23:59:59.9990000+00:00" },
+    };
+
+    public static TheoryData<string> InvalidPermissionRequestTimestamps => new()
+    {
+        "1e-1",
+        "1.1",
+        "12.01e1",
+        "1.0000000000000000000000000000000000000001",
+        "253402300799999.0000000000000000001",
+        "-62135596800001",
+        "253402300800000",
+        "99999999999999999999999999999999999999999999999999",
+        "1e999999999999999999999999999999",
+        "1e-999999999999999999999999999999",
+    };
+
+    public static TheoryData<string, string> InvalidPermissionRequestFieldValues => new()
+    {
+        { "hookName", "null" },
+        { "hookName", "1" },
+        { "hookName", "\"permissionRequest\"" },
+        { "sessionId", "null" },
+        { "sessionId", "1" },
+        { "sessionId", "{}" },
+        { "sessionId", "[]" },
+        { "sessionId", "true" },
+        { "timestamp", "null" },
+        { "timestamp", "\"0\"" },
+        { "timestamp", "{}" },
+        { "timestamp", "[]" },
+        { "timestamp", "true" },
+        { "cwd", "null" },
+        { "cwd", "1" },
+        { "cwd", "{}" },
+        { "cwd", "[]" },
+        { "cwd", "true" },
+        { "toolName", "null" },
+        { "toolName", "1" },
+        { "toolName", "{}" },
+        { "toolName", "[]" },
+        { "toolName", "true" },
+        { "toolInput", "null" },
+        { "toolInput", "\"value\"" },
+        { "toolInput", "1" },
+        { "toolInput", "[]" },
+        { "toolInput", "true" },
+        { "permissionSuggestions", "null" },
+        { "permissionSuggestions", "\"value\"" },
+        { "permissionSuggestions", "1" },
+        { "permissionSuggestions", "{}" },
+        { "permissionSuggestions", "true" },
+    };
+
+    public static TheoryData<string, string> ValidPermissionRequestIdentifiers
+    {
+        get
+        {
+            var data = new TheoryData<string, string>();
+            var values = new[]
+            {
+                "x",
+                new string('x', 256),
+                string.Concat(Enumerable.Repeat("\U0001F600", 256)),
+                "\u0009\u0020x\u3000",
+                "\u180E",
+            };
+            foreach (var propertyName in new[] { "sessionId", "toolName" })
+            {
+                foreach (var value in values)
+                {
+                    data.Add(propertyName, value);
+                }
+            }
+
+            return data;
+        }
+    }
+
+    public static TheoryData<string, string> InvalidPermissionRequestIdentifiers
+    {
+        get
+        {
+            const string exactWhitespace = "\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680"
+                + "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A"
+                + "\u2028\u2029\u202F\u205F\u3000";
+            var data = new TheoryData<string, string>();
+            var values = new[]
+            {
+                string.Empty,
+                exactWhitespace,
+                new string('x', 257),
+                string.Concat(Enumerable.Repeat("\U0001F600", 257)),
+            };
+            foreach (var propertyName in new[] { "sessionId", "toolName" })
+            {
+                foreach (var value in values)
+                {
+                    data.Add(propertyName, value);
+                }
+            }
+
+            return data;
+        }
+    }
+
     [Theory]
     [InlineData("SessionStart", "SessionStart")]
     [InlineData("UserPromptSubmit", "UserPromptSubmit")]
@@ -45,6 +161,225 @@ public sealed class HookForwarderTests
         Assert.Equal(eventType, @event.GetProperty("type").GetString());
         Assert.Equal("2026-07-11T01:02:03.0000000+00:00", @event.GetProperty("occurred_at").GetString());
         Assert.Equal(64, @event.GetProperty("source_event_id").GetString()!.Length);
+    }
+
+    [Theory]
+    [MemberData(nameof(IntegralPermissionRequestTimestamps))]
+    public async Task CopilotCliPermissionRequest_IntegralJsonNumberMapsExactUnixMilliseconds(
+        string timestampJson,
+        string expectedOccurredAt)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunAsync(CreatePermissionRequestPayload(timestampJson), handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
+        Assert.NotNull(handler.Request);
+        using var document = JsonDocument.Parse(handler.Body!);
+        var root = document.RootElement;
+        Assert.Equal("copilot-compatible-hook", root.GetProperty("source_adapter").GetString());
+        Assert.Equal("hook-unknown", root.GetProperty("source_surface").GetString());
+        Assert.Equal("native-123", root.GetProperty("native_session_id").GetString());
+        var @event = root.GetProperty("events")[0];
+        Assert.Equal("PermissionRequest", @event.GetProperty("type").GetString());
+        Assert.Equal(expectedOccurredAt, @event.GetProperty("occurred_at").GetString());
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidPermissionRequestTimestamps))]
+    public async Task CopilotCliPermissionRequest_NonIntegralOrOutOfRangeTimestampMakesNoRequest(string timestampJson)
+    {
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(timestampJson));
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_ExactHookNamePresenceForbidsLegacyFallback()
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["hookName"] = "\"Unsupported\"",
+            },
+            extraProperties:
+            [
+                new("session_id", "\"legacy-session\""),
+                new("hook_event_name", "\"Stop\""),
+            ]);
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_MixedLegacySelectorMakesNoRequest()
+    {
+        var payload = CreatePermissionRequestPayload(
+            extraProperties: [new("hook_event_name", "\"Stop\"")]);
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Theory]
+    [InlineData("hookName")]
+    [InlineData("sessionId")]
+    [InlineData("timestamp")]
+    [InlineData("cwd")]
+    [InlineData("toolName")]
+    [InlineData("toolInput")]
+    [InlineData("permissionSuggestions")]
+    public async Task CopilotCliPermissionRequest_MissingPropertyMakesNoRequest(string propertyName)
+    {
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(omittedProperty: propertyName));
+    }
+
+    [Theory]
+    [InlineData("hookName")]
+    [InlineData("sessionId")]
+    [InlineData("timestamp")]
+    [InlineData("cwd")]
+    [InlineData("toolName")]
+    [InlineData("toolInput")]
+    [InlineData("permissionSuggestions")]
+    public async Task CopilotCliPermissionRequest_DuplicatePropertyMakesNoRequest(string propertyName)
+    {
+        await AssertPermissionRequestRejectedAsync(CreatePermissionRequestPayload(duplicateProperty: propertyName));
+    }
+
+    [Theory]
+    [InlineData("hookName", "HookName")]
+    [InlineData("sessionId", "SessionId")]
+    [InlineData("timestamp", "Timestamp")]
+    [InlineData("cwd", "Cwd")]
+    [InlineData("toolName", "ToolName")]
+    [InlineData("toolInput", "ToolInput")]
+    [InlineData("permissionSuggestions", "PermissionSuggestions")]
+    public async Task CopilotCliPermissionRequest_WrongCasedPropertyMakesNoRequest(
+        string propertyName,
+        string wrongCasedName)
+    {
+        var exactValue = GetPermissionRequestPropertyJson(propertyName);
+        var payload = CreatePermissionRequestPayload(
+            omittedProperty: propertyName,
+            extraProperties: [new(wrongCasedName, exactValue)]);
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_UnknownPropertyMakesNoRequest()
+    {
+        var payload = CreatePermissionRequestPayload(extraProperties: [new("unknown", "true")]);
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidPermissionRequestFieldValues))]
+    public async Task CopilotCliPermissionRequest_WrongFieldValueOrTypeMakesNoRequest(
+        string propertyName,
+        string rawJson)
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [propertyName] = rawJson,
+            });
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Theory]
+    [MemberData(nameof(ValidPermissionRequestIdentifiers))]
+    public async Task CopilotCliPermissionRequest_IdentifierAcceptsExactScalarAndUtf8Bounds(
+        string propertyName,
+        string value)
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [propertyName] = JsonSerializer.Serialize(value),
+            });
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunAsync(payload, handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidPermissionRequestIdentifiers))]
+    public async Task CopilotCliPermissionRequest_IdentifierRejectsEmptyWhitespaceOrExceededBounds(
+        string propertyName,
+        string value)
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [propertyName] = JsonSerializer.Serialize(value),
+            });
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Theory]
+    [InlineData("sessionId")]
+    [InlineData("toolName")]
+    public async Task CopilotCliPermissionRequest_IdentifierRejectsUnpairedSurrogate(string propertyName)
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [propertyName] = "\"\\uD800\"",
+            });
+
+        await AssertPermissionRequestRejectedAsync(payload);
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_PreservesExactSessionIdAndExistingRecursiveSanitization()
+    {
+        var payload = CreatePermissionRequestPayload(
+            rawOverrides: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["sessionId"] = "\"  native-123  \"",
+                ["toolInput"] = """{"safe":"kept","token":"SYNTHETIC_SECRET_123","nested":{"authorization":"Bearer SYNTHETIC_BEARER_123"}}""",
+                ["permissionSuggestions"] = """[{"safe":"suggestion-kept","api_key":"SYNTHETIC_KEY_123"}]""",
+            });
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunAsync(payload, handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(1, handler.Attempts);
+        using var document = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("  native-123  ", document.RootElement.GetProperty("native_session_id").GetString());
+        var forwarded = document.RootElement.GetProperty("events")[0].GetProperty("payload").GetRawText();
+        Assert.Contains("kept", forwarded, StringComparison.Ordinal);
+        Assert.Contains("suggestion-kept", forwarded, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYNTHETIC_SECRET_123", forwarded, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYNTHETIC_BEARER_123", forwarded, StringComparison.Ordinal);
+        Assert.DoesNotContain("SYNTHETIC_KEY_123", forwarded, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CopilotCliPermissionRequest_CanonicalSourceIdIgnoresPropertyOrder()
+    {
+        var first = new RecordingHandler(HttpStatusCode.NoContent);
+        var second = new RecordingHandler(HttpStatusCode.NoContent);
+
+        await RunAsync(CreatePermissionRequestPayload("1.2e1"), handler: first);
+        await RunAsync(CreatePermissionRequestPayload("1.2e1", reverseProperties: true), handler: second);
+
+        Assert.NotNull(first.Body);
+        Assert.NotNull(second.Body);
+        Assert.Equal(ReadEventId(first.Body), ReadEventId(second.Body));
     }
 
     [Fact]
@@ -472,6 +807,86 @@ public sealed class HookForwarderTests
 
     private static string ReadClaudeFixture(string name) => File.ReadAllText(Path.Combine(
         AppContext.BaseDirectory, "TestData", "Claude", "hooks", name));
+
+    private static string CreatePermissionRequestPayload(
+        string timestampJson = "0",
+        IReadOnlyDictionary<string, string>? rawOverrides = null,
+        string? omittedProperty = null,
+        string? duplicateProperty = null,
+        bool reverseProperties = false,
+        IReadOnlyList<KeyValuePair<string, string>>? extraProperties = null)
+    {
+        var properties = new List<KeyValuePair<string, string>>
+        {
+            new("hookName", "\"PermissionRequest\""),
+            new("sessionId", "\"native-123\""),
+            new("timestamp", timestampJson),
+            new("cwd", "\"SYNTHETIC_CWD\""),
+            new("toolName", "\"Read\""),
+            new("toolInput", "{}"),
+            new("permissionSuggestions", "[]"),
+        };
+
+        if (rawOverrides is not null)
+        {
+            for (var index = 0; index < properties.Count; index++)
+            {
+                if (rawOverrides.TryGetValue(properties[index].Key, out var replacement))
+                {
+                    properties[index] = new KeyValuePair<string, string>(properties[index].Key, replacement);
+                }
+            }
+        }
+
+        if (omittedProperty is not null)
+        {
+            properties.RemoveAll(item => item.Key == omittedProperty);
+        }
+
+        if (duplicateProperty is not null)
+        {
+            var duplicate = properties.Single(item => item.Key == duplicateProperty);
+            properties.Add(duplicate);
+        }
+
+        if (extraProperties is not null)
+        {
+            properties.AddRange(extraProperties);
+        }
+
+        if (reverseProperties)
+        {
+            properties.Reverse();
+        }
+
+        return "{" + string.Join(",", properties.Select(item =>
+            JsonSerializer.Serialize(item.Key) + ":" + item.Value)) + "}";
+    }
+
+    private static string GetPermissionRequestPropertyJson(string propertyName) => propertyName switch
+    {
+        "hookName" => "\"PermissionRequest\"",
+        "sessionId" => "\"native-123\"",
+        "timestamp" => "0",
+        "cwd" => "\"SYNTHETIC_CWD\"",
+        "toolName" => "\"Read\"",
+        "toolInput" => "{}",
+        "permissionSuggestions" => "[]",
+        _ => throw new ArgumentOutOfRangeException(nameof(propertyName)),
+    };
+
+    private static async Task AssertPermissionRequestRejectedAsync(string payload)
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+
+        var result = await RunAsync(payload, handler: handler);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StdOut);
+        Assert.Empty(result.StdErr);
+        Assert.Equal(0, handler.Attempts);
+        Assert.Null(handler.Request);
+    }
 
     private static string ReadEventId(string body)
     {

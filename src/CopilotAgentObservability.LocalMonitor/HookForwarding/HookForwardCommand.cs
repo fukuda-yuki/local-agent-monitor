@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -238,24 +239,47 @@ internal static class HookForwardCommand
         using (document)
         {
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || !TryGetString(root, ["session_id", "sessionId", "conversation_id", "conversationId"], out var nativeSessionId)
-                || string.IsNullOrWhiteSpace(nativeSessionId)
-                || nativeSessionId.Length > 256
-                || !TryGetString(root, ["hook_event_name", "hookEventName", "event_name", "eventName"], out var hookName)
-                || !EventTypes.TryGetValue(hookName, out var eventType))
+            if (root.ValueKind != JsonValueKind.Object)
             {
                 return false;
             }
 
-            var sourceSurface = TryGetString(root, ["source_surface", "sourceSurface"], out var suppliedSurface)
-                && (suppliedSurface == "copilot-cli" || suppliedSurface == "vscode")
-                    ? suppliedSurface
-                    : "hook-unknown";
-            var occurredAt = TryGetString(root, ["timestamp", "occurred_at", "occurredAt"], out var timestamp)
-                && DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedTimestamp)
-                    ? parsedTimestamp
-                    : DateTimeOffset.UtcNow;
+            string nativeSessionId;
+            string eventType;
+            string sourceSurface;
+            DateTimeOffset occurredAt;
+            if (HasExactRootProperty(root, "hookName"))
+            {
+                if (!TryReadPermissionRequest(root, out nativeSessionId, out occurredAt))
+                {
+                    return false;
+                }
+
+                eventType = "PermissionRequest";
+                sourceSurface = "hook-unknown";
+            }
+            else
+            {
+                if (!TryGetString(root, ["session_id", "sessionId", "conversation_id", "conversationId"], out nativeSessionId)
+                    || string.IsNullOrWhiteSpace(nativeSessionId)
+                    || nativeSessionId.Length > 256
+                    || !TryGetString(root, ["hook_event_name", "hookEventName", "event_name", "eventName"], out var hookName)
+                    || !EventTypes.TryGetValue(hookName, out var mappedEventType)
+                    || mappedEventType is null)
+                {
+                    return false;
+                }
+
+                eventType = mappedEventType;
+                sourceSurface = TryGetString(root, ["source_surface", "sourceSurface"], out var suppliedSurface)
+                    && (suppliedSurface == "copilot-cli" || suppliedSurface == "vscode")
+                        ? suppliedSurface
+                        : "hook-unknown";
+                occurredAt = TryGetString(root, ["timestamp", "occurred_at", "occurredAt"], out var timestamp)
+                    && DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedTimestamp)
+                        ? parsedTimestamp
+                        : DateTimeOffset.UtcNow;
+            }
 
             if (!IsOptionalStringValid(root, ["parent_event_id", "parentEventId"], 256)
                 || !IsOptionalStringValid(root, ["run_id", "runId", "run_native_id", "runNativeId"], 256)
@@ -291,6 +315,292 @@ internal static class HookForwardCommand
             envelope = Encoding.UTF8.GetString(stream.ToArray());
             return true;
         }
+    }
+
+    private static bool HasExactRootProperty(JsonElement root, string name)
+    {
+        foreach (var property in root.EnumerateObject())
+        {
+            if (property.NameEquals(name))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadPermissionRequest(
+        JsonElement root,
+        out string nativeSessionId,
+        out DateTimeOffset occurredAt)
+    {
+        nativeSessionId = string.Empty;
+        occurredAt = default;
+        JsonElement hookName = default;
+        JsonElement sessionId = default;
+        JsonElement timestamp = default;
+        JsonElement cwd = default;
+        JsonElement toolName = default;
+        JsonElement toolInput = default;
+        JsonElement permissionSuggestions = default;
+        var seen = 0;
+
+        foreach (var property in root.EnumerateObject())
+        {
+            int bit;
+            switch (property.Name)
+            {
+                case "hookName":
+                    bit = 1 << 0;
+                    hookName = property.Value;
+                    break;
+                case "sessionId":
+                    bit = 1 << 1;
+                    sessionId = property.Value;
+                    break;
+                case "timestamp":
+                    bit = 1 << 2;
+                    timestamp = property.Value;
+                    break;
+                case "cwd":
+                    bit = 1 << 3;
+                    cwd = property.Value;
+                    break;
+                case "toolName":
+                    bit = 1 << 4;
+                    toolName = property.Value;
+                    break;
+                case "toolInput":
+                    bit = 1 << 5;
+                    toolInput = property.Value;
+                    break;
+                case "permissionSuggestions":
+                    bit = 1 << 6;
+                    permissionSuggestions = property.Value;
+                    break;
+                default:
+                    return false;
+            }
+
+            if ((seen & bit) != 0)
+            {
+                return false;
+            }
+
+            seen |= bit;
+        }
+
+        if (seen != 0b111_1111
+            || hookName.ValueKind != JsonValueKind.String
+            || !hookName.ValueEquals("PermissionRequest")
+            || !TryReadPermissionIdentifier(sessionId, out nativeSessionId)
+            || !TryReadPermissionIdentifier(toolName, out _)
+            || cwd.ValueKind != JsonValueKind.String
+            || toolInput.ValueKind != JsonValueKind.Object
+            || permissionSuggestions.ValueKind != JsonValueKind.Array
+            || !TryReadPermissionTimestamp(timestamp, out occurredAt))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryReadPermissionIdentifier(JsonElement element, out string value)
+    {
+        value = string.Empty;
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        try
+        {
+            value = element.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+
+        var remaining = value.AsSpan();
+        var scalarCount = 0;
+        var utf8ByteCount = 0;
+        var hasNonWhitespace = false;
+        while (!remaining.IsEmpty)
+        {
+            var status = Rune.DecodeFromUtf16(remaining, out var rune, out var consumed);
+            if (status != OperationStatus.Done)
+            {
+                return false;
+            }
+
+            scalarCount++;
+            utf8ByteCount += rune.Utf8SequenceLength;
+            if (scalarCount > 256 || utf8ByteCount > 1024)
+            {
+                return false;
+            }
+
+            hasNonWhitespace |= !IsPermissionWhitespace(rune.Value);
+            remaining = remaining[consumed..];
+        }
+
+        return scalarCount > 0 && hasNonWhitespace;
+    }
+
+    private static bool IsPermissionWhitespace(int scalarValue) => scalarValue is
+        >= 0x0009 and <= 0x000D
+        or 0x0020
+        or 0x0085
+        or 0x00A0
+        or 0x1680
+        or >= 0x2000 and <= 0x200A
+        or 0x2028
+        or 0x2029
+        or 0x202F
+        or 0x205F
+        or 0x3000;
+
+    private static bool TryReadPermissionTimestamp(JsonElement element, out DateTimeOffset occurredAt)
+    {
+        occurredAt = default;
+        if (element.ValueKind != JsonValueKind.Number
+            || !TryParseExactIntegralNumber(element.GetRawText(), out var unixMilliseconds)
+            || unixMilliseconds < -62_135_596_800_000L
+            || unixMilliseconds > 253_402_300_799_999L)
+        {
+            return false;
+        }
+
+        occurredAt = DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds);
+        return true;
+    }
+
+    private static bool TryParseExactIntegralNumber(string raw, out long value)
+    {
+        value = 0;
+        var index = 0;
+        var negative = raw[index] == '-';
+        if (negative)
+        {
+            index++;
+        }
+
+        var exponentIndex = raw.IndexOfAny(['e', 'E'], index);
+        var coefficientEnd = exponentIndex >= 0 ? exponentIndex : raw.Length;
+        var decimalPointIndex = raw.IndexOf('.', index, coefficientEnd - index);
+        var fractionDigitCount = decimalPointIndex >= 0
+            ? coefficientEnd - decimalPointIndex - 1
+            : 0;
+        var coefficient = new StringBuilder(coefficientEnd - index - (decimalPointIndex >= 0 ? 1 : 0));
+        for (var coefficientIndex = index; coefficientIndex < coefficientEnd; coefficientIndex++)
+        {
+            if (raw[coefficientIndex] != '.')
+            {
+                coefficient.Append(raw[coefficientIndex]);
+            }
+        }
+
+        var digits = coefficient.ToString();
+        if (digits.All(static digit => digit == '0'))
+        {
+            return true;
+        }
+
+        long exponent = 0;
+        if (exponentIndex >= 0)
+        {
+            var exponentCursor = exponentIndex + 1;
+            var exponentNegative = raw[exponentCursor] == '-';
+            if (raw[exponentCursor] is '+' or '-')
+            {
+                exponentCursor++;
+            }
+
+            var saturation = raw.Length + 16L;
+            for (; exponentCursor < raw.Length; exponentCursor++)
+            {
+                var digit = raw[exponentCursor] - '0';
+                exponent = exponent > (saturation - digit) / 10
+                    ? saturation
+                    : exponent * 10 + digit;
+            }
+
+            if (exponentNegative)
+            {
+                exponent = -exponent;
+            }
+        }
+
+        var decimalShift = exponent - fractionDigitCount;
+        var integerDigitEnd = digits.Length;
+        var appendedZeroCount = 0;
+        if (decimalShift < 0)
+        {
+            var removedDigitCount = -decimalShift;
+            if (removedDigitCount > digits.Length)
+            {
+                return false;
+            }
+
+            integerDigitEnd -= (int)removedDigitCount;
+            for (var removedIndex = integerDigitEnd; removedIndex < digits.Length; removedIndex++)
+            {
+                if (digits[removedIndex] != '0')
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            if (decimalShift > 15)
+            {
+                return false;
+            }
+
+            appendedZeroCount = (int)decimalShift;
+        }
+
+        var firstSignificantDigit = 0;
+        while (firstSignificantDigit < integerDigitEnd && digits[firstSignificantDigit] == '0')
+        {
+            firstSignificantDigit++;
+        }
+
+        var significantDigitCount = integerDigitEnd - firstSignificantDigit + appendedZeroCount;
+        if (significantDigitCount > 15)
+        {
+            return false;
+        }
+
+        var maximumMagnitude = negative ? 62_135_596_800_000UL : 253_402_300_799_999UL;
+        ulong magnitude = 0;
+        for (var digitIndex = firstSignificantDigit; digitIndex < integerDigitEnd; digitIndex++)
+        {
+            var digit = (uint)(digits[digitIndex] - '0');
+            if (magnitude > (maximumMagnitude - digit) / 10)
+            {
+                return false;
+            }
+
+            magnitude = magnitude * 10 + digit;
+        }
+
+        for (var zeroIndex = 0; zeroIndex < appendedZeroCount; zeroIndex++)
+        {
+            if (magnitude > maximumMagnitude / 10)
+            {
+                return false;
+            }
+
+            magnitude *= 10;
+        }
+
+        value = negative ? -(long)magnitude : (long)magnitude;
+        return true;
     }
 
     private static void WriteOptionalString(Utf8JsonWriter writer, JsonElement root, string outputName, string[] names)
