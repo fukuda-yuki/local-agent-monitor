@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.ConfigCli.Setup.Capabilities;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -194,6 +195,83 @@ public sealed class SourceCompatibilityIngestionTests
             item => item.EventId == beforeEvent.EventId
                 && item.MatchKind == beforeEvent.MatchKind
                 && item.SourceEventId == beforeEvent.SourceEventId);
+    }
+
+    [Fact]
+    public async Task PostTraces_CurrentMarkerlessCliPersistsUnrecognisedProjectsNullAndSelectsNoManifest()
+    {
+        const string traceId = "11111111111111111111111111111111";
+        const string payload =
+            """
+            {"resourceSpans":[{
+              "resource":{"attributes":[
+                {"key":"service.name","value":{"stringValue":""}},
+                {"key":"service.version","value":{"stringValue":"1.0.75"}}
+              ]},
+              "scopeSpans":[{"spans":[{
+                "traceId":"11111111111111111111111111111111",
+                "spanId":"1111111111111111",
+                "name":"chat gpt-4o"
+              }]}]
+            }]}
+            """;
+        var inventory = OtlpTracePayloadDecoder.DecodeTracePayload(
+            "application/json", Encoding.UTF8.GetBytes(payload)).StructuralInventory;
+        var registry = VerifiedSourceFingerprintRegistry.Create(
+            [VerifiedSourceFingerprintEvidence.Create("github-copilot-cli", "1.0.75", inventory.SchemaFingerprint)],
+            [],
+            []);
+        var metadata = OtlpTraceSourceMetadata.Create(
+            "github-copilot-cli",
+            "1.0.75",
+            "raw-otlp",
+            "1",
+            SourceCaptureContentState.Unsupported);
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
+        {
+            StartProjectionWorker = false,
+            UseUserSecrets = false,
+            SourceFingerprintRegistry = registry,
+            SourceMetadataProvider = new FixedOtlpTraceSourceMetadataProvider(metadata),
+        });
+
+        var response = await host.Client.PostAsync("/v1/traces", JsonContent(payload));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var sourceStore = new SqliteSourceCompatibilityStore(
+            temp.DatabasePath,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        Assert.Equal(
+            new TraceSourceResolutionRow(traceId, TraceSourceResolutionState.Unrecognised, null),
+            sourceStore.GetTraceSourceResolution(traceId));
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(traceId, TraceSourceVersionResolutionState.Resolved, "1.0.75"),
+            sourceStore.GetTraceSourceVersionResolution(traceId));
+        var sourceResolution = Assert.Single(OtlpTraceSourceResolver.Resolve(payload));
+        Assert.Null(SourceCapabilityManifestLoader.LoadForTraceSourceResolution(sourceResolution));
+
+        var rawStore = temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var projectionStore = new RawTelemetryStoreProjectionStore(rawStore);
+        var health = new MonitorHealthState();
+        health.MarkMigrationComplete();
+        var worker = new ProjectionWorker(projectionStore, health, sourceStore);
+        await worker.RunProjectionPassAsync();
+
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        using (var trace = connection.CreateCommand())
+        {
+            trace.CommandText = "SELECT client_kind FROM monitor_traces WHERE trace_id=$trace_id;";
+            trace.Parameters.AddWithValue("$trace_id", traceId);
+            Assert.Equal(DBNull.Value, trace.ExecuteScalar());
+        }
+        using (var ingestion = connection.CreateCommand())
+        {
+            ingestion.CommandText = "SELECT client_kind FROM monitor_ingestions WHERE trace_id=$trace_id;";
+            ingestion.Parameters.AddWithValue("$trace_id", traceId);
+            Assert.Equal(DBNull.Value, ingestion.ExecuteScalar());
+        }
     }
 
     [Fact]
