@@ -78,6 +78,13 @@ model, Repository, path, and time are never attribution evidence.
 Langfuse-style trace's `metadata.resourceAttributes`; its legacy input shape
 does not permit arbitrary `client.kind` values to bypass these semantics.
 
+A current Copilot CLI trace with absent `client.kind` and a present zero-length
+`service.name` is therefore unrecognised and keeps `client_kind` null. An
+observed trace-scoped source version remains separate metadata and cannot fill
+that null. The `service.name=github-copilot` mapping remains accepted only when
+that non-empty exact value is present; process or invocation context cannot
+substitute for it.
+
 Issue #56 does not treat a dataset row with manually supplied
 `success_status=pass` as an objective Session evaluation. The repository-safe
 dataset has no durable Session/Run foreign key. A quality fact participates in

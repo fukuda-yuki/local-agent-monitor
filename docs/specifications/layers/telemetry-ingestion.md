@@ -582,6 +582,13 @@ there is no second resolver or database reader:
 Selection is fail closed: there is no guess, default, first-record choice,
 compatibility shim, or fallback.
 
+A current Copilot CLI trace with absent `client.kind` and a present zero-length
+`service.name` is `unrecognised` and therefore selects no manifest. Any
+trace-scoped `service.version` observed on that trace remains available to the
+separate source-version authority, but it never supplies source identity. The
+`service.name=github-copilot` mapping remains valid only for a trace that
+actually carries that non-empty exact value.
+
 ### Copilot CLI Skill projection
 
 The Skill projection is source-scoped to `github-copilot-cli`. Its
@@ -1003,6 +1010,19 @@ otherwise attribution is missing. No unresolved state falls back to a
 record-global trace/resource value or to source version, agent, model,
 Repository, path, Session, or time. Source-version resolution remains a
 separate trace-scoped authority.
+
+The current-producer validation gate is deliberately narrower than the
+accepted mapping table. The accepted current Copilot CLI producer shape—absent
+`client.kind` and present zero-length `service.name`—is outside Issue #151's
+positive CLI live-validation gate. It must retain the fail-closed result above:
+`unrecognised`, persisted `client_kind=null`, and no selected capability
+manifest. A future CLI trace that actually carries an accepted exact tuple
+still follows the existing resolver, but making that trace a required positive
+live gate requires new accepted producer evidence and a new Product Owner
+decision. A source version, process or invocation context, Repository, path, or
+time cannot substitute for the absent identity tuple. Positive VS Code
+producer-to-receiver-to-projection validation remains required on the exact
+candidate SHA using a signed-in producer in a disposable isolated profile.
 
 Validated adapter ingestion commits the per-raw/per-trace evidence and an
 idempotent durable trace-reconciliation queue entry in the same transaction as
