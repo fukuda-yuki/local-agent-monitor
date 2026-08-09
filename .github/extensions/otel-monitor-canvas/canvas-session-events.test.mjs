@@ -133,6 +133,90 @@ test("recursively filters secret keys and credential-shaped strings without muta
     assert.equal(input.token, "secret-token");
 });
 
+test("preserves bounded totalTokens only for exact subagent completed events", () => {
+    for (const value of [0, 1, 2_147_483_647]) {
+        const mapped = mapSdkEvent({
+            id: `completed-${value}`,
+            type: "subagent.completed",
+            timestamp: "2026-07-11T01:02:03.000Z",
+            data: {
+                totalTokens: value,
+                safe: "kept",
+                token: "remove-me",
+                nested: { ["pass" + "word"]: "remove-me" },
+            },
+        });
+
+        assert.deepEqual(mapped.payload, {
+            totalTokens: value,
+            safe: "kept",
+            token: "[REDACTED]",
+            nested: { ["pass" + "word"]: "[REDACTED]" },
+        });
+    }
+});
+
+test("omits invalid totalTokens values before posting while retaining safe fields", () => {
+    const cases = [
+        ["overflow", 2_147_483_648],
+        ["negative", -1],
+        ["negative-zero", -0],
+        ["fraction", 1.5],
+        ["nan", Number.NaN],
+        ["infinity", Number.POSITIVE_INFINITY],
+        ["string", "1"],
+        ["null", null],
+        ["boolean", true],
+        ["object", { value: 1 }],
+        ["array", [1]],
+    ];
+
+    for (const [label, value] of cases) {
+        const mapped = mapSdkEvent({
+            id: `invalid-${label}`,
+            type: "subagent.completed",
+            timestamp: "2026-07-11T01:02:03.000Z",
+            data: { totalTokens: value, safe: label },
+        });
+
+        assert.deepEqual(mapped.payload, { safe: label }, label);
+    }
+});
+
+test("does not preserve totalTokens on a wrong event, path, case, or similar name", () => {
+    for (const type of ["subagent.failed", "Subagent.Completed", "assistant.message"]) {
+        const mapped = mapSdkEvent({
+            id: `wrong-event-${type}`,
+            type,
+            timestamp: "2026-07-11T01:02:03.000Z",
+            data: { totalTokens: 7, safe: "kept" },
+        });
+        assert.deepEqual(mapped.payload, { safe: "kept" }, type);
+    }
+
+    const nested = mapSdkEvent({
+        id: "wrong-depth",
+        type: "subagent.completed",
+        timestamp: "2026-07-11T01:02:03.000Z",
+        data: {
+            nested: { totalTokens: 7 },
+            array: [{ totalTokens: 8 }],
+            safe: "kept",
+        },
+    });
+    assert.deepEqual(nested.payload, { nested: {}, array: [{}], safe: "kept" });
+
+    for (const key of ["TotalTokens", "totaltokens", "total_tokens", "totalToken", "totalTokens2", "myTotalTokens"]) {
+        const mapped = mapSdkEvent({
+            id: `wrong-name-${key}`,
+            type: "subagent.completed",
+            timestamp: "2026-07-11T01:02:03.000Z",
+            data: { [key]: 7, safe: "kept" },
+        });
+        assert.deepEqual(mapped.payload, { safe: "kept" }, key);
+    }
+});
+
 test("redacts credential-shaped substrings embedded in otherwise ordinary text", () => {
     const payload = sanitizeSessionPayload({
         text: "before Bearer abc.def.ghi after",

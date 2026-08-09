@@ -100,7 +100,7 @@ internal sealed class SessionEventNormalizer
         var contents = persistedInputEvents.Where(item => !existingSourceIds.Contains(item.SourceEventId!) && !IsUsage(item.Type!) && IsSupported(item.Type!)).Select(item => new SessionEventContent(
             knownEventIds[item.SourceEventId!],
             "application/json",
-            SessionSecretFilter.Filter(item.Payload),
+            SessionSecretFilter.Filter(item.Type!, item.Payload),
             now,
             now.AddDays(90))).ToArray();
 

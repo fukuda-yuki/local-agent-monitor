@@ -4,17 +4,21 @@ namespace CopilotAgentObservability.LocalMonitor.Sessions;
 
 internal static class SessionSecretFilter
 {
+    private const int MaximumTotalTokens = 2_147_483_647;
     private static readonly string[] SecretFragments =
     [
         "authorization", "credential", "password", "passwd", "secret", "token", "api_key", "apikey", "access_key", "private_key",
     ];
 
-    public static string Filter(JsonElement payload)
+    public static string Filter(string eventType, JsonElement payload)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
-            WriteFiltered(writer, payload);
+            WriteFiltered(
+                writer,
+                payload,
+                string.Equals(eventType, "subagent.completed", StringComparison.Ordinal));
         }
         return Encoding.UTF8.GetString(stream.ToArray());
     }
@@ -29,16 +33,29 @@ internal static class SessionSecretFilter
             string.Equals(normalized, string.Concat(fragment.Where(char.IsAsciiLetterOrDigit)), StringComparison.OrdinalIgnoreCase));
     }
 
-    private static void WriteFiltered(Utf8JsonWriter writer, JsonElement value)
+    private static void WriteFiltered(
+        Utf8JsonWriter writer,
+        JsonElement value,
+        bool allowTotalTokens = false)
     {
         switch (value.ValueKind)
         {
             case JsonValueKind.Object:
                 writer.WriteStartObject();
+                var exactTotalTokensCount = allowTotalTokens
+                    ? value.EnumerateObject().Count(property => property.NameEquals("totalTokens"))
+                    : 0;
                 foreach (var property in value.EnumerateObject())
                 {
                     if (SecretFragments.Any(fragment => property.Name.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
                     {
+                        if (allowTotalTokens
+                            && exactTotalTokensCount == 1
+                            && property.NameEquals("totalTokens")
+                            && TryReadTotalTokens(property.Value, out var totalTokens))
+                        {
+                            writer.WriteNumber("totalTokens", totalTokens);
+                        }
                         continue;
                     }
                     writer.WritePropertyName(property.Name);
@@ -58,6 +75,31 @@ internal static class SessionSecretFilter
                 value.WriteTo(writer);
                 break;
         }
+    }
+
+    private static bool TryReadTotalTokens(JsonElement value, out int totalTokens)
+    {
+        totalTokens = 0;
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            return false;
+        }
+
+        var raw = value.GetRawText();
+        if (raw.Length == 0 || (raw[0] == '0' ? raw.Length != 1 : raw[0] is < '1' or > '9'))
+        {
+            return false;
+        }
+        for (var index = 1; index < raw.Length; index++)
+        {
+            if (raw[index] is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+        return value.TryGetInt32(out totalTokens)
+            && totalTokens >= 0
+            && totalTokens <= MaximumTotalTokens;
     }
 
     private static string SanitizeString(string value)

@@ -5,6 +5,7 @@ export const SESSION_EVENT_VERSION_HEADER = "X-CAO-Session-Event-Version";
 const SESSION_INGEST_PATH = "/api/session-ingest/v1/events";
 const MAX_EVENTS_PER_BATCH = 100;
 const MAX_BATCH_BYTES = 1_048_576;
+const MAX_TOTAL_TOKENS = 2_147_483_647;
 const REDACTED = "[REDACTED]";
 const EVENT_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
 const OFFSET_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-](\d{2}):(\d{2}))$/;
@@ -35,6 +36,18 @@ function containsReasoningPayload(key) {
         || normalized.includes("chainofthought")
         || normalized.includes("delta")
         || normalized === "encryptedcontent";
+}
+
+function isTotalTokensCandidateKey(key) {
+    const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    return normalized.includes("totaltoken");
+}
+
+function isValidTotalTokens(value) {
+    return Number.isSafeInteger(value)
+        && !Object.is(value, -0)
+        && value >= 0
+        && value <= MAX_TOTAL_TOKENS;
 }
 
 function isOffsetTimestamp(value) {
@@ -87,7 +100,7 @@ function nonBlankString(value, maximumLength) {
         : null;
 }
 
-function sanitizedValue(value, seen) {
+function sanitizedValue(value, seen, allowTotalTokens = false) {
     if (typeof value === "string") {
         return redactCredentialSubstrings(value);
     }
@@ -109,8 +122,21 @@ function sanitizedValue(value, seen) {
     }
 
     const result = {};
-    for (const [key, item] of Object.entries(value)) {
+    const properties = Object.entries(value);
+    const exactTotalTokensCount = allowTotalTokens
+        ? properties.filter(([key]) => key === "totalTokens").length
+        : 0;
+    for (const [key, item] of properties) {
         if (containsReasoningPayload(key)) {
+            continue;
+        }
+        if (isTotalTokensCandidateKey(key)) {
+            if (allowTotalTokens
+                && exactTotalTokensCount === 1
+                && key === "totalTokens"
+                && isValidTotalTokens(item)) {
+                result[key] = item;
+            }
             continue;
         }
         result[key] = isSecretKey(key) ? REDACTED : sanitizedValue(item, seen);
@@ -119,11 +145,11 @@ function sanitizedValue(value, seen) {
     return result;
 }
 
-export function sanitizeSessionPayload(payload) {
+export function sanitizeSessionPayload(payload, eventType = null) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         return {};
     }
-    return sanitizedValue(payload, new WeakSet());
+    return sanitizedValue(payload, new WeakSet(), eventType === "subagent.completed");
 }
 
 function eventRunNativeId(event) {
@@ -161,7 +187,7 @@ export function mapSdkEvent(event) {
         parent_event_id: nonBlankString(event?.parentId, 256),
         run_native_id: eventRunNativeId(event),
         trace_id: nonBlankString(event?.data?.traceId, 128),
-        payload: sanitizeSessionPayload(event?.data ?? {}),
+        payload: sanitizeSessionPayload(event?.data ?? {}, type),
     };
 }
 
