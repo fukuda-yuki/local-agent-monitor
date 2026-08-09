@@ -256,6 +256,20 @@ payload is secret-filtered into `session_event_content`. `assistant.usage` and
 `session.usage_info` are stored with `content_state=not_captured` and no content
 row. The existing five-value `content_state` vocabulary is unchanged.
 
+For exact event type `subagent.completed`, the only secret-key exception is one
+direct, ordinal case-sensitive root property named `totalTokens`. A candidate
+qualifies only when the outgoing and received payload each contain exactly one
+such occurrence, represented by an original JSON number token matching
+`0|[1-9][0-9]*` in the inclusive range `0..2147483647`. Canvas admits only a
+finite JavaScript integer in that range, rejects negative zero, and emits the
+canonical unsigned-decimal token. It omits an invalid candidate before the
+POST; the receiver independently revalidates the raw JSON token and omits every
+candidate occurrence on any value or cardinality failure. Missing and rejected
+values remain absent, valid zero is retained as numeric `0`, and the remaining
+valid event and safe payload fields are preserved. Wrong event, case, depth, or
+similar names do not qualify, and all other recursive secret-key removal and
+credential-value redaction is unchanged.
+
 An unknown but syntactically valid event `type` is stored with normalized status
 `unsupported`, increments `unsupported_event_version_count`, and prevents
 `full` completeness. The normalizer must not guess a mapping. Event `payload`
@@ -351,6 +365,9 @@ conversation ID for Session binding or merge.
 
 - App/SDK capture uses Canvas `ctx.sessionId` as the native session ID.
 - Persisted SDK events are stored through the Session subsystem.
+- Canvas applies the bounded `subagent.completed` `totalTokens` admission above
+  before enqueueing or posting an event; receiver validation remains
+  independent.
 - Ephemeral usage is aggregated rather than persisted as event content.
 - Reasoning and streaming deltas are not persisted.
 - Capture begins at the first Canvas open. Earlier events are not reconstructed;

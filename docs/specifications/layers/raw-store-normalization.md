@@ -445,6 +445,16 @@ The Session subsystem owns these additive tables:
 `session_native_ids` preserves source identity separately from local IDs.
 `session_events` stores normalized event metadata; raw-bearing content is
 secret-filtered and stored separately in `session_event_content`.
+The sole filter exception preserves an independently validated, exact root
+`totalTokens` JSON number only for `subagent.completed`, only when its token is
+canonical unsigned decimal and its value is in `0..2147483647` inclusive. Its
+ceiling is a local admission/security limit, not producer semantics. Its
+authority ends inside the filtered `session_event_content.content_json`: it
+does not populate `session_runs.total_tokens`, any public DTO or aggregate, and
+it does not authorize migration, backfill, replay repair, or a runtime-backup
+variant. Missing or rejected candidates stay absent; unrelated safe content
+continues to be stored, and every other secret-key and credential-value rule is
+unchanged.
 `session_projection_state` owns the dedicated post-monitor-projection OTel
 enrichment cursor.
 

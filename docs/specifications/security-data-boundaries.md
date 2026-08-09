@@ -1105,6 +1105,17 @@ and 1..100 events, and return `204` only after commit. Fixed error responses use
 only `{ "error": "<code>" }`; responses and logs never echo payloads, raw
 exception details, PII, credentials, tokens, or local paths.
 
+Session payload secret filtering has exactly one key-name exception. Only an
+exact ordinal, case-sensitive root property named `totalTokens` on exact event
+type `subagent.completed` may survive, and only when it occurs exactly once and
+its original JSON number token matches `0|[1-9][0-9]*` and is in the inclusive
+range `0..2147483647`. String, null, Boolean, object, array, negative, fraction,
+exponent, negative-zero, out-of-range, duplicate, wrong-case, nested,
+similarly-named, and wrong-event candidates are omitted while the otherwise
+valid event and its safe fields remain admitted. Zero remains numeric `0`;
+missing or rejected evidence remains absent. Every other recursive secret-key
+removal and string-value credential redaction rule remains unchanged.
+
 Claude Hook provenance in that envelope is sanitized metadata, not content.
 `source_application_version`, `adapter_version`, and `normalization_version`
 accept only the closed metadata-token grammar in the Session ingest interface;
