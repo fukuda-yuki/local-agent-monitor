@@ -4,6 +4,7 @@ Status: **Accepted**
 Authority: Issue #132  
 Product design input: Issue #153  
 Date: 2026-07-30
+Route/transport amendment: PO136-A2b, 2026-08-09
 
 ## 1. Product boundary
 
@@ -59,6 +60,10 @@ Human pages exist only in raw-default posture.
 
 Opaque IDs are used in routes. Repository display name, remote URL, local path, prompt text and raw values never appear as route identity.
 
+Path identity, per-page query grammars, HTTP methods/statuses, browser history
+and retired-route dispatch are exact in
+[Local Monitor v1 Route and Session Explorer Transport](local-monitor-v1-route-transport.md).
+
 ### Settings modal URL state
 
 Any primary page may carry one bounded query parameter:
@@ -69,6 +74,10 @@ settings=state | receiver | ai | repositories | archive | storage | diagnostics
 
 Opening/closing/changing a Settings section updates browser history. Closing removes `settings` while preserving the rest of the page query.
 
+`settings` is a case-sensitive singleton. Unknown, empty or duplicate values
+are `400 invalid_request`; the exact HTTP/recovery behavior comes from the
+route/transport contract.
+
 ### Session detail URL state
 
 ```text
@@ -76,35 +85,55 @@ Opening/closing/changing a Settings section updates browser history. Closing rem
 ```
 
 - all values are opaque validated IDs;
+- `sessionId`, `execution` and `analysis` are canonical local UUIDv7 values;
+  `node` is `node-` plus 32 lowercase hexadecimal characters;
 - `node` requires or resolves its exact execution;
 - an evidence link expands ancestors and selects/highlights the exact node;
 - `analysis` names an exact run, never a mutable `latest` pointer;
 - reload and back/forward restore the meaningful state.
 
+The exact missing, scope-mismatch, node/execution-mismatch and transient-run
+expiry results are owned by the route/transport contract. No state falls back
+to a latest, nearby or same-name object.
+
 ### Session Explorer query state
 
-Filter/search/pagination state is reflected in the URL:
+Only non-sensitive filter/pagination state is reflected in the URL:
 
-- `q`
 - `from` / `to`
 - `source`
-- `model`
 - `status`
-- activity filters
+- `has_skill` / `has_subagent` / `has_error` / `has_retry`
 - `archive_scope`
 - cursor
 - `mode=compare`
+
+Dynamic `q` and `model` filters exist only in the current page form/JavaScript
+memory and the closed body of
+`POST /api/local-monitor/v1/sessions`. They are never URL/history/storage/log
+state and reset on reload or back/forward. The POST is the sole Session
+collection transport; there is no GET alias, saved-search handle or fallback.
+Non-default `limit` is also transient request state. A cursor may enter the URL
+only for exact `q=null`, `model=[]`, `limit=null`/default 50; otherwise cursor
+and limit remain page-memory/POST state and reload clears them. The exact
+request, timestamp, cursor and conditional cursor-in-URL grammars are owned by
+the route/transport contract.
 
 Checkbox selection before a comparison snapshot is created is transient and is not encoded as hundreds of Session IDs in the URL. Reload before preview resets the unchecked draft. After preview, the comparison has an opaque server snapshot ID and a stable Compare route.
 
 ## 4. Existing route disposition
 
 - `/` changes from the old Overview to Repository selection.
-- The old `/traces` list is retired from the human UI and returns 404 after Session Explorer ships.
+- The old `/traces` list is retired atomically when the functional #138
+  Session Explorer backed by #134 ships. The narrow existing list classifier
+  then returns empty no-store 404 for every method and advertises no `Allow`.
 - `/traces/{traceId}` remains an exact low-level evidence page and is not a permanent navigation destination.
 - Existing raw record/span/event routes remain technical evidence surfaces under their current security contracts.
 - `/diagnostics`, historical import, backup/restore and retention pages may remain focused detail workflows opened from Settings. They are not permanent navigation.
-- The old `/historical-analysis` human page is retired when #164 integrates the existing backend into Repository-local AI actions. Its versioned machine APIs remain under their accepted contracts.
+- The old `/historical-analysis` human page is retired only when #164
+  integrates the existing backend into Repository-local AI actions. Its narrow
+  existing page classifier then uses the same empty no-store 404; versioned
+  machine APIs remain under their accepted contracts.
 - Existing unrelated standalone surfaces are not promoted into the v1 primary IA and are not implicitly deleted by this specification.
 - No indefinite redirect, dual UI path or compatibility shim is added unless a frozen producer contract explicitly requires it.
 
@@ -170,6 +199,13 @@ No aggregate/KPI card row is displayed.
 
 Selecting a row opens Session detail directly. There is no preview pane.
 
+The browser will obtain this list only through the #133/#134-owned closed
+body-bearing POST; this UI never reads Workspace or Repository tables directly.
+#133 currently defines semantic row requirements but not the complete exact
+success response wire. The POST and functional Explorer page remain
+unregistered until a later canonical #134 Workspace-read response contract
+fixes that wire; #134 then alone performs the coherent read and serialization.
+
 ### Compare selection mode
 
 - normal mode has no checkboxes;
@@ -213,6 +249,11 @@ Columns are fixed:
 - provider-ready users may ask AI to interpret the accepted deterministic receipt, but AI does not recalculate it.
 
 The complete formula/snapshot contract is #165; implementation is #166.
+Comparison IDs are canonical local UUIDv7. A live snapshot expires after 24
+hours; #166 retains only the append-only, non-sensitive expiry tombstone in the
+route/transport contract so a known expired URL deterministically returns
+`410 comparison_expired`. Unknown and Repository-mismatched IDs return
+`404 comparison_not_found`.
 
 ## 8. Session detail workspace
 
@@ -428,6 +469,10 @@ Every primary page supports:
 - active and archived context;
 - source unsupported, not observed, capture gap, certification pending, raw expired.
 
+Malformed/missing/stale/expired HTTP status, closed page-state and recovery
+tokens are defined by the route/transport contract. Sentence-level HTML and
+copy remain #137/#169-owned and are not byte-frozen.
+
 ### AI states
 
 - unconfigured: no action on core pages;
@@ -521,6 +566,9 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 - raw reads are same-origin, no-store, retention-gated and inert text;
 - mutations require CSRF;
 - no raw/PII/path/credential in URLs, logs, fixed errors or repository artifacts;
+- dynamic Explorer `q`/`model` values are transient POST-body state only;
+- Session pagination cursors carry only a process-keyed HMAC binding, never
+  raw values or an unkeyed low-entropy digest;
 - AI data egress is explicit and separate from local observation;
 - frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE remain unchanged;
 - no heuristic Session/Repository/parent identity;
@@ -537,7 +585,8 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 | Archive | #160 | #161 |
 | AI scope/history | #162 | #163/#164 |
 | Compare | #165 | #166 |
-| Workspace read APIs | #133 | #134 |
+| Workspace read APIs | #133 plus a required later exact response contract | #134 after that contract closes |
+| Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps only after its response gate closes |
 | Shell/header/Settings host | this spec | #135/#136 |
 | Missing states | #129 + this spec | #137 |
 | Repository selection | this spec | #167 |

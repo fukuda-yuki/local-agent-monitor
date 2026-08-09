@@ -107,6 +107,10 @@ field, selection, capability, distribution, log, or repository-safe diagnostic.
 The three frozen carriers, their canonical property order, and all bundle/
 profile/manifest/canonical-JSON versions remain unchanged.
 
+The #165/#166 comparison operational namespace, including
+`local_comparison_expiry_tombstones`, is outside the allowlist. It is neither
+queried nor represented by a record, capability or empty carrier.
+
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
 agent versions, processing versions, completeness, content state, retention

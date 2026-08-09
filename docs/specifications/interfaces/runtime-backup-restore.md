@@ -11,14 +11,20 @@ not permanent navigation. Archive is separate reversible metadata and never a
 backup/restore operation. Node/Repository/Compare AI operational content and
 deterministic Compare snapshots are 24-hour non-backed-up state under their
 own accepted contracts; this interface does not create alternate ownership for
-them.
+them. The minimal #165/#166 comparison-expiry tombstone from
+[the route transport contract](local-monitor-v1-route-transport.md) is part of
+that excluded comparison operational namespace, not one of the Retention
+tombstones inventoried by this backup. Its exclusion is the exact staging-copy
+projection in section 5; prose classification alone does not exclude a SQLite
+table from `database.sqlite`.
 
 ## 1. Scope and profile
 
 The fixed bundle profile is `local-runtime-backup`. A bundle contains the
 complete supported Local Monitor SQLite restore unit, including raw telemetry,
-Session content, policy state, tombstones, mutation/audit state, projections,
-and component versions captured in one SQLite snapshot.
+Session content, policy state, Retention-owned tombstones, mutation/audit state,
+projections, and component versions captured in one SQLite snapshot, minus only
+the exact profile-owned staging exclusions defined by this contract.
 
 The bundle is private local runtime data. It is explicitly:
 
@@ -183,9 +189,12 @@ returns the SHA-256 of the complete ZIP.
 `integrity_check=ok`, `foreign_key_check=ok`, and one opaque snapshot ID derived
 from the database checksum. `component_versions` records every row from the
 standard `schema_version` table plus `retention_component_versions`, with
-component names unique after merge. `row_counts` records every non-SQLite
-table, ordered by table name. `projection_cursors` records only bounded
-sanitized cursor/high-water integers or null; it never records raw IDs.
+component names unique after merge. `row_counts` records every non-SQLite table
+present in the canonical bundle projection, ordered by table name. The exact
+`local_comparison_expiry_tombstones` table is removed from that projection
+before inventory and therefore has no row-count entry. `projection_cursors`
+records only bounded sanitized cursor/high-water integers or null; it never
+records raw IDs.
 
 `backup_window` binds the online snapshot to explicit bounded observations. Its
 exact field order is `started_at`, `completed_at`,
@@ -247,6 +256,64 @@ locking and change detection, including while restore owns its lease. SQLite
 `immutable=1` is restricted to closed, service-owned snapshot/staging files
 whose sidecars are absent; it is never selected merely because a live path
 happens to have no sidecar at one instant.
+
+### Comparison expiry-tombstone staging projection
+
+When the #165/#166 comparison-expiry owner is first installed, its canonical
+migration creates the exact `local_comparison_expiry_tombstones` table and
+immutable guards; later ordinary startup validates rather than recreates it.
+A source backup preflight requires that exact object and streaming-valid rows;
+a missing, renamed, malformed or guard-incomplete source object fails closed. A
+supported pre-#166 component vector has no such object and does not run this
+projection. #166 must canonically identify the first component vector that
+installs it before implementation.
+
+For an installed owner, immediately after `BackupDatabase` completes and before
+the destination is opened read-only or any integrity check, table/count/cursor/
+retention inventory, database hash, manifest construction or archive write, the
+runtime-backup owner performs this exact operation:
+
+1. Prove that the private owner-marked staging path and open connection are the
+   completed backup destination and are not the canonical source path. Pooling
+   remains disabled; no SQL from this operation is issued to the source
+   connection.
+2. Open only that staging database read/write, start one SQLite transaction and
+   run the #166-owned exact schema/row/immutable-guard validator. Validation is
+   streaming and does not materialize the lifetime tombstone set.
+3. Execute the fixed statement
+   `DROP TABLE "local_comparison_expiry_tombstones"` against the staging
+   connection. SQLite removes only that table and its table-owned automatic
+   index/triggers. No dynamic object name, row copy or best-effort delete is
+   permitted.
+4. In the same transaction, query `sqlite_schema` and require zero table,
+   index or trigger rows whose `name` or `tbl_name` is the exact tombstone table
+   name. Commit only after that proof.
+
+Any validation, DROP, residue check or commit failure rolls back and fails the
+backup; normal owned-staging cleanup then removes the private destination and no
+manifest/archive is published. The live source table and rows remain untouched.
+Only after the committed projection does the service reopen the destination
+read-only and perform the existing quick check, foreign-key check, inventory,
+hash and archive sequence.
+
+The resulting canonical `local-runtime-backup.v1` database member contains no
+tombstone table or row, and its manifest contains no corresponding row-count,
+cursor, retention or external-state carrier. Inspection rejects a bundle that
+contains that table. Restore preview and restore accept this one profile-owned
+schema omission without relaxing any other exact-object check. After atomic
+restore installation, and under the existing restore/startup lease, the #166
+owner creates and validates an empty table before any comparison read or HTTP
+readiness. Failure blocks readiness; no old tombstone is reconstructed. A
+missing table in an ordinary live source with no accepted restore projection is
+still corruption and is not silently repaired.
+
+This rule excludes only `local_comparison_expiry_tombstones`. It does not
+authorize exclusion of future #166 comparison snapshot, result or evidence
+tables. Before any such operational table ships, #166 must amend this contract
+with its exact object names, validation, foreign-key-safe staging drop order,
+manifest absence and restore rematerialization/absence behavior. Without that
+amendment the new table is not backup-excluded and #166 integration remains
+blocked.
 
 The destination is closed and reopened read-only. `PRAGMA quick_check` must be
 the single row `ok`; `PRAGMA foreign_key_check` must be empty. Version, count,

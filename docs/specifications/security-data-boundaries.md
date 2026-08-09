@@ -85,6 +85,8 @@ summaries, and non-secret endpoint shapes instead of raw payload content.
 This subsection is the current closed enumeration for the Local Monitor v1
 human product. It incorporates
 [the accepted security supplement](interfaces/local-monitor-v1-security.md)
+and the exact
+[route/Session Explorer transport](interfaces/local-monitor-v1-route-transport.md)
 and supersedes conflicting UI-posture statements in the later implementation
 history. Later route-specific controls remain binding for installed frozen
 technical surfaces.
@@ -94,6 +96,17 @@ Every raw-local read is loopback-only, Host-header validated, same-origin,
 `Cache-Control: no-store`, retention-authorized, bounded by a closed route and
 payload contract, and rendered as escaped inert text. Raw values do not enter
 URLs, normal logs, repository artifacts, sanitized machine APIs or SSE.
+
+The Session Explorer therefore has one raw-default collection transport: the
+closed 32,768-byte JSON `POST /api/local-monitor/v1/sessions`. Dynamic `q` and
+`model` values exist only in current-page form/JavaScript memory and that body.
+They do not enter the URL, history/storage/cache, application logs, errors or
+cursors. A cursor contains only a process-keyed HMAC binding to the semantic
+filter, never raw values or an unkeyed low-entropy digest. URL cursor placement
+also requires exact `limit=null`/default 50; non-default limit and its cursor
+remain transient and reset on reload/back. The former
+unimplemented GET has no alias, saved-search handle, compatibility reader or
+fallback.
 
 The v1 raw-local set is closed to:
 
@@ -118,6 +131,15 @@ outlive content only with an explicit expired state. Archive does not extend
 retention. Session AI reports use analysis retention; node/Repository/Compare
 AI operational content and deterministic Compare snapshots expire after 24
 hours and are not backed up.
+
+Known comparison expiry retains only an append-only opaque comparison ID,
+opaque Repository ID and exact expiry instant in the current runtime database.
+That non-listable tombstone contains no cohort/Session/filter/receipt/evidence/
+metric/hash/content/model/path. Runtime backup validates and transactionally
+drops its exact table only from the private SQLite staging copy before
+inventory/hash/archive; source remains untouched and manifest/restore omit it.
+Sanitized export/import never queries it. It exists only to make the accepted
+`410 comparison_expired` deterministic after operational content deletion.
 
 Frozen `POST /api/session-ingest/v1/events` supports `skill.started` and
 `skill.completed`; `skill.invoked` is unsupported and follows the existing
@@ -187,9 +209,10 @@ and [Skill Projection](layers/skill-projection.md).
 
 `/api/local-monitor/v1/*` is raw-default human-UI support, not a sanitized
 public API. Responses are no-store; mutations require same-origin and CSRF;
-bodies are closed and bounded; fixed errors never echo raw input or inner
-exceptions; identities in URLs are opaque. The entire namespace is absent in
-`--sanitized-only`.
+the body-bearing Session read also requires same-origin and the exact CSRF
+header; bodies are closed and bounded; fixed errors never echo raw input or
+inner exceptions; identities in URLs are opaque. The entire namespace is
+absent in `--sanitized-only`.
 
 `--sanitized-only` is receiver-only under #159. Ingestion, health and accepted
 frozen machine APIs remain available, but Razor Pages, human static assets and
@@ -208,6 +231,9 @@ credentials or secrets. Provider request/response bodies, paths and content are
 not logged or emitted in diagnostics or repository artifacts.
 
 No raw value is stored in browser storage, reusable cache or URL state.
+Explorer URL state is restricted to canonical timestamps, closed filter/mode/
+Settings tokens and an eligible opaque cursor; q/model/non-default limit reset
+on reload or back/forward.
 Comparison and AI URLs carry opaque snapshot/run IDs only; draft cohort
 checkboxes and follow-up transcripts stay in the current page. Generated
 Markdown/HTML is not executed and color is never the sole signal.
