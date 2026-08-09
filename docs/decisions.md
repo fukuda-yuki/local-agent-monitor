@@ -3006,6 +3006,13 @@ It cannot synthesize or terminalize data, change Retention facts, affect the
 live target, or weaken strict startup, ordinary backup, restore-staging, or read
 validation.
 
+For an extracted archive with the complete exact current component vector,
+restore staging therefore uses select-only current validation and restorable
+coverage instead of rerunning Retention writable adoption/backfill. Missing or
+older components still require the strict writable migration path; present
+owner/receipt mismatch, extra source bytes, malformed state, and foreign-key
+failure remain incompatible.
+
 Only genuine Copilot-compatible `SessionEnd(reason=complete|user_exit)` has
 controlled-live evidence on candidate `6a313fa61ac2bf161a6c6c4c0cb4ce4a6a311103`.
 The other exact table rows are accepted producer-vocabulary Product policy,

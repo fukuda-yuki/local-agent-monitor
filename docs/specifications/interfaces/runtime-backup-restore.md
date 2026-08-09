@@ -726,8 +726,19 @@ owner mismatch, a source without a catalog row, malformed schema/row/foreign
 key state, or any other proof fails closed. This path never terminalizes an
 item, synthesizes or copies raw bytes from incoming staging, or changes
 lifecycle, receipt, revision, timestamps, expiry, or TTL. Ordinary startup,
-adoption/backfill, normal backup, restore staging, and ordinary reads retain
-their strict current validators.
+adoption/backfill, normal backup, and ordinary reads retain their strict current
+validators.
+
+An extracted archive that declares the complete exact current component vector
+and passes current schema, row, object, integrity, and foreign-key validation
+does not rerun Retention writable adoption/backfill merely to reinitialize
+current v1. Restore staging uses select-only current validation plus the
+existing restorable-coverage validator, then performs the existing restore-only
+lease normalization and reconciliation. Only exact source absence without
+bytes survives: a present owner/receipt mismatch, an extra source without a
+catalog row, or malformed state cannot be reclassified as `Missing`. Any absent
+or older component that requires migration or adoption remains on strict
+writable backfill.
 
 The bounded sibling journal schema is `runtime-restore-journal.v2`. It binds one
 UUID operation ID, archive digest, a derived random sibling staging basename,
