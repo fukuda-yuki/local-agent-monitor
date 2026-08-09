@@ -13,6 +13,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
 | Skill projection validity/re-run | [`skill-projection.md`](../layers/skill-projection.md), [exact-v10 input evidence](../contracts/skill-projection-v1-deleted-before-digest.md), #154 | #154 |
 | Skill v1 correction/v2 transport/body/path snapshot/current file | [`skill-invocation-snapshot.md`](skill-invocation-snapshot.md), #119/#157/#158 | #158 after gate closure |
+| Session terminal facts/outcome aggregation | [`canvas-session-workspace.md`](canvas-session-workspace.md), #124 | #124 |
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | #160 | #161 |
 | Optional AI snapshots/results/history | #162 | #163/#164 |
@@ -79,7 +80,9 @@ telemetry fixes / #154
 - Frozen `/api/monitor/*`, `/api/session-workspace/*` v1 and SSE are never widened.
 - Frozen Session ingest v1 supports `skill.started | skill.completed`;
   `skill.invoked` is unsupported and no other v1 shape, enum, limit, status,
-  error or response byte changes.
+  error or response byte changes. #124 changes only which existing public
+  `status`/`ended_at` values are selected from private Session-14 facts; it adds
+  no public enum, field, or representation.
 - `/api/local-monitor/v1/*` is the raw-default local human-UI namespace and is absent in sanitized-only posture.
 - Repository, Session and hierarchy identities are exact and opaque.
 - Missing values are not zero.

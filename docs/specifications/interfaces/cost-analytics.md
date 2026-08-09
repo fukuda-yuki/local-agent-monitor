@@ -517,8 +517,9 @@ guard failure makes the catalog projection store-unavailable. This route, not
 canonical catalog bytes or estimate history, is the configuration UI's sole
 catalog/mode data source.
 
-Preview's commit-bound selection is the proposed set of terminal
-(`completed | failed`) Sessions whose source resolver is `resolved` and whose
+Preview's commit-bound selection is the proposed set of Sessions whose current
+status is exactly `completed | failed`, completeness is `full`, exact Session
+scope contains a non-null Session-14 fact, source resolver is `resolved`, and
 resolved source-surface/application-version tuple matches a proposed source
 entry. It is ordered by `sessions.last_seen_at` then Session ID and records
 Session ID, status, last-seen/update times, source-partition state/count/digest,
@@ -630,10 +631,12 @@ the existing `202` polling resource, never remapped to a late `413`. No scope is
 truncated or partially committed.
 
 The application resolves every Session by its exact accepted local Session ID
-and captures each exact active estimate head and attempt revision before
-starting. Missing Sessions reject the complete request. A target Session whose
-persisted status is not exactly `completed | failed` rejects the request as
-`409 cost_session_not_eligible` before root creation. A Session budget scope
+and revalidates current status, completeness, and Session-scoped fact presence
+before capturing each exact active estimate head and attempt revision. Missing
+Sessions reject the complete request. A target Session whose
+current status is not exactly `completed | failed`, completeness is not `full`,
+or exact Session scope contains no non-null Session-14 fact rejects the request
+as `409 cost_session_not_eligible` before root creation. A Session budget scope
 also requires its named Session to be in the exact resolved configured
 eligibility set; an existing but ineligible Session produces that same 409 and
 no run. It captures one exact application-clock `calculation_time_utc` for the
@@ -745,7 +748,8 @@ alert artifact is corruption and fails readiness without mutation.
 Completion runs under one `BEGIN IMMEDIATE` transaction shared by the pricing
 store and existing alert-engine store. It re-reads the configuration/catalog/
 current active configuration-head revision/ID,
-Session status/update/source resolver state/count/digest/resolved tuple,
+Session status/completeness/Session-scoped terminal-fact presence/update/source
+resolver state/count/digest/resolved tuple,
 active-head revision/identity, attempt revision, and eligibility facts,
 constructs the post-head snapshot for every requested scope, and invokes the
 pure evaluator with a transaction-bound
@@ -828,8 +832,12 @@ distinguishes
 reason), and `failed` (terminal target/run failure).
 
 The current projection and every historical item apply an exact item-specific
-stale gate independently. An estimate-backed item is `stale` when its captured
-Session status/effective/update facts or source resolver state/count/digest/
+stale gate independently. Current cost use first revalidates exact Session
+status `completed|failed`, completeness `full`, and Session-scoped non-null
+fact. Failure makes the current item stale and removes its monetary amount from
+current use without deleting an estimate, attempt, or receipt. An estimate-
+backed item is also `stale` when its captured Session status/effective/update
+facts or source resolver state/count/digest/
 resolved tuple differ from the current exact Session/resolver result, or when
 its source/application-version/provider/billing-mode/pricing-route/adapter
 capability partition no longer equals the sole current configuration entry for
@@ -851,10 +859,11 @@ state. A configuration change limited to budget policy or an unrelated source
 entry does not make it stale. Historical catalog/registry versions remain exact
 provenance and do not become current by substitution; a mixed registry set is
 displayed rather than silently replaced. A stale record remains immutable
-history but contributes no monetary amount. It remains in the coverage
-denominator only while the Session is otherwise still in the exact terminal/
-configured-source eligible set, until an explicit recalculation advances the
-head.
+history and every historical estimate remains stored and inspectable with its
+original provenance, but contributes no monetary amount. It remains in the
+coverage denominator only while the Session is otherwise still in the exact
+`completed|failed` / `full` / Session-fact / configured-source eligible set,
+until an explicit recalculation advances the head.
 
 A requested/running or terminal unavailable/failed attempt with no estimate
 uses `cost-attempt-input-freshness/v1`, never the #94 pricing-selection semantic
@@ -923,7 +932,7 @@ it must not copy a pricing table list or DDL string.
 
 Canonical creation SQL omits `IF NOT EXISTS`. `Ensure` creates the complete
 component only when the component row and every `pricing_*` object are absent,
-after validating exact Session v13, alert-engine v2, and runtime-backup v1
+after validating exact Session v14, alert-engine v2, and runtime-backup v1
 dependencies. It inserts `schema_version('pricing',1)` last. Once any pricing
 object or component row exists, a missing, extra, type/target/SQL-mismatched
 object fails closed and is never repaired. No additional column or owned object
@@ -1175,8 +1184,13 @@ historical_instruction_analysis
 ```
 
 This preserves Issue #79 -> #86 -> #88 as an unchanged subsequence. A declared
-pricing component without Session v13, `alert_engine` v2, or runtime-backup v1
-is a forged, unsupported vector. Startup upgrades/validates the shared alert
+current or post-migration pricing component without Session v14,
+`alert_engine` v2, or runtime-backup v1 is a forged, unsupported vector.
+Runtime-backup read-only legacy preflight recognizes pricing v1 with an older
+Session parent only for exact Session v13 and complete exact legacy shapes;
+pricing v1 with Session v1..v12 is incompatible before mutation. Staging
+migrates Session v13 first and only then calls the current pricing validator.
+Startup upgrades/validates the shared alert
 engine to v2 before creating or opening pricing, then creates pricing after
 runtime-backup in the same final migration transaction. Issue #88 backs up the complete database, includes pricing
 component/table row counts, validates exact owned shape/bytes, migrates an
@@ -1924,7 +1938,9 @@ Required automated proof includes exact v1 alert golden compatibility, v2
 canonical/store/read behavior, disabled/configured budget rules, insufficient
 coverage suppression, estimated zero, partial/unknown/subscription/Codex/stale/
 mixed-registry states, append-only recalculation and retry history, fresh and
-supported-upgrade migrations, backup/restore round-trip, sanitized-export v1
+supported-upgrade migrations, exact `completed|failed`/`full`/Session-fact
+admission and completion races, current eligibility loss with immutable
+historical estimates, backup/restore round-trip, sanitized-export v1
 coexistence, API security/status mapping, Playwright/accessibility, full build
 and tests, repository-safe scans, and artifact checksums.
 

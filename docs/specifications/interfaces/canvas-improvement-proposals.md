@@ -17,8 +17,14 @@ Issue #56 exclusively owns the comparison that may set a proposal to
 
 ## Analysis Boundary
 
-The Improve primary action is available only for an exact-bound completed or
-failed Session. It opens the existing token-gated `/analysis` helper and uses
+The Improve primary action is available only for an exact-bound Session whose
+current status is exactly `completed` or `failed`, completeness is `full`, and
+whose exact Session scope contains a persisted non-null Session-14 fact.
+`active`, `unknown`, and non-full Sessions are ineligible. Event type, `Stop`,
+and error/status text are not substitutes. Run/Trace scope is checked only for
+an existing evidence-reference DTO that carries it; proposal terminal lookup
+itself is always Session-scoped. The action opens the existing token-gated
+`/analysis` helper and uses
 the existing `POST /analyze` -> `session.send({ prompt })` fire-and-forget
 path. The prompt continues to contain only the allowed trace/span identifiers,
 focus, requested analysis options, and bounded Canvas action names.
@@ -71,6 +77,14 @@ unresolvable evidence is displayed honestly and cannot satisfy the promotion
 rule. Multiple recommendations for the same Session are rejected until the
 existing recommendation is demoted to `candidate` by an explicit user action.
 
+Persisted proposal rows, lifecycle transitions, and downstream historical
+receipts are immutable history with respect to later Session reclassification.
+Every current Improve action, evidence use, and promotion nevertheless
+revalidates exact binding, current `completed|failed` status, `full`
+completeness, and one Session-scoped fact. A proposal whose source Session no
+longer passes is retained for history but is unavailable for current use and
+cannot be created, promoted, or used as current proposal/effect authority.
+
 The lifecycle does not mean approved for file mutation. A later Issue #55
 operation may create an immutable, separately human-approved apply draft, but
 that operation never changes this lifecycle. This interface never creates a
@@ -98,10 +112,18 @@ PUT  /api/session-workspace/improvement-proposals/{proposalId}/status
 
 `POST` accepts exactly the proposal fields above except server-generated IDs,
 timestamps, and lifecycle timestamps. Its initial `status` must be
-`candidate`. `PUT .../status` accepts exactly `{ "status": "candidate" |
-"recommended" }`; promotion performs the two-distinct-session check inside the
-same SQLite transaction that updates the status. `verified` is rejected with
-`400` `verification_owned_by_compare`.
+`candidate`. In the same immediate SQLite transaction that inserts the
+proposal/evidence rows, `POST` re-reads the referenced Session and requires
+exact binding, status `completed|failed`, completeness `full`, one
+Session-scoped non-null fact, and every DTO-carried Run/Event/Trace relation;
+any eligibility or relation failure is `evidence_not_exact_bound` and no
+row is inserted. `PUT .../status` accepts exactly `{ "status": "candidate" |
+"recommended" }`. In the same transaction that promotes, it re-reads every
+contributing distinct Session and evidence relation and requires the identical
+current eligibility gate plus the two-Session rule; failure is
+`insufficient_recommendation_evidence` and no lifecycle row changes. Missing
+referenced evidence remains `evidence_not_found`. `verified` is rejected
+with `400` `verification_owned_by_compare`.
 
 Success responses are `201` with the sanitized proposal object for `POST`,
 `200` with the object for `PUT`, and `200` with `{ "items": [...] }` for
@@ -117,7 +139,9 @@ The additive SQLite tables are `improvement_proposals`,
 `improvement_proposal_sessions`, and `improvement_proposal_evidence`.
 `improvement_proposal_sessions` uses a Session foreign key. Run/Event/Trace
 references are validated against the referenced Session and existing monitor
-store at write time; they are not copied into a raw-content table. The schema
+store at write time; they are not copied into a raw-content table. The
+Session-14 fact query is always `session_id`-scoped and does not require or
+invent Run/Trace columns in proposal tables or DTOs. The schema
 migration is additive; no existing session, telemetry, or raw-content table is
 repurposed. A proposal stores opaque identifiers and sanitized text, never raw
 content or filesystem locations.
@@ -132,7 +156,8 @@ artifact, or repository-safe summary.
 Improve replaces its placeholder with:
 
 1. an honest empty/unavailable state when the selected Session is not
-   exact-bound, terminal, or has no valid evidence;
+   exact-bound, has a status other than `completed` or `failed`, is not `full`,
+   or has no Session-scoped persisted-fact evidence;
 2. an action opening the existing detailed-analysis helper;
 3. a structured proposal form and evidence-reference selector;
 4. one recommended proposal with title, target label, expected effect, risk,
@@ -147,7 +172,10 @@ model response text. It renders all user-entered strings as inert text.
 
 - xUnit: proposal route validation, CSRF/same-origin policy, additive
   migration, persistence, lifecycle transitions, single-recommendation rule,
-  two-session promotion rule, and fixed-error/no-echo behavior.
+  two-session promotion rule, POST/promotion transaction races, exact
+  `completed|failed`/`full`/Session-fact gates, Session-scoped fact lookup,
+  later ineligibility without historical rewrite, and fixed-error/no-echo
+  behavior.
 - Node tests: Improve state rendering, unavailable states, bounded proposal
   payload construction, evidence selection, and absence of apply/git controls.
 - Canvas contract tests: proposal routes remain token-gated; no action DTO,

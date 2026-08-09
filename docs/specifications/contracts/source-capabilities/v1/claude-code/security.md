@@ -139,9 +139,25 @@ transport field when Claude supplies no documented event timestamp. It is not
 source timing authority and cannot create duration, ordering, ownership, or
 binding evidence.
 
-Hook `duration_ms`, error/status labels, stop fields, and SessionEnd reason stay
-within the Hook lifecycle/raw boundary. They never overwrite OTel
-`MonitorSpanProjection.DurationMs`, `Status`, or `ErrorType`.
+Hook `duration_ms`, error/status labels, and stop fields stay within the Hook
+lifecycle/raw boundary. They never overwrite OTel
+`MonitorSpanProjection.DurationMs`, `Status`, or `ErrorType`, and
+`PostToolUseFailure`, `Stop`, and `StopFailure` remain nonterminal for Session
+outcome aggregation.
+
+The sole outcome exception is exact `claude-code-hook` / `claude-code` /
+`SessionEnd` root `reason` under Session terminal policy v1. The mapping remains
+required: absent, duplicated, non-string, wrong-content-kind, invalid-JSON, or
+non-object root values reject live admission through the existing invalid-
+mapping path and persist neither Event nor fact. Exact admitted values `clear`,
+`resume`, `logout`, and `prompt_input_exit` persist a private `clean` fact;
+`bypass_permissions_disabled`, `other`, and any other admitted string persist
+`neutral`. Only migration of an already-admitted legacy SessionEnd may use
+`neutral` when discriminator content is absent, unavailable, duplicated,
+non-string, invalid-JSON, or non-object. Claude has no v1 failed row.
+Classification occurs before optional content retention and does not expose the
+reason or private fact through sanitized reads. Every
+`claude-code-otel` signal remains nonterminal.
 
 Hook `session_title`, `background_tasks`, and `session_crons` also remain raw
 only. They pass through `SessionIngestEvent.Payload`, are secret-filtered before

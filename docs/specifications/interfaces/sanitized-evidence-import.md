@@ -194,7 +194,7 @@ Issue #86 owns the independent SQLite schema component
 `schema_version.component = 'sanitized_import'`, version 1. It owns only the
 `sanitized_import_*` tables and indexes. A commit adds or validates the component
 inside the same immediate transaction as archive reinspection and import. Fresh
-databases and databases with the supported monitor v8 / Session v13 version
+databases and databases with the current Monitor v11 / Session v14 version
 vector add this component without changing those component versions or data.
 A CreateSchema, preview, or commit transaction ensures and validates
 `historical_import` v1 immediately before `sanitized_import` v1. This is a
@@ -206,12 +206,21 @@ foreign-key check rolls back component tables, indexes, and version stamp as
 well as import rows. A stamped future version or absent stamp with pre-existing
 import tables is rejected without adoption.
 
-This is Wave 3 storage-owner sequence 2, after Issue #79. It intentionally does
-not consume Session v14 or another shared migration number because sanitized
-imports do not mutate Session identity. If #79 remains component-scoped,
+This is Wave 3 storage-owner sequence 2, after Issue #79. The destination must
+already be exact Session v14, but `sanitized_import:1` owns no Session migration,
+row/fact validation, mutation, fact synthesis, reverse dependency, or shared
+migration number. The Session owner reaches and validates v14 first. There is
+no v13/v14 dual destination validator. If #79 remains component-scoped,
 migration renumbering after rebase is `not_applicable`; the primary integration
 owner still rebases in `#79 -> #86 -> #88` order, audits shared files/version
 vectors, and reruns fresh-database and supported-upgrade tests.
+
+Imported `processing_versions` remains immutable source metadata. A new valid
+bundle preserves `monitor_schema = 11` and `session_schema = 14`; a previously
+valid v1 bundle whose source metadata says `monitor_schema = 8` and
+`session_schema = 13` remains accepted and retains those historical values.
+Import never rewrites either value, runs a Monitor/Session migration, creates or
+updates a Session/Event/fact row, or adds a carrier.
 
 ## Retention
 

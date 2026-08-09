@@ -57,12 +57,17 @@ contract, scanner, manifest, and size rules. Syntax-valid bytes alone never
 establish owner/store provenance.
 
 The provider opens the explicitly named existing database once in read-only,
-private-cache, non-pooled mode, enables `query_only`, and anchors monitor v8,
-Session v13, and optional producer schemas in one deferred transaction. It runs
+private-cache, non-pooled mode, enables `query_only`, and anchors current
+Monitor v11, Session v14, and optional producer schemas in one deferred
+transaction. Before carrier discovery, it invokes the Session owner's shared
+full current-v14 select-only validator on that same connection/transaction;
+the validator reads exact schema, Session/Event rows, immutable facts,
+completeness, and aggregates and performs no repair, migration, or content
+read. It runs
 a metadata-only descriptor query with a 256-row sentinel and carrier byte
-lengths before exact-ID reads. It may query only `monitor_traces`, Session
-identity/provenance metadata, optional `instruction_finding_handoffs`, and
-optional `alert_receipts`; it never queries `raw_records`,
+lengths before exact-ID reads. Outside the shared Session validation call, it
+may query only `monitor_traces`, Session identity/provenance metadata, optional
+`instruction_finding_handoffs`, and optional `alert_receipts`; it never queries `raw_records`,
 `session_event_content`, or raw analysis/content stores.
 Because the #80 table intentionally stores selector metadata only inside the
 canonical carrier, alert descriptors remain opaque until the byte gate. All
@@ -74,6 +79,33 @@ from the final selected inventory. A trace bound to more than one distinct
 non-null Session ID is unavailable rather than exported ambiguously. Multiple
 source-surface provenance rows for the same exact Session/trace remain separate
 `(session_id, trace_id, source_surface)` projections.
+
+The provider is an exact current-schema consumer with no Session-13 or partial-
+v14 compatibility branch. Its exact `session_events` descriptor column list is
+the existing 17 names in order followed by the two private fact names:
+
+```text
+event_id, session_id, run_id, source_surface, parent_event_id, trace_id,
+status, source_adapter, source_event_id, type, occurred_at, content_state,
+source_application_version, adapter_version, schema_fingerprint,
+normalization_version, match_kind, terminal_outcome, terminal_policy_version
+```
+
+Missing, reversed, renamed, or additional columns, invalid rows/facts, or
+aggregate/completeness drift fail with the existing
+`snapshot_store_unavailable` result. The existing
+`processing_versions["session_schema"]` value is exact string `"14"`; this
+changes the normal snapshot/manifest/archive hashes through their existing
+version input but adds no property or carrier.
+
+The private fact columns are owner-validation input only. The shared validator
+selects them solely to validate full v14 row/fact/aggregate consistency inside
+the deferred transaction. Carrier descriptor, materialization, agent-version,
+and record queries do not select or derive from them, and no path queries
+`session_event_content`. Neither fact name may appear in a record, manifest
+field, selection, capability, distribution, log, or repository-safe diagnostic.
+The three frozen carriers, their canonical property order, and all bundle/
+profile/manifest/canonical-JSON versions remain unchanged.
 
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
@@ -271,6 +303,10 @@ upload, import, replay, back up, or restore anything.
 Canonical schemas and the synthetic golden request/archive are under
 `docs/specifications/contracts/sanitized-evidence/v1/` and
 `tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SanitizedExport/`.
+Export tests also cover current Monitor v11 / Session v14 acceptance, malformed
+fact pairs, illegal tuple outcomes, aggregate/completeness drift, and proof that
+the shared select-only validator reads facts without reading content or leaking
+private fact names/values into carriers, hashes, diagnostics, or logs.
 
 ## Validation matrix transition
 

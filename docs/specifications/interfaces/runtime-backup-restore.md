@@ -292,9 +292,48 @@ unchanged runtime-backup owner. The fixed migration tail is
 `historical_instruction_analysis` -> `historical_import` -> `sanitized_import`
 -> `runtime_backup` -> `pricing`, preserving #79 -> #86 -> #88 as an unchanged
 subsequence before #95. The runtime-backup owner itself does not reserve or
-change Session 13, current Monitor v11 (or its exact supported v10
+change Session 14, current Monitor v11 (or its exact supported v10
 predecessor), Retention 1, or a Retention store kind. The separate #154 Monitor
 v10-to-v11 migration owns the source-compatibility change described above.
+
+### Session 14 component compatibility
+
+The current runtime-backup component vector pins `session:14`; every other
+currently supported component entry is unchanged:
+
+```text
+alert_engine:2, alert_lifecycle:1, doctor:1, first_trace_navigation:1,
+historical_import:1, historical_instruction_analysis:1,
+local_repository_catalog:1, monitor:11, pricing:1, retention:1,
+runtime_backup:1, sanitized_import:1, session:14, skill_projection:1
+```
+
+The registered migration order remains:
+
+```text
+monitor -> session -> local_repository_catalog -> retention -> skill_projection
+-> doctor -> alert_engine -> alert_lifecycle -> first_trace_navigation
+-> historical_instruction_analysis -> historical_import -> sanitized_import
+-> runtime_backup -> pricing
+```
+
+Session versions `1..13` are exact supported older versions and preview as
+`session:n->14`; `14` is current. Version `15+`, gaps, duplicates,
+partial/mixed shapes, unknown Session objects, `session:13` with v14 fact
+columns, or `session:14` without the exact fact pair/CHECK are incompatible. If
+the component is absent, every Session-reserved object must be absent and
+staging creates empty v14. Session remains in the same migration slot.
+
+Backup create requires the exact current-v14 schema, immutable fact pairs, and
+aggregate equality before online copy. Inspect/preview compares manifest vector
+and actual objects; valid older `1..13` sources, subject to the catalog/pricing
+exact-v13 legacy-parent restrictions below, schedule the ordered staging
+migration, while contradictions return `restore_incompatible`. Staging uses the
+Session owner's same atomic classifier, Retention-authorized content helper,
+and one injected staging-time snapshot. Current v14 sources are validated but
+never reclassified from content or wall time. Round trip preserves both fact
+columns, Session status, and `ended_at` bytes exactly; table-row accounting is
+unchanged because v14 adds no table.
 
 `skill_projection:1` is an independent Local Monitor component, not a Retention
 kind and not part of `runtime_backup`'s historical Wave 3 tail. Its dependency
@@ -370,6 +409,15 @@ Validation recomputes locator fingerprints and verifies unique ownership,
 heads, observation references, overrides, contiguous revisions, exact receipt
 bytes and append-only completeness.
 
+A current `local_repository_catalog:1` parent is valid only with exact Session
+14. Read-only legacy preflight recognizes one exception only: exact catalog v1
+with exact Session 13 and the complete respective legacy shapes. Catalog v1
+with Session `1..12`, a partial/mixed Session shape, or any other parent vector
+is incompatible before mutation. For that one legacy pair, staging runs the
+Session 13-to-14 owner migration first, then invokes the current catalog v1
+schema/row validator before any downstream consumer; the catalog never
+validates against or opens a child migration while its parent is still v13.
+
 The component can restore without source raw content; retained catalog-owned
 metadata survives and provenance availability resolves to `unknown` or
 `expired` without reconstructing raw. The whole component is excluded from
@@ -381,8 +429,13 @@ Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather
 than a supported migration source.
-A declared `pricing` component without Session 13, `alert_engine` v2, or
-`runtime_backup` v1 is likewise an incompatible forged vector.
+A current or post-migration `pricing` component without Session 14,
+`alert_engine` v2, or `runtime_backup` v1 is an incompatible forged vector.
+Read-only legacy preflight recognizes pricing v1 with an older Session parent
+only for exact Session 13 and complete exact legacy shapes; pricing v1 with
+Session `1..12` is incompatible before mutation. For the exact v13 pair,
+staging migrates Session first and only then applies the current pricing parent
+and row validation.
 
 Current backup component vectors record `alert_engine` v2 and `pricing` v1.
 An exact older P1 source may omit pricing and may declare alert-engine v1; both
@@ -629,9 +682,12 @@ The state machine is:
 3. extract the database to that journal-bound unique sibling staging file;
 4. validate checksums, compatibility, integrity, foreign keys, retention
    invariants, terminal reconciliation, and non-terminal reintroduction policy;
-5. create or migrate `alert_engine` to v2 in staging without reserializing a v1
-   row, validate lifecycle v1 against that parent, then apply supported
-   component migrations in the fixed integration order, including
+5. apply supported component migrations in the fixed integration order,
+   including the ordered Session `1..12 -> ... -> 13` path and exact atomic
+   `13 -> 14` step before downstream consumers; create or migrate
+   `alert_engine` to v2 in staging without
+   reserializing a v1 row, validate lifecycle v1 against that parent, and then
+   continue with
    `historical_instruction_analysis` v1,
    `historical_import` v1, `sanitized_import` v1, `runtime_backup` v1, then
    `pricing` v1; pricing is never created while the parent remains v1;
@@ -650,11 +706,16 @@ The state machine is:
 12. report `restore_succeeded`.
 
 Step 6 does not invoke the live-target mutation path of normal backup. It
-read-only preflights and online-copies the unchanged target into a private
-owned snapshot, applies supported alert/runtime/pricing migrations only to that
-copy, validates/packages the migrated safety snapshot, and appends no receipt
-to the live target. Thus every failure before the atomic swap leaves the live
-target byte-identical even when its accepted component vector was older.
+read-only preflights and online-copies the unchanged target into a private owned
+snapshot, then applies the same fixed migration order as restore staging,
+including Session before `local_repository_catalog` and every other Session
+consumer, followed by the alert/runtime/pricing tail. It runs the same current
+component/row validation after each dependency reaches current. The safety-
+backup manifest, component vector, database hash, archive hashes, and published
+bytes are derived only from that fully migrated private copy. It validates and
+packages the copy and appends no receipt to the live target. Thus the live
+target remains byte-identical through safety-backup construction and every
+failure before atomic swap, even when its accepted component vector was older.
 
 The bounded sibling journal schema is `runtime-restore-journal.v2`. It binds one
 UUID operation ID, archive digest, a derived random sibling staging basename,
@@ -780,3 +841,10 @@ Automated synthetic source/destination-directory testing is not second-machine
 evidence. `91-L-088` remains `blocked_external` until a real second-machine run
 exists. Matrix validation and leak scanning operate on sanitized receipts and
 ledgers only; a raw backup is never copied into repository evidence.
+
+The automated rows include Session v13-to-v14 restore and safety-snapshot
+fixtures with Event content, Retention catalog/receipt children, installed
+Skill projection/claim descendants, exact catalog-v1/pricing-v1 Session-13
+legacy pairs, rejection of those children with Session 1..12, and proof that
+the safety manifest/hash comes from the migrated private copy while the live
+target remains byte-identical.

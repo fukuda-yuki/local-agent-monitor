@@ -81,8 +81,12 @@ Tool/LLM span fields, and Session event metadata (`event_id`, `run_id`,
 `content_state`). Missing sanitized Skill name/path/version or typed test/review
 result renders `利用不可`; it is not derived from names, tool output, or content.
 
-The Review terminal gate links only to a matching canonical terminal Session
-event (`session.shutdown`, `session.task_complete`, `SessionEnd`, or `Stop`).
+The Review terminal gate links only to a matching persisted Session Event whose
+Session-14 `terminal_outcome` and `terminal_policy_version` fact pair is
+non-null. The query verifies that fact in the requested Session/Run/Trace scope;
+it does not maintain an event-type allowlist. `Stop`, `PostToolUseFailure`,
+`StopFailure`, `subagent.failed`, and child error/status evidence cannot unlock
+the gate without such a fact.
 The error-event gate links to every exact `status == error` event counted by
 that gate. Otherwise no link is rendered and evidence is honestly unavailable.
 Issue #53 adds no persistent human-verdict reference.

@@ -347,8 +347,8 @@ to Config CLI and no new Local Monitor route.
   contracts; neither accepts caller-supplied adapter/candidate bytes.
 - `CopilotAgentObservability.Persistence.Sqlite` owns a distinct
   `schema_version(component='historical_import', version=1)` component in the
-  Local Monitor database. It is not part of `RawTelemetryStore.cs`, Session
-  schema v13, or retention catalog v1.
+  Local Monitor database. It is not part of `RawTelemetryStore.cs`, the current
+  Session schema v14, or retention catalog v1.
 - Positive production admission can come only from a source-specific typed seam
   after exact profile tuple and stable source snapshot validation. Current
   GitHub Copilot CLI and Claude Code profiles remain zero-candidate and
@@ -954,8 +954,8 @@ body and creates no raw retention item in workflow v1.
 
 Issue #88 adds a separate `runtime_backup` SQLite component v1 after the #79
 and #86 component migrations. It owns sanitized path-free operation receipts
-only and does not change Monitor 7, Session 13, Retention 1, or the five raw
-store kinds.
+only and does not own the current Monitor 11, Session 14, Retention 1, or the
+five raw store kinds.
 
 Issue #95 appends `pricing` component v1 after `runtime_backup` without changing
 the accepted #79 -> #86 -> #88 subsequence. It owns exact private catalog and

@@ -870,6 +870,14 @@ local_repository_catalog:1
 
 immediately after the Session component.
 
+The current catalog v1 parent is exact Session v14. Runtime-backup read-only
+legacy preflight accepts a present catalog v1 with an older Session parent only
+for exact Session v13 and complete exact legacy shapes; catalog v1 paired with
+Session v1..v12 is incompatible before mutation. For the exact v13 pair,
+restore and safety-snapshot staging migrate Session first and only then invoke
+the current catalog schema/row validator. A catalog validator never runs while
+its parent remains v13.
+
 The relevant restore order is:
 
 ```text

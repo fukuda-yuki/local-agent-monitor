@@ -130,6 +130,257 @@ envelope provenance fields defined below; it does not change sanitized read
 DTOs, the raw-content route, Session/Run/Event identity, or Issue #49 Agent
 ownership.
 
+Terminal evidence for completeness is exactly a persisted Session Event with
+non-null `terminal_outcome` and `terminal_policy_version`. A `neutral` fact is
+terminal evidence for completeness. Event type, event or child status, error
+text, trace/span status, and content availability are not terminal-evidence
+substitutes. After every ordinary write and during v13-to-v14 migration, the
+Session owner reruns the existing durable completeness calculator over the full
+persisted Session evidence and supplies `terminal_evidence = facts.Any()`.
+The calculator, rank/reason order, and every other input remain unchanged.
+
+## Session Outcome Aggregation
+
+Session schema component version `14` owns the private terminal-fact and
+aggregate contract in this section. All comparisons are ordinal and
+case-sensitive. Adapter, surface, event `type`, root discriminator name, and
+root discriminator value must match exactly. Nested values, aliases, summary
+text, names, status/error text, child state, timing proximity, and the prior
+`sessions.status` are never consulted.
+
+### Source-scoped terminal policy v1
+
+| Exact `source_adapter` | Exact legal `source_surface` | Exact event `type` | Exact evidence | Persisted `terminal_outcome` |
+| --- | --- | --- | --- | --- |
+| `copilot-sdk-stream` | `copilot-sdk` | `session.task_complete` | Type alone | `clean` |
+| `copilot-sdk-stream` | `copilot-sdk` | `session.shutdown` | Root `shutdownType` is `routine` | `clean` |
+| `copilot-sdk-stream` | `copilot-sdk` | `session.shutdown` | Root `shutdownType` is `error` | `failed` |
+| `copilot-sdk-stream` | `copilot-sdk` | `session.shutdown` | `shutdownType` is absent, unavailable, duplicated, non-string, or any other string | `neutral` |
+| `copilot-compatible-hook` | one of `copilot-cli`, `vscode`, `hook-unknown` | `SessionEnd` | Root `reason` is `complete` or `user_exit` | `clean` |
+| `copilot-compatible-hook` | one of `copilot-cli`, `vscode`, `hook-unknown` | `SessionEnd` | Root `reason` is `error` or `timeout` | `failed` |
+| `copilot-compatible-hook` | one of `copilot-cli`, `vscode`, `hook-unknown` | `SessionEnd` | `reason` is `abort`, absent, unavailable, duplicated, non-string, or any other string | `neutral` |
+| `claude-code-hook` | `claude-code` | `SessionEnd` | Root `reason` is `clear`, `resume`, `logout`, or `prompt_input_exit` | `clean` |
+| `claude-code-hook` | `claude-code` | `SessionEnd` | Root `reason` is `bypass_permissions_disabled`, `other`, or any other admitted string; during migration only, an already-admitted legacy Event has absent, unavailable, duplicated, non-string, invalid-JSON, or non-object discriminator content | `neutral` |
+
+A discriminator is read only from the one exact root JSON property. The Claude
+Hook mapping remains required at live admission: absent, duplicated,
+non-string, wrong-content-kind, invalid-JSON, or non-object root `reason`
+rejects the producer event through the existing invalid-mapping path, admits no
+Event, and persists no fact. An admitted string outside the clean set is
+`neutral`. During v13-to-v14 migration only, an already-admitted legacy
+SessionEnd whose discriminator content is absent, unavailable, duplicated,
+non-string, invalid-JSON, or non-object is `neutral`; migration never treats
+that fallback as proof that a new live event was valid. No path falls back to a
+legacy event-name heuristic. Other root properties do not participate.
+`session.task_complete` is `clean` without a content read.
+
+Every other retained event has no terminal fact. This includes
+`PostToolUseFailure`, `Stop`, `StopFailure`, `subagent.failed`, child
+Run/Event/Trace/Span errors, exception or error text, and every
+`claude-code-otel` event. An error outside the table cannot synthesize a failed
+Session. In particular, the recoverable `PostToolUseFailure` signal and the
+nonterminal `subagent.failed` lifecycle event remain ordinary evidence.
+
+### Immutable fact schema and reducer
+
+In exact Session schema `14`, `session_events` appends these columns immediately
+after `match_kind`:
+
+```sql
+terminal_outcome TEXT NULL,
+terminal_policy_version INTEGER NULL
+```
+
+The table has exactly this additional CHECK:
+
+```sql
+CHECK (
+    (terminal_outcome IS NULL AND terminal_policy_version IS NULL)
+    OR
+    (
+        typeof(terminal_outcome) = 'text'
+        AND terminal_outcome IN ('clean', 'failed', 'neutral')
+        AND typeof(terminal_policy_version) = 'integer'
+        AND terminal_policy_version = 1
+    )
+)
+```
+
+The pair is either both null or the exact v1 fact pair, including SQLite
+storage classes. No new table, view, generated column, named index, trigger,
+wire DTO, or public field is added. Each accepted in-memory event is classified
+before secret filtering or optional content retention, and its event row and
+final fact are committed atomically. Production has no fact update/delete API.
+
+For the complete durable event set of one Session, reduction is exact:
+
+```text
+facts = events where terminal_outcome is non-null
+status = failed     if any fact is failed
+         completed  else if any fact is clean
+         unknown    else if any fact is neutral
+         active     else
+ended_at = null     if facts is empty
+           UTC-O(max parsed facts.occurred_at) otherwise
+```
+
+`UTC-O` is invariant round-trip UTC with seven fractional digits. Every fact
+participates in the maximum, including neutral facts and outcomes that lose the
+status lattice. A later neutral fact can therefore advance `ended_at` without
+changing a completed or failed status. Equal instants produce identical bytes.
+An empty fact set, including a zero-event, OTel-only, Stop-only, or error-only
+Session, always produces `active` and null `ended_at`; prior status and prior
+ended time are never consulted or preserved.
+
+Normal writes run inside the existing `BEGIN IMMEDIATE` transaction: validate
+and classify the batch; merge non-outcome Session metadata; resolve exact event
+identities and compare replays; insert new event/content/fact rows; reduce all
+durable facts for every affected Session and assign exact status and ended time;
+then rerun the existing durable completeness calculator with terminal evidence
+equal to any persisted fact before commit. Late delivery follows only the
+lattice: clean then failed becomes failed, failed then clean remains failed,
+neutral then clean becomes completed, and every later terminal instant may
+advance `ended_at`. Arrival order, batch split, and exact duplicate delivery
+cannot change final bytes.
+
+### Replay, retention, and downstream gates
+
+Replay identity remains exact `(source_adapter, source_event_id)`. First resolve
+the incoming caller-local Event ID and parent reference to their canonical local
+IDs under the existing identity rules. Then compare this exact vector:
+
+```text
+event_id, session_id, run_id, source_surface, parent_event_id, trace_id,
+status, source_adapter, source_event_id, type, occurred_at, content_state,
+source_application_version, adapter_version, schema_fingerprint,
+normalization_version, match_kind, terminal_outcome, terminal_policy_version
+```
+
+Both incoming and durable `occurred_at` values pass through the existing
+canonical UTC seven-fractional-digit formatter before exact equality. All
+nullable strings and IDs use ordinal equality after canonical resolution.
+Exact replay is a complete no-op. Any
+vector mismatch aborts the whole batch and transaction; there is no
+first-writer/last-writer choice, merge, repair, or reclassification. The same
+comparator applies to `claude-code-otel`; its former owner-only replay shortcut
+is not sufficient. Same-batch duplicate source identities resolve against the
+first canonical candidate and must compare exactly. A mixed batch commits only
+when every database or same-batch replay is exact.
+
+Session Event content remains outside this event/fact comparator and preserves
+its existing separate ownership/conflict contract. An exact replay never
+creates or backfills a missing content row, replaces content, or reclassifies a
+fact. Where both sides already have content, the existing content conflict
+checks remain authoritative and any mismatch aborts the transaction. Existing
+writer failures retain the frozen `503` /
+`{ "error": "session_store_busy" }` response.
+
+Retention expiry or deletion removes only authorized content. It never deletes
+or rewrites a fact, Session status, terminal time, or historical downstream
+receipt/estimate. Completeness, proposal, and cost terminal lookup is scoped by
+the exact `session_id` and uses any persisted non-null fact, not a raw event-type
+list. Run/Trace scope participates only where an existing objective/evidence DTO
+already carries those fields; PO124-A adds no Run/Trace field to proposal DTOs.
+A neutral fact can satisfy completeness but leaves the Session `unknown`.
+Current proposal, objective, comparison, and cost eligibility always revalidates
+exact-bound status `completed` or `failed`, completeness `full`, and a
+Session-scoped non-null fact. `active`, `unknown`, and non-full Sessions are
+ineligible. `Stop` cannot unlock any terminal gate.
+
+### Exact v13-to-v14 transition and current validation
+
+The Session owner performs one atomic `13 -> 14` migration in the established
+schema-initialization envelope. Because `session_events` is a referenced parent,
+the connection sets `PRAGMA foreign_keys=OFF` while still in autocommit and
+before `BEGIN IMMEDIATE`; changing the pragma inside a transaction is forbidden.
+It then requires one exact version-13 component row and exact v13 Session
+profile before mutation; partial, mixed, future, or extra-object shapes fail
+closed. The migration rebuilds `session_events` with the exact column order and
+CHECK above while preserving every legacy event and every child/descendant row
+byte-for-byte, including `session_event_content`, Retention catalog/receipt
+state, and installed Skill projection/claim descendants.
+
+It verifies source/destination event counts, canonical IDs, all child joins,
+and every copied legacy value before classification, then enumerates every event
+in ordinal `event_id` order and applies the v1 classifier. For every Session,
+including zero-event Sessions, it overwrites `status` and `ended_at` from the
+fact reducer and recomputes `completeness` through the existing durable
+calculator with terminal evidence equal to any fact. No other Session value,
+including `created_at` or `updated_at`, changes merely because migration ran.
+It then verifies the exact v14 profile, tuple/outcome domains, aggregates,
+completeness, row counts, copied legacy/descendant values, and
+`PRAGMA foreign_key_check`. It stamps component version `14` last and reruns
+current-v14 validation before commit.
+
+Any failure rolls back schema, facts, aggregates, completeness, descendants,
+and stamp together. In a `finally` path after commit or rollback, the connection
+returns to autocommit, executes `PRAGMA foreign_keys=ON`, and verifies the pragma
+is enabled; failure to restore enforcement fails initialization. Fresh
+databases create exact v14 directly. Versions `1..12` traverse the existing
+migrations to exact v13 and then this v14 step in the same initialization
+transaction whose foreign-key pragma was disabled before `BEGIN`.
+
+Migration reads discriminator content only through a Retention-owned helper on
+the already-open connection/transaction and one `migration_now` captured from
+the injected `TimeProvider` before classification; system time is not a
+fallback. The helper opens no connection, acquires no lease, advances no
+Retention state, and reads nothing after the transaction. It returns content
+only when all of these agree: exactly one available `application/json` content
+row; the current Retention v1 schema; exact coverage-version-1 rows for
+`session_event_content`, `raw_record`, `analysis_run_raw`, `sensitive_bundle`,
+and `analysis_sdk_directory`; one valid store singleton; exactly one matching
+catalog row for that singleton with `store_kind=session_event_content`,
+`source_item_id=event_id`, receipt/coverage version `1`, lifecycle state
+`expiring` or `retained_by_policy`, and null `read_denied_at`; one 32-byte owner
+token; and the recomputed Session ownership receipt. For `expiring`, both
+catalog and content expiry must be strictly later than `migration_now`. For
+`retained_by_policy`, the authorized pinned item remains readable regardless of
+its original past expiry; migration must not demote it to unavailable. No
+Retention component or ordinary absent/expired/denied/deleted/unavailable
+content yields `neutral` for an already-admitted legacy discriminator-bearing
+event.
+Malformed or partial Retention schema, duplicate identity/singleton, invalid
+coverage/token, receipt contradiction, or a malformed recognized terminal
+`occurred_at` is corruption and rolls back; there is no direct-content fallback
+or second attempt.
+
+The exact current-v14 validator checks column/affinity/nullability/key/FK/CHECK
+semantics and reserved objects, every fact pair/domain/version, canonical fact
+timestamps, and this exact tuple/outcome matrix: SDK `session.task_complete` is
+`clean` only; SDK `session.shutdown` permits `clean|failed|neutral`;
+Copilot-compatible `SessionEnd` permits `clean|failed|neutral`; Claude Hook
+`SessionEnd` permits `clean|neutral` and never `failed`; every other tuple,
+including all Claude OTel, has the null pair. Thus a failed task-complete or
+failed Claude SessionEnd is corruption even though `failed` is in the global
+domain.
+
+For every Session, the validator independently recomputes exact
+status/`ended_at` and invokes the existing durable completeness calculator with
+terminal evidence equal to any fact, then requires persisted `completeness` to
+match. It does not reopen content, reclassify, rewrite, or repair. Aggregate or
+completeness drift, or a contradictory current fact, fails startup before
+readiness. A second open of a valid v14 database is select-only and
+byte-idempotent.
+
+Required migration/reducer fixtures include content-bearing terminal events,
+Retention catalog/receipt descendants, installed Skill projection/claim
+descendants, pinned `retained_by_policy` content whose original expiry is past,
+all tuple/outcome invalid pairs, and a Session whose otherwise-full evidence
+contains only `Stop`; the latter must lose terminal evidence and must not remain
+`full`.
+
+Required replay fixtures vary each of the 17 legacy event columns and each fact
+column independently, cover canonical timestamp equality and inequality,
+caller-local Event/parent resolution, database and same-batch duplicates,
+mixed-batch rollback, the Claude OTel comparator, and the separate content
+no-backfill/conflict rule. Migration tests reopen the same valid v14 database
+and require byte-idempotent select-only validation.
+
+The public Session list/detail/status wire shape, property order, routes,
+headers, enum strings, status codes, fixed error representations, monitor
+health/SSE bytes, and content-state vocabulary remain frozen. The two private
+fact columns are never serialized.
+
 ## Session Event Ingest
 
 The installed Local Monitor exposes:

@@ -2521,6 +2521,13 @@ mutation targets. Raw replay, backup restore, heuristic conflict resolution,
 origin attestation, and new carriers remain separate concerns. The interface
 is [sanitized evidence import](specifications/interfaces/sanitized-evidence-import.md).
 
+PO124-A supersedes only D070's current destination/capture-version pin: the
+runtime and #85 anchor are current Monitor v11 / Session v14. The ownership
+decision remains intact: `sanitized_import` stays component v1, preserves
+`monitor_schema=8` and `session_schema=13` when they are immutable metadata
+from an older valid source bundle, and owns no Monitor/Session migration,
+Session row/fact validation, mutation, or carrier.
+
 ## D071: Runtime restore uses a strict SQLite restore unit and authoritative tombstone reconciliation
 
 Status: Accepted (2026-07-23)
@@ -2968,3 +2975,40 @@ writer, snapshot/current-file service or snapshot raw-local route. Sanitized
 export/import excludes the complete namespace and emits no empty carrier.
 Issue #152 remains unresolved, and frozen Monitor/Workspace/SSE contracts remain
 unchanged.
+
+## D079: Session outcome is reduced from immutable source-scoped terminal facts
+
+Status: Accepted (2026-08-09)
+
+Issue #124 adopts PO124-A. Session schema `14` persists one private
+`terminal_outcome` / `terminal_policy_version=1` fact pair on each exact
+recognized SDK/Hook terminal signal. The closed clean/failed/neutral table is
+owned by
+[Canvas Session Workspace](specifications/interfaces/canvas-session-workspace.md).
+`PostToolUseFailure`, `Stop`, `StopFailure`, `subagent.failed`, child error
+state/text, and every Claude OTel event are nonterminal; recoverable error
+evidence cannot synthesize Session failure.
+
+Aggregate precedence is `failed > clean > neutral > no fact`, projected through
+the frozen public statuses as `failed`, `completed`, `unknown`, and `active`.
+`ended_at` is the maximum instant of every terminal fact, including neutral and
+losing facts. Exact replay is a no-op; any durable event/fact mismatch aborts
+the transaction. Retention may remove content but never a fact or aggregate.
+The atomic v13-to-v14 migration reclassifies every retained event through the
+same policy using only authorized content and recomputes every Session; current
+v14 opens validate without content reads, repair, or reclassification.
+
+Only genuine Copilot-compatible `SessionEnd(reason=complete|user_exit)` has
+controlled-live evidence on candidate `6a313fa61ac2bf161a6c6c4c0cb4ce4a6a311103`.
+The other exact table rows are accepted producer-vocabulary Product policy,
+not claims of live observation. Additional failed/neutral/live source evidence
+remains useful `AWAITING_LIVE` characterization but is not an implementation
+gate and cannot widen or override the table without a new accepted decision.
+
+Public Session wire shapes, enum strings, property order, routes, headers,
+status/error bytes, monitor health/SSE, and content states remain frozen. A
+neutral fact counts for completeness, while current proposal/objective/
+comparison/cost eligibility requires exact public status `completed|failed`,
+`full` completeness, and a Session-scoped fact; `active|unknown`, non-full,
+and type-only `Stop` evidence are ineligible. Later reclassification does not
+rewrite immutable historical proposal, objective, effect, or estimate rows.

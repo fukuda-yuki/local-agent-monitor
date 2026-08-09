@@ -54,10 +54,17 @@ An objective evaluation receipt is immutable local-runtime metadata:
 
 Identifiers accept only `^[A-Za-z0-9][A-Za-z0-9._:-]*$`. They are labels, not
 paths, URIs, source fragments, credentials, or free-form notes. A receipt is
-rejected unless the Session is terminal and `full`, the Run and trace match
-exactly, and every evidence reference resolves in the same exact Session
-scope. Repository, workspace, timestamp proximity, prompt similarity, and
-target label never establish identity.
+rejected unless the Session status is exactly `completed` or `failed`,
+completeness is `full`, the exact Session scope contains a persisted non-null
+Session-14 fact, the Run and trace match exactly, and every evidence reference
+resolves in the same exact Session scope. Run/Trace narrows only those existing
+receipt references that carry it; the terminal-fact query is Session-scoped.
+`active`, `unknown`, raw event type, `Stop`, and error/status text are
+ineligible. Objective creation revalidates this gate inside the receipt-insert
+transaction, and every current use of an existing receipt revalidates it again;
+later ineligibility preserves the immutable receipt as history but removes it
+from current objective authority. Repository, workspace, timestamp
+proximity, prompt similarity, and target label never establish identity.
 
 The repository-safe normalized measurement dataset is not an objective
 receipt source by itself. Its manually supplied `success_status=pass` has no
@@ -81,7 +88,9 @@ The user submits one immutable cohort revision containing:
   `overlaps_application`, or `user_excluded`.
 
 Every Session appears once at most. Included Sessions must be exact-bound,
-terminal, and `full`. A pre Session must end at or before `applied_at`; a post
+have status exactly `completed` or `failed`, be `full`, and have a
+Session-scoped non-null fact; `active` and `unknown` are ineligible. A pre
+Session must end at or before `applied_at`; a post
 Session must start at or after `applied_at`. A Session spanning the boundary
 cannot be included. At least three pre and three post Sessions are required for
 an effect verdict other than `insufficient_evidence`.
@@ -130,7 +139,8 @@ The fixed verdicts are `improved`, `no_change`, `regressed`, and
 
 1. Return `insufficient_evidence` when application/proposal/cohort linkage is
    invalid, either cohort has fewer than three Sessions, any included Session
-   is not exact-bound/terminal/full, any quality input is missing, or a
+   is not exact-bound, `completed|failed`, `full`, and backed by a
+   Session-scoped fact, any quality input is missing, or a
    comparison required below has no complete common efficiency metric.
 2. Return `regressed` when any post Session has severe failure.
 3. Compare quality pass rates exactly by integer cross multiplication. A
@@ -155,21 +165,30 @@ excluded Session, every captured human/objective evidence reference, quality
 summary, efficiency summary, verdict, fixed reasons, and `recorded_at`.
 
 Inside one SQLite transaction, the store re-reads the proposal revision,
-application state, cohort revision, and evidence identities, records the effect
-receipt, and changes the proposal from `recommended` to `verified` only when
-the verdict is `improved`. Other verdicts never change proposal maturity.
-Races return a fixed stale/insufficient result and never partially verify.
+application state, cohort revision, evidence identities, and every included
+Session's exact binding, `completed|failed` status, `full` completeness, and
+Session-scoped fact. It records the effect receipt and changes the proposal
+from `recommended` to `verified` only when the verdict is `improved`. Other
+verdicts never change proposal maturity. Races or a newly ineligible Session
+return the existing fixed stale/`insufficient_evidence` result and never
+partially verify.
 
 A later successful rollback leaves the effect receipt as historical evidence
 but makes its derived `verification_state` equal `invalidated`. A persisted
 receipt is likewise `invalidated` whenever its exact application is no longer
-current: post-apply hashes are stale, the application is unavailable, or an
-apply/rollback operation is pending. This derived projection is recomputed at
-the Local Monitor service/route boundary from the authoritative Issue #55
-application currentness check; it is not persisted and does not disclose paths
-or hashes. The proposal's historical `verified` status and the immutable
-receipt/result remain unchanged; UI and APIs must not present the receipt as
-an active improvement. No non-current receipt can verify another cohort.
+current, or whenever any included Session no longer passes exact binding,
+current `completed|failed` status, `full` completeness, and Session-scoped fact
+validation. Application non-currentness includes stale post-apply hashes,
+unavailable application state, or a pending apply/rollback operation. This
+derived projection is recomputed inside one read transaction at the Local
+Monitor service/route boundary from the authoritative Issue #55 application
+currentness check and the Session owner's current eligibility snapshot; it is
+not persisted and does not disclose paths or hashes. The proposal's historical
+`verified` status and the immutable receipt/result remain unchanged; UI and APIs
+must not present the receipt as
+an active improvement. Every current comparison/use revalidates the same gate;
+the immutable objective/effect receipts, verdict, and proposal history remain
+stored. No non-current receipt can verify another cohort.
 
 ## Local Monitor Interface
 
@@ -234,12 +253,15 @@ apply, rollback, git operation, retry, or background polling.
   receipt cases;
 - candidate suggestions without repository/timestamp-only matching;
 - user confirmation, duplicate/overlap exclusion, exact three-by-three and
-  two-by-three boundaries, unbound/partial/rich/nonterminal Sessions;
+  two-by-three boundaries, unbound/partial/rich, `active`, and
+  `unknown` Sessions, missing Session facts, and loss of eligibility after
+  receipt creation;
 - missing/conflicting/human/objective/severe quality evidence;
 - exact 10% improvement, exact 10% worsening, greater-than-10% worsening,
   mixed efficiency, missing metric, odd/even median, and quality precedence;
-- atomic effect receipt + Verified, stale cohort/evidence/application races,
-  concurrent rollback, and post-verification rollback invalidation;
+- atomic effect receipt + Verified, stale cohort/evidence/application/Session-
+  eligibility races, concurrent rollback, post-verification rollback
+  invalidation, and eligibility-loss invalidation without historical rewrite;
 - summary/pair drill-down reference identity and Canvas helper/action/no-leak
   boundaries; and
 - repository build, Playwright bootstrap, and full solution tests.
