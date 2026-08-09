@@ -1345,6 +1345,59 @@ byte-for-byte unchanged and installation fails with
 Claude Code event, not a GitHub Copilot CLI event; it remains valid only in the
 separate Claude Hook mapping below.
 
+#### Copilot CLI 1.0.75 `PermissionRequest` admission arm
+
+In the no-`--source` forwarder, presence of an ordinal, case-sensitive root
+property named `hookName` selects this arm. Selection happens before value
+validation: a selected payload that fails this arm never falls through to the
+pre-existing Copilot-compatible arm. When exact root `hookName` is absent, that
+pre-existing arm and all of its aliases and behavior remain unchanged.
+
+The selected root must be an object with exactly one occurrence of each of
+these seven ordinal properties and no other property:
+
+```text
+hookName
+sessionId
+timestamp
+cwd
+toolName
+toolInput
+permissionSuggestions
+```
+
+Their accepted values are closed:
+
+- `hookName` is the JSON string `PermissionRequest` exactly.
+- `sessionId` and `toolName` are JSON strings containing 1 through 256 Unicode
+  scalar values and encoding to at most 1,024 strict UTF-8 bytes after JSON
+  unescape. An unpaired surrogate is invalid. Each string must contain at least
+  one scalar outside exactly U+0009..U+000D, U+0020, U+0085, U+00A0, U+1680,
+  U+2000..U+200A, U+2028, U+2029, U+202F, U+205F, and U+3000. Values are not
+  trimmed or normalized.
+- `timestamp` is a JSON Number whose exact mathematical value is an integer in
+  the inclusive range `[-62135596800000,253402300799999]`. Admission evaluates
+  the decimal coefficient and exponent exactly; it neither converts through a
+  binary floating-point type nor requires integer-only lexical form. Therefore
+  `1`, `1.0`, `1e3`, `1.2e1`, and `-0` are integral, while `1e-1` is not. The
+  accepted value is Unix epoch milliseconds and is converted to the exact UTC
+  `occurred_at`; an invalid value never falls back to local capture time.
+- `cwd` is a JSON string, `toolInput` is a JSON object, and
+  `permissionSuggestions` is a JSON array whose elements have no additional
+  admission meaning.
+
+An unknown, missing, duplicate, wrong-cased, wrong-typed, out-of-range, or
+mixed-selector property makes the selected input invalid. The command then
+makes no HTTP request, writes nothing to stdout or stderr, and exits zero.
+
+An accepted input uses the existing `copilot-compatible-hook` v1 envelope with
+`source_surface=hook-unknown`, `native_session_id=sessionId`, event type
+`PermissionRequest`, and the converted `occurred_at`. Existing whole-input
+canonical event identity and recursive property/string sanitization apply
+unchanged to the accepted root. This arm does not establish aliases, a generic
+Copilot payload schema, source inference, or a producer guarantee for another
+event or version.
+
 ### GitHub Copilot App / SDK
 
 App/SDK configuration is caller-owned. Detection reports whether the current
@@ -1888,6 +1941,7 @@ The setup implementation must keep this requirement-to-test mapping:
 | no-change persistence and missing durable artifact distinctions | `SetupCommandDispatcherTests` prove `plan`/`no_changes` persists a private plan plus `planned` ledger row and later apply reaches terminal `no_changes`; paired apply/rollback/status cases distinguish no row, orphan plan, matching row with missing/unreadable/mismatched plan, and ineligible lifecycle without target activity |
 | VS Code channel/profile, running-state, and managed-source contract | `VsCodeSetupAdapterTests` cover Stable/Insiders Default Profiles on all three OS path maps, exact no-`--profile` extension commands, dual-channel order, fixed non-default warning/no-create/no-open behavior, Copilot whole-channel precedence, independent enterprise-policy equality/conflict, and apply-time version/extension/policy/member revalidation. They assert the exact tagged v1 `desired_state` union (never an inline document), 1 MiB-plus-sentinel settings reads, supported-version drift as `recovery_required`, and transient materialization with exact expected hash. They also assert exactly one post-gate Stable-then-Insiders `--status` call per eligible channel, zero calls after an early gate failure and during `Revalidate`, no retry/sleep, no stdout leakage, all representable observations (`Completed` with zero, null, or nonzero exit; `NotFound`; `Failed`; `TimedOut`), and the four dual-channel per-record restart combinations with top-level action deduplication only; revalidation proves persisted record requirements are unchanged. Contract shape/validation tests close the warning/action values. |
 | Copilot CLI OS and exact environment contract | `CopilotCliSetupAdapterTests` cover the five-member explicit-capture allowlist, forbidden global identity/resource/header/credential keys, matching/conflicting detect-only trace protocol override, environment-only managed warning, Windows apply, and macOS/Linux no-write apply refusal; contract shape/validation tests close the new code/warning/action values |
+| Copilot CLI 1.0.75 `PermissionRequest` admission | `HookForwarderTests` cover selector exclusivity, the exact seven-property inventory and duplicates, every property type and bound, exact decimal/exponent integrality and Unix-millisecond range boundaries, silent no-request rejection, unchanged canonical identity/sanitization/`hook-unknown`, and every unaffected Copilot Hook arm |
 | cross-platform private setup root | `SetupRuntimeTests` cover Windows/macOS/Linux local-application-data mappings, absolute and invalid/unset `XDG_DATA_HOME`, injected platform base, and absence of a CLI/environment override |
 | Local Monitor recognition | `GitHubCopilotEndpointProbeTests` cover the 500 ms/no-redirect/4096-byte-plus-sentinel or oversized-`Content-Length`/exact-JSON matrix and fixed refused-versus-timeout/connected failure mapping |
 | Claude nested settings and private-plan arm | `ClaudeSettingsDocumentTests` and `SetupStorageTests` cover exact nested ownership, preservation, malformed/duplicate/oversize input, both existing v1 fixture byte identities, `claude_settings_owned_values_v1` bounds and arm relation, and secret/path/command non-leakage outside the private plan |
