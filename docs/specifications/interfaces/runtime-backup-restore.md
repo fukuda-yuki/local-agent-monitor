@@ -717,6 +717,18 @@ packages the copy and appends no receipt to the live target. Thus the live
 target remains byte-identical through safety-backup construction and every
 failure before atomic swap, even when its accepted component vector was older.
 
+Only this step-6 private safety copy, and only after every required terminal
+reconciliation and non-terminal confirmation gate for the restore has passed,
+uses the existing Retention restorable-coverage validator during that fixed
+migration. A catalog-backed source proof of exact `Match` counts normally;
+exact `Missing` preserves the already-accepted source absence. A receipt or
+owner mismatch, a source without a catalog row, malformed schema/row/foreign
+key state, or any other proof fails closed. This path never terminalizes an
+item, synthesizes or copies raw bytes from incoming staging, or changes
+lifecycle, receipt, revision, timestamps, expiry, or TTL. Ordinary startup,
+adoption/backfill, normal backup, restore staging, and ordinary reads retain
+their strict current validators.
+
 The bounded sibling journal schema is `runtime-restore-journal.v2`. It binds one
 UUID operation ID, archive digest, a derived random sibling staging basename,
 whether the target existed, exact old/staged/rollback hashes, and the closed

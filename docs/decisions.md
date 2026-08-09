@@ -2998,6 +2998,14 @@ The atomic v13-to-v14 migration reclassifies every retained event through the
 same policy using only authorized content and recomputes every Session; current
 v14 opens validate without content reads, repair, or reclassification.
 
+D079's fixed private-copy migration remains consistent with the accepted
+runtime-restore resurrection contract: only a post-gate pre-restore safety copy
+uses Retention's existing restorable-coverage profile, which preserves exact
+`Missing` source proof but rejects mismatch, extra source, or malformed state.
+It cannot synthesize or terminalize data, change Retention facts, affect the
+live target, or weaken strict startup, ordinary backup, restore-staging, or read
+validation.
+
 Only genuine Copilot-compatible `SessionEnd(reason=complete|user_exit)` has
 controlled-live evidence on candidate `6a313fa61ac2bf161a6c6c4c0cb4ce4a6a311103`.
 The other exact table rows are accepted producer-vocabulary Product policy,
