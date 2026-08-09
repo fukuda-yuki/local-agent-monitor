@@ -75,6 +75,10 @@ non-null Session ID is unavailable rather than exported ambiguously. Multiple
 source-surface provenance rows for the same exact Session/trace remain separate
 `(session_id, trace_id, source_surface)` projections.
 
+The #165/#166 comparison operational namespace, including
+`local_comparison_expiry_tombstones`, is outside the allowlist. It is neither
+queried nor represented by a record, capability or empty carrier.
+
 The source snapshot uses the Issue #58 nullable label names exactly:
 `repository_name`, `workspace_label`, and `repo_snapshot`. It also records source
 agent versions, processing versions, completeness, content state, retention

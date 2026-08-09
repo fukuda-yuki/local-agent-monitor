@@ -2968,3 +2968,84 @@ writer, snapshot/current-file service or snapshot raw-local route. Sanitized
 export/import excludes the complete namespace and emits no empty carrier.
 Issue #152 remains unresolved, and frozen Monitor/Workspace/SSE contracts remain
 unchanged.
+
+## D080: Local Monitor human routes are strict and Session search uses one body-bearing read
+
+Status: Accepted (2026-08-09)
+
+Issue #136 adopts PO136-A2b through
+`docs/specifications/interfaces/local-monitor-v1-route-transport.md`.
+Primary human paths are exact lowercase, slashless templates with canonical
+local UUIDv7 identities, except timeline nodes use `node-` plus 32 lowercase
+hexadecimal characters. Matched malformed identity/query input fails closed;
+literal/case/slash near-path aliases are empty no-store 404. There is no
+redirect, compatibility parser, first-wins query handling, name-based repair,
+latest-object fallback or alternate primary path.
+
+Exact `/sessions/unassigned` has reserved static precedence over the Session-ID
+template. Case variants of that reserved literal are near-path empty 404, never
+malformed Session-ID 400.
+
+The unimplemented #133 Session collection GET is replaced before production by
+one raw-default closed read:
+
+```text
+POST /api/local-monitor/v1/sessions
+```
+
+#133 keeps the Workspace semantic row requirements but does not yet define a
+complete exact Session-collection success wire. A later canonical #134
+Workspace-read response contract must fix it before #134 alone maps, reads and
+serializes the endpoint or a consuming primary page is registered. Until then
+only pure request/query/cursor/URL parsers may proceed. `q` and dynamic `model`
+values are transient current-page/POST-body state. They never enter URLs,
+history, browser storage, reusable cache, application logs, errors or cursors.
+Non-default limit is also transient; URL cursor eligibility requires exact
+q=null/model=[]/limit=null/default 50. Pagination uses an exact process-keyed
+HMAC-bound 110-byte cursor and the exclusive
+`sort_group ASC, sort_instant_utc DESC, session_id DESC` keyset, so neither raw
+values nor an unkeyed low-entropy digest are exposed. The POST has no GET alias,
+saved-search handle, server-side search session, fallback or second Workspace
+reader.
+
+The strongest objection is that q/model searches cannot be bookmarked or
+restored after reload/back. That loss is accepted because a raw-URL exception
+would put user-derived search/model text into request targets and common browser
+history/log surfaces, while a server-side handle would add sensitive
+persistence, cleanup, restart, backup and stale-handle contracts outside v1.
+
+#133 owns local execution/node identity, #162 owns AI run identity and #165 owns
+comparison identity. Their human-route representations are closed by the route
+transport specification; #136 does not create a parallel identity store.
+Known 24-hour comparison expiry uses #165/#166's minimal append-only
+`(comparison_id, repository_id, expired_at)` runtime-database tombstone so the
+same URL remains deterministic `410 comparison_expired` after operational
+content deletion. Unknown or Repository-mismatched IDs are 404. Tombstones
+contain no cohort, Session, filter, receipt, evidence, metric, hash, content,
+model or path. Runtime backup validates and transactionally drops the exact
+tombstone table only from its private staging copy after SQLite backup and
+before inventory/hash/archive; source is untouched, manifest/restore omit the
+table, and accepted restore startup creates it empty. Sanitized export/import
+never queries it. Future #166 operational tables receive no implicit exclusion
+and require their own exact runtime-backup amendment before shipping.
+
+The strongest tombstone objection is database-lifetime row growth. It is
+accepted as the smallest deterministic contract: pruning would make a known
+expired URL later change from 410 to 404, while retaining comparison facts
+would violate the operational-only boundary. A restored database intentionally
+has neither comparison content nor tombstone and returns 404.
+
+Human error sentence/HTML bytes remain #137/#169-owned. Only status, headers,
+closed state/recovery tokens and nonreflection are fixed. The old `/traces`
+list retires atomically with functional #138 Explorer integration and is then
+an empty no-store 404 for every method, without `Allow`; technical
+`/traces/{traceId}` stays under its frozen owner. `/historical-analysis`
+retires only with #164. Pure route/parser helpers may precede data owners, but
+no placeholder or substitute data route may be registered. Active Session
+collection/page registration also waits for the later canonical #134 exact
+response contract.
+
+D080 refines D075's route/browser boundary without changing the primary IA,
+raw-default-only posture, frozen `/api/monitor/*`,
+`/api/session-workspace/*` v1, SSE, Canvas, exact identity/provenance,
+missing-to-zero prohibition or Issue #152 scope.

@@ -174,6 +174,7 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   detail or deterministic Repository Session Compare. Unified Settings owns
   receiver, AI, Repository, archive, storage/backup and diagnostics entry.
 - `/api/local-monitor/v1/*` is the human-UI composition namespace. It reuses the
+  [exact route/Session Explorer transport](specifications/interfaces/local-monitor-v1-route-transport.md),
   [single Repository catalog/assignment authority](specifications/interfaces/local-repository-catalog.md),
   #133/#134 Workspace reads,
   [#157/#158 Skill snapshot/raw detail](specifications/interfaces/skill-invocation-snapshot.md),
@@ -181,6 +182,12 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
   `ILocalRepositoryScopeSnapshotService` and do not duplicate catalog readers.
+  The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
+  accepted Session collection request transport; q/model search values remain
+  transient and it has no GET or saved-search fallback. #133 does not yet fix
+  its complete exact success wire. Only pure #136 parsers may precede the later
+  canonical #134 Workspace-read response contract; #134 alone maps and
+  serializes the endpoint after that gate closes.
   It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
 - AI-independent observation/investigation/Compare remains complete without an

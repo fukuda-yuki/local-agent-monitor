@@ -45,7 +45,7 @@ Profile selector は `CAO_COLLECTION_PROFILE` とし、詳細は
 
 `raw-local-receiver` は Langfuse なしで VS Code からこの repository の local receiver へ直接 telemetry を送信する profile であり、Sprint7 の実装対象とする。
 
-Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
+Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Route and Session Explorer Transport](specifications/interfaces/local-monitor-v1-route-transport.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
 
 Human page route ownership:
 
@@ -63,12 +63,17 @@ The bounded Settings values are `state`, `receiver`, `ai`, `repositories`,
 `archive`, `storage` and `diagnostics`. Session detail uses only validated
 opaque `execution={executionId}`, `node={nodeId}` and `analysis={runId}` query
 state; `node` resolves its exact execution and `analysis` never names a mutable
-`latest`. Session Explorer filter/search/pagination state uses the closed
-`q/from/to/source/model/status/activity/archive_scope/cursor/mode=compare`
-contract from the IA. Draft cohort checkboxes remain transient until the server
-creates an opaque comparison snapshot ID.
+`latest`. Session Explorer URL state uses only canonical `from/to`, closed
+`source/status/has_*` filters, `archive_scope`, an eligible opaque cursor,
+`mode=compare` and `settings`. Dynamic `q` and `model` values are transient
+current-page state and travel only in the closed body of
+`POST /api/local-monitor/v1/sessions`; reload/back clears them. Non-default
+limit is also transient, and a cursor is URL-eligible only for exact
+q=null/model=[]/limit=null/default 50. Draft cohort checkboxes remain transient
+until the server creates an opaque comparison snapshot ID. Exact grammars and
+browser behavior are owned by the route transport specification.
 
-`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository catalog/assignment and its gated management routes are owned by #155/#156; #134 alone owns and serializes the composite `GET /api/local-monitor/v1/repositories` Workspace read. #156, #161 and #134 share one `ILocalRepositoryScopeSnapshotService`; #161 composes archive eligibility and neither #161 nor #134 adds direct catalog SQL or a second reader. Other Workspace reads are owned by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+`/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository catalog/assignment and its gated management routes are owned by #155/#156; #134 alone owns and serializes the composite `GET /api/local-monitor/v1/repositories` Workspace read. The sole accepted Session collection request transport is `POST /api/local-monitor/v1/sessions`; the formerly specified GET has no alias, compatibility reader, saved-search handle or fallback. #133 currently fixes semantic row requirements but not a complete exact success wire, so no active POST or consuming primary page is registered until a later canonical #134 Workspace-read response contract closes that gap. #134 then alone maps, reads and serializes it. #156, #161 and #134 share one `ILocalRepositoryScopeSnapshotService`; #161 composes archive eligibility and neither #161 nor #134 adds direct catalog SQL or a second reader. Other Workspace reads are owned by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
 
 The accepted #119/#157/#158 Skill foundation is canonical in
 [Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
@@ -92,7 +97,7 @@ inferred. V1 admission remains limited to
 `vcs.repository.url.full` and `copilot_chat.repo.remote_url`; Issue #152 remains
 unresolved.
 
-Old human-route disposition is exact: `/` changes from Overview to Repository selection; `/traces` retires when Session Explorer ships; `/traces/{traceId}` remains low-level technical evidence; raw record/span/event routes remain focused technical evidence; `/historical-analysis` retires when #164 integrates its backend into Repository-local AI while `/api/historical-analysis/v1/*` remains frozen; diagnostics, historical import, backup/restore and retention remain focused detail flows opened from Settings. No indefinite redirect, dual page path or permissive fallback is added.
+Old human-route disposition is exact: `/` changes from Overview to Repository selection; the narrow existing `/traces` list classifier retires atomically only when the functional #138 Session Explorer backed by #134's later accepted exact response contract ships and then returns empty no-store 404 for every method without `Allow`; `/traces/{traceId}` remains low-level technical evidence; raw record/span/event routes remain focused technical evidence; `/historical-analysis` retires only when #164 integrates its backend into Repository-local AI and then uses the same narrow empty-404 rule while `/api/historical-analysis/v1/*` remains frozen; diagnostics, historical import, backup/restore and retention remain focused detail flows opened from Settings. No indefinite redirect, dual page path or permissive fallback is added.
 
 Execution order is the contract-index graph: telemetry prerequisites and #154;
 then only the contract-released slices of #156/#158/#161/#168; then #134 after
@@ -1102,6 +1107,7 @@ sanitized. The canonical contract is
 | Validation and release matrix | [specifications/validation-release-matrix.md](specifications/validation-release-matrix.md) |
 | Local Monitor v1 authority index | [specifications/interfaces/local-monitor-v1-contract-index.md](specifications/interfaces/local-monitor-v1-contract-index.md) |
 | Local Monitor v1 IA, routes and states | [specifications/interfaces/local-monitor-v1-ia.md](specifications/interfaces/local-monitor-v1-ia.md) |
+| Local Monitor v1 exact route and Session Explorer transport | [specifications/interfaces/local-monitor-v1-route-transport.md](specifications/interfaces/local-monitor-v1-route-transport.md) |
 | Local Monitor v1 security supplement | [specifications/interfaces/local-monitor-v1-security.md](specifications/interfaces/local-monitor-v1-security.md) |
 | Local Repository catalog and Session assignment | [specifications/interfaces/local-repository-catalog.md](specifications/interfaces/local-repository-catalog.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
@@ -1162,8 +1168,12 @@ Publicly documented interfaces are:
 - Local Monitor v1 raw-default human-UI support namespace:
   `/api/local-monitor/v1/*`. Its readers and mutations are defined only by the
   accepted Local Monitor v1 contract owners; all routes are no-store, closed and
-  bounded, mutations require same-origin plus CSRF, and the entire namespace is
-  absent in `--sanitized-only`. It does not widen or duplicate frozen
+  bounded, mutations and the raw-search-bearing Session collection POST require
+  same-origin plus CSRF, and the entire namespace is absent in
+  `--sanitized-only`. The sole accepted Session collection request transport is
+  `POST /api/local-monitor/v1/sessions`; no GET alias or saved-search fallback
+  exists. Its active registration waits for the later canonical #134 exact
+  success-response contract. It does not widen or duplicate frozen
   `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. #134 is the sole HTTP
   owner of `GET /api/local-monitor/v1/repositories`; #156 owns only its gated
   management/action routes and the catalog/assignment core.

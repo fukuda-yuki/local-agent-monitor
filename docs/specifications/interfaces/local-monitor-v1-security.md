@@ -1,6 +1,7 @@
 # Local Monitor v1 Security and Data Boundary
 
-Status: **Accepted input to Issue #118**  
+Status: **Accepted current authority**
+Route/transport amendment: PO136-A2b, 2026-08-09
 Product posture: loopback-only, single trusted local user
 
 ## Human UI posture
@@ -19,6 +20,10 @@ Every raw-local surface remains:
 - retention-authorized;
 - bounded by closed routes and payload limits;
 - absent from normal logs and repository artifacts.
+
+Exact human-path, query, method, error, browser-history and Session Explorer
+POST behavior is owned by
+[Local Monitor v1 Route and Session Explorer Transport](local-monitor-v1-route-transport.md).
 
 ## Sanitized-only posture
 
@@ -120,10 +125,18 @@ This namespace is raw-default human-UI support, not a sanitized public API.
 
 - all responses are no-store;
 - mutations require same-origin and CSRF;
+- the body-bearing Session collection read also requires same-origin and the
+  exact CSRF header because it carries raw-local search/model state;
 - request bodies are closed and bounded;
 - error responses use fixed codes and never echo raw input or inner exceptions;
 - raw values, display names, local paths and provider content never become URL identity;
 - routes are absent in sanitized-only posture.
+
+The sole Session collection transport is the 32,768-byte closed JSON
+`POST /api/local-monitor/v1/sessions`. The former unimplemented GET is removed;
+there is no alias, saved-search handle, compatibility reader or fallback. This
+fixes the request/security boundary only; active registration waits for the
+later canonical #134 exact success-response contract.
 
 ## Retention
 
@@ -138,6 +151,13 @@ This namespace is raw-default human-UI support, not a sanitized public API.
 - Session AI report content uses analysis retention;
 - node/Repository/Compare AI operational content is deleted after 24 hours and is not backed up;
 - Compare deterministic snapshots are deleted after 24 hours and are not backed up.
+- Comparison expiry retains only the route/transport-owned append-only
+  `(comparison_id, repository_id, expired_at)` tombstone in the current runtime
+  database. It contains no cohort, Session, filter, receipt, evidence, metric,
+  hash, content, model or path and has no list/read API. Runtime backup removes
+  the exact table transactionally from its private staging copy before
+  inventory/hash/archive, never from source; manifest/restore omit it and
+  restore startup creates it empty. Sanitized export/import never queries it.
 
 ## AI provider egress
 
@@ -169,10 +189,21 @@ They must not contain:
 ## Browser state
 
 - no raw value is stored in URL, browser storage or reusable cache;
+- Explorer URLs carry only canonical timestamps, closed source/status,
+  `has_skill`/`has_subagent`/`has_error`/`has_retry`, archive/mode/Settings
+  tokens and an eligible opaque process-keyed cursor;
+- dynamic `q` and `model` values exist only in current-page form/JavaScript
+  memory and the bounded Session POST body; non-default limit is also transient;
+  reload/back clears all three;
+- URL cursor eligibility requires exact q=null/model=[]/limit=null/default 50;
+  other cursors remain page-memory/POST state;
+- cursor HMACs bind the complete semantic filter without exposing raw or
+  normalized q/model values or an unkeyed low-entropy digest;
 - comparison and AI URLs carry opaque snapshot/run IDs only;
 - pre-preview Compare checkbox selection is transient;
 - follow-up AI transcript is held only in the current browser page and is not persisted;
-- Settings/query state contains only closed section tokens and opaque IDs.
+- other Settings/query state contains only the route/transport-authorized
+  canonical timestamps, closed tokens, Booleans and opaque IDs/cursors.
 
 ## Rendering
 

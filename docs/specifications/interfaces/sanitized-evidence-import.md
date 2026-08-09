@@ -57,6 +57,10 @@ the repository-safe scanner result only. It does not prove bundle origin,
 signature, authorization, source-store provenance, or that a source claim was
 true.
 
+No accepted record can create or restore a comparison snapshot or
+`local_comparison_expiry_tombstones` row. There is no comparison empty carrier
+or compatibility mapping.
+
 ## Preview Contract
 
 `sanitized-import-preview.v1` is computed without writing import state. It
