@@ -1511,12 +1511,13 @@ Budget eligibility is independent of the one-to-100 recalculation target list.
 Inside one stable read transaction the cost application enumerates the complete
 eligible set and captures its deterministic eligibility digest plus every
 active estimate head revision. A Session is eligible in v1 when its persisted
-status is exactly `completed` or `failed`, its current source resolver state is
-`resolved`, and that exact resolved source-surface/application-version tuple
-matches one active configuration source entry. Its canonical window time is the exact current persisted
+status is exactly `completed` or `failed`, its completeness is `full`, exact
+Session scope contains a non-null Session-14 fact, its current source resolver
+state is `resolved`, and that exact resolved source-surface/application-version
+tuple matches one active configuration source entry. Its canonical window time is the exact current persisted
 `sessions.last_seen_at`, captured with `sessions.updated_at` and rechecked
-before append. Active/unknown Sessions and unselected source versions
-are ineligible. A selected Session with an unavailable adapter, missing
+before append. Active/unknown, non-full, factless Sessions and unselected source
+versions are ineligible. A selected Session with an unavailable adapter, missing
 estimate, partial/not-estimable/stale head, or prior recalculation failure
 remains in the denominator. If a current last-seen/update/source fact changes
 during evaluation, the eligibility digest changes and the append fails stale;
