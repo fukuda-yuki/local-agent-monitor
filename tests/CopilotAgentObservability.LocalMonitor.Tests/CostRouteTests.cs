@@ -24,8 +24,12 @@ public sealed class CostRouteTests
         { "overlap", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_recalculation_in_progress" },
         { "missing", PricingStoreStatus.Conflict, HttpStatusCode.NotFound, "cost_session_not_found" },
         { "ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "no-fact", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "non-full", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
         { "budget-missing", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
         { "budget-ineligible", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "budget-no-fact", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
+        { "budget-non-full", PricingStoreStatus.Conflict, HttpStatusCode.Conflict, "cost_session_not_eligible" },
         { "capacity", PricingStoreStatus.CapacityReached, HttpStatusCode.RequestEntityTooLarge, "cost_request_too_large" },
     };
 
@@ -536,6 +540,97 @@ public sealed class CostRouteTests
     }
 
     [Theory]
+    [InlineData("no_fact")]
+    [InlineData("non_full")]
+    public async Task RecalculationAdmission_RevalidatesCoreEligibilityAfterRequestCapture(
+        string loss)
+    {
+        using var temp = NewTemp();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider));
+        var sessionId = Guid.CreateVersion7().ToString("D");
+        InsertResolvedSession(temp.DatabasePath, sessionId);
+        var source = new CostSourceEntryV1(
+            "github-copilot-vscode",
+            "1.2.3",
+            "source-capability.v1",
+            PricingProviders.GitHubCopilot,
+            PricingBillingModes.PlanIncluded,
+            PricingRoutes.CodeCompletion);
+        var configuration = await CommitConfiguration(host.Client, [source]);
+        var request = RecalculationRequest(
+            configuration,
+            [sessionId],
+            "eligibility-race-" + loss);
+        LoseCoreEligibility(temp.DatabasePath, sessionId, loss);
+        using var mutation = new RecalculationMutationProbe(temp.DatabasePath);
+
+        var result = new SqliteCostRecalculationCoordinatorV1(
+            temp.DatabasePath,
+            timeProvider: temp.TimeProvider).Start(
+                Guid.CreateVersion7().ToString("D"),
+                request,
+                provider.CanonicalCatalogBytes,
+                temp.TimeProvider.GetUtcNow());
+
+        Assert.Equal(PricingStoreStatus.Conflict, result.Status);
+        Assert.Equal("cost_session_not_eligible", result.ErrorCode);
+        mutation.AssertUnchanged();
+    }
+
+    [Fact]
+    public async Task RecalculationBudgetAdmission_ExcludesIneligibleSessionsBeforeCardinalityBounds()
+    {
+        using var temp = NewTemp();
+        var provider = DefaultPricingCatalogProvider.Create([]);
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider));
+        var targetSessionId = Guid.CreateVersion7().ToString("D");
+        InsertResolvedSession(temp.DatabasePath, targetSessionId);
+        var source = new CostSourceEntryV1(
+            "github-copilot-vscode",
+            "1.2.3",
+            "source-capability.v1",
+            PricingProviders.GitHubCopilot,
+            PricingBillingModes.PlanIncluded,
+            PricingRoutes.CodeCompletion);
+        var configuration = await CommitConfiguration(host.Client, [source]);
+        InsertResolvedSessions(temp.DatabasePath, 1_999);
+        InsertResolvedSession(
+            temp.DatabasePath,
+            Guid.NewGuid().ToString("D"),
+            completeness: "rich");
+        var request = CostRecalculationRequestCanonicalJsonV1.Create(
+            configuration.ConfigurationId,
+            configuration.HeadRevision,
+            configuration.CatalogSha256,
+            [targetSessionId],
+            [
+                new("utc_day", null, "2026-07-01", null, null),
+                new(
+                    "rolling_period",
+                    null,
+                    null,
+                    new DateTimeOffset(2026, 7, 2, 0, 0, 0, TimeSpan.Zero),
+                    2),
+            ],
+            "cardinality-excludes-ineligible");
+
+        var result = new SqliteCostRecalculationCoordinatorV1(
+            temp.DatabasePath,
+            timeProvider: temp.TimeProvider).Start(
+                Guid.CreateVersion7().ToString("D"),
+                request,
+                provider.CanonicalCatalogBytes,
+                temp.TimeProvider.GetUtcNow());
+
+        Assert.Equal(PricingStoreStatus.Success, result.Status);
+    }
+
+    [Theory]
     [MemberData(nameof(RecalculationAdmissionFailures))]
     public async Task RecalculationAdmissionFailuresPreserveFixedStoreApplicationAndRouteOutcomes(
         string scenarioName,
@@ -706,7 +801,11 @@ public sealed class CostRouteTests
         command.ExecuteNonQuery();
     }
 
-    private static void InsertResolvedSession(string databasePath, string sessionId)
+    private static void InsertResolvedSession(
+        string databasePath,
+        string sessionId,
+        string completeness = "full",
+        bool hasTerminalFact = true)
     {
         InsertSession(databasePath, sessionId);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -718,19 +817,45 @@ public sealed class CostRouteTests
         using var command = connection.CreateCommand();
         command.CommandText =
             """
+            UPDATE sessions
+            SET completeness=$completeness,
+                ended_at=CASE WHEN $terminal_outcome IS NULL THEN NULL
+                    ELSE '2026-07-01T01:00:00.0000000+00:00' END
+            WHERE session_id=$session;
+            INSERT INTO session_native_ids(
+                session_id,source_surface,native_session_id,binding_kind,observed_at)
+            VALUES($session,'vscode',$native,'native','2026-07-01T00:59:56.0000000+00:00');
             INSERT INTO session_runs(run_id,session_id,source_surface,status)
             VALUES($run,$session,'vscode','completed');
             INSERT INTO session_events(
                 event_id,session_id,run_id,source_surface,source_adapter,
                 source_event_id,type,occurred_at,content_state,
-                source_application_version)
-            VALUES($event,$session,$run,'vscode','synthetic',$source,'turn',
-                '2026-07-01T01:00:00.0000000+00:00','not_captured','1.2.3');
+                source_application_version,terminal_outcome,terminal_policy_version)
+            VALUES
+                ($start,$session,$run,'vscode','synthetic',$source_start,'session.start',
+                    '2026-07-01T00:59:57.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($instruction,$session,$run,'vscode','synthetic',$source_instruction,'user.message',
+                    '2026-07-01T00:59:58.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($otel,$session,$run,'vscode','otel-exact',$source_otel,'turn',
+                    '2026-07-01T00:59:59.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($terminal,$session,$run,'vscode','copilot-compatible-hook',$source_terminal,'SessionEnd',
+                    '2026-07-01T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    $terminal_outcome,$terminal_policy_version);
             """;
         command.Parameters.AddWithValue("$run", "run-" + sessionId);
         command.Parameters.AddWithValue("$session", sessionId);
-        command.Parameters.AddWithValue("$event", "event-" + sessionId);
-        command.Parameters.AddWithValue("$source", "source-" + sessionId);
+        command.Parameters.AddWithValue("$native", "native-" + sessionId);
+        command.Parameters.AddWithValue("$start", "start-" + sessionId);
+        command.Parameters.AddWithValue("$instruction", "instruction-" + sessionId);
+        command.Parameters.AddWithValue("$otel", "otel-" + sessionId);
+        command.Parameters.AddWithValue("$terminal", "terminal-" + sessionId);
+        command.Parameters.AddWithValue("$source_start", "source-start-" + sessionId);
+        command.Parameters.AddWithValue("$source_instruction", "source-instruction-" + sessionId);
+        command.Parameters.AddWithValue("$source_otel", "source-otel-" + sessionId);
+        command.Parameters.AddWithValue("$source_terminal", "source-terminal-" + sessionId);
+        command.Parameters.AddWithValue("$completeness", completeness);
+        command.Parameters.AddWithValue("$terminal_outcome", hasTerminalFact ? "clean" : DBNull.Value);
+        command.Parameters.AddWithValue("$terminal_policy_version", hasTerminalFact ? 1 : DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -779,11 +904,25 @@ public sealed class CostRouteTests
             var secondSessionId = Guid.CreateVersion7().ToString("D");
             var ineligibleSessionId = Guid.CreateVersion7().ToString("D");
             var budgetIneligibleSessionId = Guid.CreateVersion7().ToString("D");
+            var noFactSessionId = Guid.CreateVersion7().ToString("D");
+            var nonFullSessionId = Guid.CreateVersion7().ToString("D");
+            var budgetNoFactSessionId = Guid.CreateVersion7().ToString("D");
+            var budgetNonFullSessionId = Guid.CreateVersion7().ToString("D");
             var missingSessionId = Guid.CreateVersion7().ToString("D");
             InsertResolvedSession(temp.DatabasePath, firstSessionId);
             InsertResolvedSession(temp.DatabasePath, secondSessionId);
-            InsertSession(temp.DatabasePath, ineligibleSessionId, "active");
-            InsertSession(temp.DatabasePath, budgetIneligibleSessionId);
+            if (scenarioName is "missing" or "ineligible")
+                InsertSession(temp.DatabasePath, ineligibleSessionId, "active");
+            if (scenarioName == "budget-ineligible")
+                InsertSession(temp.DatabasePath, budgetIneligibleSessionId);
+            if (scenarioName == "no-fact")
+                InsertResolvedSession(temp.DatabasePath, noFactSessionId, hasTerminalFact: false);
+            if (scenarioName == "non-full")
+                InsertResolvedSession(temp.DatabasePath, nonFullSessionId, completeness: "rich");
+            if (scenarioName == "budget-no-fact")
+                InsertResolvedSession(temp.DatabasePath, budgetNoFactSessionId, hasTerminalFact: false);
+            if (scenarioName == "budget-non-full")
+                InsertResolvedSession(temp.DatabasePath, budgetNonFullSessionId, completeness: "rich");
             var source = new CostSourceEntryV1(
                 "github-copilot-vscode",
                 "1.2.3",
@@ -853,6 +992,18 @@ public sealed class CostRouteTests
                         [ineligibleSessionId],
                         "status-mapping-ineligible");
                     break;
+                case "no-fact":
+                    request = RecalculationRequest(
+                        configuration,
+                        [noFactSessionId],
+                        "status-mapping-no-fact");
+                    break;
+                case "non-full":
+                    request = RecalculationRequest(
+                        configuration,
+                        [nonFullSessionId],
+                        "status-mapping-non-full");
+                    break;
                 case "budget-ineligible":
                     request = CostRecalculationRequestCanonicalJsonV1.Create(
                         configuration.ConfigurationId,
@@ -884,6 +1035,24 @@ public sealed class CostRouteTests
                                 null),
                         ],
                         "status-mapping-budget-missing");
+                    break;
+                case "budget-no-fact":
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [firstSessionId],
+                        [new("session", budgetNoFactSessionId, null, null, null)],
+                        "status-mapping-budget-no-fact");
+                    break;
+                case "budget-non-full":
+                    request = CostRecalculationRequestCanonicalJsonV1.Create(
+                        configuration.ConfigurationId,
+                        configuration.HeadRevision,
+                        configuration.CatalogSha256,
+                        [firstSessionId],
+                        [new("session", budgetNonFullSessionId, null, null, null)],
+                        "status-mapping-budget-non-full");
                     break;
                 case "capacity":
                     InsertResolvedSessions(temp.DatabasePath, 1_999);
@@ -1083,23 +1252,49 @@ public sealed class CostRouteTests
             INSERT INTO session_events(
                 event_id,session_id,run_id,source_surface,source_adapter,
                 source_event_id,type,occurred_at,content_state,
-                source_application_version)
+                source_application_version,terminal_outcome,terminal_policy_version)
             SELECT
                 printf('status-mapping-capacity-event-%04d', value),
                 printf('00000000-0000-7000-8000-%012d', value),
                 printf('status-mapping-capacity-run-%04d', value),
                 'vscode',
-                'synthetic',
+                'copilot-compatible-hook',
                 printf('status-mapping-capacity-source-%04d', value),
-                'turn',
+                'SessionEnd',
                 '2026-07-01T01:00:00.0000000+00:00',
                 'not_captured',
-                '1.2.3'
+                '1.2.3',
+                'clean',
+                1
             FROM ordinal;
             """;
         command.Parameters.AddWithValue("$count", count);
         command.ExecuteNonQuery();
         transaction.Commit();
+    }
+
+    private static void LoseCoreEligibility(
+        string databasePath,
+        string sessionId,
+        string loss)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = loss switch
+        {
+            "no_fact" =>
+                "UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id=$session AND terminal_outcome IS NOT NULL;",
+            "non_full" =>
+                "UPDATE sessions SET completeness='rich' WHERE session_id=$session;",
+            _ => throw new ArgumentOutOfRangeException(nameof(loss)),
+        };
+        command.Parameters.AddWithValue("$session", sessionId);
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     private static IPricingCatalogProvider ChangedCatalogProvider()

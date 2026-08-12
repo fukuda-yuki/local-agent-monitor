@@ -12,8 +12,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SessionSchemaMigrationFixtureTests
 {
-    private const int CurrentSessionSchemaVersion = 13;
-    private const int MatchKindSchemaVersion = 13;
+    private const int CurrentSessionSchemaVersion = 14;
+    private const int MatchKindSchemaVersion = 14;
     private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
@@ -32,18 +32,18 @@ public sealed class SessionSchemaMigrationFixtureTests
         [10] = "0966d9e4d84537343ccb9706a6e3d3e101d16612431d2edb4dfe3fe882555ea4",
     };
 
-    private static readonly IReadOnlyDictionary<int, string> ExpectedV13SemanticSchemaHashes = new Dictionary<int, string>
+    private static readonly IReadOnlyDictionary<int, string> ExpectedV14SemanticSchemaHashes = new Dictionary<int, string>
     {
-        [1] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
-        [2] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
-        [3] = "d1c4a765ab343d084c70825bb9f98f5cb45a1adfb98c6ab39c70c3a2cf15acbc",
-        [4] = "e3ee9fc95c983957eeed1c0553ab85a535ca64dc093b20924e35bf271e0adec7",
-        [5] = "c6fd6a6cddbedad3d1f7640ad12d6b60817095e741d2ec05418c642c02d04a0b",
-        [6] = "c6fd6a6cddbedad3d1f7640ad12d6b60817095e741d2ec05418c642c02d04a0b",
-        [7] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
-        [8] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
-        [9] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
-        [10] = "447296474409df024d16aa1f961edda54fce1aade30bff73d381d0e4bb590910",
+        [1] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
+        [2] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
+        [3] = "8ef3eef70e31a146742ccba0538dacac8229fefd5e76fe9b92c950dd91a67f31",
+        [4] = "4e28b4e9b8c5cb9f1340f62d6db1d0cec635475d225154f12221a589c8a4a4c5",
+        [5] = "57703482e8dd245ed74639360e7c25ef8041ca03f3b4fa053be0868360050485",
+        [6] = "57703482e8dd245ed74639360e7c25ef8041ca03f3b4fa053be0868360050485",
+        [7] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
+        [8] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
+        [9] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
+        [10] = "b8cfa3f5bf930b9e629b624fa037f64799b1a3af7302039370788b5fc85cc13e",
     };
 
     private static readonly string[] ExpectedV11Tables =
@@ -105,11 +105,11 @@ public sealed class SessionSchemaMigrationFixtureTests
         var expectedLimitations = sourceVersion is not null
             ? Array.Empty<string>()
             : version switch
-        {
-            4 => [VersionFourLimitation],
-            >= 9 => [$"Commit {sourceCommit} exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."],
-            _ => Array.Empty<string>(),
-        };
+            {
+                4 => [VersionFourLimitation],
+                >= 9 => [$"Commit {sourceCommit} exposes RecordEffectComparison but no public comparison-ID input; after that public API persists the complete comparison graph, parameterized UPDATEs replace only its generated opaque comparison ID with the deterministic fixture sentinel so SHA-256 reproduction remains exact."],
+                _ => Array.Empty<string>(),
+            };
         Assert.Equal(expectedLimitations, fixture.Limitations);
         if (sourceVersion is null)
         {
@@ -1266,9 +1266,9 @@ public sealed class SessionSchemaMigrationFixtureTests
         AssertSingleRow(connection, "schema_version", D(("component", S("session")), ("version", I(CurrentSessionSchemaVersion))));
         var sessionRowCount = version >= 9 ? 2 : 1;
         AssertExpectedRow(connection, "sessions", sessionRowCount, D(
-            ("session_id", S(sessionId)), ("status", S("completed")), ("completeness", S("full")),
+            ("session_id", S(sessionId)), ("status", S("active")), ("completeness", S("partial")),
             ("repository", S($"fixture/session-v{version}")), ("workspace", S($"workspace-v{version}")),
-            ("started_at", S(at)), ("ended_at", S(at.AddMinutes(1))), ("last_seen_at", S(at.AddMinutes(1))),
+            ("started_at", S(at)), ("ended_at", N), ("last_seen_at", S(at.AddMinutes(1))),
             ("raw_retention_state", S("expiring")), ("created_at", S(at)), ("updated_at", S(at.AddMinutes(1)))));
         AssertExpectedRow(connection, "session_native_ids", sessionRowCount, D(
             ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")), ("native_session_id", S(sentinels.NativeSessionId)),
@@ -1282,7 +1282,8 @@ public sealed class SessionSchemaMigrationFixtureTests
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
             ("source_event_id", S(sentinels.SourceEventId)), ("type", S("session.task_complete")), ("occurred_at", S(at.AddSeconds(30))), ("content_state", S("available")),
-            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N)));
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N),
+            ("terminal_outcome", N), ("terminal_policy_version", N)));
         AssertExpectedRow(connection, "session_event_content", sessionRowCount, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}\"}}")),
             ("captured_at", S(at.AddSeconds(30))), ("expires_at", S(at.AddDays(90)))));
@@ -1336,8 +1337,8 @@ public sealed class SessionSchemaMigrationFixtureTests
         Assert.Equal(ExpectedV11Tables, ReadTableNames(connection));
         var semanticSnapshot = ReadSemanticSchemaSnapshot(connection);
         var actualHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(semanticSnapshot))).ToLowerInvariant();
-        Assert.True(string.Equals(ExpectedV13SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
-            $"Session v{version}->v13 semantic schema hash was {actualHash}.");
+        Assert.True(string.Equals(ExpectedV14SemanticSchemaHashes[version], actualHash, StringComparison.Ordinal),
+            $"Session v{version}->v14 semantic schema hash was {actualHash}.");
         return new MigratedSnapshot(semanticSnapshot, ReadDatabaseRowSnapshot(connection));
     }
 
@@ -1348,9 +1349,9 @@ public sealed class SessionSchemaMigrationFixtureTests
         var runId = sentinels.SecondaryRunId!.Value.ToString("D");
         var eventId = sentinels.SecondaryEventId!.Value.ToString("D");
         AssertExpectedRow(connection, "sessions", 2, D(
-            ("session_id", S(sessionId)), ("status", S("completed")), ("completeness", S("full")),
+            ("session_id", S(sessionId)), ("status", S("active")), ("completeness", S("partial")),
             ("repository", S($"fixture/session-v{version}/secondary")), ("workspace", S($"workspace-v{version}-secondary")),
-            ("started_at", S(secondaryAt)), ("ended_at", S(secondaryAt.AddMinutes(1))), ("last_seen_at", S(secondaryAt.AddMinutes(1))),
+            ("started_at", S(secondaryAt)), ("ended_at", N), ("last_seen_at", S(secondaryAt.AddMinutes(1))),
             ("raw_retention_state", S("expiring")), ("created_at", S(secondaryAt)), ("updated_at", S(secondaryAt.AddMinutes(1)))));
         AssertExpectedRow(connection, "session_native_ids", 2, D(
             ("session_id", S(sessionId)), ("source_surface", S("copilot-sdk")), ("native_session_id", S(sentinels.SecondaryNativeSessionId!)),
@@ -1364,7 +1365,8 @@ public sealed class SessionSchemaMigrationFixtureTests
             ("event_id", S(eventId)), ("session_id", S(sessionId)), ("run_id", S(runId)), ("source_surface", S("copilot-sdk")),
             ("parent_event_id", N), ("trace_id", S($"fixture-trace-v{version}-secondary")), ("status", S("ok")), ("source_adapter", S("fixture-adapter")),
             ("source_event_id", S(sentinels.SecondarySourceEventId!)), ("type", S("session.task_complete")), ("occurred_at", S(secondaryAt.AddSeconds(30))), ("content_state", S("available")),
-            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N)));
+            ("source_application_version", N), ("adapter_version", N), ("schema_fingerprint", N), ("normalization_version", N), ("match_kind", N),
+            ("terminal_outcome", N), ("terminal_policy_version", N)));
         AssertExpectedRow(connection, "session_event_content", 2, D(
             ("event_id", S(eventId)), ("content_kind", S("fixture")), ("content_json", S($"{{\"fixture\":\"session-v{version}-secondary\"}}")),
             ("captured_at", S(secondaryAt.AddSeconds(30))), ("expires_at", S(secondaryAt.AddDays(90)))));

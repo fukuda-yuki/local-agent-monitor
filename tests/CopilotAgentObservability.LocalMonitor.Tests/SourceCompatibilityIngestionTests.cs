@@ -78,6 +78,7 @@ public sealed class SourceCompatibilityIngestionTests
         {
             StartProjectionWorker = false,
             StartSessionOtelEnrichment = false,
+            StartLocalRepositoryCatalogHostedService = false,
             UseUserSecrets = false,
             TimeProvider = new FixedTimeProvider(now),
         });

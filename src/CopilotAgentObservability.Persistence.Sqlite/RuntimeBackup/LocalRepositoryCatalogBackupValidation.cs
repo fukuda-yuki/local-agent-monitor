@@ -11,7 +11,10 @@ internal static class LocalRepositoryCatalogBackupValidation
     private const string InvalidState = "local_repository_catalog_backup_invalid";
 
     internal static void Validate(SqliteConnection connection, SqliteTransaction transaction) =>
-        ValidateCore(connection, transaction, observer: null);
+        ValidateCore(connection, transaction, observer: null, legacySession13: false);
+
+    internal static void ValidateLegacySession13(SqliteConnection connection, SqliteTransaction transaction) =>
+        ValidateCore(connection, transaction, observer: null, legacySession13: true);
 
     internal static void Validate(
         SqliteConnection connection,
@@ -19,13 +22,14 @@ internal static class LocalRepositoryCatalogBackupValidation
         ILocalRepositoryCatalogBackupValidationObserver observer)
     {
         ArgumentNullException.ThrowIfNull(observer);
-        ValidateCore(connection, transaction, observer);
+        ValidateCore(connection, transaction, observer, legacySession13: false);
     }
 
     private static void ValidateCore(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        ILocalRepositoryCatalogBackupValidationObserver? observer)
+        ILocalRepositoryCatalogBackupValidationObserver? observer,
+        bool legacySession13)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -33,7 +37,7 @@ internal static class LocalRepositoryCatalogBackupValidation
             Reject();
 
         observer?.PhaseEntered(LocalRepositoryCatalogBackupValidationPhase.Structure);
-        ValidateStructure(connection, transaction);
+        ValidateStructure(connection, transaction, legacySession13);
         observer?.PhaseEntered(LocalRepositoryCatalogBackupValidationPhase.Guards);
         ValidateStorage(connection, transaction);
         observer?.PhaseEntered(LocalRepositoryCatalogBackupValidationPhase.RawReferences);
@@ -49,11 +53,18 @@ internal static class LocalRepositoryCatalogBackupValidation
         SqliteLocalRepositoryCatalogStore.ValidateRestorableMutationState(connection, transaction);
     }
 
-    private static void ValidateStructure(SqliteConnection connection, SqliteTransaction transaction)
+    private static void ValidateStructure(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        bool legacySession13)
     {
-        if (!HasExactComponentVersion(connection, transaction, "session", 13)
+        var sessionIsValid = legacySession13
+            ? HasExactComponentVersion(connection, transaction, "session", 13)
+                && SessionSchemaV11Validator.IsCurrentV13SchemaValidSelectOnly(connection, transaction)
+            : HasExactComponentVersion(connection, transaction, "session", 14)
+                && SqliteSessionStore.IsCurrentSchemaValid(connection, transaction);
+        if (!sessionIsValid
             || !HasExactComponentVersion(connection, transaction, LocalRepositoryCatalogSchemaV1.ComponentName, LocalRepositoryCatalogSchemaV1.Version)
-            || !SqliteSessionStore.IsCurrentSchemaValid(connection, transaction)
             || !LocalRepositoryCatalogSchemaV1.HasExactOwnedSchema(connection, transaction))
         {
             Reject();

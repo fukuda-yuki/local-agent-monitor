@@ -1,5 +1,7 @@
 namespace CopilotAgentObservability.Telemetry.Sessions;
 
+using System.Text.Json;
+
 public enum SessionCompleteness { Unbound, Partial, Rich, Full }
 public enum ObservedSessionStatus { Active, Completed, Failed, Unknown }
 public enum SessionSourceSurface { CopilotSdk, CopilotCli, VisualStudioCode, HookUnknown, ClaudeCode }
@@ -10,6 +12,23 @@ public enum SessionContentState { Available, NotCaptured, Redacted, Unsupported,
 public enum SessionRawRetentionState { Expiring, ExpiredPendingDeletion, NotCaptured }
 public enum ImprovementProposalStatus { Candidate, Recommended, Verified }
 public enum ProposalApplyState { Draft, Approved, Applied, RolledBack, Failed }
+
+internal enum ImprovementProposalFailure
+{
+    InvalidShape,
+    EvidenceNotFound,
+    EvidenceNotExactBound,
+    InsufficientRecommendationEvidence,
+    RecommendationAlreadyExists,
+    ProposalNotFound,
+    VerificationOwnedByComparison,
+    InvalidStatus,
+}
+
+internal sealed class ImprovementProposalStoreException(ImprovementProposalFailure failure) : InvalidOperationException("Improvement proposal mutation was rejected.")
+{
+    internal ImprovementProposalFailure Failure { get; } = failure;
+}
 
 public static class SessionWire
 {
@@ -298,6 +317,82 @@ public sealed record SessionDetail(
 
 public sealed record SessionWriteBatch(SessionDetail Detail, IReadOnlyList<SessionEventContent> Content);
 
+internal enum SessionTerminalOutcome { Clean, Failed, Neutral }
+
+internal sealed record SessionTerminalFact(Guid EventId, SessionTerminalOutcome Outcome, int PolicyVersion = 1);
+internal sealed record SessionReplayContentCandidate(Guid EventId, string ContentKind, string ContentJson);
+
+internal interface IClassifiedSessionStore
+{
+    void WriteClassified(
+        SessionWriteBatch batch,
+        IReadOnlyList<SessionTerminalFact> terminalFacts,
+        IReadOnlyList<SessionReplayContentCandidate>? replayContentCandidates = null);
+}
+
+internal interface ICurrentSessionEligibilityStore
+{
+    bool IsCurrentSessionEligible(Guid sessionId);
+}
+
+internal static class SessionTerminalPolicyV1
+{
+    internal static SessionTerminalFact? Classify(
+        Guid eventId,
+        string sourceAdapter,
+        SessionSourceSurface? sourceSurface,
+        string type,
+        JsonElement payload)
+    {
+        if (sourceAdapter == "copilot-sdk-stream" && sourceSurface == SessionSourceSurface.CopilotSdk)
+        {
+            if (type == "session.task_complete") return new(eventId, SessionTerminalOutcome.Clean);
+            if (type == "session.shutdown")
+                return new(eventId, RootString(payload, "shutdownType") switch
+                {
+                    "routine" => SessionTerminalOutcome.Clean,
+                    "error" => SessionTerminalOutcome.Failed,
+                    _ => SessionTerminalOutcome.Neutral,
+                });
+        }
+        if (sourceAdapter == "copilot-compatible-hook"
+            && sourceSurface is SessionSourceSurface.CopilotCli or SessionSourceSurface.VisualStudioCode or SessionSourceSurface.HookUnknown
+            && type == "SessionEnd")
+            return new(eventId, RootString(payload, "reason") switch
+            {
+                "complete" or "user_exit" => SessionTerminalOutcome.Clean,
+                "error" or "timeout" => SessionTerminalOutcome.Failed,
+                _ => SessionTerminalOutcome.Neutral,
+            });
+        if (sourceAdapter == "claude-code-hook" && sourceSurface == SessionSourceSurface.ClaudeCode && type == "SessionEnd")
+        {
+            var reason = RootString(payload, "reason", required: true);
+            return new(eventId, reason is "clear" or "resume" or "logout" or "prompt_input_exit"
+                ? SessionTerminalOutcome.Clean
+                : SessionTerminalOutcome.Neutral);
+        }
+        return null;
+    }
+
+    private static string? RootString(JsonElement payload, string name, bool required = false)
+    {
+        if (payload.ValueKind == JsonValueKind.Object)
+        {
+            JsonElement found = default;
+            var count = 0;
+            foreach (var property in payload.EnumerateObject())
+            {
+                if (!string.Equals(property.Name, name, StringComparison.Ordinal)) continue;
+                found = property.Value;
+                count++;
+            }
+            if (count == 1 && found.ValueKind == JsonValueKind.String) return found.GetString();
+        }
+        if (required) throw new InvalidOperationException("Invalid Claude SessionEnd terminal discriminator.");
+        return null;
+    }
+}
+
 public enum SessionContentReadDisposition { Granted, NotFound, Denied, Busy }
 
 public sealed class SessionContentReadLease : IAsyncDisposable
@@ -388,7 +483,7 @@ public interface ISessionStore
     IReadOnlyList<ImprovementProposal> ListImprovementProposals(Guid sessionId);
     ImprovementProposal? GetImprovementProposal(Guid proposalId);
     void CreateImprovementProposal(ImprovementProposal proposal);
-    void UpdateImprovementProposalStatus(Guid proposalId, ImprovementProposalStatus status, DateTimeOffset updatedAt);
+    ImprovementProposal UpdateImprovementProposalStatus(Guid proposalId, ImprovementProposalStatus status, DateTimeOffset updatedAt);
     void SaveProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
     void UpdateProposalApplyDraft(ProposalApplyDraftMetadata draft, IReadOnlyList<(string BaseSha256, string ReplacementSha256)> files, IReadOnlyList<(string HunkId, bool Selected, string ReplacementSha256)> hunks, ProposalApplyRevisionMetadata revision);
     ProposalApplyDraftMetadata? GetProposalApplyDraft(Guid draftId);

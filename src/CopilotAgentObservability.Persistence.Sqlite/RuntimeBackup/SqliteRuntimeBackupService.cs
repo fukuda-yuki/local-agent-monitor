@@ -42,7 +42,7 @@ public sealed class SqliteRuntimeBackupService
         ["retention"] = 1,
         ["runtime_backup"] = 1,
         ["sanitized_import"] = 1,
-        ["session"] = 13,
+        ["session"] = 14,
         ["skill_projection"] = 1,
     };
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
@@ -240,7 +240,7 @@ public sealed class SqliteRuntimeBackupService
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (versions.ContainsKey("local_repository_catalog")
                 && (!versions.TryGetValue("session", out var sessionVersion)
-                    || sessionVersion != SupportedComponents["session"]
+                    || !IsCurrentOrLegacySessionParent(sessionVersion)
                     || !ValidateComponentShapes(database, versions, immutableReadOnly: false)))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             return new(true, null, versions, []);
@@ -373,7 +373,7 @@ public sealed class SqliteRuntimeBackupService
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (versions.ContainsKey("local_repository_catalog")
                 && (!versions.TryGetValue("session", out var sessionVersion)
-                    || sessionVersion != SupportedComponents["session"]))
+                    || !IsCurrentOrLegacySessionParent(sessionVersion)))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
@@ -388,9 +388,12 @@ public sealed class SqliteRuntimeBackupService
 
     private static bool HasValidPricingParents(IReadOnlyDictionary<string, int> versions) =>
         !versions.ContainsKey("pricing")
-        || versions.TryGetValue("session", out var session) && session == SupportedComponents["session"]
+        || versions.TryGetValue("session", out var session) && IsCurrentOrLegacySessionParent(session)
             && versions.TryGetValue("alert_engine", out var alert) && alert == SupportedComponents["alert_engine"]
             && versions.TryGetValue("runtime_backup", out var backup) && backup == SupportedComponents["runtime_backup"];
+
+    private static bool IsCurrentOrLegacySessionParent(int version) =>
+        version is 13 || version == SupportedComponents["session"];
 
     public RuntimeRestorePreview Preview(string bundlePath, string databasePath)
     {
@@ -498,7 +501,10 @@ public sealed class SqliteRuntimeBackupService
                 ValidateRetentionInvariants(database, immutableReadOnly: false);
             var externalError = ValidateExternalState(database, scanRuntimeRoot: false, immutableDatabase: false);
             if (externalError is not null) return PreviewFailure(externalError, context.Result.ArchiveSha256);
-            MigrateStaging(context.StagePath, source.ComponentVersions ?? new Dictionary<string, int>());
+            MigrateStaging(
+                context.StagePath,
+                source.ComponentVersions ?? new Dictionary<string, int>(),
+                restorableSafetyCopy: false);
             var migratedExternalError = ValidateDatabaseExternalRawState(context.StagePath, immutableReadOnly: true);
             if (migratedExternalError is not null) return PreviewFailure(migratedExternalError, context.Result.ArchiveSha256);
             _ = ValidateInstalledDatabase(context.StagePath, immutableReadOnly: true);
@@ -637,7 +643,10 @@ public sealed class SqliteRuntimeBackupService
             if (stagedExternalError is not null) throw new RuntimeBackupException(stagedExternalError);
             var preflight = PreflightForMigration(context.StagePath, immutableReadOnly: true);
             if (!preflight.Success) throw new RuntimeBackupException(RuntimeBackupErrorCodes.RestoreIncompatible);
-            MigrateStaging(context.StagePath, preflight.ComponentVersions ?? new Dictionary<string, int>());
+            MigrateStaging(
+                context.StagePath,
+                preflight.ComponentVersions ?? new Dictionary<string, int>(),
+                restorableSafetyCopy: false);
             InvokeCheckpoint(RuntimeBackupCheckpoints.AfterMigration);
             stagedExternalError = ValidateDatabaseExternalRawState(context.StagePath, immutableReadOnly: true);
             if (stagedExternalError is not null) throw new RuntimeBackupException(stagedExternalError);
@@ -664,7 +673,7 @@ public sealed class SqliteRuntimeBackupService
                     if (!TryFullFile(candidate, mustExist: false, out prePath))
                         throw new RuntimeBackupException(RuntimeBackupErrorCodes.ExternalRuntimeStateUnsafe);
                 }
-                preRestore = CreateArchive(database, prePath, scanRuntimeRoot: false);
+                preRestore = CreateArchive(database, prePath, scanRuntimeRoot: false, migrateSnapshotToCurrent: true);
                 if (!preRestore.Success) throw new RuntimeBackupException(preRestore.ErrorCode!);
             }
 
@@ -805,7 +814,11 @@ public sealed class SqliteRuntimeBackupService
         }
     }
 
-    private RuntimeBackupCreateResult CreateArchive(string databasePath, string outputPath, bool scanRuntimeRoot)
+    private RuntimeBackupCreateResult CreateArchive(
+        string databasePath,
+        string outputPath,
+        bool scanRuntimeRoot,
+        bool migrateSnapshotToCurrent = false)
     {
         string? snapshot = null;
         string? partial = null;
@@ -834,6 +847,14 @@ public sealed class SqliteRuntimeBackupService
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
             var snapshotPreflight = PreflightForMigration(snapshot, immutableReadOnly: true);
             if (!snapshotPreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
+            if (migrateSnapshotToCurrent)
+            {
+                MigrateStaging(
+                    snapshot,
+                    snapshotPreflight.ComponentVersions ?? new Dictionary<string, int>(),
+                    restorableSafetyCopy: true);
+                _ = ValidateInstalledDatabase(snapshot, immutableReadOnly: true);
+            }
             var capturedExternalError = ValidateDatabaseExternalRawState(snapshot, immutableReadOnly: true);
             if (capturedExternalError is not null) return CreateFailure(capturedExternalError);
             var cursorsAtEnd = ReadProjectionCursors(databasePath, immutableReadOnly: false);
@@ -1211,12 +1232,15 @@ public sealed class SqliteRuntimeBackupService
         if (versions.ContainsKey("local_repository_catalog"))
         {
             if (!versions.TryGetValue("session", out var localRepositorySessionVersion)
-                || localRepositorySessionVersion != SupportedComponents["session"])
+                || !IsCurrentOrLegacySessionParent(localRepositorySessionVersion))
                 return false;
             using var localRepositoryTransaction = connection.BeginTransaction(deferred: true);
             try
             {
-                LocalRepositoryCatalogBackupValidation.Validate(connection, localRepositoryTransaction);
+                if (localRepositorySessionVersion == SupportedComponents["session"])
+                    LocalRepositoryCatalogBackupValidation.Validate(connection, localRepositoryTransaction);
+                else
+                    LocalRepositoryCatalogBackupValidation.ValidateLegacySession13(connection, localRepositoryTransaction);
             }
             catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
             {
@@ -2282,25 +2306,66 @@ public sealed class SqliteRuntimeBackupService
         return HashText(builder.ToString());
     }
 
-    private void MigrateStaging(string path, IReadOnlyDictionary<string, int> versions)
+    private void MigrateStaging(
+        string path,
+        IReadOnlyDictionary<string, int> versions,
+        bool restorableSafetyCopy)
     {
-        using (var connection = Open(path, SqliteOpenMode.ReadWrite))
-        using (var transaction = connection.BeginTransaction(deferred: false))
+        if (HasCompleteCurrentVector(versions))
         {
-            MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
-            if (!versions.ContainsKey("session") || versions["session"] < SupportedComponents["session"])
-                SqliteSessionStore.InitializeSchema(connection, transaction);
-            LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
-            if (versions.ContainsKey("local_repository_catalog"))
-                SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(connection, transaction);
-            new RetentionCatalogStore(path, timeProvider).InitializeForWrite(connection, transaction);
-            SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
-            EnsureDoctorSchema(connection, transaction);
-            SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
-            HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
-            SqliteHistoricalImportStore.EnsureSchema(connection, transaction);
-            SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys: false);
-            transaction.Commit();
+            _ = ValidateInstalledDatabase(path, immutableReadOnly: false);
+            using (var connection = Open(path, SqliteOpenMode.ReadWrite))
+            {
+                try
+                {
+                    SetPragma(connection, "foreign_keys", false);
+                    using var transaction = connection.BeginTransaction(deferred: false);
+                    SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(
+                        connection,
+                        transaction);
+                    SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
+                    EnsureForeignKeysValid(connection, transaction);
+                    transaction.Commit();
+                }
+                finally
+                {
+                    SetPragma(connection, "foreign_keys", true);
+                }
+            }
+            _ = ValidateInstalledDatabase(path, immutableReadOnly: false);
+            return;
+        }
+
+        using (var connection = Open(path, SqliteOpenMode.ReadWrite))
+        {
+            try
+            {
+                SetPragma(connection, "foreign_keys", false);
+                using var transaction = connection.BeginTransaction(deferred: false);
+                MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
+                if (!versions.ContainsKey("session") || versions["session"] < SupportedComponents["session"])
+                    SqliteSessionStore.InitializeSchema(connection, transaction, timeProvider.GetUtcNow());
+                LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+                if (versions.ContainsKey("local_repository_catalog"))
+                    SqliteLocalRepositoryReconciliationStore.NormalizeRestoredLeases(connection, transaction);
+                var retention = new RetentionCatalogStore(path, timeProvider);
+                if (restorableSafetyCopy)
+                    retention.InitializeForRestorableCopy(connection, transaction);
+                else
+                    retention.InitializeForWrite(connection, transaction);
+                SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
+                EnsureDoctorSchema(connection, transaction);
+                SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
+                HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
+                SqliteHistoricalImportStore.EnsureSchema(connection, transaction);
+                SanitizedImportSchemaV1.Ensure(connection, transaction, validateForeignKeys: false);
+                EnsureForeignKeysValid(connection, transaction);
+                transaction.Commit();
+            }
+            finally
+            {
+                SetPragma(connection, "foreign_keys", true);
+            }
         }
 
         new SqliteSourceCompatibilityStore(path).CreateSchema();
@@ -2315,6 +2380,12 @@ public sealed class SqliteRuntimeBackupService
             transaction.Commit();
         }
     }
+
+    private static bool HasCompleteCurrentVector(IReadOnlyDictionary<string, int> versions) =>
+        versions.Count == SupportedComponents.Count
+        && SupportedComponents.All(component =>
+            versions.TryGetValue(component.Key, out var version)
+            && version == component.Value);
 
     private static void ValidateRetentionCoverage(string path, bool immutableReadOnly)
     {
@@ -2381,6 +2452,15 @@ public sealed class SqliteRuntimeBackupService
         using var command = connection.CreateCommand();
         command.CommandText = $"PRAGMA {name}={(enabled ? "ON" : "OFF")};";
         command.ExecuteNonQuery();
+    }
+
+    private static void EnsureForeignKeysValid(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "PRAGMA foreign_key_check;";
+        using var reader = command.ExecuteReader();
+        if (reader.Read()) throw new InvalidOperationException("Runtime backup migration produced invalid foreign keys.");
     }
 
     private static void EnsureCurrentBackupTail(string path)

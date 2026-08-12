@@ -192,13 +192,13 @@ internal static class SessionRoutes
             if (HasUnsafeProposalContent(request)) { await Failure(context, 400, "unsafe_proposal_content"); return; }
             if (!TryCreateProposal(request, timeProvider.GetUtcNow(), out var proposal)) { await Failure(context, 400, "invalid_proposal_request"); return; }
 
-            var sourceDetails = proposal.SourceSessionIds.Select(id => store.GetDetail(id)).ToArray();
-            if (sourceDetails.Any(detail => detail is null)) { await Failure(context, 400, "evidence_not_found"); return; }
-            if (sourceDetails.Any(detail => !IsExactTerminal(detail!))) { await Failure(context, 400, "evidence_not_exact_bound"); return; }
-            if (!EvidenceReferencesResolve(proposal, sourceDetails!)) { await Failure(context, 400, "evidence_not_found"); return; }
-
             try { store.CreateImprovementProposal(proposal); }
-            catch (InvalidOperationException) { await Failure(context, 400, "invalid_proposal_request"); return; }
+            catch (ImprovementProposalStoreException exception)
+            {
+                var failure = MapProposalFailure(ProposalMutationOperation.Create, exception.Failure);
+                await Failure(context, failure.StatusCode, failure.ErrorCode);
+                return;
+            }
             context.Response.StatusCode = 201;
             await JsonBody(context, ProposalDto(proposal));
         });
@@ -216,14 +216,15 @@ internal static class SessionRoutes
             if (status == "verified") { await Failure(context, 400, "verification_owned_by_compare"); return; }
             if (status is not "candidate" and not "recommended") { await Failure(context, 400, "invalid_proposal_status"); return; }
 
-            var proposal = store.GetImprovementProposal(id);
-            if (proposal is null) { await Failure(context, 404, "proposal_not_found"); return; }
-            if (proposal.Status == ImprovementProposalStatus.Verified) { await Failure(context, 400, "verification_owned_by_compare"); return; }
-            if (status == "recommended" && !HasRecommendationEvidence(store, proposal)) { await Failure(context, 400, "insufficient_recommendation_evidence"); return; }
-            try { store.UpdateImprovementProposalStatus(id, status == "candidate" ? ImprovementProposalStatus.Candidate : ImprovementProposalStatus.Recommended, timeProvider.GetUtcNow()); }
-            catch (InvalidOperationException) { await Failure(context, 400, status == "recommended" ? "recommendation_already_exists" : "invalid_proposal_status"); return; }
+            ImprovementProposal updated;
+            try { updated = store.UpdateImprovementProposalStatus(id, status == "candidate" ? ImprovementProposalStatus.Candidate : ImprovementProposalStatus.Recommended, timeProvider.GetUtcNow()); }
+            catch (ImprovementProposalStoreException exception)
+            {
+                var failure = MapProposalFailure(ProposalMutationOperation.Status, exception.Failure);
+                await Failure(context, failure.StatusCode, failure.ErrorCode);
+                return;
+            }
 
-            var updated = store.GetImprovementProposal(id)!;
             await Json(context, ProposalDto(updated));
         });
 
@@ -248,43 +249,43 @@ internal static class SessionRoutes
                         detail.NativeIds,
                         store.GetRawRetentionState(detail.Session.SessionId),
                         await ProjectSessionAsync(detail, projectionStore, compatibilityStore, context.RequestAborted)),
-                human_evaluation = store.GetHumanEvaluation(id) is { } evaluation ? new
-                {
-                    verdict = evaluation.Verdict,
-                    recorded_at = evaluation.RecordedAt,
-                } : null,
-                native_ids = detail.NativeIds.Select(item => new
-                {
-                    source_surface = SessionWire.ToWire(item.SourceSurface),
-                    native_session_id = item.NativeSessionId,
-                    binding_kind = SessionWire.ToWire(item.BindingKind),
-                    observed_at = item.ObservedAt,
-                }),
-                runs = detail.Runs.Select(item => new
-                {
-                    run_id = item.RunId,
-                    source_surface = item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value),
-                    native_run_id = item.NativeRunId,
-                    trace_id = item.TraceId,
-                    parent_run_id = item.ParentRunId,
-                    model = item.Model,
-                    status = SessionWire.ToWire(item.Status),
-                    started_at = item.StartedAt,
-                    ended_at = item.EndedAt,
-                    input_tokens = item.InputTokens,
-                    output_tokens = item.OutputTokens,
-                    total_tokens = item.TotalTokens,
-                }),
+                    human_evaluation = store.GetHumanEvaluation(id) is { } evaluation ? new
+                    {
+                        verdict = evaluation.Verdict,
+                        recorded_at = evaluation.RecordedAt,
+                    } : null,
+                    native_ids = detail.NativeIds.Select(item => new
+                    {
+                        source_surface = SessionWire.ToWire(item.SourceSurface),
+                        native_session_id = item.NativeSessionId,
+                        binding_kind = SessionWire.ToWire(item.BindingKind),
+                        observed_at = item.ObservedAt,
+                    }),
+                    runs = detail.Runs.Select(item => new
+                    {
+                        run_id = item.RunId,
+                        source_surface = item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value),
+                        native_run_id = item.NativeRunId,
+                        trace_id = item.TraceId,
+                        parent_run_id = item.ParentRunId,
+                        model = item.Model,
+                        status = SessionWire.ToWire(item.Status),
+                        started_at = item.StartedAt,
+                        ended_at = item.EndedAt,
+                        input_tokens = item.InputTokens,
+                        output_tokens = item.OutputTokens,
+                        total_tokens = item.TotalTokens,
+                    }),
                     events = detail.Events.Select(item => new
-                {
-                    event_id = item.EventId,
-                    run_id = item.RunId,
-                    source_surface = item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value),
-                    parent_event_id = item.ParentEventId,
-                    status = item.Status,
-                    type = item.Type,
-                    occurred_at = item.OccurredAt,
-                    content_state = SessionWire.ToWire(item.ContentState),
+                    {
+                        event_id = item.EventId,
+                        run_id = item.RunId,
+                        source_surface = item.SourceSurface is null ? null : SessionWire.ToWire(item.SourceSurface.Value),
+                        parent_event_id = item.ParentEventId,
+                        status = item.Status,
+                        type = item.Type,
+                        occurred_at = item.OccurredAt,
+                        content_state = SessionWire.ToWire(item.ContentState),
                     }),
                 });
             }
@@ -540,22 +541,22 @@ internal static class SessionRoutes
         IReadOnlyList<SessionNativeId> nativeIds,
         SessionRawRetentionState rawRetentionState,
         SourceProjectionState state) => new
-    {
-        session_id = item.SessionId,
-        status = SessionWire.ToWire(item.Status),
-        completeness = SessionWire.ToWire(item.Completeness),
-        source_surfaces = nativeIds.Select(id => SessionWire.ToWire(id.SourceSurface)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal),
-        repository = item.Repository,
-        workspace = item.Workspace,
-        started_at = item.StartedAt,
-        ended_at = item.EndedAt,
-        last_seen_at = item.LastSeenAt,
-        raw_retention_state = SessionWire.ToWire(rawRetentionState),
-        source_diagnostic = state.SourceDiagnostic?.ToWire(),
-        binding_state = state.BindingState,
-        completeness_reason_codes = state.CompletenessReasonCodes,
-        content_state = state.ContentState,
-    };
+        {
+            session_id = item.SessionId,
+            status = SessionWire.ToWire(item.Status),
+            completeness = SessionWire.ToWire(item.Completeness),
+            source_surfaces = nativeIds.Select(id => SessionWire.ToWire(id.SourceSurface)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal),
+            repository = item.Repository,
+            workspace = item.Workspace,
+            started_at = item.StartedAt,
+            ended_at = item.EndedAt,
+            last_seen_at = item.LastSeenAt,
+            raw_retention_state = SessionWire.ToWire(rawRetentionState),
+            source_diagnostic = state.SourceDiagnostic?.ToWire(),
+            binding_state = state.BindingState,
+            completeness_reason_codes = state.CompletenessReasonCodes,
+            content_state = state.ContentState,
+        };
 
     private static async Task<SourceProjectionState> ProjectSessionAsync(
         SessionDetail? detail,
@@ -671,40 +672,25 @@ internal static class SessionRoutes
         return true;
     }
 
-    private static bool IsExactTerminal(SessionDetail detail) =>
-        detail.Session.Status is ObservedSessionStatus.Completed or ObservedSessionStatus.Failed
-        && detail.NativeIds.Any(id => id.BindingKind == SessionBindingKind.Native);
-
-    private static bool EvidenceReferencesResolve(ImprovementProposal proposal, SessionDetail?[] details) =>
-        proposal.EvidenceReferences.All(reference => EvidenceReferenceResolves(reference, details));
-
-    private static bool EvidenceReferenceResolves(ImprovementProposalEvidenceReference reference, IEnumerable<SessionDetail?> details) =>
-        details.Any(detail => detail is not null && reference.Kind switch
+    private static (int StatusCode, string ErrorCode) MapProposalFailure(
+        ProposalMutationOperation operation,
+        ImprovementProposalFailure failure) => (operation, failure) switch
         {
-            "event" => Guid.TryParse(reference.ReferenceId, out var eventId) && detail.Events.Any(item => item.EventId == eventId),
-            "run" => Guid.TryParse(reference.ReferenceId, out var runId) && detail.Runs.Any(item => item.RunId == runId),
-            "trace" => detail.Runs.Any(item => string.Equals(item.TraceId, reference.ReferenceId, StringComparison.Ordinal)),
-            "gate" => reference.ReferenceId == "terminal" && detail.Events.Any(item => item.Type is "session.shutdown" or "session.task_complete" or "SessionEnd" or "Stop")
-                || reference.ReferenceId == "error" && detail.Events.Any(item => item.Status == "error"),
-            _ => false,
-        });
+            (ProposalMutationOperation.Create, ImprovementProposalFailure.InvalidShape) => (400, "invalid_proposal_request"),
+            (ProposalMutationOperation.Create, ImprovementProposalFailure.InvalidStatus) => (400, "invalid_proposal_status"),
+            (ProposalMutationOperation.Create, ImprovementProposalFailure.EvidenceNotFound) => (400, "evidence_not_found"),
+            (ProposalMutationOperation.Create, ImprovementProposalFailure.EvidenceNotExactBound) => (400, "evidence_not_exact_bound"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.InvalidShape) => (400, "invalid_proposal_status"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.InvalidStatus) => (400, "invalid_proposal_status"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.EvidenceNotFound) => (400, "evidence_not_found"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.InsufficientRecommendationEvidence) => (400, "insufficient_recommendation_evidence"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.RecommendationAlreadyExists) => (400, "recommendation_already_exists"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.ProposalNotFound) => (404, "proposal_not_found"),
+            (ProposalMutationOperation.Status, ImprovementProposalFailure.VerificationOwnedByComparison) => (400, "verification_owned_by_compare"),
+            _ => throw new InvalidOperationException("Improvement proposal failure was emitted for an unsupported operation."),
+        };
 
-    private static bool HasRecommendationEvidence(ISessionStore store, ImprovementProposal proposal)
-    {
-        if (proposal.SourceSessionIds.Count < 2) return false;
-        var details = proposal.SourceSessionIds.Select(store.GetDetail).ToArray();
-        if (details.Any(detail => detail is null || !IsExactTerminal(detail))) return false;
-
-        var evidencedSessions = new HashSet<Guid>();
-        foreach (var reference in proposal.EvidenceReferences)
-        {
-            foreach (var detail in details.Where(detail => detail is not null).Cast<SessionDetail>())
-            {
-                if (EvidenceReferenceResolves(reference, [detail])) evidencedSessions.Add(detail.Session.SessionId);
-            }
-        }
-        return evidencedSessions.Count >= 2;
-    }
+    private enum ProposalMutationOperation { Create, Status }
 
     private static object ProposalDto(ImprovementProposal proposal) => new
     {

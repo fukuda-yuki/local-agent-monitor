@@ -146,16 +146,13 @@ public sealed class SqliteSessionOtelEnricher
     {
         const string sourceAdapter = "claude-code-otel";
         var sourceEventId = $"{row.TraceId}/{row.SpanId}";
-        if (FindSessionBySourceIdentity(sourceAdapter, sourceEventId) is not null)
-        {
-            return;
-        }
+        var replay = FindEventBySourceIdentity(sourceAdapter, sourceEventId);
 
         var binding = row.PayloadJson is null
             ? null
             : claudeExactBindingRule.Resolve(row.PayloadJson, row.TraceId, row.SpanId);
-        var traceSessionId = FindUnboundClaudeSessionByTraceId(row.TraceId);
-        var sessionId = binding?.SessionId ?? traceSessionId ?? Guid.CreateVersion7();
+        var traceSessionId = FindUnboundClaudeSessionByTraceId(row.TraceId, sourceEventId);
+        var sessionId = binding?.SessionId ?? replay?.SessionId ?? traceSessionId ?? Guid.CreateVersion7();
         var matchKind = binding is not null
             ? MatchKind(binding.BindingKind)
             : traceSessionId == sessionId
@@ -168,7 +165,9 @@ public sealed class SqliteSessionOtelEnricher
         var completeness = binding is null
             ? SessionCompleteness.Unbound
             : CalculateExactCompleteness(existing);
-        var session = existing?.Session is { } current
+        var session = replay is not null
+            ? existing?.Session ?? throw new InvalidOperationException("Session event replay owner is missing.")
+            : existing?.Session is { } current
             ? current with
             {
                 Completeness = completeness,
@@ -187,7 +186,7 @@ public sealed class SqliteSessionOtelEnricher
                 SessionRawRetentionState.NotCaptured,
                 CreatedAt: now,
                 UpdatedAt: now);
-        var runId = Guid.CreateVersion7();
+        var runId = replay?.RunId ?? Guid.CreateVersion7();
         var run = new ObservedSessionRun(
             runId,
             sessionId,
@@ -202,6 +201,12 @@ public sealed class SqliteSessionOtelEnricher
             row.InputTokens,
             row.OutputTokens,
             row.TotalTokens);
+        if (replay?.RunId is not null
+            && replay.SessionId == sessionId
+            && (existing is null || !existing.Runs.Contains(run)))
+        {
+            throw new InvalidOperationException("Session run replay conflict.");
+        }
         var @event = new ObservedSessionEvent(
             Guid.CreateVersion7(),
             sessionId,
@@ -251,21 +256,47 @@ public sealed class SqliteSessionOtelEnricher
         _ => throw new InvalidOperationException("Unsupported exact Claude binding kind."),
     };
 
-    private Guid? FindSessionBySourceIdentity(string sourceAdapter, string sourceEventId) =>
-        FindUnambiguous(
-            "SELECT DISTINCT session_id FROM session_events WHERE source_adapter=$first AND source_event_id=$second COLLATE BINARY;",
-            sourceAdapter,
-            sourceEventId);
+    private ExistingSourceEvent? FindEventBySourceIdentity(string sourceAdapter, string sourceEventId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT session_id,run_id FROM session_events WHERE source_adapter=$adapter AND source_event_id=$source_event_id COLLATE BINARY;";
+        command.Parameters.AddWithValue("$adapter", sourceAdapter);
+        command.Parameters.AddWithValue("$source_event_id", sourceEventId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        var result = new ExistingSourceEvent(
+            Guid.Parse(reader.GetString(0)),
+            reader.IsDBNull(1) ? null : Guid.Parse(reader.GetString(1)));
+        if (reader.Read()) throw new InvalidOperationException("Ambiguous Session event source identity.");
+        return result;
+    }
 
-    private Guid? FindUnboundClaudeSessionByTraceId(string traceId) =>
-        FindUnambiguous(
-            """
+    private Guid? FindUnboundClaudeSessionByTraceId(string traceId, string sourceEventId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
             SELECT DISTINCT e.session_id
             FROM session_events e JOIN sessions s ON s.session_id=e.session_id
-            WHERE e.source_adapter=$first AND e.trace_id=$second COLLATE BINARY AND s.completeness='unbound';
-            """,
-            "claude-code-otel",
-            traceId);
+            WHERE e.source_adapter='claude-code-otel'
+              AND e.trace_id=$trace_id COLLATE BINARY
+              AND e.source_event_id<>$source_event_id COLLATE BINARY
+              AND s.completeness='unbound';
+            """;
+        command.Parameters.AddWithValue("$trace_id", traceId);
+        command.Parameters.AddWithValue("$source_event_id", sourceEventId);
+        using var reader = command.ExecuteReader();
+        Guid? result = null;
+        while (reader.Read())
+        {
+            var current = Guid.Parse(reader.GetString(0));
+            if (result is not null && result != current) return null;
+            result = current;
+        }
+        return result;
+    }
 
     private Guid? FindUnambiguous(string sql, string first, string second)
     {
@@ -407,4 +438,6 @@ public sealed class SqliteSessionOtelEnricher
         public bool IsClaudeCode => string.Equals(SourceSurface, "claude-code", StringComparison.Ordinal)
             && string.Equals(SourceAdapter, "claude-code-otel", StringComparison.Ordinal);
     }
+
+    private sealed record ExistingSourceEvent(Guid SessionId, Guid? RunId);
 }

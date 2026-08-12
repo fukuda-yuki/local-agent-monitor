@@ -600,8 +600,12 @@ public sealed class PricingQueryFoundationTests
         }
     }
 
-    [Fact]
-    public void SessionEstimateHistory_ProjectsExactHeadsDeltaAndSafeFields()
+    [Theory]
+    [InlineData("updated_at")]
+    [InlineData("non_full")]
+    [InlineData("no_fact")]
+    [InlineData("raw_stop")]
+    public void SessionEstimateHistory_ProjectsExactHeadsDeltaAndSafeFields(string eligibilityLoss)
     {
         using var database = new QueryDatabase();
         var calculationTime = new DateTimeOffset(2026, 7, 25, 3, 0, 0, TimeSpan.Zero);
@@ -836,20 +840,55 @@ public sealed class PricingQueryFoundationTests
             "estimated",
             queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!.CalculationState);
 
+        var immutableHistory = database.ReadImmutablePricingHistory();
         using (var connection = database.Open())
             Execute(
                 connection,
-                $"""
-                UPDATE sessions SET updated_at='2026-07-25T04:00:00.0000000+00:00'
-                WHERE session_id='{sessionId}';
-                """);
+                eligibilityLoss switch
+                {
+                    "updated_at" =>
+                        $"UPDATE sessions SET updated_at='2026-07-25T04:00:00.0000000+00:00' WHERE session_id='{sessionId}';",
+                    "non_full" =>
+                        $"UPDATE sessions SET completeness='rich' WHERE session_id='{sessionId}';",
+                    "no_fact" =>
+                        $"UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id='{sessionId}' AND terminal_outcome IS NOT NULL;",
+                    "raw_stop" =>
+                        $"UPDATE session_events SET type='Stop',terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id='{sessionId}' AND terminal_outcome IS NOT NULL;",
+                    _ => throw new ArgumentOutOfRangeException(nameof(eligibilityLoss)),
+                });
         var stale = queries.ReadSessionEstimates(sessionId, catalogBytes, null, 1).Value!;
         Assert.Equal("stale", stale.CalculationState);
         var staleLatest = Assert.Single(stale.Items);
         Assert.Equal("stale", staleLatest.Freshness);
         Assert.Equal("not_applicable", staleLatest.AmountKind);
         Assert.Null(staleLatest.Amount);
+        Assert.Null(staleLatest.Currency);
         Assert.Equal("includes_stale", staleLatest.Delta.BasisFreshness);
+        var staleExact = queries.ReadSessionEstimate(
+            sessionId,
+            staleLatest.EstimateId,
+            catalogBytes);
+        Assert.Equal(PricingReadStatus.Success, staleExact.Status);
+        Assert.Equal("stale", staleExact.Value!.Item.Freshness);
+        Assert.Equal(staleLatest.Components, staleExact.Value.Item.Components);
+        Assert.Equal(
+            staleLatest.Coverage.RequiredCategories,
+            staleExact.Value.Item.Coverage.RequiredCategories);
+        Assert.Equal(
+            staleLatest.Coverage.EstimatedCategories,
+            staleExact.Value.Item.Coverage.EstimatedCategories);
+        Assert.Equal(
+            staleLatest.Coverage.MissingCategories,
+            staleExact.Value.Item.Coverage.MissingCategories);
+        var recalculations = queries.ReadSessionRecalculations(
+            sessionId,
+            catalogBytes,
+            null,
+            10);
+        Assert.Equal(PricingReadStatus.Success, recalculations.Status);
+        Assert.Equal(3, recalculations.Value!.Attempts.Count);
+        Assert.All(recalculations.Value.Attempts, attempt => Assert.Equal("stale", attempt.Freshness));
+        Assert.Equal(immutableHistory, database.ReadImmutablePricingHistory());
 
         var predecessorCorruptPath = database.Backup("predecessor-corrupt.db");
         var canonicalCorruptPath = database.Backup("canonical-corrupt.db");
@@ -1161,9 +1200,11 @@ public sealed class PricingQueryFoundationTests
                 VALUES($run,$id,'vscode','completed');
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
-                VALUES($event,$id,$run,'vscode','synthetic',$source,
-                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                    type,occurred_at,content_state,source_application_version,
+                    terminal_outcome,terminal_policy_version)
+                VALUES($event,$id,$run,'vscode','copilot-compatible-hook',$source,
+                    'SessionEnd','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    'clean',1);
                 """;
             command.Parameters.AddWithValue("$id", sessionId);
             command.Parameters.AddWithValue("$run", "run-" + sessionId);
@@ -1171,6 +1212,40 @@ public sealed class PricingQueryFoundationTests
             command.Parameters.AddWithValue("$source", "source-" + sessionId);
             command.ExecuteNonQuery();
             return sessionId;
+        }
+
+        internal string ReadImmutablePricingHistory()
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT kind || ':' || identity || ':' || payload
+                FROM (
+                    SELECT 'configuration' kind,configuration_id identity,
+                           hex(canonical_blob) payload
+                    FROM pricing_configurations
+                    UNION ALL
+                    SELECT 'run',run_id,hex(canonical_request_blob)
+                    FROM pricing_recalculation_runs
+                    UNION ALL
+                    SELECT 'estimate',estimate_id,hex(canonical_blob)
+                    FROM pricing_estimates
+                    UNION ALL
+                    SELECT 'head',session_id || ':' || printf('%d',head_revision),
+                           quote(estimate_id) || ':' || quote(previous_estimate_id)
+                    FROM pricing_estimate_heads
+                    UNION ALL
+                    SELECT 'attempt',session_id || ':' || printf('%d',attempt_revision),
+                           quote(run_id) || ':' || quote(result_kind) || ':' || quote(result_code)
+                    FROM pricing_session_attempts
+                )
+                ORDER BY kind,identity;
+                """;
+            using var reader = command.ExecuteReader();
+            var values = new List<string>();
+            while (reader.Read()) values.Add(reader.GetString(0));
+            return string.Join("|", values);
         }
 
         internal PricingRecalculationTargetCapture CaptureTarget(string sessionId)

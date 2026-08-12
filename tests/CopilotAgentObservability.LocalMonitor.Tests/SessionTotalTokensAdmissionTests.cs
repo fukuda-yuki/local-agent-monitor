@@ -106,7 +106,13 @@ public sealed class SessionTotalTokensAdmissionTests
                   {"source_event_id":"historical-missing","type":"subagent.completed","occurred_at":"2026-07-11T00:00:02Z","payload":{"totalTokens":1,"safe":"historical"}}
                 ]}
                 """));
-            Assert.Equal(HttpStatusCode.NoContent, replay.StatusCode);
+            // D079 clause F: replaying an existing event with divergent captured content
+            // aborts the whole batch fail-closed; the writer keeps the frozen 503
+            // session_store_busy bytes instead of backfilling or overwriting content.
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, replay.StatusCode);
+            Assert.Equal(
+                """{"error":"session_store_busy"}""",
+                await replay.Content.ReadAsStringAsync());
         }
 
         Assert.Equal(

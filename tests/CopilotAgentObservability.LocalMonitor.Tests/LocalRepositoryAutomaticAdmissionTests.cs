@@ -701,7 +701,7 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         {
             session.CommandText = """
                 INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
-                VALUES($session_id,'completed','full',$at,'not_captured',$at,$at)
+                VALUES($session_id,'active','unbound',$at,'not_captured',$at,$at)
                 ON CONFLICT(session_id) DO NOTHING;
                 """;
             session.Parameters.AddWithValue("$session_id", input.SessionId);

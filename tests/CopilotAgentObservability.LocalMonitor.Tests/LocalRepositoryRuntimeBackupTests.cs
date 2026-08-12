@@ -51,6 +51,64 @@ public sealed class LocalRepositoryRuntimeBackupTests
     }
 
     [Fact]
+    public void CurrentTerminalEventTypeWithoutPersistedFactIsRejectedBeforeBackupPublication()
+    {
+        using var fixture = new LocalRepositoryCatalogFixture();
+        fixture.CreateSession(LocalRepositoryCatalogFixture.SessionId(3_701));
+        fixture.Execute("UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE type='session.task_complete';");
+        var archive = Path.Combine(Path.GetDirectoryName(fixture.DatabasePath)!, "missing-terminal-fact.zip");
+
+        var result = new SqliteRuntimeBackupService(TimeProvider.System).CreateAndPublish(fixture.DatabasePath, archive);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.False(File.Exists(archive));
+    }
+
+    [Fact]
+    public async Task ExactLegacySession13CatalogMigratesFirstAndPreservesEveryCatalogChild()
+    {
+        using var fixture = await CreatePopulatedCatalogAsync();
+        var expected = ReadCatalogSnapshot(fixture.DatabasePath);
+        var directory = Path.GetDirectoryName(fixture.DatabasePath)!;
+        var currentBundle = Path.Combine(directory, "current-catalog.zip");
+        var legacyBundle = Path.Combine(directory, "legacy-session13-catalog.zip");
+        var target = Path.Combine(directory, "legacy-session13-catalog-restored.db");
+        var service = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(service.CreateAndPublish(fixture.DatabasePath, currentBundle).Success);
+        var sourceHash = DatabaseHash(fixture.DatabasePath);
+        RewriteArchiveDatabase(
+            currentBundle,
+            legacyBundle,
+            path =>
+            {
+                using var connection = OpenWritable(path);
+                SessionVersion13TestFixture.DowngradeSessionEvents(connection);
+            },
+            manifest => manifest with
+            {
+                ComponentVersions = new SortedDictionary<string, int>(manifest.ComponentVersions.ToDictionary(), StringComparer.Ordinal)
+                {
+                    ["session"] = 13,
+                },
+            });
+
+        var inspected = service.Inspect(legacyBundle);
+        var restored = service.Restore(legacyBundle, target, new RuntimeRestoreOptions());
+
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        Assert.Equal(13, inspected.ComponentVersions!["session"]);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(sourceHash, DatabaseHash(fixture.DatabasePath));
+        Assert.Equal(expected, ReadCatalogSnapshot(target));
+        using var migrated = Open(target);
+        Assert.Equal(14L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.True(SqliteSessionStore.IsCurrentSchemaValid(migrated, null));
+        Assert.Equal(0L, ScalarLong(target, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+        Assert.Equal("session_events", StringJoin(target, "SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('session_repository_observation_contexts') WHERE \"from\"='session_event_id';"));
+    }
+
+    [Fact]
     public async Task ComposerUsesTheApprovedPhaseOrderAndOneCallerOwnedReadTransaction()
     {
         using var fixture = await CreatePopulatedCatalogAsync();
@@ -98,7 +156,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
     [InlineData("older")]
     [InlineData("newer")]
     [InlineData("shape")]
-    public async Task CatalogRequiresExactSessionV13WithoutRepairOrMutation(string contradiction)
+    public async Task CatalogRequiresCurrentOrExactLegacySessionWithoutRepairOrMutation(string contradiction)
     {
         using var fixture = await CreatePopulatedCatalogAsync();
         ApplySessionContradiction(fixture.DatabasePath, contradiction);
@@ -644,7 +702,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var current = service.Initialize(temp.DatabasePath);
 
         Assert.True(current.Success, current.ErrorCode);
-        Assert.Equal(13, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1, ScalarLong(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='local_repository_catalog';"));
         Assert.All(LocalRepositoryCatalogSchemaV1.TableNames, table =>
             Assert.Equal(table == "local_repository_reconciliation_state" ? 1 : 0, ScalarLong(temp.DatabasePath, $"SELECT COUNT(*) FROM \"{table}\";")));
@@ -675,7 +733,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             Assert.Equal(before, DatabaseHash(corrupt.DatabasePath));
         }
 
-        using (var valid = CreateSessionV13WithoutCatalog())
+        using (var valid = CreateCurrentSessionWithoutCatalog())
         {
             var checkpointCount = 0;
             var result = new SqliteRuntimeBackupService(valid.TimeProvider, checkpoint =>
@@ -688,7 +746,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             AssertEmptyCatalogInstalled(valid.DatabasePath);
         }
 
-        using (var corruptAfterTail = CreateSessionV13WithoutCatalog())
+        using (var corruptAfterTail = CreateCurrentSessionWithoutCatalog())
         {
             var checkpointCount = 0;
             byte[]? afterCorruption = null;
@@ -733,7 +791,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             Assert.Equal(before, DatabaseHash(corrupt.DatabasePath));
         }
 
-        using (var valid = CreateSessionV13WithoutCatalog())
+        using (var valid = CreateCurrentSessionWithoutCatalog())
         {
             var checkpointCount = 0;
             var service = new SqliteRuntimeBackupService(valid.TimeProvider, checkpoint =>
@@ -751,7 +809,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             AssertEmptyCatalogInstalled(valid.DatabasePath);
         }
 
-        using (var corruptAfterTail = CreateSessionV13WithoutCatalog())
+        using (var corruptAfterTail = CreateCurrentSessionWithoutCatalog())
         {
             var checkpointCount = 0;
             byte[]? afterCorruption = null;
@@ -799,7 +857,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             Assert.Equal(before, DatabaseHash(corrupt.DatabasePath));
         }
 
-        using (var valid = CreateSessionV13WithoutCatalog())
+        using (var valid = CreateCurrentSessionWithoutCatalog())
         {
             var output = Path.Combine(Path.GetDirectoryName(valid.DatabasePath)!, "post-tail-valid.zip");
             var checkpointCount = 0;
@@ -816,7 +874,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             Assert.True(service.Inspect(output).Success);
         }
 
-        using (var corruptAfterTail = CreateSessionV13WithoutCatalog())
+        using (var corruptAfterTail = CreateCurrentSessionWithoutCatalog())
         {
             var output = Path.Combine(Path.GetDirectoryName(corruptAfterTail.DatabasePath)!, "post-tail-must-not-publish.zip");
             var checkpointCount = 0;
@@ -1498,7 +1556,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
     {
         "missing" => "DELETE FROM schema_version WHERE component='session';",
         "older" => "UPDATE schema_version SET version=12 WHERE component='session';",
-        "newer" => "UPDATE schema_version SET version=14 WHERE component='session';",
+        "newer" => "UPDATE schema_version SET version=15 WHERE component='session';",
         "shape" => "ALTER TABLE sessions ADD COLUMN task10_unexpected TEXT NULL;",
         _ => throw new ArgumentOutOfRangeException(nameof(contradiction)),
     });
@@ -1680,7 +1738,11 @@ public sealed class LocalRepositoryRuntimeBackupTests
         return SHA256.HashData(File.ReadAllBytes(path));
     }
 
-    private static void RewriteArchiveDatabase(string source, string output, Action<string> mutateDatabase)
+    private static void RewriteArchiveDatabase(
+        string source,
+        string output,
+        Action<string> mutateDatabase,
+        Func<RuntimeBackupManifestData, RuntimeBackupManifestData>? mutateManifest = null)
     {
         byte[] manifest;
         byte[] database;
@@ -1697,6 +1759,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         _ = DatabaseHash(mutated);
         database = File.ReadAllBytes(mutated);
         var parsed = RuntimeBackupJson.ParseManifest(manifest);
+        parsed = mutateManifest?.Invoke(parsed) ?? parsed;
         var rowCounts = ReadManifestRowCounts(mutated, parsed.RowCounts.Keys);
         File.Delete(mutated);
         manifest = RuntimeBackupJson.WriteManifest(parsed with
@@ -3109,7 +3172,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
 
-    private static MonitorTempDirectory CreateSessionV13WithoutCatalog()
+    private static MonitorTempDirectory CreateCurrentSessionWithoutCatalog()
     {
         var temp = new MonitorTempDirectory();
         temp.CreateRawStore().CreateMonitorSchema();
@@ -3949,7 +4012,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         using var expectedConnection = new SqliteConnection("Data Source=:memory:");
         expectedConnection.Open();
         using var expectedTransaction = expectedConnection.BeginTransaction();
-        SqliteSessionStore.InitializeSchema(expectedConnection, expectedTransaction);
+        SqliteSessionStore.InitializeSchema(expectedConnection, expectedTransaction, DateTimeOffset.UnixEpoch);
         LocalRepositoryCatalogSchemaV1.Ensure(expectedConnection, expectedTransaction);
         var expected = ReadOwnedObjects(expectedConnection, expectedTransaction);
         Assert.True(SqliteOwnedSchemaAuthority.Equal(actual, expected),
@@ -3959,7 +4022,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         {
             versions.Transaction = transaction;
             versions.CommandText = "SELECT group_concat(component || ':' || typeof(version) || ':' || version, ',') FROM schema_version ORDER BY component;";
-            Assert.Contains("session:integer:13", Convert.ToString(versions.ExecuteScalar(), CultureInfo.InvariantCulture));
+            Assert.Contains("session:integer:14", Convert.ToString(versions.ExecuteScalar(), CultureInfo.InvariantCulture));
             Assert.Contains("local_repository_catalog:integer:1", Convert.ToString(versions.ExecuteScalar(), CultureInfo.InvariantCulture));
         }
         LocalRepositoryCatalogBackupValidation.Validate(connection, transaction);

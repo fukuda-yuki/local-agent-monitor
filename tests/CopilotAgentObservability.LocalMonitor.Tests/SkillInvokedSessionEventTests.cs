@@ -59,7 +59,7 @@ public sealed class SkillInvokedSessionEventTests
     }
 
     [Fact]
-    public async Task SupportedSkillLifecycle_DuplicateReplayAfterTimeAdvanceKeepsOneAvailableByteIdenticalContent()
+    public async Task SupportedSkillLifecycle_DivergentReplayAfterTimeAdvanceFailsClosedKeepingOneAvailableByteIdenticalContent()
     {
         using var temp = CreateTempDirectory();
         var time = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
@@ -75,14 +75,18 @@ public sealed class SkillInvokedSessionEventTests
 
         time.Advance(TimeSpan.FromMinutes(1));
 
-        normalizer.NormalizeAndWrite(Envelope([
-            SkillInvokedEvent() with
-            {
-                Type = "skill.started",
-                Payload = JsonDocument.Parse(
-                    """{"name":"replacement-skill","description":"replacement payload"}""").RootElement.Clone(),
-            },
-        ]));
+        // D079 clause F: a replay of the same source event carrying divergent captured
+        // content must fail closed — the whole batch aborts instead of backfilling or
+        // silently replacing the original capture. The original bytes stay untouched.
+        Assert.Throws<InvalidOperationException>(() =>
+            normalizer.NormalizeAndWrite(Envelope([
+                SkillInvokedEvent() with
+                {
+                    Type = "skill.started",
+                    Payload = JsonDocument.Parse(
+                        """{"name":"replacement-skill","description":"replacement payload"}""").RootElement.Clone(),
+                },
+            ])));
 
         var persisted = Assert.Single(
             Assert.IsType<SessionDetail>(store.GetDetail(session.SessionId)).Events);

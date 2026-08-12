@@ -197,6 +197,74 @@ public sealed class CostConfigurationApplicationServiceTests
     }
 
     [Fact]
+    public void PreviewAndCurrentConfiguration_ExcludeSessionsWithoutCoreCurrentUseEligibility()
+    {
+        using var database = new ApplicationDatabase();
+        var clock = new MutableTimeProvider(new(2026, 7, 24, 1, 0, 0, TimeSpan.Zero));
+        var application = database.CreateApplication(
+            clock,
+            PricingCatalog.Create(BundledPricingRegistry.Load()));
+        database.InsertResolvedSession();
+        database.InsertResolvedSession(completeness: "rich");
+        database.InsertResolvedSession(hasTerminalFact: false);
+
+        var preview = application.PreviewConfiguration(Proposal("1.2.3"));
+        var committed = application.CommitConfiguration(preview.Value!);
+        var current = application.ReadCurrentConfiguration();
+
+        Assert.True(preview.Success);
+        Assert.Equal(1, preview.Value!.ProposedMatchCount);
+        Assert.True(committed.Success);
+        Assert.True(current.Success);
+        Assert.Equal(1, current.Value!.SelectedSessionCount);
+        Assert.Equal("exact", current.Value.SelectedSessionCountState);
+    }
+
+    [Fact]
+    public void CommitConfiguration_RejectsEligibilityLossAfterPreviewWithoutAppendingHistory()
+    {
+        using var database = new ApplicationDatabase();
+        var clock = new MutableTimeProvider(new(2026, 7, 24, 1, 0, 0, TimeSpan.Zero));
+        var application = database.CreateApplication(
+            clock,
+            PricingCatalog.Create(BundledPricingRegistry.Load()));
+        var sessionId = database.InsertResolvedSession();
+        var preview = application.PreviewConfiguration(Proposal("1.2.3")).Value!;
+        database.RemoveTerminalFact(sessionId);
+
+        var result = application.CommitConfiguration(preview);
+
+        Assert.False(result.Success);
+        Assert.Equal("cost_selection_changed", result.ErrorCode);
+        Assert.Equal((0L, 0L, 0L), database.ReadConfigurationHistoryCounts());
+    }
+
+    [Fact]
+    public void CurrentConfiguration_DropsEligibilityLossWithoutRewritingCommittedHistory()
+    {
+        using var database = new ApplicationDatabase();
+        var clock = new MutableTimeProvider(new(2026, 7, 24, 1, 0, 0, TimeSpan.Zero));
+        var application = database.CreateApplication(
+            clock,
+            PricingCatalog.Create(BundledPricingRegistry.Load()));
+        var sessionId = database.InsertResolvedSession();
+        var preview = application.PreviewConfiguration(Proposal("1.2.3")).Value!;
+        var committed = application.CommitConfiguration(preview).Value!;
+        var before = database.ReadConfigurationHistoryBytes();
+        database.SetCompleteness(sessionId, "rich");
+
+        var current = application.ReadCurrentConfiguration();
+        var version = application.ReadConfigurationVersion(committed.ConfigurationId);
+
+        Assert.True(current.Success);
+        Assert.Equal(0, current.Value!.SelectedSessionCount);
+        Assert.Equal("exact", current.Value.SelectedSessionCountState);
+        Assert.True(version.Success);
+        Assert.Equal(committed.ConfigurationId, version.Value!.ConfigurationId);
+        Assert.Equal(before, database.ReadConfigurationHistoryBytes());
+    }
+
+    [Fact]
     public void CommitConfiguration_DifferentOccupiedSuccessorWinsAsIdempotencyConflict()
     {
         using var database = new ApplicationDatabase();
@@ -317,7 +385,9 @@ public sealed class CostConfigurationApplicationServiceTests
                 catalog.CatalogSha256);
         }
 
-        internal string InsertResolvedSession()
+        internal string InsertResolvedSession(
+            string completeness = "full",
+            bool hasTerminalFact = true)
         {
             var sessionId = Guid.NewGuid().ToString("D");
             using var connection = Open();
@@ -326,21 +396,26 @@ public sealed class CostConfigurationApplicationServiceTests
                 """
                 INSERT INTO sessions(
                     session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
-                VALUES($id,'completed','full','2026-07-24T01:00:00.0000000+00:00',
+                VALUES($id,'completed',$completeness,'2026-07-24T01:00:00.0000000+00:00',
                     'not_captured','2026-07-24T01:00:00.0000000+00:00',
                     '2026-07-24T01:00:00.0000000+00:00');
                 INSERT INTO session_runs(run_id,session_id,source_surface,status)
                 VALUES($run,$id,'vscode','completed');
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
-                VALUES($event,$id,$run,'vscode','synthetic',$source,
-                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                    type,occurred_at,content_state,source_application_version,
+                    terminal_outcome,terminal_policy_version)
+                VALUES($event,$id,$run,'vscode','copilot-compatible-hook',$source,
+                    'SessionEnd','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    $terminal_outcome,$terminal_policy_version);
                 """;
             command.Parameters.AddWithValue("$id", sessionId);
+            command.Parameters.AddWithValue("$completeness", completeness);
             command.Parameters.AddWithValue("$run", "run-" + sessionId);
             command.Parameters.AddWithValue("$event", "event-" + sessionId);
             command.Parameters.AddWithValue("$source", "source-" + sessionId);
+            command.Parameters.AddWithValue("$terminal_outcome", hasTerminalFact ? "clean" : DBNull.Value);
+            command.Parameters.AddWithValue("$terminal_policy_version", hasTerminalFact ? 1 : DBNull.Value);
             command.ExecuteNonQuery();
             return sessionId;
         }
@@ -367,10 +442,10 @@ public sealed class CostConfigurationApplicationServiceTests
                     INSERT INTO session_events(
                         event_id,session_id,run_id,source_surface,source_adapter,
                         source_event_id,type,occurred_at,content_state,
-                        source_application_version)
-                    VALUES($event,$id,$run,'vscode','synthetic',$source,
-                        'turn','2026-07-24T01:00:00.0000000+00:00',
-                        'not_captured','1.2.3');
+                        source_application_version,terminal_outcome,terminal_policy_version)
+                    VALUES($event,$id,$run,'vscode','copilot-compatible-hook',$source,
+                        'SessionEnd','2026-07-24T01:00:00.0000000+00:00',
+                        'not_captured','1.2.3','clean',1);
                     """;
                 command.Parameters.AddWithValue("$id", sessionId);
                 command.Parameters.AddWithValue("$run", "run-" + sessionId);
@@ -379,6 +454,54 @@ public sealed class CostConfigurationApplicationServiceTests
                 command.ExecuteNonQuery();
             }
             transaction.Commit();
+        }
+
+        internal void RemoveTerminalFact(string sessionId)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id=$session;";
+            command.Parameters.AddWithValue("$session", sessionId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        internal void SetCompleteness(string sessionId, string completeness)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE sessions SET completeness=$completeness WHERE session_id=$session;";
+            command.Parameters.AddWithValue("$completeness", completeness);
+            command.Parameters.AddWithValue("$session", sessionId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        internal (long Configurations, long Heads, long Commits) ReadConfigurationHistoryCounts()
+        {
+            using var connection = Open();
+            return (
+                Scalar("SELECT COUNT(*) FROM pricing_configurations;"),
+                Scalar("SELECT COUNT(*) FROM pricing_configuration_heads;"),
+                Scalar("SELECT COUNT(*) FROM pricing_configuration_commits;"));
+
+            long Scalar(string sql)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = sql;
+                return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        internal string ReadConfigurationHistoryBytes()
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT hex(canonical_blob) FROM pricing_configurations ORDER BY configuration_id;";
+            using var reader = command.ExecuteReader();
+            var values = new List<string>();
+            while (reader.Read()) values.Add(reader.GetString(0));
+            return string.Join("|", values);
         }
 
         internal IReadOnlyList<string> ReadSessionIds()

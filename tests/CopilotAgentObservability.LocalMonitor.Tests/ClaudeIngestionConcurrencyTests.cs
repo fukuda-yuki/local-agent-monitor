@@ -266,6 +266,7 @@ public sealed class ClaudeIngestionConcurrencyTests
     {
         using var temp = new MonitorTempDirectory();
         var store = PrepareClaudeOtelFixture(temp.DatabasePath);
+        var retentionContext = temp.RetentionContext;
         using (var connection = Open(temp.DatabasePath))
         using (var command = connection.CreateCommand())
         {
@@ -276,7 +277,7 @@ public sealed class ClaudeIngestionConcurrencyTests
                 """;
             command.ExecuteNonQuery();
         }
-        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, new FixedTimeProvider(ObservedAt));
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, retentionContext, new FixedTimeProvider(ObservedAt));
 
         Assert.Throws<SqliteException>(() => enricher.ProcessNextBatch(1));
 
@@ -425,7 +426,7 @@ public sealed class ClaudeIngestionConcurrencyTests
             AdapterVersion: "claude-hook-v1",
             SchemaFingerprint: null,
             NormalizationVersion: "session-normalization-v1")).ToArray();
-        store.Write(new SessionWriteBatch(
+        var batch = new SessionWriteBatch(
             new SessionDetail(
                 new ObservedSession(
                     sessionId,
@@ -442,7 +443,10 @@ public sealed class ClaudeIngestionConcurrencyTests
                 [new SessionNativeId(sessionId, SessionSourceSurface.ClaudeCode, nativeSessionId, SessionBindingKind.Native, ObservedAt)],
                 [],
                 events),
-            []));
+            []);
+        ((IClassifiedSessionStore)store).WriteClassified(
+            batch,
+            [new SessionTerminalFact(events[^1].EventId, SessionTerminalOutcome.Clean)]);
         return sessionId;
     }
 

@@ -49,7 +49,7 @@ public sealed class TraceSourceAttributionMigrationTests
                     session_id,status,completeness,repository,workspace,started_at,ended_at,
                     last_seen_at,raw_retention_state,created_at,updated_at)
                 VALUES(
-                    'migration-session','active','rich','owner/repo','C:\workspace',
+                    '01900000-0000-7000-8000-00000000a001','active','partial','owner/repo','C:\workspace',
                     '2026-07-30T00:00:00.0000000+00:00',NULL,
                     '2026-07-30T00:00:01.0000000+00:00','expiring',
                     '2026-07-30T00:00:00.0000000+00:00',
@@ -57,13 +57,13 @@ public sealed class TraceSourceAttributionMigrationTests
                 INSERT INTO session_native_ids(
                     session_id,source_surface,native_session_id,binding_kind,observed_at)
                 VALUES(
-                    'migration-session','vscode','native-session','native',
+                    '01900000-0000-7000-8000-00000000a001','vscode','native-session','native',
                     '2026-07-30T00:00:00.0000000+00:00');
                 INSERT INTO session_runs(
                     run_id,session_id,source_surface,native_run_id,trace_id,parent_run_id,model,
                     started_at,ended_at,input_tokens,output_tokens,total_tokens,status)
                 VALUES(
-                    'migration-run','migration-session','vscode','native-run','{TraceId}',NULL,
+                    'migration-run','01900000-0000-7000-8000-00000000a001','vscode','native-run','{TraceId}',NULL,
                     'legacy-model','2026-07-30T00:00:00.0000000+00:00',NULL,3,5,8,'active');
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,
@@ -71,7 +71,7 @@ public sealed class TraceSourceAttributionMigrationTests
                     source_application_version,adapter_version,schema_fingerprint,
                     normalization_version,match_kind)
                 VALUES(
-                    'migration-event','migration-session','migration-run','vscode',NULL,
+                    'migration-event','01900000-0000-7000-8000-00000000a001','migration-run','vscode',NULL,
                     '{TraceId}','ok','otel-exact','migration-source-event','otel.span',
                     '2026-07-30T00:00:00.0000000+00:00','not_captured',
                     '1.0.75','legacy-adapter','legacy-fingerprint','legacy-normalization',

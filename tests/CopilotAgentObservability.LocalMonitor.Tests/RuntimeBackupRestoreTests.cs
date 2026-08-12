@@ -513,6 +513,7 @@ public sealed class RuntimeBackupRestoreTests
             temp.Execute(target, "PRAGMA wal_checkpoint(TRUNCATE);");
         }
         var changedPreview = service.Preview(bundle, temp.Target);
+        Assert.True(changedPreview.Success, changedPreview.ErrorCode);
         var stale = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions(AllowResurrection: true, ConfirmationDigest: preview.ConfirmationDigest));
         var restored = service.Restore(bundle, temp.Target, new RuntimeRestoreOptions(AllowResurrection: true, ConfirmationDigest: changedPreview.ConfirmationDigest));
 
@@ -531,8 +532,59 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(RuntimeBackupErrorCodes.RestoreResurrectionBlocked, stale.ErrorCode);
         Assert.True(restored.Success, restored.ErrorCode);
         Assert.Equal(1, restored.NonTerminalReintroductionCount);
+        Assert.True(restored.PreRestoreBackupCreated);
+        var safetyBundle = Path.Combine(
+            temp.Root,
+            "runtime-backups",
+            Assert.IsType<string>(restored.PreRestoreBackupFileName));
+        var safetyInspection = service.Inspect(safetyBundle);
+        Assert.True(safetyInspection.Success, safetyInspection.ErrorCode);
+        Assert.Equal(14, safetyInspection.ComponentVersions!["session"]);
+        var safetyTarget = Path.Combine(temp.Root, "restored-safety.db");
+        var safetyRestore = service.Restore(
+            safetyBundle,
+            safetyTarget,
+            new RuntimeRestoreOptions());
+        Assert.True(safetyRestore.Success, safetyRestore.ErrorCode);
+        using var safetyDatabase = temp.Open(safetyTarget);
+        Assert.Equal(0L, temp.Scalar<long>(safetyDatabase, "SELECT COUNT(*) FROM raw_records;"));
+        Assert.Equal("expiring", temp.Scalar<string>(safetyDatabase, "SELECT state FROM retention_items;"));
         using var database = temp.Open(temp.Target);
         Assert.Equal(1L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM raw_records;"));
+    }
+
+    [Theory]
+    [InlineData("wrong-owner")]
+    [InlineData("extra-source")]
+    [InlineData("malformed-row")]
+    [InlineData("foreign-key")]
+    public void Exact_current_archive_cannot_reclassify_hostile_retention_state_as_missing(
+        string contradiction)
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "hostile-current", includeRaw: true);
+        var validBundle = Path.Combine(temp.Root, "hostile-current-valid.zip");
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        Assert.True(service.CreateAndPublish(temp.Source, validBundle).Success);
+        var hostileBundle = temp.CreateRetentionCoverageContradictionArchive(
+            validBundle,
+            contradiction);
+        var target = Path.Combine(temp.Root, $"hostile-{contradiction}.db");
+
+        var inspection = service.Inspect(hostileBundle);
+        var restored = service.Restore(
+            hostileBundle,
+            target,
+            new RuntimeRestoreOptions());
+
+        Assert.False(inspection.Success);
+        var expectedError = contradiction == "foreign-key"
+            ? RuntimeBackupErrorCodes.ArchiveInvalid
+            : RuntimeBackupErrorCodes.RestoreIncompatible;
+        Assert.Equal(expectedError, inspection.ErrorCode);
+        Assert.False(restored.Success);
+        Assert.Equal(expectedError, restored.ErrorCode);
+        Assert.False(File.Exists(target));
     }
 
     [Fact]
@@ -829,7 +881,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.DoesNotContain("session", archivedSource.ComponentVersions.Keys);
         Assert.DoesNotContain("local_repository_catalog", archivedSource.ComponentVersions.Keys);
         var archivedSteps = archivedSource.MigrationSteps!.ToArray();
-        var session = Array.IndexOf(archivedSteps, "session:0->13");
+        var session = Array.IndexOf(archivedSteps, "session:0->14");
         var catalog = Array.IndexOf(archivedSteps, "local_repository_catalog:0->1");
         var retention = Array.IndexOf(archivedSteps, "retention:0->1");
         var skill = Array.IndexOf(archivedSteps, "skill_projection:0->1");
@@ -855,7 +907,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.Equal(1, restoredPreflight.ComponentVersions!["historical_instruction_analysis"]);
         Assert.Equal(1, restoredPreflight.ComponentVersions["historical_import"]);
         Assert.Equal(1, restoredPreflight.ComponentVersions["sanitized_import"]);
-        Assert.Equal(13, restoredPreflight.ComponentVersions["session"]);
+        Assert.Equal(14, restoredPreflight.ComponentVersions["session"]);
         Assert.Equal(1, restoredPreflight.ComponentVersions["local_repository_catalog"]);
         Assert.Empty(restoredPreflight.MigrationSteps!);
         using var restored = temp.Open(destination);
@@ -2264,7 +2316,7 @@ public sealed class RuntimeBackupRestoreTests
 
         Assert.True(result.Success, Describe(result));
         var steps = result.MigrationSteps!.ToArray();
-        var session = Array.IndexOf(steps, "session:0->13");
+        var session = Array.IndexOf(steps, "session:0->14");
         var catalog = Array.IndexOf(steps, "local_repository_catalog:0->1");
         var skill = Array.IndexOf(steps, "skill_projection:0->1");
         var instruction = Array.IndexOf(steps, "historical_instruction_analysis:0->1");
@@ -2317,7 +2369,7 @@ public sealed class RuntimeBackupRestoreTests
         var preflight = service.PreflightForMigration(destination);
         Assert.True(preflight.Success, preflight.ErrorCode);
         Assert.Equal(11, preflight.ComponentVersions!["monitor"]);
-        Assert.Equal(13, preflight.ComponentVersions["session"]);
+        Assert.Equal(14, preflight.ComponentVersions["session"]);
         Assert.Equal(1, preflight.ComponentVersions["local_repository_catalog"]);
         Assert.Equal(1, preflight.ComponentVersions["retention"]);
         Assert.Equal(1, preflight.ComponentVersions["doctor"]);
@@ -3255,6 +3307,45 @@ public sealed class RuntimeBackupRestoreTests
                 manifest = RuntimeBackupJson.WriteManifest(
                     parsed with { RowCounts = rows });
             }
+            using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+            Write(target, "manifest.json", manifest);
+            Write(target, "database.sqlite", database);
+            return output;
+        }
+
+        internal string CreateRetentionCoverageContradictionArchive(
+            string valid,
+            string contradiction)
+        {
+            var output = Path.Combine(Root, $"retention-{contradiction}.zip");
+            byte[] manifest;
+            byte[] database;
+            using (var archive = ZipFile.OpenRead(valid))
+            {
+                manifest = Read(archive.GetEntry("manifest.json")!);
+                database = Read(archive.GetEntry("database.sqlite")!);
+            }
+            var mutatedPath = Path.Combine(Root, $".retention-{contradiction}.sqlite");
+            File.WriteAllBytes(mutatedPath, database);
+            using (var connection = Open(mutatedPath))
+            {
+                Execute(connection, contradiction switch
+                {
+                    "wrong-owner" =>
+                        "UPDATE retention_items SET ownership_receipt=randomblob(32);",
+                    "extra-source" =>
+                        "UPDATE retention_items SET source_item_id='2';",
+                    "malformed-row" =>
+                        "PRAGMA ignore_check_constraints=ON; UPDATE retention_items SET state='malformed'; PRAGMA ignore_check_constraints=OFF;",
+                    "foreign-key" =>
+                        $"PRAGMA foreign_keys=OFF; UPDATE retention_items SET store_instance_id='{new string('3', 32)}'; PRAGMA foreign_keys=ON;",
+                    _ => throw new ArgumentOutOfRangeException(nameof(contradiction)),
+                });
+                Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            database = File.ReadAllBytes(mutatedPath);
+            File.Delete(mutatedPath);
+            manifest = ReplaceDatabaseHash(manifest, database);
             using var target = ZipFile.Open(output, ZipArchiveMode.Create);
             Write(target, "manifest.json", manifest);
             Write(target, "database.sqlite", database);

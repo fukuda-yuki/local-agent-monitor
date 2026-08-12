@@ -30,6 +30,30 @@ public sealed record EffectComparisonDetail(
     EffectReceipt Receipt, IReadOnlyList<EffectComparisonSession> Sessions,
     IReadOnlyList<EffectComparisonEvidence> Evidence);
 
+internal sealed record EffectCurrentApplicationSnapshot(
+    ProposalApplicationReceipt Receipt,
+    ProposalApplyImmutableMetadata ImmutableMetadata);
+
+internal sealed record EffectCandidateSessionSnapshot(
+    ObservedSession Session,
+    bool ExactBound,
+    bool CurrentEligible,
+    bool EvidenceAvailable);
+
+internal sealed record EffectCandidateSnapshot(
+    EffectCurrentApplicationSnapshot? Application,
+    IReadOnlyList<EffectCandidateSessionSnapshot> Sessions);
+
+internal sealed record EffectComparisonSnapshot(
+    EffectComparisonDetail Detail,
+    EffectCurrentApplicationSnapshot? Application);
+
+internal interface IEffectCurrentUseStore
+{
+    EffectCandidateSnapshot ReadEffectCandidateSnapshot(Guid proposalId, Guid applyId, int limit);
+    EffectComparisonSnapshot? ReadEffectComparisonSnapshot(Guid comparisonId);
+}
+
 public sealed record SessionEffectFacts(
     Guid SessionId, string Side, string CaseKey, bool QualityPass,
     bool SevereFailure, long? DurationMs, long? TotalTokens,

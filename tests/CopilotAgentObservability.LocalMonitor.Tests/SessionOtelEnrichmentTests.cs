@@ -28,13 +28,16 @@ public sealed class SessionOtelEnrichmentTests
             Event(sessionId, "end", "SessionEnd", now.AddSeconds(2)),
             Event(sessionId, "trace-link", "tool.execution_complete", now.AddSeconds(2)) with { TraceId = "trace-by-context" },
         };
-        store.Write(new(
+        var seed = new SessionWriteBatch(
             new(
                 new(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Rich, "same-repo", null, now, now.AddSeconds(2), now.AddSeconds(2), SessionRawRetentionState.NotCaptured, now, now),
                 [new(sessionId, SessionSourceSurface.HookUnknown, "native-exact", SessionBindingKind.Native, now)],
                 [],
                 events),
-            []));
+            []);
+        ((IClassifiedSessionStore)store).WriteClassified(
+            seed,
+            [new SessionTerminalFact(events[2].EventId, SessionTerminalOutcome.Clean)]);
         InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-exact", "span-1", "native-exact", "vscode-copilot-chat", "same-repo", now.AddSeconds(3));
         InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-unmatched", "span-2", null, "vscode-copilot-chat", "same-repo", now.AddSeconds(4));
         InsertProjectedSpan(temp.DatabasePath, temp.RetentionContext, "trace-by-context", "span-3", null, "unrecognized-client", "same-repo", now.AddSeconds(5));
@@ -486,11 +489,72 @@ public sealed class SessionOtelEnrichmentTests
                 "otel.span", ObservedAt, SessionContentState.NotCaptured)]), []));
         var competingOwner = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
 
-        new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1);
+        Assert.Throws<SessionIdentityConflictException>(() =>
+            new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1));
 
         Assert.Single(store.GetDetail(originalOwner)!.Events, item => item.SourceAdapter == "claude-code-otel" && item.SourceEventId == sourceIdentity);
         Assert.DoesNotContain(store.GetDetail(competingOwner)!.Events, item => item.SourceAdapter == "claude-code-otel");
+        Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey));
+    }
+
+    [Fact]
+    public void ProcessNextBatch_ExactClaudeReplayUsesCanonicalIdentityAndCompleteComparator()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
+        var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
+        var firstClock = new FixedTimeProvider(ObservedAt.AddMinutes(1));
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, firstClock);
+        Assert.Equal(1, enricher.ProcessNextBatch(1));
+        var detailBefore = store.GetDetail(sessionId)!;
+        var databaseBefore = ReadSessionPersistenceSnapshot(temp.DatabasePath);
+        store.UpsertProjectionState(new(SqliteSessionOtelEnricher.ProjectorKey, 0, 0, firstClock.GetUtcNow()));
+        var replay = new SqliteSessionOtelEnricher(
+            temp.DatabasePath,
+            store,
+            temp.RetentionContext,
+            new FixedTimeProvider(ObservedAt.AddDays(1)));
+
+        Assert.Equal(1, replay.ProcessNextBatch(1));
+
+        var detailAfter = store.GetDetail(sessionId)!;
+        Assert.Equal(detailBefore.Session, detailAfter.Session);
+        Assert.Equal(detailBefore.NativeIds, detailAfter.NativeIds);
+        Assert.Equal(detailBefore.Runs, detailAfter.Runs);
+        Assert.Equal(detailBefore.Events, detailAfter.Events);
+        Assert.Equal(databaseBefore, ReadSessionPersistenceSnapshot(temp.DatabasePath));
         Assert.Equal(1, store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!.ProjectionCursor);
+    }
+
+    [Theory]
+    [InlineData("UPDATE monitor_spans SET status='error' WHERE id=1;")]
+    [InlineData("UPDATE monitor_spans SET start_time='2026-07-12T00:00:01.0000000+00:00' WHERE id=1;")]
+    [InlineData("UPDATE monitor_spans SET end_time='2026-07-12T00:00:03.0000000+00:00' WHERE id=1;")]
+    [InlineData("UPDATE source_schema_observations SET source_application_version='changed-version' WHERE raw_record_id=(SELECT raw_record_id FROM monitor_spans WHERE id=1);")]
+    [InlineData("UPDATE source_schema_observations SET adapter_version='changed-adapter' WHERE raw_record_id=(SELECT raw_record_id FROM monitor_spans WHERE id=1);")]
+    [InlineData("UPDATE source_schema_observations SET schema_fingerprint='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE raw_record_id=(SELECT raw_record_id FROM monitor_spans WHERE id=1);")]
+    public void ProcessNextBatch_ClaudeReplayFieldMismatchRollsBackAndDoesNotAdvanceCursor(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
+        var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
+        var clock = new FixedTimeProvider(ObservedAt.AddMinutes(1));
+        var enricher = new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext, clock);
+        Assert.Equal(1, enricher.ProcessNextBatch(1));
+        var detailBefore = store.GetDetail(sessionId)!;
+        var databaseBefore = ReadSessionPersistenceSnapshot(temp.DatabasePath);
+        store.UpsertProjectionState(new(SqliteSessionOtelEnricher.ProjectorKey, 0, 0, clock.GetUtcNow()));
+        Execute(temp.DatabasePath, mutation);
+
+        Assert.Throws<InvalidOperationException>(() => enricher.ProcessNextBatch(1));
+
+        var detailAfter = store.GetDetail(sessionId)!;
+        Assert.Equal(detailBefore.Session, detailAfter.Session);
+        Assert.Equal(detailBefore.NativeIds, detailAfter.NativeIds);
+        Assert.Equal(detailBefore.Runs, detailAfter.Runs);
+        Assert.Equal(detailBefore.Events, detailAfter.Events);
+        Assert.Equal(databaseBefore, ReadSessionPersistenceSnapshot(temp.DatabasePath));
+        Assert.Equal(0, store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!.ProjectionCursor);
     }
 
     [Fact]
@@ -499,13 +563,14 @@ public sealed class SessionOtelEnrichmentTests
         using var temp = new MonitorTempDirectory();
         var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
         var sessionId = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
+        var retentionContext = temp.RetentionContext;
         Execute(temp.DatabasePath, """
             CREATE TRIGGER fail_claude_enrichment BEFORE INSERT ON session_events
             WHEN NEW.source_adapter IN ('otel-exact','claude-code-otel')
             BEGIN SELECT RAISE(ABORT,'synthetic enrichment failure'); END;
             """);
 
-        Assert.Throws<SqliteException>(() => new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1));
+        Assert.Throws<SqliteException>(() => new SqliteSessionOtelEnricher(temp.DatabasePath, store, retentionContext).ProcessNextBatch(1));
 
         var afterFailure = store.GetDetail(sessionId)!;
         Assert.Equal(SessionCompleteness.Rich, afterFailure.Session.Completeness);
@@ -514,7 +579,7 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey));
 
         Execute(temp.DatabasePath, "DROP TRIGGER fail_claude_enrichment;");
-        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store, temp.RetentionContext).ProcessNextBatch(1));
+        Assert.Equal(1, new SqliteSessionOtelEnricher(temp.DatabasePath, store, retentionContext).ProcessNextBatch(1));
         var afterRetry = store.GetDetail(sessionId)!;
         Assert.Single(afterRetry.Runs);
         Assert.Single(afterRetry.Events, item => item.SourceAdapter == "claude-code-otel");
@@ -606,14 +671,17 @@ public sealed class SessionOtelEnrichmentTests
             AdapterVersion = "claude-hook-v1",
             NormalizationVersion = "session-normalization-v1",
         };
-        store.Write(new(new(
+        var batch = new SessionWriteBatch(new(
             new ObservedSession(
                 sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Rich,
                 repository, workspace, ObservedAt, ObservedAt.AddSeconds(2), ObservedAt.AddSeconds(2),
                 SessionRawRetentionState.NotCaptured, ObservedAt, ObservedAt),
             [new SessionNativeId(sessionId, SessionSourceSurface.ClaudeCode, nativeSessionId, bindingKind, ObservedAt)],
             [],
-            [start, prompt, end]), []));
+            [start, prompt, end]), []);
+        ((IClassifiedSessionStore)store).WriteClassified(
+            batch,
+            [new SessionTerminalFact(end.EventId, SessionTerminalOutcome.Clean)]);
         return sessionId;
     }
 
@@ -637,6 +705,29 @@ public sealed class SessionOtelEnrichmentTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return (long)command.ExecuteScalar()!;
+    }
+
+    private static IReadOnlyList<string> ReadSessionPersistenceSnapshot(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 'sessions|'||quote(session_id)||'|'||quote(status)||'|'||quote(completeness)||'|'||quote(repository)||'|'||quote(workspace)||'|'||quote(started_at)||'|'||quote(ended_at)||'|'||quote(last_seen_at)||'|'||quote(raw_retention_state)||'|'||quote(created_at)||'|'||quote(updated_at) FROM sessions
+            UNION ALL
+            SELECT 'session_native_ids|'||quote(session_id)||'|'||quote(source_surface)||'|'||quote(native_session_id)||'|'||quote(binding_kind)||'|'||quote(observed_at) FROM session_native_ids
+            UNION ALL
+            SELECT 'session_runs|'||quote(run_id)||'|'||quote(session_id)||'|'||quote(source_surface)||'|'||quote(native_run_id)||'|'||quote(trace_id)||'|'||quote(parent_run_id)||'|'||quote(model)||'|'||quote(started_at)||'|'||quote(ended_at)||'|'||quote(input_tokens)||'|'||quote(output_tokens)||'|'||quote(total_tokens)||'|'||quote(status) FROM session_runs
+            UNION ALL
+            SELECT 'session_events|'||quote(event_id)||'|'||quote(session_id)||'|'||quote(run_id)||'|'||quote(source_surface)||'|'||quote(parent_event_id)||'|'||quote(trace_id)||'|'||quote(status)||'|'||quote(source_adapter)||'|'||quote(source_event_id)||'|'||quote(type)||'|'||quote(occurred_at)||'|'||quote(content_state)||'|'||quote(source_application_version)||'|'||quote(adapter_version)||'|'||quote(schema_fingerprint)||'|'||quote(normalization_version)||'|'||quote(match_kind)||'|'||quote(terminal_outcome)||'|'||quote(terminal_policy_version) FROM session_events
+            UNION ALL
+            SELECT 'session_event_content|'||quote(event_id)||'|'||quote(content_kind)||'|'||quote(content_json)||'|'||quote(captured_at)||'|'||quote(expires_at)||'|'||quote(retention_owner_token) FROM session_event_content
+            ORDER BY 1;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read()) rows.Add(reader.GetString(0));
+        return rows;
     }
 
     private static void InsertProjectedSpan(string databasePath, RetentionCatalogContext retentionContext, string traceId, string spanId, string? conversationId, string clientKind, string repository, DateTimeOffset time)

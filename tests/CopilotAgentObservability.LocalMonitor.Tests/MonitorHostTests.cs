@@ -110,7 +110,9 @@ public class MonitorHostTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT version FROM schema_version WHERE component='session';";
-        Assert.Equal(13L, (long)command.ExecuteScalar()!);
+        // D079 pinned session schema version 14 (terminal outcome columns + deterministic
+        // outcome reduction); host startup must migrate to the current version.
+        Assert.Equal(14L, (long)command.ExecuteScalar()!);
     }
 
     [Fact]

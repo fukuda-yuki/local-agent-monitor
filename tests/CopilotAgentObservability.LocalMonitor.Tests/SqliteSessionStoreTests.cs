@@ -15,6 +15,331 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
+    public void CreateSchema_CreatesExactSessionVersionFourteenOutcomeColumns()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+
+        store.CreateSchema();
+
+        using var connection = database.Open();
+        Assert.Equal(14L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(
+            new[] { "match_kind", "terminal_outcome", "terminal_policy_version" },
+            ReadColumns(connection, "session_events").TakeLast(3));
+    }
+
+    [Fact]
+    public void Write_ReducesTerminalFactsWithFailedPrecedenceAndLatestTerminalTimestamp()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-08-09T00:00:00Z");
+        var batch = CreateBatch(at, "outcome-reducer");
+        var clean = new ObservedSessionEvent(
+            Guid.CreateVersion7(), batch.Detail.Session.SessionId, batch.Detail.Runs[0].RunId,
+            SessionSourceSurface.CopilotSdk, null, "trace-1", null, "copilot-sdk-stream", "terminal-clean",
+            "session.task_complete", at.AddMinutes(1), SessionContentState.NotCaptured);
+        var failed = clean with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "terminal-failed",
+            Type = "session.shutdown",
+            OccurredAt = at.AddMinutes(2),
+            ContentState = SessionContentState.Available,
+        };
+        var neutral = failed with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "terminal-neutral",
+            OccurredAt = at.AddMinutes(3),
+            ContentState = SessionContentState.NotCaptured,
+        };
+        batch = batch with
+        {
+            Detail = batch.Detail with
+            {
+                Session = batch.Detail.Session with
+                {
+                    Status = ObservedSessionStatus.Completed,
+                    EndedAt = at.AddDays(1),
+                    LastSeenAt = at.AddMinutes(3),
+                },
+                Events = [.. batch.Detail.Events, clean, failed, neutral],
+            },
+            Content = [.. batch.Content, new SessionEventContent(
+                failed.EventId, "application/json", "{\"shutdownType\":\"error\"}",
+                failed.OccurredAt, failed.OccurredAt.AddDays(90))],
+        };
+
+        WriteClassified(store, batch,
+            new(clean.EventId, SessionTerminalOutcome.Clean),
+            new(failed.EventId, SessionTerminalOutcome.Failed),
+            new(neutral.EventId, SessionTerminalOutcome.Neutral));
+
+        var detail = store.GetDetail(batch.Detail.Session.SessionId)!;
+        Assert.Equal(ObservedSessionStatus.Failed, detail.Session.Status);
+        Assert.Equal(at.AddMinutes(3), detail.Session.EndedAt);
+        using var connection = database.Open();
+        Assert.Equal(
+            new[]
+            {
+                "terminal-clean|clean|1",
+                "terminal-failed|failed|1",
+                "terminal-neutral|neutral|1",
+            },
+            ReadStrings(connection, "SELECT source_event_id||'|'||terminal_outcome||'|'||terminal_policy_version FROM session_events WHERE terminal_outcome IS NOT NULL ORDER BY source_event_id;"));
+    }
+
+    [Fact]
+    public void Write_StopOnlyDoesNotPreserveCallerTerminalState()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-08-09T00:00:00Z");
+        var batch = CreateBatch(at, "stop-only");
+        var stop = new ObservedSessionEvent(
+            Guid.CreateVersion7(), batch.Detail.Session.SessionId, batch.Detail.Runs[0].RunId,
+            SessionSourceSurface.CopilotSdk, null, "trace-1", "error", "copilot-sdk-stream", "stop-only-event",
+            "Stop", at.AddMinutes(1), SessionContentState.NotCaptured);
+        batch = batch with
+        {
+            Detail = batch.Detail with
+            {
+                Session = batch.Detail.Session with
+                {
+                    Status = ObservedSessionStatus.Failed,
+                    EndedAt = at.AddMinutes(1),
+                    LastSeenAt = at.AddMinutes(1),
+                },
+                Events = [.. batch.Detail.Events, stop],
+            },
+        };
+
+        store.Write(batch);
+
+        var session = store.GetDetail(batch.Detail.Session.SessionId)!.Session;
+        Assert.Equal(ObservedSessionStatus.Active, session.Status);
+        Assert.Null(session.EndedAt);
+    }
+
+    [Fact]
+    public void Write_ReplayFactMismatchRollsBackWholeBatch()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-08-09T00:00:00Z");
+        var first = CreateBatch(at, "replay-fact");
+        var terminal = first.Detail.Events[0] with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "replay-terminal",
+            Type = "session.task_complete",
+            ContentState = SessionContentState.NotCaptured,
+        };
+        first = first with { Detail = first.Detail with { Events = [terminal] }, Content = [] };
+        store.Write(first);
+        var conflicting = first with
+        {
+            Detail = first.Detail with
+            {
+                Events = [terminal with { EventId = Guid.CreateVersion7(), Type = "Stop" }],
+            },
+        };
+
+        Assert.Throws<InvalidOperationException>(() => store.Write(conflicting));
+
+        var detail = store.GetDetail(first.Detail.Session.SessionId)!;
+        Assert.Equal(ObservedSessionStatus.Completed, detail.Session.Status);
+        Assert.Equal("session.task_complete", Assert.Single(detail.Events).Type);
+    }
+
+    [Fact]
+    public void Write_IdenticalSameBatchTerminalFactsReplayThroughCanonicalComparator()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.Parse("2026-08-09T00:00:00Z"), "same-batch-identical");
+        var first = batch.Detail.Events[0] with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "same-batch-terminal",
+            Type = "session.shutdown",
+            ContentState = SessionContentState.NotCaptured,
+        };
+        var second = first with { EventId = Guid.CreateVersion7() };
+        batch = batch with
+        {
+            Detail = batch.Detail with { Events = [first, second] },
+            Content = [],
+        };
+
+        WriteClassified(
+            store,
+            batch,
+            new(first.EventId, SessionTerminalOutcome.Clean),
+            new(second.EventId, SessionTerminalOutcome.Clean));
+
+        using var connection = database.Open();
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_events;"));
+        Assert.Equal("clean|1", Scalar<string>(connection, "SELECT terminal_outcome||'|'||terminal_policy_version FROM session_events;"));
+    }
+
+    [Fact]
+    public void Write_ContradictorySameBatchTerminalFactsRollBackAtomically()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateBatch(DateTimeOffset.Parse("2026-08-09T00:00:00Z"), "same-batch-conflict");
+        var first = batch.Detail.Events[0] with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "same-batch-terminal",
+            Type = "session.shutdown",
+            ContentState = SessionContentState.NotCaptured,
+        };
+        var second = first with { EventId = Guid.CreateVersion7() };
+        batch = batch with
+        {
+            Detail = batch.Detail with { Events = [first, second] },
+            Content = [],
+        };
+
+        Assert.Throws<InvalidOperationException>(() => WriteClassified(
+            store,
+            batch,
+            new(first.EventId, SessionTerminalOutcome.Clean),
+            new(second.EventId, SessionTerminalOutcome.Failed)));
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM sessions;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_events;"));
+    }
+
+    [Fact]
+    public void Write_MixedNewAndContradictoryReplayRollsBackWholeBatch()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var original = CreateBatch(DateTimeOffset.Parse("2026-08-09T00:00:00Z"), "mixed-replay");
+        original = original with
+        {
+            Detail = original.Detail with
+            {
+                Events = [original.Detail.Events[0] with { ContentState = SessionContentState.NotCaptured }],
+            },
+            Content = [],
+        };
+        store.Write(original);
+        var persisted = original.Detail.Events[0];
+        var fresh = persisted with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "mixed-replay-new",
+            Type = "Stop",
+            ContentState = SessionContentState.Available,
+        };
+        var contradictoryReplay = persisted with
+        {
+            EventId = Guid.CreateVersion7(),
+            Type = "Stop",
+        };
+        var mixed = original with
+        {
+            Detail = original.Detail with { Events = [fresh, contradictoryReplay] },
+            Content = [new SessionEventContent(fresh.EventId, "application/json", "{}", fresh.OccurredAt, fresh.OccurredAt.AddDays(90))],
+        };
+
+        Assert.Throws<InvalidOperationException>(() => store.Write(mixed));
+
+        using var connection = database.Open();
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_events;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM sessions;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_native_ids;"));
+        Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_runs;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content';"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_projection_state;"));
+        Assert.Equal(persisted.SourceEventId, Scalar<string>(connection, "SELECT source_event_id FROM session_events;"));
+        Assert.Equal(persisted.Type, Scalar<string>(connection, "SELECT type FROM session_events;"));
+        Assert.Equal("null|null", Scalar<string>(connection, "SELECT typeof(terminal_outcome)||'|'||typeof(terminal_policy_version) FROM session_events;"));
+        Assert.Equal(
+            "active|partial|<null>|2026-08-09T00:00:00.0000000+00:00",
+            Scalar<string>(connection, "SELECT status||'|'||completeness||'|'||IFNULL(ended_at,'<null>')||'|'||last_seen_at FROM sessions;"));
+    }
+
+    [Fact]
+    public void Write_ExactReplayDoesNotBackfillMissingContent()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-08-09T00:00:00Z");
+        var first = CreateBatch(at, "replay-content");
+        first = first with
+        {
+            Detail = first.Detail with
+            {
+                Events = [first.Detail.Events[0] with { ContentState = SessionContentState.NotCaptured }],
+            },
+            Content = [],
+        };
+        store.Write(first);
+        var replayId = Guid.CreateVersion7();
+        var replay = first with
+        {
+            Detail = first.Detail with { Events = [first.Detail.Events[0] with { EventId = replayId }] },
+            Content = [new SessionEventContent(replayId, "application/json", "{}", at, at.AddDays(90))],
+        };
+
+        store.Write(replay);
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Write_ClassifiedLiveFactDoesNotDependOnRetainedDiscriminatorContent(bool retainFilteredContent)
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var at = DateTimeOffset.Parse("2026-08-09T00:00:00Z");
+        var batch = CreateBatch(at, "live-classified");
+        var terminal = batch.Detail.Events[0] with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceSurface = SessionSourceSurface.CopilotCli,
+            SourceAdapter = "copilot-compatible-hook",
+            SourceEventId = "classified-session-end",
+            Type = "SessionEnd",
+            ContentState = retainFilteredContent ? SessionContentState.Available : SessionContentState.NotCaptured,
+        };
+        batch = batch with
+        {
+            Detail = batch.Detail with { Events = [terminal] },
+            Content = retainFilteredContent
+                ? [new SessionEventContent(terminal.EventId, "application/json", "{}", at, at.AddDays(90))]
+                : [],
+        };
+
+        WriteClassified(store, batch, new SessionTerminalFact(terminal.EventId, SessionTerminalOutcome.Failed));
+
+        var session = store.GetDetail(batch.Detail.Session.SessionId)!.Session;
+        Assert.Equal(ObservedSessionStatus.Failed, session.Status);
+        using var connection = database.Open();
+        Assert.Equal("failed|1", Scalar<string>(connection, "SELECT terminal_outcome||'|'||terminal_policy_version FROM session_events;"));
+    }
+
+    [Fact]
     public void ObjectiveEvaluations_RejectNonVersionSevenReceiptIdentifiers()
     {
         using var database = new SessionTestDatabase();
@@ -45,7 +370,7 @@ public sealed class SqliteSessionStoreTests
         new SqliteSessionStore(database.Path).CreateSchema();
         using (var migrated = database.Open())
         {
-            Assert.Equal(13L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(14L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
             Assert.Equal(proposalId.ToString("D"), Scalar<string>(migrated, "SELECT proposal_id FROM improvement_proposals;"));
         }
 
@@ -105,7 +430,7 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         var store = CreateRawStore(database.Path);
         store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-persist");
         store.Write(batch);
         var proposal = CreateProposal(batch);
 
@@ -123,7 +448,7 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         var store = CreateRawStore(database.Path);
         store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-get");
         store.Write(batch);
         var proposal = CreateProposal(batch);
         store.CreateImprovementProposal(proposal);
@@ -153,7 +478,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateImprovementProposal(competing);
         store.UpdateImprovementProposalStatus(existing.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        AssertProposalFailure(ImprovementProposalFailure.RecommendationAlreadyExists, () =>
             store.UpdateImprovementProposalStatus(
                 competing.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
     }
@@ -168,7 +493,7 @@ public sealed class SqliteSessionStoreTests
         store.Write(batch);
         var proposal = CreateProposal(batch) with { Status = ImprovementProposalStatus.Verified };
 
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidStatus, () => store.CreateImprovementProposal(proposal));
     }
 
     [Theory]
@@ -193,7 +518,7 @@ public sealed class SqliteSessionStoreTests
             Assert.Equal(1, command.ExecuteNonQuery());
         }
 
-        Assert.Throws<InvalidOperationException>(() =>
+        AssertProposalFailure(ImprovementProposalFailure.VerificationOwnedByComparison, () =>
             store.UpdateImprovementProposalStatus(proposal.ProposalId, requestedStatus, DateTimeOffset.UnixEpoch.AddDays(1)));
 
         var actual = store.GetImprovementProposal(proposal.ProposalId)!;
@@ -213,9 +538,9 @@ public sealed class SqliteSessionStoreTests
         store.Write(batch);
         var proposal = CreateProposal(batch);
 
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { Status = ImprovementProposalStatus.Recommended }));
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { RecommendedAt = DateTimeOffset.UnixEpoch }));
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal with { VerifiedAt = DateTimeOffset.UnixEpoch }));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidStatus, () => store.CreateImprovementProposal(proposal with { Status = ImprovementProposalStatus.Recommended }));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidShape, () => store.CreateImprovementProposal(proposal with { RecommendedAt = DateTimeOffset.UnixEpoch }));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidShape, () => store.CreateImprovementProposal(proposal with { VerifiedAt = DateTimeOffset.UnixEpoch }));
     }
 
     [Fact]
@@ -224,13 +549,142 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         var store = CreateRawStore(database.Path);
         store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "promotion-one-source");
         store.Write(batch);
         var proposal = CreateProposal(batch);
         store.CreateImprovementProposal(proposal);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        AssertProposalFailure(ImprovementProposalFailure.InsufficientRecommendationEvidence, () =>
             store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
+    }
+
+    [Fact]
+    public void ImprovementProposals_CreateDistinguishesEvidenceOutsideClaimedSourceSession()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var source = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-source");
+        var other = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "proposal-other");
+        store.Write(source);
+        store.Write(other);
+        var proposal = CreateProposal(source) with
+        {
+            EvidenceReferences = [new ImprovementProposalEvidenceReference("event", other.Detail.Events[0].EventId.ToString("D"))],
+        };
+
+        AssertProposalFailure(
+            ImprovementProposalFailure.EvidenceNotExactBound,
+            () => store.CreateImprovementProposal(proposal));
+
+        using var connection = database.Open();
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposals;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_sessions;"));
+        Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposal_evidence;"));
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("completeness")]
+    [InlineData("native")]
+    [InlineData("fact")]
+    public void ImprovementProposals_CreateDistinguishesSourceEligibilityLoss(string mutation)
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var source = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-ineligible");
+        store.Write(source);
+        using (var connection = database.Open())
+        {
+            Execute(connection, mutation switch
+            {
+                "status" => "UPDATE sessions SET status='active';",
+                "completeness" => "UPDATE sessions SET completeness='rich';",
+                "native" => "DELETE FROM session_native_ids;",
+                "fact" => "UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE terminal_outcome IS NOT NULL;",
+                _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+            });
+        }
+
+        var proposal = CreateProposal(source);
+
+        AssertProposalFailure(
+            ImprovementProposalFailure.EvidenceNotExactBound,
+            () => store.CreateImprovementProposal(proposal));
+
+        using var verify = database.Open();
+        Assert.Equal(0L, Scalar<long>(verify, "SELECT COUNT(*) FROM improvement_proposals;"));
+    }
+
+    [Theory]
+    [InlineData("completed", true)]
+    [InlineData("failed", true)]
+    [InlineData("active", false)]
+    [InlineData("unknown", false)]
+    [InlineData("non_full", false)]
+    [InlineData("no_fact", false)]
+    [InlineData("no_native", true)]
+    [InlineData("raw_stop", false)]
+    public void PricingCoreCurrentUseEligibility_UsesStatusFullAndSessionFactWithoutNativeBinding(string state, bool expected)
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "pricing-core-" + state);
+        store.Write(batch);
+        using var connection = database.Open();
+        Execute(connection, state switch
+        {
+            "completed" => "SELECT 1;",
+            "failed" => "UPDATE sessions SET status='failed'; UPDATE session_events SET terminal_outcome='failed' WHERE terminal_outcome IS NOT NULL;",
+            "active" => "UPDATE sessions SET status='active';",
+            "unknown" => "UPDATE sessions SET status='unknown';",
+            "non_full" => "UPDATE sessions SET completeness='rich';",
+            "no_fact" => "UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE terminal_outcome IS NOT NULL;",
+            "no_native" => "DELETE FROM session_native_ids;",
+            "raw_stop" => "UPDATE session_events SET type='Stop',terminal_outcome=NULL,terminal_policy_version=NULL WHERE terminal_outcome IS NOT NULL;",
+            _ => throw new ArgumentOutOfRangeException(nameof(state)),
+        });
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal(
+            expected,
+            SessionCurrentUseEligibilitySqlV1.Contains(connection, transaction, batch.Detail.Session.SessionId));
+    }
+
+    [Fact]
+    public void ImprovementProposals_PromotionDistinguishesMissingReferencedEvidenceBeforeOtherSemanticFailures()
+    {
+        using var database = new SessionTestDatabase();
+        var store = CreateRawStore(database.Path);
+        store.CreateSchema();
+        var first = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "promotion-missing-first");
+        var second = CreateTerminalBatch(DateTimeOffset.UnixEpoch.AddMinutes(1), "promotion-missing-second");
+        store.Write(first);
+        store.Write(second);
+        var proposal = CreateProposal([first, second]);
+        store.CreateImprovementProposal(proposal);
+        using (var connection = database.Open())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM session_events WHERE event_id=$event_id;";
+            command.Parameters.AddWithValue("$event_id", first.Detail.Events[0].EventId.ToString("D"));
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        var before = store.GetImprovementProposal(proposal.ProposalId);
+
+        AssertProposalFailure(
+            ImprovementProposalFailure.EvidenceNotFound,
+            () => store.UpdateImprovementProposalStatus(
+                proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch.AddMinutes(2)));
+        var after = store.GetImprovementProposal(proposal.ProposalId);
+        Assert.NotNull(before);
+        Assert.NotNull(after);
+        Assert.Equal(
+            (before.Status, before.Revision, before.UpdatedAt, before.RecommendedAt, before.VerifiedAt),
+            (after.Status, after.Revision, after.UpdatedAt, after.RecommendedAt, after.VerifiedAt));
     }
 
     [Fact]
@@ -249,7 +703,7 @@ public sealed class SqliteSessionStoreTests
         };
         store.CreateImprovementProposal(proposal);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        AssertProposalFailure(ImprovementProposalFailure.InsufficientRecommendationEvidence, () =>
             store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
     }
 
@@ -263,7 +717,7 @@ public sealed class SqliteSessionStoreTests
         store.Write(batch);
         var proposal = CreateProposal(batch) with { ProposalId = Guid.NewGuid() };
 
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidShape, () => store.CreateImprovementProposal(proposal));
     }
 
     [Fact]
@@ -289,7 +743,7 @@ public sealed class SqliteSessionStoreTests
             command.ExecuteNonQuery();
         }
 
-        Assert.Throws<InvalidOperationException>(() =>
+        AssertProposalFailure(ImprovementProposalFailure.InsufficientRecommendationEvidence, () =>
             store.UpdateImprovementProposalStatus(proposal.ProposalId, ImprovementProposalStatus.Recommended, DateTimeOffset.UnixEpoch));
     }
 
@@ -303,7 +757,7 @@ public sealed class SqliteSessionStoreTests
         store.Write(batch);
         var proposal = CreateProposal(batch) with { TargetKind = "invalid" };
 
-        Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(proposal));
+        AssertProposalFailure(ImprovementProposalFailure.InvalidShape, () => store.CreateImprovementProposal(proposal));
 
         using var connection = database.Open();
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposals;"));
@@ -317,11 +771,11 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         var store = CreateRawStore(database.Path);
         store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-transaction");
         store.Write(batch);
         var proposal = CreateProposal(batch) with { SourceSessionIds = [batch.Detail.Session.SessionId, Guid.CreateVersion7()] };
 
-        Assert.Throws<SqliteException>(() => store.CreateImprovementProposal(proposal));
+        AssertProposalFailure(ImprovementProposalFailure.EvidenceNotFound, () => store.CreateImprovementProposal(proposal));
 
         using var connection = database.Open();
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM improvement_proposals;"));
@@ -351,7 +805,7 @@ public sealed class SqliteSessionStoreTests
 
         foreach (var invalid in invalidProposals)
         {
-            Assert.Throws<InvalidOperationException>(() => store.CreateImprovementProposal(invalid));
+            AssertProposalFailure(ImprovementProposalFailure.InvalidShape, () => store.CreateImprovementProposal(invalid));
         }
     }
 
@@ -365,9 +819,9 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var connection = database.Open();
-        Assert.Equal(13L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
+        Assert.Equal(14L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component = 'session';"));
         Assert.Equal(
-            new[] { "source_application_version", "adapter_version", "schema_fingerprint", "normalization_version" },
+            new[] { "source_application_version", "adapter_version", "schema_fingerprint", "normalization_version", "terminal_policy_version" },
             ReadColumns(connection, "session_events").Where(column => column.EndsWith("version", StringComparison.Ordinal) || column == "schema_fingerprint"));
         foreach (var table in new[] { "sessions", "session_native_ids", "session_runs", "session_events", "session_event_content", "session_projection_state", "session_human_evaluation", "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence", "proposal_apply_drafts", "proposal_apply_files", "proposal_apply_hunks", "proposal_apply_revisions", "proposal_applies", "proposal_apply_audit", "proposal_apply_pending", "objective_evaluations", "objective_evaluation_evidence" })
         {
@@ -398,12 +852,12 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
         var batch = CreateBatch(DateTimeOffset.UnixEpoch);
         store.Write(batch);
-        using (var connection = database.Open()) Execute(connection, "UPDATE schema_version SET version=14 WHERE component='session';");
+        using (var connection = database.Open()) Execute(connection, "UPDATE schema_version SET version=15 WHERE component='session';");
 
         Assert.Throws<InvalidOperationException>(store.CreateSchema);
 
         using var verify = database.Open();
-        Assert.Equal(14L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(15L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(batch.Detail.Session.SessionId.ToString("D"), Scalar<string>(verify, "SELECT session_id FROM sessions;"));
         Assert.Equal(batch.Detail.Events[0].EventId.ToString("D"), Scalar<string>(verify, "SELECT event_id FROM session_events;"));
     }
@@ -412,21 +866,16 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_VersionOneDatabaseAddsHumanEvaluationTable()
     {
         using var database = new SessionTestDatabase();
+        var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", "session-v1.sqlite");
+        File.Copy(fixture, database.Path);
         var store = CreateRawStore(database.Path);
-        store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
-        store.Write(batch);
-        using (var connection = database.Open())
-        {
-            Execute(connection, "DROP TABLE session_human_evaluation; UPDATE schema_version SET version=1 WHERE component='session';");
-        }
 
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_human_evaluation';"));
-        Assert.NotNull(store.GetDetail(batch.Detail.Session.SessionId));
+        Assert.NotNull(store.GetDetail(Guid.Parse("00000001-0000-7000-8000-000000000001")));
     }
 
     [Fact]
@@ -435,7 +884,7 @@ public sealed class SqliteSessionStoreTests
         using var database = new SessionTestDatabase();
         var store = CreateRawStore(database.Path);
         store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.UnixEpoch);
+        var batch = CreateTerminalBatch(DateTimeOffset.UnixEpoch, "proposal-apply");
         store.Write(batch);
         var proposal = CreateProposal(batch);
         store.CreateImprovementProposal(proposal);
@@ -466,24 +915,20 @@ public sealed class SqliteSessionStoreTests
     public void CreateSchema_VersionTwoDatabaseAddsProposalTablesAndPreservesSessionRow()
     {
         using var database = new SessionTestDatabase();
+        var fixture = Path.Combine(AppContext.BaseDirectory, "TestData", "SchemaMigrations", "session", "session-v2.sqlite");
+        File.Copy(fixture, database.Path);
         var store = CreateRawStore(database.Path);
-        store.CreateSchema();
-        var batch = CreateBatch(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
-        store.Write(batch);
-        using (var connection = database.Open())
-        {
-            Execute(connection, "DROP TABLE improvement_proposal_evidence; DROP TABLE improvement_proposal_sessions; DROP TABLE improvement_proposals; UPDATE schema_version SET version=2 WHERE component='session';");
-        }
 
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         foreach (var table in new[] { "improvement_proposals", "improvement_proposal_sessions", "improvement_proposal_evidence" })
         {
             Assert.Equal(1L, Scalar<long>(verify, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';"));
         }
-        Assert.Equal(batch.Detail.Session.SessionId, store.GetDetail(batch.Detail.Session.SessionId)?.Session.SessionId);
+        var sessionId = Guid.Parse("00000001-0000-7000-8000-000000000002");
+        Assert.Equal(sessionId, store.GetDetail(sessionId)?.Session.SessionId);
     }
 
     [Fact]
@@ -530,7 +975,7 @@ public sealed class SqliteSessionStoreTests
         store.Write(batch);
 
         using var connection = database.Open();
-        Assert.Equal(13L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar<long>(connection, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content WHERE typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32;"));
         Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=(SELECT event_id FROM session_event_content);"));
     }
@@ -907,6 +1352,23 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
+    public void WriteReplayContent_WithoutRetentionContextFailsClosedBeforeDatabaseMutation()
+    {
+        using var database = new SessionTestDatabase();
+        var store = new SqliteSessionStore(database.Path);
+        var batch = CreateBatch(DateTimeOffset.UnixEpoch) with { Content = [] };
+        var candidate = new SessionReplayContentCandidate(
+            batch.Detail.Events[0].EventId,
+            "application/json",
+            "{}");
+
+        Assert.Throws<RetentionCatalogUnavailableException>(() =>
+            ((IClassifiedSessionStore)store).WriteClassified(batch, [], [candidate]));
+
+        Assert.False(File.Exists(database.Path));
+    }
+
+    [Fact]
     public void GetDetail_RemainsAvailableWithoutContentTable()
     {
         using var database = new SessionTestDatabase();
@@ -1022,7 +1484,7 @@ public sealed class SqliteSessionStoreTests
         var session = new ObservedSession(
             Guid.CreateVersion7(),
             ObservedSessionStatus.Active,
-            SessionCompleteness.Rich,
+            SessionCompleteness.Partial,
             "owner/repository",
             "workspace",
             lastSeenAt.AddMinutes(-2),
@@ -1078,7 +1540,7 @@ public sealed class SqliteSessionStoreTests
         store.CreateSchema();
 
         using var verify = database.Open();
-        Assert.Equal(13L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar<long>(verify, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT revision FROM improvement_proposals;"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT COUNT(*) FROM pragma_table_info('improvement_proposal_sessions') WHERE name='proposal_revision';"));
         Assert.Equal(1L, Scalar<long>(verify, "SELECT proposal_revision FROM proposal_apply_drafts;"));
@@ -1090,12 +1552,25 @@ public sealed class SqliteSessionStoreTests
     private static SessionWriteBatch CreateTerminalBatch(DateTimeOffset lastSeenAt, string nativeId)
     {
         var batch = CreateBatch(lastSeenAt, nativeId);
+        var sessionId = batch.Detail.Session.SessionId;
+        var runId = batch.Detail.Runs[0].RunId;
+        var lifecycle = new ObservedSessionEvent(
+            Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.CopilotSdk, null, "trace-1", "received",
+            "copilot-sdk-stream", $"start-{nativeId}", "session.start", lastSeenAt.AddMinutes(-2), SessionContentState.NotCaptured);
+        var exact = new ObservedSessionEvent(
+            Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.CopilotSdk, null, "trace-1", "received",
+            "otel-exact", $"otel-{nativeId}", "otel.span", lastSeenAt.AddMinutes(-1), SessionContentState.NotCaptured,
+            MatchKind: SessionMatchKind.ExactNative);
+        var terminal = new ObservedSessionEvent(
+            Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.CopilotSdk, null, "trace-1", "received",
+            "copilot-sdk-stream", $"terminal-{nativeId}", "session.task_complete", lastSeenAt, SessionContentState.NotCaptured);
         return batch with
         {
             Detail = batch.Detail with
             {
-                Session = batch.Detail.Session with { Status = ObservedSessionStatus.Completed, EndedAt = lastSeenAt },
+                Session = batch.Detail.Session with { Status = ObservedSessionStatus.Completed, Completeness = SessionCompleteness.Full, EndedAt = lastSeenAt },
                 Runs = [batch.Detail.Runs[0] with { Status = ObservedSessionStatus.Completed, EndedAt = lastSeenAt }],
+                Events = [batch.Detail.Events[0], lifecycle, exact, terminal],
             },
         };
     }
@@ -1135,6 +1610,28 @@ public sealed class SqliteSessionStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T));
+    }
+
+    private static void WriteClassified(
+        SqliteSessionStore store,
+        SessionWriteBatch batch,
+        params SessionTerminalFact[] terminalFacts) =>
+        ((IClassifiedSessionStore)store).WriteClassified(batch, terminalFacts);
+
+    private static void AssertProposalFailure(ImprovementProposalFailure expected, Action action)
+    {
+        var failure = Assert.Throws<ImprovementProposalStoreException>(action);
+        Assert.Equal(expected, failure.Failure);
+    }
+
+    private static IReadOnlyList<string> ReadStrings(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        var values = new List<string>();
+        while (reader.Read()) values.Add(reader.GetString(0));
+        return values;
     }
 
     private static IReadOnlyList<string> ReadColumns(SqliteConnection connection, string table)

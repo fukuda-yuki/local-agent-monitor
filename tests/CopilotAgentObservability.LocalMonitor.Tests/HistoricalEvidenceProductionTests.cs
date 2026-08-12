@@ -106,7 +106,7 @@ public sealed class HistoricalEvidenceProductionTests
             new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, traceId, "ok",
                 "claude-code-otel", $"{traceId}/{secondSpan}", "otel.span", now.AddTicks(1), SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative),
         };
-        store.Write(new(new(session, [], [], events), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], events), []);
         InsertSpans(temp.DatabasePath, traceId,
         [
             Span(1, firstSpan, operation: "chat", totalTokens: 10),
@@ -166,7 +166,7 @@ public sealed class HistoricalEvidenceProductionTests
         var events = spanIds.Select((span, index) => new ObservedSessionEvent(
             Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, traceId, "ok",
             "claude-code-otel", $"{traceId}/{span}", "otel.span", now.AddTicks(index), SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative)).ToArray();
-        store.Write(new(new(session, [], [], events), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], events), []);
         InsertSpans(temp.DatabasePath, traceId, spanIds.Select((span, index) => Span(index + 1, span, operation: "chat", totalTokens: 10)).ToArray());
         var evidence = InstructionEvidenceExtractor.Extract(traceId, ReadSpans(temp.DatabasePath, traceId), [], []);
         var index = InstructionFindingEvidenceIndexFactoryV1.FromInstructionEvidence(traceId, evidence);
@@ -219,7 +219,7 @@ public sealed class HistoricalEvidenceProductionTests
             new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, followingTrace, "ok",
                 "claude-code-otel", $"{followingTrace}/{followingSpan}", "otel.span", now.AddTicks(2), SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative),
         };
-        store.Write(new(new(session, [], [], events), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], events), []);
         InsertSpans(temp.DatabasePath, previousTrace, [Span(1, previousSpan, operation: "chat", totalTokens: 10)]);
         InsertSpans(temp.DatabasePath, anchorTrace, [Span(2, anchorSpan, operation: "chat", totalTokens: 10)]);
         InsertSpans(temp.DatabasePath, followingTrace, [Span(3, followingSpan, operation: "chat", totalTokens: 10)]);
@@ -344,7 +344,7 @@ public sealed class HistoricalEvidenceProductionTests
             SessionSourceSurface.ClaudeCode, null, traceId, "ok", "claude-code-otel", $"{traceId}/{span.SpanId}",
             index == 0 ? "user.message" : "otel.span", now.AddTicks(index), SessionContentState.NotCaptured,
             MatchKind: SessionMatchKind.ExactNative)).ToArray();
-        store.Write(new(new(session, [native], [run], events), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [native], [run], events), []);
         InsertSpans(temp.DatabasePath, traceId, spans);
         store.CreateObjectiveEvaluation(new(Guid.CreateVersion7(), sessionId, runId, traceId, ObjectiveResult.Pass,
             ObjectiveSeverity.Normal, "eval", "v1", "criterion", "case", [new("trace", traceId)], now));
@@ -423,7 +423,7 @@ public sealed class HistoricalEvidenceProductionTests
         var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.ClaudeCode,
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now,
             SessionContentState.NotCaptured, "2.1.215", "adapter.v1", MatchKind: SessionMatchKind.ExactNative);
-        store.Write(new(new(session, [], [run], [@event]), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [run], [@event]), []);
         var service = app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>();
 
         var extractionId = (await service.CreateAsync(
@@ -454,8 +454,10 @@ public sealed class HistoricalEvidenceProductionTests
         const string spanId = "1123456789abcdee";
         var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
             null, null, now, now, now, SessionRawRetentionState.NotCaptured, now, now);
-        store.Write(new(new(session, [], [], [new(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode,
-            null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now, SessionContentState.NotCaptured)]), []));
+        // Deliberately keep the adapter-named event without a match kind: D079 eligibility still requires a
+        // native-bound session, and the contract under test is exclusion for missing exact evidence references.
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [new(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode,
+            null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now, SessionContentState.NotCaptured)]), []);
         InsertSpans(temp.DatabasePath, traceId, [Span(1, spanId, operation: "chat", totalTokens: 10)]);
 
         var result = await app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>()
@@ -543,7 +545,7 @@ public sealed class HistoricalEvidenceProductionTests
         var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, runId, SessionSourceSurface.ClaudeCode,
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now,
             SessionContentState.NotCaptured, "2.1.215", "adapter.v1", MatchKind: SessionMatchKind.ExactNative);
-        store.Write(new(new(session, [], [run], [@event]), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [run], [@event]), [], "2.1.215", "adapter.v1");
 
         var service = app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>();
         var created = await service.CreateAsync(HistoricalEvidenceSelectionV1.Create(
@@ -650,8 +652,8 @@ public sealed class HistoricalEvidenceProductionTests
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "user.message", now,
             SessionContentState.Available, "2.1.215", "adapter.v1", MatchKind: SessionMatchKind.ExactNative);
         var initial = @event with { EventId = Guid.CreateVersion7(), SourceEventId = $"{traceId}/0123456789abcdef", OccurredAt = now.AddTicks(-1) };
-        store.Write(new(new(session, [], [], [initial, @event]),
-            [new SessionEventContent(eventId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1))]));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [initial, @event]),
+            [new SessionEventContent(eventId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1))]);
         var reader = new RecordingContentReader(new(
             SessionContentReadDisposition.Granted,
             new SessionContentReadLease(
@@ -698,8 +700,8 @@ public sealed class HistoricalEvidenceProductionTests
         }));
         var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
             "owner/repository", null, now, now, now, SessionRawRetentionState.Expiring, now, now);
-        store.Write(new(new(session, [], [], events), candidates.Select(candidate => new SessionEventContent(
-            candidate.EventId, "application/json", JsonSerializer.Serialize(new { text = candidate.Value }), now, now.AddDays(1))).ToArray()));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], events), candidates.Select(candidate => new SessionEventContent(
+            candidate.EventId, "application/json", JsonSerializer.Serialize(new { text = candidate.Value }), now, now.AddDays(1))).ToArray());
         var descriptorValues = candidates.ToDictionary(item => item.EventId, item => item.Value);
         var reader = new DescriptorMapContentReader(descriptorValues, now);
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
@@ -746,8 +748,8 @@ public sealed class HistoricalEvidenceProductionTests
         var @event = new ObservedSessionEvent(eventId, sessionId, null, SessionSourceSurface.ClaudeCode, null, traceId, "ok",
             "claude-code-otel", $"{traceId}/{spanId}", "user.message", now, SessionContentState.Available, MatchKind: SessionMatchKind.ExactNative);
         var initial = @event with { EventId = Guid.CreateVersion7(), SourceEventId = $"{traceId}/8123456789abcdef", OccurredAt = now.AddTicks(-1) };
-        store.Write(new(new(session, [], [], [initial, @event]),
-            [new SessionEventContent(eventId, "application/json", "{\"text\":\"sensitive body\"}", now, now.AddDays(1))]));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [initial, @event]),
+            [new SessionEventContent(eventId, "application/json", "{\"text\":\"sensitive body\"}", now, now.AddDays(1))]);
         var reader = new RecordingContentReader(new((SessionContentReadDisposition)dispositionValue, null));
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
 
@@ -777,7 +779,7 @@ public sealed class HistoricalEvidenceProductionTests
         var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode,
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "user.message", now,
             (SessionContentState)contentValue, MatchKind: SessionMatchKind.ExactNative);
-        store.Write(new(new(session, [], [], [@event]), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [@event]), []);
         var reader = new RecordingContentReader(new(SessionContentReadDisposition.Denied, null));
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
 
@@ -806,7 +808,7 @@ public sealed class HistoricalEvidenceProductionTests
         var @event = new ObservedSessionEvent(eventId, sessionId, null, SessionSourceSurface.ClaudeCode,
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "user.message", now, SessionContentState.Available, MatchKind: SessionMatchKind.ExactNative);
         var initial = @event with { EventId = Guid.CreateVersion7(), SourceEventId = $"{traceId}/2123456789abcdef", OccurredAt = now.AddTicks(-1) };
-        realStore.Write(new(new(session, [], [], [initial, @event]), []));
+        WriteTerminalEligibleSession(realStore, new SessionDetail(session, [], [], [initial, @event]), []);
         var authority = DispatchProxy.Create<ISessionStore, NotCapturedRetentionProxy>();
         var reader = new RecordingContentReader(new(SessionContentReadDisposition.Granted,
             new SessionContentReadLease(new SessionEventContent(eventId, "application/json", "{\"text\":\"must not read\"}", now, now.AddDays(1)), () => ValueTask.CompletedTask)));
@@ -840,8 +842,8 @@ public sealed class HistoricalEvidenceProductionTests
             SourceEventId = $"{traceId}/5123456789abcdef",
             OccurredAt = now.AddTicks(1),
         };
-        store.Write(new(new(session, [], [], [initial, correction]),
-            [new SessionEventContent(correctionId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1))]));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [initial, correction]),
+            [new SessionEventContent(correctionId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1))]);
         var reader = new MutableContentReader(correctionId, now, "Use focused tests") { Disposition = SessionContentReadDisposition.Granted };
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
         var selection = HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]);
@@ -900,6 +902,42 @@ public sealed class HistoricalEvidenceProductionTests
         }
     }
 
+    // D079 (PO124-A, docs/decisions.md Session-terminal-outcome decision; docs/specifications/interfaces/canvas-session-workspace.md):
+    // session status, completeness, and ended_at are unconditionally reduced from persisted terminal facts on
+    // every write, and a session without a native binding reduces to unbound regardless of the stored row values.
+    // Scenarios whose contract requires an eligible completed/full session therefore seed the reducer inputs
+    // (native identity, lifecycle start, user instruction, and a persisted clean terminal fact) instead of
+    // relying on pre-D079 directly stored status/completeness values.
+    private static ObservedSessionEvent ClaudeLifecycleEvent(
+        Guid sessionId, string sourceEventId, string type, DateTimeOffset occurredAt,
+        string? sourceApplicationVersion = null, string? adapterVersion = null) =>
+        new(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, null, "ok",
+            "claude-code-hook", sourceEventId, type, occurredAt, SessionContentState.NotCaptured,
+            sourceApplicationVersion, adapterVersion);
+
+    private static void WriteTerminalEligibleSession(
+        ISessionStore store, SessionDetail detail, IReadOnlyList<SessionEventContent> content,
+        string? sourceApplicationVersion = null, string? adapterVersion = null)
+    {
+        var session = detail.Session;
+        var startAt = session.StartedAt ?? session.LastSeenAt;
+        var endAt = session.EndedAt ?? session.LastSeenAt;
+        var terminal = ClaudeLifecycleEvent(session.SessionId, $"end-{session.SessionId:N}", "SessionEnd", endAt,
+            sourceApplicationVersion, adapterVersion);
+        var nativeIds = detail.NativeIds.Count > 0
+            ? detail.NativeIds
+            : [new SessionNativeId(session.SessionId, SessionSourceSurface.ClaudeCode, $"native-{session.SessionId:N}", SessionBindingKind.Native, startAt)];
+        var events = detail.Events.Concat(
+        [
+            ClaudeLifecycleEvent(session.SessionId, $"start-{session.SessionId:N}", "SessionStart", startAt, sourceApplicationVersion, adapterVersion),
+            ClaudeLifecycleEvent(session.SessionId, $"prompt-{session.SessionId:N}", "UserPromptSubmit", startAt.AddTicks(1), sourceApplicationVersion, adapterVersion),
+            terminal,
+        ]).ToArray();
+        ((IClassifiedSessionStore)store).WriteClassified(
+            new SessionWriteBatch(detail with { NativeIds = nativeIds, Events = events }, content),
+            [new SessionTerminalFact(terminal.EventId, SessionTerminalOutcome.Clean)]);
+    }
+
     private static Guid WriteExactSession(ISessionStore store, string repository, DateTimeOffset at, string traceId, string spanId)
     {
         var sessionId = Guid.CreateVersion7();
@@ -907,7 +945,7 @@ public sealed class HistoricalEvidenceProductionTests
             repository, null, at, at, at, SessionRawRetentionState.NotCaptured, at, at);
         var @event = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode,
             null, traceId, "ok", "claude-code-otel", $"{traceId}/{spanId}", "otel.span", at, SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative);
-        store.Write(new(new(session, [], [], [@event]), []));
+        WriteTerminalEligibleSession(store, new SessionDetail(session, [], [], [@event]), []);
         return sessionId;
     }
 

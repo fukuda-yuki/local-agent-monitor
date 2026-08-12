@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
@@ -14,6 +15,10 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SqliteSanitizedExportSnapshotProviderTests
 {
+    private const string SessionA = "01900000-0000-7000-8000-0000000000a1";
+    private const string SessionB = "01900000-0000-7000-8000-0000000000b1";
+    private const string UnrelatedSession = "01900000-0000-7000-8000-0000000000c1";
+
     [Fact]
     public void Capture_ProjectsOnlySafeMonitorAndExactSessionMetadata()
     {
@@ -26,7 +31,7 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
         Assert.True(result.Success, result.ErrorCode);
         var record = Assert.Single(result.Snapshot!.Records);
         Assert.Equal("repository_metadata_projection", record.RecordType);
-        Assert.Equal("session-a", record.SessionId);
+        Assert.Equal(SessionA, record.SessionId);
         Assert.Equal("trace-a", record.TraceId);
         Assert.Equal("safe-repository", record.RepositoryName);
         Assert.Equal("safe-workspace", record.WorkspaceLabel);
@@ -50,7 +55,7 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     {
         using var fixture = new Fixture();
         fixture.SeedTraceAndSession();
-        fixture.Execute("INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES('run-b','session-a','copilot-cli','trace-a','completed');");
+        fixture.Execute($"INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES('run-b','{SessionA}','copilot-cli','trace-a','completed');");
 
         var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath).Capture(new(TraceIds: ["trace-a"]));
 
@@ -63,7 +68,7 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     {
         using var fixture = new Fixture();
         fixture.SeedTraceAndSession();
-        fixture.Execute("INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES('run-b','session-a','claude-code','trace-a','completed');");
+        fixture.Execute($"INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status) VALUES('run-b','{SessionA}','claude-code','trace-a','completed');");
         var provider = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath);
 
         var first = provider.Capture(new(TraceIds: ["trace-a"]));
@@ -82,11 +87,11 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     {
         using var fixture = new Fixture();
         fixture.SeedTraceAndSession();
-        fixture.Execute("""
+        fixture.Execute($"""
             INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
-            VALUES('session-b','completed','rich','2026-07-22T00:00:00.0000000Z','not_captured','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z');
+            VALUES('{SessionB}','active','unbound','2026-07-22T00:00:00.0000000Z','not_captured','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z');
             INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status)
-            VALUES('run-b','session-b','claude-code','trace-a','completed');
+            VALUES('run-b','{SessionB}','claude-code','trace-a','completed');
             """);
 
         var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath).Capture(new(TraceIds: ["trace-a"]));
@@ -373,12 +378,205 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
     }
 
     [Fact]
+    public void Capture_RejectsMalformedTerminalFactPairWithFixedStoreFailure()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute("""
+            PRAGMA ignore_check_constraints=ON;
+            UPDATE session_events
+            SET terminal_policy_version=NULL
+            WHERE terminal_outcome IS NOT NULL;
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Theory]
+    [InlineData("failed-sdk-task-complete")]
+    [InlineData("failed-claude-hook")]
+    [InlineData("fact-on-claude-otel")]
+    public void Capture_RejectsEachIllegalTerminalTupleOutcomeWithFixedStoreFailure(string corruption)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute(
+            corruption switch
+            {
+                "failed-sdk-task-complete" => """
+                    UPDATE session_events SET terminal_outcome='failed'
+                    WHERE source_event_id='complete-a';
+                    UPDATE sessions SET status='failed';
+                    """,
+                "failed-claude-hook" => """
+                    UPDATE session_events
+                    SET source_adapter='claude-code-hook',source_surface='claude-code',
+                        type='SessionEnd',terminal_outcome='failed'
+                    WHERE source_event_id='complete-a';
+                    UPDATE sessions SET status='failed';
+                    """,
+                "fact-on-claude-otel" => """
+                    UPDATE session_events
+                    SET source_adapter='claude-code-otel',source_surface='claude-code',
+                        source_event_id='11111111111111111111111111111111/2222222222222222',
+                        type='otel.span',terminal_outcome='clean'
+                    WHERE source_event_id='complete-a';
+                    """,
+                _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+            });
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("ended_at")]
+    [InlineData("completeness")]
+    public void Capture_RejectsAggregateAndCompletenessDriftWithFixedStoreFailure(string corruption)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute(
+            corruption switch
+            {
+                "status" => "UPDATE sessions SET status='active';",
+                "ended_at" => "UPDATE sessions SET ended_at='2026-07-22T00:00:00.0000001+00:00';",
+                "completeness" => "UPDATE sessions SET completeness='partial';",
+                _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+            });
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("monitor")]
+    public void Capture_BlobRequiredSchemaVersionReturnsFixedStoreFailure(string component)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute($"UPDATE schema_version SET version=CAST(x'00' AS BLOB) WHERE component='{component}';");
+        Assert.Equal("blob", fixture.Scalar<string>($"SELECT typeof(version) FROM schema_version WHERE component='{component}';"));
+
+        var result = new SqliteSanitizedExportSnapshotProvider(fixture.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_store_unavailable", result.ErrorCode);
+        Assert.Null(result.Snapshot);
+    }
+
+    [Fact]
+    public void Capture_SharedValidationReadsFactsButNeverContentOrRawStores()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedTraceAndSession();
+        fixture.Execute("""
+            INSERT INTO session_event_content(
+                event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token)
+            VALUES(
+                '01900000-0000-7000-9000-0000000000a2','application/json',
+                '{"private":"content-read-marker"}',
+                '2026-07-22T00:00:00.0000000+00:00',
+                '2026-10-20T00:00:00.0000000+00:00',zeroblob(32));
+            """);
+        var statements = new List<string>();
+        var reads = new List<(string Table, string Column)>();
+
+        var result = new SqliteSanitizedExportSnapshotProvider(
+                fixture.DatabasePath,
+                statements.Add,
+                (table, column) => reads.Add((table, column)))
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.NotEmpty(statements);
+        Assert.Contains(reads, read => read == ("session_events", "terminal_outcome"));
+        Assert.Contains(reads, read => read == ("session_events", "terminal_policy_version"));
+        Assert.DoesNotContain(reads, read => read.Table == "session_event_content");
+        Assert.DoesNotContain(reads, read => read.Table == "raw_records");
+        Assert.DoesNotContain(
+            result.Snapshot!.Records,
+            record => Encoding.UTF8.GetString(record.CanonicalBytes).Contains("content-read-marker", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Capture_PrivateTerminalFactsNeverEnterCarriersHashesOrFixedDiagnostics()
+    {
+        using var clean = new Fixture();
+        using var failed = new Fixture();
+        using var malformed = new Fixture();
+        clean.SeedTraceAndSession();
+        failed.SeedTraceAndSession();
+        malformed.SeedTraceAndSession();
+        MakeCompatibleTerminalFact(clean, "clean", "completed");
+        MakeCompatibleTerminalFact(failed, "failed", "failed");
+        malformed.Execute("""
+            PRAGMA ignore_check_constraints=ON;
+            UPDATE session_events
+            SET terminal_outcome='future_private_outcome',terminal_policy_version=1
+            WHERE source_event_id='complete-a';
+            PRAGMA ignore_check_constraints=OFF;
+            """);
+        var cleanCapture = new SqliteSanitizedExportSnapshotProvider(clean.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+        var failedCapture = new SqliteSanitizedExportSnapshotProvider(failed.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+        var malformedCapture = new SqliteSanitizedExportSnapshotProvider(malformed.DatabasePath)
+            .Capture(new(TraceIds: ["trace-a"]));
+
+        Assert.True(cleanCapture.Success, cleanCapture.ErrorCode);
+        Assert.True(failedCapture.Success, failedCapture.ErrorCode);
+        Assert.Equal(cleanCapture.Snapshot!.SnapshotId, failedCapture.Snapshot!.SnapshotId);
+        Assert.Equal(
+            cleanCapture.Snapshot.Records.Select(record => record.CanonicalBytes),
+            failedCapture.Snapshot.Records.Select(record => record.CanonicalBytes));
+        Assert.False(malformedCapture.Success);
+        Assert.Equal("snapshot_store_unavailable", malformedCapture.ErrorCode);
+        var publicOutput = string.Join(
+            "\n",
+            JsonSerializer.Serialize(cleanCapture),
+            JsonSerializer.Serialize(failedCapture),
+            JsonSerializer.Serialize(malformedCapture));
+        Assert.DoesNotContain("terminal_outcome", publicOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminal_policy_version", publicOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("future_private_outcome", publicOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"clean\"", publicOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"failed\"", publicOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FramedInventoryHashDistinguishesDelimiterBoundaryCollisions()
     {
         Assert.NotEqual(
             SqliteSanitizedExportSnapshotProvider.FramedHash("a", "b\0c"),
             SqliteSanitizedExportSnapshotProvider.FramedHash("a\0b", "c"));
     }
+
+    private static void MakeCompatibleTerminalFact(Fixture fixture, string outcome, string status) =>
+        fixture.Execute($$"""
+            UPDATE session_events
+            SET source_adapter='copilot-compatible-hook',source_surface='copilot-cli',
+                type='SessionEnd',terminal_outcome='{{outcome}}'
+            WHERE source_event_id='complete-a';
+            UPDATE sessions SET status='{{status}}';
+            """);
 
     private sealed class Fixture : IDisposable
     {
@@ -399,24 +597,34 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = $$"""
                 INSERT INTO monitor_traces(trace_id,client_kind,last_seen_at,projected_at,repository_name,workspace_label,repo_snapshot)
                 VALUES('trace-a','github-copilot-cli','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z','safe-repository','safe-workspace','safe-snapshot');
-                INSERT INTO sessions(session_id,status,completeness,repository,workspace,last_seen_at,raw_retention_state,created_at,updated_at)
-                VALUES('session-a','completed','full','must-not-substitute','must-not-substitute','2026-07-22T00:00:00.0000000Z','not_captured','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z');
-                INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status)
-                VALUES('run-a','session-a','copilot-cli','trace-a','completed');
+                INSERT INTO sessions(session_id,status,completeness,repository,workspace,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+                VALUES('{{SessionA}}','completed','full','must-not-substitute','must-not-substitute','2026-07-22T00:00:00.0000000+00:00','2026-07-22T00:00:00.0000000+00:00','2026-07-22T00:00:00.0000000+00:00','not_captured','2026-07-22T00:00:00.0000000+00:00','2026-07-22T00:00:00.0000000+00:00');
+                INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+                VALUES('{{SessionA}}','copilot-sdk','native-session-a','native','2026-07-22T00:00:00.0000000+00:00');
+                INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,started_at,ended_at,status)
+                VALUES('run-a','{{SessionA}}','copilot-cli','trace-a','2026-07-22T00:00:00.0000000+00:00','2026-07-22T00:00:00.0000000+00:00','completed');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+                VALUES('01900000-0000-7000-9000-0000000000a1','{{SessionA}}','run-a','copilot-sdk','copilot-sdk-stream','start-a','session.start','2026-07-22T00:00:00.0000000+00:00','not_captured');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state)
+                VALUES('01900000-0000-7000-9000-0000000000a2','{{SessionA}}','run-a','copilot-sdk','copilot-sdk-stream','message-a','user.message','2026-07-22T00:00:00.0000000+00:00','not_captured');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+                VALUES('01900000-0000-7000-9000-0000000000a3','{{SessionA}}','run-a','copilot-cli','trace-a','otel-exact','trace-a/span-a','otel.span','2026-07-22T00:00:00.0000000+00:00','not_captured');
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,terminal_outcome,terminal_policy_version)
+                VALUES('01900000-0000-7000-9000-0000000000a4','{{SessionA}}','run-a','copilot-sdk','copilot-sdk-stream','complete-a','session.task_complete','2026-07-22T00:00:00.0000000+00:00','not_captured','clean',1);
                 INSERT INTO raw_records(source,trace_id,received_at,payload_json,schema_version,retention_owner_token)
                 VALUES('raw-otlp','trace-a','2026-07-22T00:00:00.0000000Z','{"raw":"raw-secret-marker"}',1,zeroblob(32));
                 """;
             command.ExecuteNonQuery();
         }
 
-        internal void SeedUnrelatedSessionEvent() => Execute("""
+        internal void SeedUnrelatedSessionEvent() => Execute($"""
             INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
-            VALUES('session-unrelated','completed','full','2026-07-22T00:00:00.0000000Z','not_captured','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z');
+            VALUES('{UnrelatedSession}','active','unbound','2026-07-22T00:00:00.0000000Z','not_captured','2026-07-22T00:00:00.0000000Z','2026-07-22T00:00:00.0000000Z');
             INSERT INTO session_events(event_id,session_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version)
-            VALUES('event-unrelated','session-unrelated','claude-code','fixture','source-unrelated','capture.started','2026-07-22T00:00:00.0000000Z','not_captured','unrelated-version');
+            VALUES('01900000-0000-7000-9000-0000000000c1','{UnrelatedSession}','claude-code','fixture','source-unrelated','capture.started','2026-07-22T00:00:00.0000000Z','not_captured','unrelated-version');
             """);
 
         internal void SeedAlert(byte[] canonicalBytes)
@@ -614,6 +822,15 @@ public sealed class SqliteSanitizedExportSnapshotProviderTests
             using var command = connection.CreateCommand();
             command.CommandText = sql;
             command.ExecuteNonQuery();
+        }
+
+        internal T Scalar<T>(string sql)
+        {
+            using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T), CultureInfo.InvariantCulture);
         }
 
         public void Dispose() => Directory.Delete(directory, recursive: true);

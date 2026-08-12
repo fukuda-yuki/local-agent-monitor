@@ -250,15 +250,43 @@ public sealed class RuntimeBackupWave3ComponentRoundTripTests
 
             using (var connection = Open(Source))
             {
+                // D079 clause E keeps runtime backup validation strict: a session row whose
+                // status/completeness/ended_at disagrees with the deterministic outcome
+                // reducer fails backup preflight (restore_incompatible). Clause A reduces an
+                // OTel-only fact set to active with null ended_at, so the completed/full
+                // session must carry real terminal evidence — native binding, lifecycle
+                // start, user instruction, the exact OTel span, and a clean
+                // session.task_complete fact — for the reducer to derive completed/full.
                 Execute(connection, $"""
-                    INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at)
-                    VALUES('{sessionId}','completed','full','{at}','not_captured','{at}','{at}');
+                    INSERT INTO sessions(session_id,status,completeness,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+                    VALUES('{sessionId}','completed','full','{at}','{at}','not_captured','{at}','{at}');
+                    INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+                    VALUES('{sessionId}','copilot-cli','wave3-native-session','native','{at}');
                     INSERT INTO session_events(
                         event_id,session_id,source_surface,trace_id,source_adapter,source_event_id,
                         type,occurred_at,content_state,source_application_version)
                     VALUES(
                         '{eventId}','{sessionId}','copilot-cli','{traceId}','otel-exact','{traceId}/{spanId}',
                         'otel.span','{at}','not_captured','1.2.3');
+                    INSERT INTO session_events(
+                        event_id,session_id,source_surface,source_adapter,source_event_id,
+                        type,occurred_at,content_state,source_application_version)
+                    VALUES(
+                        '01900000-0000-7000-8000-00000000c006','{sessionId}','copilot-sdk','copilot-sdk-stream','wave3-session-start',
+                        'session.start','2026-07-23T03:03:05.0000000+00:00','not_captured','1.2.3');
+                    INSERT INTO session_events(
+                        event_id,session_id,source_surface,source_adapter,source_event_id,
+                        type,occurred_at,content_state,source_application_version)
+                    VALUES(
+                        '01900000-0000-7000-8000-00000000c007','{sessionId}','copilot-sdk','copilot-sdk-stream','wave3-user-message',
+                        'user.message','2026-07-23T03:03:35.0000000+00:00','not_captured','1.2.3');
+                    INSERT INTO session_events(
+                        event_id,session_id,source_surface,source_adapter,source_event_id,
+                        type,occurred_at,content_state,source_application_version,
+                        terminal_outcome,terminal_policy_version)
+                    VALUES(
+                        '01900000-0000-7000-8000-00000000c008','{sessionId}','copilot-sdk','copilot-sdk-stream','wave3-task-complete',
+                        'session.task_complete','{at}','not_captured','1.2.3','clean',1);
                     """);
             }
             var repositoryId = Text(Source, "SELECT repository_id FROM local_repositories;");

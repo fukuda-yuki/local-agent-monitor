@@ -408,7 +408,10 @@ internal static class MonitorHost
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
                     services.GetRequiredService<ILocalArchiveEligibilitySnapshotContributor>()));
-            builder.Services.AddHostedService(_ => localRepositoryHostedService);
+            if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
+            {
+                builder.Services.AddHostedService(_ => localRepositoryHostedService);
+            }
         }
         var pricingStore = new SqlitePricingStore(options.DatabasePath, timeProvider);
         var providerCatalog = pricingCatalogProvider.Catalog;
@@ -2257,6 +2260,8 @@ internal sealed class MonitorHostTestOptions
     public bool StartSessionOtelEnrichment { get; init; } = true;
 
     public bool StartRetentionCleanupWorker { get; init; }
+
+    public bool StartLocalRepositoryCatalogHostedService { get; init; } = true;
 
     public TimeSpan? SessionOtelPollInterval { get; init; }
 

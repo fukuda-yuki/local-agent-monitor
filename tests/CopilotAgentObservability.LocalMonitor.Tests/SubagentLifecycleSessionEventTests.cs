@@ -200,15 +200,24 @@ public sealed class SubagentLifecycleSessionEventTests
     }
 
     [Theory]
-    [InlineData("subagent.failed")]
-    [InlineData("subagent.selected")]
-    [InlineData("subagent.deselected")]
+    [InlineData("subagent.cancelled")]
+    [InlineData("subagent.paused")]
+    [InlineData("subagent.resumed")]
     public async Task ReplayOfPreexistingUnsupportedLifecycleEventDoesNotUpgradeOrBackfill(
         string eventType)
     {
         using var temp = CreateTempDirectory();
         var store = CreateStore(temp);
-        var fixture = Assert.Single(LifecycleFixtures, item => item.EventType == eventType);
+        // D079: the five canonical subagent lifecycle types are now normalized to
+        // Supported, so a legacy Unsupported row can only survive for lifecycle shapes
+        // outside the supported set; those keep content_state Unsupported and any exact
+        // replay must keep the row byte-identical instead of upgrading or backfilling it.
+        var fixture = new LifecycleFixture(
+            $"synthetic-{eventType}",
+            eventType,
+            "2026-07-11T00:05:00Z",
+            $$"""{"lifecycle":"{{eventType}}","description":"unsupported shape"}""",
+            $$"""{"lifecycle":"{{eventType}}","description":"unsupported shape"}""");
         var existing = ExistingUnsupportedLifecycleEvent(fixture);
         store.Write(existing);
         var persistedBeforeReplay = Assert.Single(

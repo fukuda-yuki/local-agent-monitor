@@ -327,7 +327,7 @@ public sealed class MonitorSkillProjectionTests
                         session_id, status, completeness, last_seen_at,
                         raw_retention_state, created_at, updated_at
                     ) VALUES (
-                        $session_id, 'unknown', 'unbound', '2026-07-29T00:00:00.0000000+00:00',
+                        $session_id, 'active', 'partial', '2026-07-29T00:00:00.0000000+00:00',
                         'not_captured', '2026-07-29T00:00:00.0000000+00:00',
                         '2026-07-29T00:00:00.0000000+00:00'
                     );

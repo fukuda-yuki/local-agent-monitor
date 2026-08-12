@@ -259,10 +259,18 @@ public sealed class LocalRepositoryAutomaticAdmissionValidationTests
     public async Task DuplicateExactSessionIdentityIsRejected()
     {
         using var fixture = await CreateValidGraphAsync();
+        // D079: session_events now carries 19 columns (terminal_outcome and
+        // terminal_policy_version were added in schema version 14), so the positional
+        // duplicate row is inserted with an explicit column list; the duplicated
+        // (source_adapter, source_event_id) identity is what admission must reject.
         fixture.Execute("""
             PRAGMA foreign_keys=OFF;
             CREATE TABLE duplicate_session_events AS SELECT * FROM session_events;
-            INSERT INTO duplicate_session_events
+            INSERT INTO duplicate_session_events(
+                event_id,session_id,run_id,source_surface,parent_event_id,trace_id,status,
+                source_adapter,source_event_id,type,occurred_at,content_state,
+                source_application_version,adapter_version,schema_fingerprint,
+                normalization_version,match_kind)
             SELECT '01900000-0000-7000-9000-00000000ff05',session_id,run_id,source_surface,
                    parent_event_id,trace_id,status,source_adapter,source_event_id,type,occurred_at,
                    content_state,source_application_version,adapter_version,schema_fingerprint,

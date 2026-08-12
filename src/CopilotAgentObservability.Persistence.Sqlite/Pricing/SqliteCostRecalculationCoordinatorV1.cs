@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
@@ -385,11 +386,12 @@ internal sealed class SqliteCostRecalculationCoordinatorV1
         SqliteTransaction transaction,
         CostBudgetScopeV1 scope)
     {
-        const string select =
-            """
-            SELECT session_id,last_seen_at,updated_at,status
-            FROM sessions
-            WHERE status IN ('completed','failed')
+        var select = SessionCurrentUseEligibilitySqlV1.EligibleSessionIdsCte + """
+            SELECT session.session_id,session.last_seen_at,session.updated_at
+            FROM sessions session
+            JOIN current_session_use_eligibility eligible
+              ON eligible.session_id=session.session_id
+            WHERE 1=1
             """;
         var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -397,23 +399,23 @@ internal sealed class SqliteCostRecalculationCoordinatorV1
         {
             case "session":
                 command.CommandText =
-                    select + " AND session_id=$session ORDER BY last_seen_at,session_id;";
+                    select + " AND session.session_id=$session ORDER BY session.last_seen_at,session.session_id;";
                 command.Parameters.AddWithValue("$session", scope.SessionId!);
                 break;
             case "utc_day":
                 var day = UtcDay(scope.UtcDate!);
                 command.CommandText =
                     select
-                    + " AND last_seen_at >= $start AND last_seen_at < $end"
-                    + " ORDER BY last_seen_at,session_id;";
+                    + " AND session.last_seen_at >= $start AND session.last_seen_at < $end"
+                    + " ORDER BY session.last_seen_at,session.session_id;";
                 command.Parameters.AddWithValue("$start", Timestamp(day.Start));
                 command.Parameters.AddWithValue("$end", Timestamp(day.End));
                 break;
             case "rolling_period":
                 command.CommandText =
                     select
-                    + " AND last_seen_at >= $start AND last_seen_at < $end"
-                    + " ORDER BY last_seen_at,session_id;";
+                    + " AND session.last_seen_at >= $start AND session.last_seen_at < $end"
+                    + " ORDER BY session.last_seen_at,session.session_id;";
                 command.Parameters.AddWithValue(
                     "$start",
                     Timestamp(scope.CutoffUtc!.Value.AddDays(-scope.WindowDays!.Value)));

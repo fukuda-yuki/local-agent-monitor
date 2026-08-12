@@ -37,7 +37,7 @@ public sealed class SqliteEffectComparisonStoreTests
 
         using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
         verify.Open();
-        Assert.Equal(13L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(14L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
         Assert.Equal(legacy.SessionId.ToString("D"), Text(verify, "SELECT session_id FROM sessions LIMIT 1;"));
         if (previousVersion >= 2) Assert.Equal("expected", Text(verify, "SELECT verdict FROM session_human_evaluation WHERE session_id=$session;", ("$session", legacy.SessionId.ToString("D"))));
         if (previousVersion >= 3) Assert.Equal("legacy", Text(verify, "SELECT title FROM improvement_proposals LIMIT 1;"));
@@ -70,6 +70,31 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.Null(detail.Sessions.Single().EffectiveQuality);
         Assert.False(detail.Sessions.Single().SevereFailure);
         Assert.Null(detail.Evidence.Single().HumanVerdict);
+    }
+
+    [Fact]
+    public void CreateSchema_RejectsOneDdlDeviationFromSupportedLegacyMigrationProfileAtomically()
+    {
+        using var temp = new MonitorTempDirectory();
+        _ = CreateGenuineLegacySchema(temp.DatabasePath, 9);
+        string schemaBefore;
+        string dataBefore;
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            Execute(connection, "CREATE INDEX fixture_sessions_status ON sessions(status);");
+            schemaBefore = ReadSchemaSnapshot(connection);
+            dataBefore = ReadDataSnapshot(connection);
+        }
+
+        var error = Assert.Throws<InvalidOperationException>(() => new SqliteSessionStore(temp.DatabasePath).CreateSchema());
+
+        Assert.Equal("Unsupported incomplete Session schema version 14.", error.Message);
+        Assert.Equal(9L, Scalar(temp.DatabasePath, "SELECT version FROM schema_version WHERE component='session';"));
+        using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        verify.Open();
+        Assert.Equal(schemaBefore, ReadSchemaSnapshot(verify));
+        Assert.Equal(dataBefore, ReadDataSnapshot(verify));
     }
 
     [Theory]
@@ -421,6 +446,47 @@ public sealed class SqliteEffectComparisonStoreTests
     }
 
     [Theory]
+    [InlineData("native_binding")]
+    [InlineData("terminal_fact")]
+    public void EffectComparisonRead_InvalidatesListAndDetailWithoutMutatingHistoryWhenCurrentSessionAuthorityIsLost(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var proposal = Guid.CreateVersion7();
+        var apply = Guid.CreateVersion7();
+        var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = SeedImprovedCohort(temp.DatabasePath, store, at);
+        var receipt = store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1));
+        string storedResult;
+        using (var before = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            before.Open();
+            storedResult = Text(before, "SELECT result_json FROM effect_receipts WHERE comparison_id=$id;", ("$id", receipt.ComparisonId.ToString("D")))!;
+        }
+
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            if (mutation == "native_binding")
+                Execute(connection, "DELETE FROM session_native_ids WHERE session_id=$id;", ("$id", sessions[0].ToString("D")));
+            else
+                Execute(connection, "UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id=$id AND terminal_outcome IS NOT NULL;", ("$id", sessions[0].ToString("D")));
+        }
+
+        Assert.Equal("invalidated", Assert.Single(store.ListEffectReceipts(proposal)).VerificationState);
+        Assert.Equal("invalidated", store.GetEffectComparison(receipt.ComparisonId)!.Receipt.VerificationState);
+        Assert.Equal(ImprovementProposalStatus.Verified, store.GetImprovementProposal(proposal)!.Status);
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_receipts;"));
+        Assert.Equal(6L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparison_sessions;"));
+        Assert.Equal(6L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM effect_comparison_evidence;"));
+        using var verify = new SqliteConnection($"Data Source={temp.DatabasePath}");
+        verify.Open();
+        Assert.Equal(storedResult, Text(verify, "SELECT result_json FROM effect_receipts WHERE comparison_id=$id;", ("$id", receipt.ComparisonId.ToString("D"))));
+    }
+
+    [Theory]
     [InlineData("missing_proposal")]
     [InlineData("wrong_proposal_revision")]
     [InlineData("candidate")]
@@ -471,6 +537,64 @@ public sealed class SqliteEffectComparisonStoreTests
         Assert.Equal(EffectVerdict.Improved, receipt.Result.Verdict);
         Assert.Contains(detail.Evidence, e => e.SessionId == sessions[0] && e.Kind == "human" && e.RecordedAt == changedAt);
         Assert.DoesNotContain(detail.Evidence, e => e.ReferenceId == objective.ToString("D"));
+    }
+
+    [Theory]
+    [InlineData("delete_event")]
+    [InlineData("move_event")]
+    [InlineData("change_run_trace")]
+    public void ObjectiveCurrentUse_ExcludesStaleExactScopeFromCandidateAndComparisonWithoutRewritingHistory(string mutation)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        var proposal = Guid.CreateVersion7();
+        var apply = Guid.CreateVersion7();
+        var at = DateTimeOffset.Parse("2026-07-12T12:00:00+00:00");
+        SeedProposalAndApply(temp.DatabasePath, proposal, apply, at);
+        var sessions = Enumerable.Range(0, 6)
+            .Select(index => SeedComparableSession(temp.DatabasePath, index < 3 ? at.AddMinutes(-10 - index) : at.AddMinutes(10 + index)))
+            .ToArray();
+        var target = sessions[0];
+        var objective = AddEventObjective(store, temp.DatabasePath, target, at);
+        foreach (var session in sessions.Skip(1))
+            _ = AddObjective(store, temp.DatabasePath, session, ObjectiveResult.Pass, ObjectiveSeverity.Normal, at);
+
+        var currentUse = (IEffectCurrentUseStore)store;
+        Assert.True(currentUse.ReadEffectCandidateSnapshot(proposal, apply, 200).Sessions.Single(item => item.Session.SessionId == target).EvidenceAvailable);
+        using (var connection = new SqliteConnection($"Data Source={temp.DatabasePath}"))
+        {
+            connection.Open();
+            switch (mutation)
+            {
+                case "delete_event":
+                    Execute(connection, "DELETE FROM session_events WHERE event_id=$event;", ("$event", objective.EventId.ToString("D")));
+                    break;
+                case "move_event":
+                    Execute(connection, """
+                        UPDATE session_events
+                        SET session_id=$other,
+                            run_id=(SELECT run_id FROM session_runs WHERE session_id=$other),
+                            trace_id=(SELECT trace_id FROM session_runs WHERE session_id=$other)
+                        WHERE event_id=$event;
+                        """, ("$other", sessions[1].ToString("D")), ("$event", objective.EventId.ToString("D")));
+                    break;
+                case "change_run_trace":
+                    Execute(connection, "UPDATE session_runs SET trace_id='stale-trace' WHERE run_id=$run;", ("$run", objective.RunId.ToString("D")));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(mutation));
+            }
+        }
+
+        Assert.False(currentUse.ReadEffectCandidateSnapshot(proposal, apply, 200).Sessions.Single(item => item.Session.SessionId == target).EvidenceAvailable);
+        var receipt = store.RecordEffectComparison(Request(proposal, apply, sessions), at.AddHours(1));
+        var detail = store.GetEffectComparison(receipt.ComparisonId)!;
+
+        Assert.Equal("missing", detail.Sessions.Single(item => item.SessionId == target).EffectiveQuality);
+        Assert.DoesNotContain(detail.Evidence, item => item.SessionId == target && item.Kind.StartsWith("objective", StringComparison.Ordinal));
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM objective_evaluations WHERE objective_evaluation_id=$id;", ("$id", objective.ObjectiveId.ToString("D"))));
+        Assert.Equal(1L, Scalar(temp.DatabasePath, "SELECT COUNT(*) FROM objective_evaluation_evidence WHERE objective_evaluation_id=$id;", ("$id", objective.ObjectiveId.ToString("D"))));
     }
 
     [Theory]
@@ -602,6 +726,7 @@ public sealed class SqliteEffectComparisonStoreTests
         Execute(connection, "INSERT INTO improvement_proposals(proposal_id,status,target_kind,target_label,title,summary,expected_effect,risk_note,created_at,updated_at,recommended_at) VALUES($id,'recommended','skill','fixture','fixture','fixture','fixture','fixture',$at,$at,$at);", ("$id", proposalId.ToString("D")), ("$at", appliedAt.ToString("O")));
         var draft = Guid.CreateVersion7();
         Execute(connection, "INSERT INTO proposal_apply_drafts(draft_id,proposal_id,proposal_revision,root_id,selection_revision,approval_digest,state,created_at,updated_at) VALUES($draft,$proposal,1,$root,1,'digest','applied',$at,$at);", ("$draft", draft.ToString("D")), ("$proposal", proposalId.ToString("D")), ("$root", Guid.CreateVersion7().ToString("D")), ("$at", appliedAt.ToString("O")));
+        Execute(connection, "INSERT INTO proposal_apply_revisions(draft_id,selection_revision,approval_digest,approved_at) VALUES($draft,1,'digest',$at);", ("$draft", draft.ToString("D")), ("$at", appliedAt.ToString("O")));
         Execute(connection, "INSERT INTO proposal_applies(apply_id,draft_id,proposal_revision,state,created_at) VALUES($apply,$draft,1,'applied',$at);", ("$apply", applyId.ToString("D")), ("$draft", draft.ToString("D")), ("$at", appliedAt.ToString("O")));
     }
 
@@ -693,11 +818,17 @@ public sealed class SqliteEffectComparisonStoreTests
     private static Guid SeedComparableSession(string databasePath, DateTimeOffset boundary, long? totalTokens = 10)
     {
         var id = Guid.CreateVersion7();
+        var run = Guid.CreateVersion7();
+        var endedAt = boundary.AddMinutes(1);
         using var connection = new SqliteConnection($"Data Source={databasePath}");
         connection.Open();
-        Execute(connection, "INSERT INTO sessions(session_id,status,completeness,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at) VALUES($id,'completed','full',$start,$end,$end,'not_captured',$start,$end);", ("$id", id.ToString("D")), ("$start", boundary.ToString("O")), ("$end", boundary.AddMinutes(1).ToString("O")));
+        Execute(connection, "INSERT INTO sessions(session_id,status,completeness,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at) VALUES($id,'completed','full',$start,$end,$end,'not_captured',$start,$end);", ("$id", id.ToString("D")), ("$start", boundary.ToString("O")), ("$end", endedAt.ToString("O")));
         Execute(connection, "INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at) VALUES($id,'copilot-sdk',$native,'native',$at);", ("$id", id.ToString("D")), ("$native", "native-" + id.ToString("N")), ("$at", boundary.ToString("O")));
-        Execute(connection, "INSERT INTO session_runs(run_id,session_id,trace_id,status,total_tokens) VALUES($run,$id,$trace,'completed',$tokens);", ("$run", Guid.CreateVersion7().ToString("D")), ("$id", id.ToString("D")), ("$trace", "trace-" + id.ToString("N")), ("$tokens", totalTokens));
+        Execute(connection, "INSERT INTO session_runs(run_id,session_id,trace_id,status,total_tokens) VALUES($run,$id,$trace,'completed',$tokens);", ("$run", run.ToString("D")), ("$id", id.ToString("D")), ("$trace", "trace-" + id.ToString("N")), ("$tokens", totalTokens));
+        Execute(connection, "INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES($event,$id,$run,'copilot-sdk','copilot-sdk-stream',$source,'session.start',$at,'not_captured');", ("$event", Guid.CreateVersion7().ToString("D")), ("$id", id.ToString("D")), ("$run", run.ToString("D")), ("$source", "start-" + id.ToString("N")), ("$at", boundary.ToString("O")));
+        Execute(connection, "INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES($event,$id,$run,'copilot-sdk','copilot-sdk-stream',$source,'user.message',$at,'not_captured');", ("$event", Guid.CreateVersion7().ToString("D")), ("$id", id.ToString("D")), ("$run", run.ToString("D")), ("$source", "message-" + id.ToString("N")), ("$at", boundary.ToString("O")));
+        Execute(connection, "INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state) VALUES($event,$id,$run,'copilot-sdk',$trace,'otel-exact',$source,'otel.span',$at,'not_captured');", ("$event", Guid.CreateVersion7().ToString("D")), ("$id", id.ToString("D")), ("$run", run.ToString("D")), ("$trace", "trace-" + id.ToString("N")), ("$source", "otel-" + id.ToString("N")), ("$at", boundary.ToString("O")));
+        Execute(connection, "INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,terminal_outcome,terminal_policy_version) VALUES($event,$id,$run,'copilot-sdk','copilot-sdk-stream',$source,'session.task_complete',$at,'not_captured','clean',1);", ("$event", Guid.CreateVersion7().ToString("D")), ("$id", id.ToString("D")), ("$run", run.ToString("D")), ("$source", "complete-" + id.ToString("N")), ("$at", endedAt.ToString("O")));
         return id;
     }
 
@@ -712,6 +843,34 @@ public sealed class SqliteEffectComparisonStoreTests
         var objective = Guid.CreateVersion7();
         store.CreateObjectiveEvaluation(new(objective, sessionId, Guid.Parse(run), trace, result, severity, "eval", "v1", "criterion", "case", [new("run", run)], recordedAt));
         return objective;
+    }
+
+    private static (Guid ObjectiveId, Guid EventId, Guid RunId) AddEventObjective(
+        SqliteSessionStore store,
+        string databasePath,
+        Guid sessionId,
+        DateTimeOffset recordedAt)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath}");
+        connection.Open();
+        var runId = Guid.Parse(Text(connection, "SELECT run_id FROM session_runs WHERE session_id=$id;", ("$id", sessionId.ToString("D")))!);
+        var traceId = Text(connection, "SELECT trace_id FROM session_runs WHERE run_id=$run;", ("$run", runId.ToString("D")))!;
+        var eventId = Guid.Parse(Text(connection, "SELECT event_id FROM session_events WHERE session_id=$id AND source_adapter='otel-exact';", ("$id", sessionId.ToString("D")))!);
+        var objectiveId = Guid.CreateVersion7();
+        store.CreateObjectiveEvaluation(new(
+            objectiveId,
+            sessionId,
+            runId,
+            traceId,
+            ObjectiveResult.Pass,
+            ObjectiveSeverity.Normal,
+            "eval",
+            "v1",
+            "criterion",
+            "case",
+            [new("event", eventId.ToString("D"))],
+            recordedAt));
+        return (objectiveId, eventId, runId);
     }
 
     private static void Execute(SqliteConnection connection, string sql, params (string Name, object? Value)[] values)

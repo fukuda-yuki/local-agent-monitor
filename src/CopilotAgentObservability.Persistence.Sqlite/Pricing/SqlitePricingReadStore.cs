@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
@@ -471,12 +472,14 @@ public sealed partial class SqlitePricingReadStore
             using var command = Command(
                 connection,
                 transaction,
-                """
-                SELECT session_id,last_seen_at FROM sessions
-                WHERE status IN ('completed','failed')
-                  AND ($last_seen IS NULL OR last_seen_at>$last_seen
-                    OR (last_seen_at=$last_seen AND session_id>$last_session))
-                ORDER BY last_seen_at,session_id LIMIT 256;
+                SessionCurrentUseEligibilitySqlV1.EligibleSessionIdsCte + """
+                SELECT session.session_id,session.last_seen_at
+                FROM sessions session
+                JOIN current_session_use_eligibility eligible
+                  ON eligible.session_id=session.session_id
+                WHERE ($last_seen IS NULL OR session.last_seen_at>$last_seen
+                    OR (session.last_seen_at=$last_seen AND session.session_id>$last_session))
+                ORDER BY session.last_seen_at,session.session_id LIMIT 256;
                 """,
                 ("$last_seen", (object?)lastSeen ?? DBNull.Value),
                 ("$last_session", (object?)lastSessionId ?? DBNull.Value));
@@ -897,6 +900,12 @@ public sealed partial class SqlitePricingReadStore
         string sessionId,
         string runId)
     {
+        if (!SessionCurrentUseEligibilitySqlV1.Contains(
+                connection,
+                transaction,
+                Guid.Parse(sessionId)))
+            return false;
+
         string capturedStatus;
         string capturedEffective;
         string capturedUpdated;

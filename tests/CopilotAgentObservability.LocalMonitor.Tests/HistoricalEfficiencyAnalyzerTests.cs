@@ -490,11 +490,24 @@ public sealed class HistoricalEfficiencyAnalysisTests
                     "owner/repository", null, now, now.AddSeconds(1), now.AddSeconds(1), SessionRawRetentionState.NotCaptured,
                     now, now);
                 var spanIds = new[] { chatSpanId, failedSpanId, recoveredSpanId };
-                var events = spanIds.Select((spanId, index) => new ObservedSessionEvent(
+                var otelEvents = spanIds.Select((spanId, index) => new ObservedSessionEvent(
                     Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, traceId, "ok",
                     "claude-code-otel", $"{traceId}/{spanId}", "otel.span", now.AddTicks(index),
                     SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative)).ToArray();
-                sessionStore.Write(new(new(session, [], [], events), []));
+                var lifecycleTypes = new[] { "SessionStart", "UserPromptSubmit", "SessionEnd" };
+                var lifecycleEvents = lifecycleTypes.Select((type, index) => new ObservedSessionEvent(
+                    Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null, null, null,
+                    "claude-code-hook", $"issue72-lifecycle-{index}", type,
+                    index == lifecycleTypes.Length - 1 ? now.AddSeconds(1) : now.AddTicks(index),
+                    SessionContentState.NotCaptured)).ToArray();
+                ((IClassifiedSessionStore)sessionStore).WriteClassified(
+                    new SessionWriteBatch(
+                        new SessionDetail(session,
+                            [new SessionNativeId(sessionId, SessionSourceSurface.ClaudeCode, traceId, SessionBindingKind.Native, now)],
+                            [],
+                            [.. lifecycleEvents, .. otelEvents]),
+                        []),
+                    [new SessionTerminalFact(lifecycleEvents[^1].EventId, SessionTerminalOutcome.Clean)]);
                 InsertPersistedHandoffSpans(source.DatabasePath, traceId, chatSpanId, failedSpanId, recoveredSpanId);
 
                 produced = await app.Services.GetRequiredService<HistoricalEvidenceApplicationServiceV1>()

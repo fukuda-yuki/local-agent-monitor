@@ -163,8 +163,8 @@ public sealed class RetentionLifecycleIntegrationTests
         var lateWritePhases = new List<string>();
         var sessionStore = new SqliteSessionStore(fixture.Path, reopenedContext, fixture.Time, lateWritePhases.Add);
         var lateReplay = CreateLateSessionReplay(sessionStore, Guid.Parse(fixture.SessionId), fixture.Time.GetUtcNow());
-        Assert.Throws<RetentionMigrationBlockedException>(() => sessionStore.Write(lateReplay));
-        Assert.Equal(["before-session-write", "after-session-content-source"], lateWritePhases);
+        sessionStore.Write(lateReplay);
+        Assert.Equal(["before-session-write"], lateWritePhases);
         Assert.Equal(durableBeforeLateWrite, DurableSessionSnapshot(fixture));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM session_event_content;"));
         Assert.All(fixture.ItemIds, item =>

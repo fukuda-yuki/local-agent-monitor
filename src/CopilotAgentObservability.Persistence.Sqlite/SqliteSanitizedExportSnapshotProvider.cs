@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.InstructionFindings;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.SanitizedExport;
 using Microsoft.Data.Sqlite;
 
@@ -34,7 +35,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
     [
         "event_id", "session_id", "run_id", "source_surface", "parent_event_id", "trace_id", "status", "source_adapter",
         "source_event_id", "type", "occurred_at", "content_state", "source_application_version", "adapter_version",
-        "schema_fingerprint", "normalization_version", "match_kind",
+        "schema_fingerprint", "normalization_version", "match_kind", "terminal_outcome", "terminal_policy_version",
     ];
     private static readonly string[] FindingColumns = ["analysis_run_id", "schema_version", "payload_json", "payload_sha256", "created_at"];
     private readonly string databasePath;
@@ -94,7 +95,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
             var processingVersions = new SortedDictionary<string, string>(StringComparer.Ordinal)
             {
                 ["monitor_schema"] = MonitorSchemaMigrator.BaseSchemaVersion.ToString(CultureInfo.InvariantCulture),
-                ["session_schema"] = "13",
+                ["session_schema"] = "14",
                 ["sanitized_export"] = "1",
             };
             if (alertState == OptionalState.Valid)
@@ -113,7 +114,7 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
             return Failure("snapshot_store_busy");
         }
         catch (Exception exception) when (exception is SqliteException or IOException or UnauthorizedAccessException
-            or InvalidOperationException or FormatException or OverflowException or JsonException
+            or InvalidOperationException or InvalidCastException or FormatException or OverflowException or JsonException
             or AlertReceiptConsumerException or InstructionFindingHandoffConsumerValidationException)
         {
             return Failure("snapshot_store_unavailable");
@@ -144,7 +145,8 @@ public sealed class SqliteSanitizedExportSnapshotProvider : ISanitizedExportSnap
 
     private static bool ValidateRequiredSchemas(SqliteConnection connection, SqliteTransaction transaction) =>
         Version(connection, transaction, "monitor") == MonitorSchemaMigrator.BaseSchemaVersion
-        && Version(connection, transaction, "session") == 13
+        && Version(connection, transaction, "session") == 14
+        && SqliteSessionStore.IsCurrentSchemaValid(connection, transaction)
         && ExactColumns(connection, transaction, "monitor_traces", MonitorTraceColumns)
         && ExactColumns(connection, transaction, "sessions", SessionColumns)
         && ExactColumns(connection, transaction, "session_runs", SessionRunColumns)

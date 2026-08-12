@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
@@ -230,16 +231,39 @@ public sealed class RetentionCatalogMigrationFixtureTests
 
     private static CatalogSnapshot InitializeThroughProductionMonitorStore(string path, IReadOnlyList<string> sourceRows, IReadOnlyList<ExpectedCatalogRow> expectedCatalog, SourceDataSnapshot originalSourceDataSnapshot, out string sourceSnapshot)
     {
+        var sessionIdsBefore = ReadColumn(path, "sessions", "session_id");
+        var eventIdsBefore = ReadColumn(path, "session_events", "event_id");
         var context = File.Exists(path) && TableExists(path, "retention_component_versions")
             ? RetentionCatalogContext.AdoptExistingCatalogV1(path)
             : RetentionCatalogContext.InitializeNewOwnedDatabase(path);
         var store = new RawTelemetryStore(path, context);
         Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
         store.CreateMonitorSchema();
+        // D079 clause D replacement guarantee for the tables excluded from the digest:
+        // the mandated recompute preserves session/event identity and leaves every
+        // session row consistent with the deterministic outcome reducer at schema v14.
+        Assert.Equal(sessionIdsBefore, ReadColumn(path, "sessions", "session_id"));
+        Assert.Equal(eventIdsBefore, ReadColumn(path, "session_events", "event_id"));
+        AssertSessionRowsReducedToCurrentSchema(path);
         sourceSnapshot = CaptureNonRetentionSourceSnapshot(path);
         var migrated = AssertMigrated(path, sourceRows, expectedCatalog);
         Assert.Equal(originalSourceDataSnapshot.Digest, CapturePreexistingSourceDataSnapshot(path, originalSourceDataSnapshot.Tables));
         return migrated;
+    }
+
+    private static IReadOnlyList<string> ReadColumn(string path, string table, string column)
+    {
+        if (!TableExists(path, table)) return [];
+        using var connection = Open(path);
+        return ReadRows(connection, $"SELECT {QuoteIdentifier(column)} FROM {QuoteIdentifier(table)} ORDER BY {QuoteIdentifier(column)};");
+    }
+
+    private static void AssertSessionRowsReducedToCurrentSchema(string path)
+    {
+        if (!TableExists(path, "sessions")) return;
+        Assert.Equal(14L, Scalar<long>(path, "SELECT version FROM schema_version WHERE component='session';"));
+        using var connection = Open(path);
+        Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, null));
     }
 
     private static CatalogSnapshot AssertMigrated(string path, IReadOnlyList<string> sourceRows, IReadOnlyList<ExpectedCatalogRow> expectedCatalog)
@@ -360,7 +384,13 @@ public sealed class RetentionCatalogMigrationFixtureTests
     {
         using var connection = Open(path);
         using var tables = connection.CreateCommand();
-        tables.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' AND name <> 'schema_version' ORDER BY name;";
+        // D079 clause D: the v13→v14 session migration run during catalog initialization
+        // is mandated to re-derive session outcome state — it rebuilds session_events with
+        // the two terminal columns (backfilling terminal facts) and recomputes every
+        // session's status/completeness/ended_at. Those tables are the migration's output,
+        // not immutable source data, so the byte-identity digest covers every other table
+        // while session identity and post-recompute consistency are asserted separately.
+        tables.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'retention_%' AND name <> 'schema_version' AND name <> 'sessions' AND name <> 'session_events' ORDER BY name;";
         using var tableReader = tables.ExecuteReader();
         var tableColumns = new List<SourceTableShape>();
         while (tableReader.Read())

@@ -338,12 +338,25 @@ internal sealed class LocalRepositoryCatalogFixture : IDisposable
     {
         var runId = NextUuid(default);
         var eventId = NextUuid(default);
+        var startEventId = NextUuid(default);
+        var instructionEventId = NextUuid(default);
+        var terminalEventId = NextUuid(default);
         sessionEvents.Add(sessionId, eventId);
         Execute($"""
-            INSERT INTO sessions(session_id,status,completeness,last_seen_at,raw_retention_state,created_at,updated_at) VALUES('{sessionId}','completed','full','{At}','not_captured','{At}','{At}');
-            INSERT INTO session_runs(run_id,session_id,source_surface,status) VALUES('{runId}','{sessionId}','vscode','completed');
+            INSERT INTO sessions(session_id,status,completeness,started_at,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+            VALUES('{sessionId}','completed','full','{At}','{At}','{At}','not_captured','{At}','{At}');
+            INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
+            VALUES('{sessionId}','copilot-sdk','native-{sessionId}','native','{At}');
+            INSERT INTO session_runs(run_id,session_id,source_surface,started_at,ended_at,status)
+            VALUES('{runId}','{sessionId}','copilot-sdk','{At}','{At}','completed');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version)
+            VALUES('{startEventId}','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{startEventId}','session.start','{At}','not_captured','1.2.3');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version)
+            VALUES('{instructionEventId}','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{instructionEventId}','user.message','{At}','not_captured','1.2.3');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version)
             VALUES('{eventId}','{sessionId}','{runId}','vscode','otel-exact','11111111111111111111111111111111/2222222222222222','otel.span','{At}','not_captured','1.2.3');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,source_application_version,terminal_outcome,terminal_policy_version)
+            VALUES('{terminalEventId}','{sessionId}','{runId}','copilot-sdk','copilot-sdk-stream','{terminalEventId}','session.task_complete','{At}','not_captured','1.2.3','clean',1);
             """);
     }
 

@@ -56,7 +56,7 @@ public sealed class RetentionCatalogStoreTests
         {
             new RetentionCatalogStore(path).CreateSchema();
 
-            Assert.Equal(13L, Scalar<long>(path, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(14L, Scalar<long>(path, "SELECT version FROM schema_version WHERE component='session';"));
             var sql = Scalar<string>(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_event_content';");
             Assert.Contains("retention_owner_token BLOB NOT NULL", sql, StringComparison.Ordinal);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM session_event_content WHERE typeof(retention_owner_token) <> 'blob' OR length(retention_owner_token) <> 32;"));

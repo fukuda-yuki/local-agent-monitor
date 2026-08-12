@@ -137,7 +137,7 @@ internal static class LocalRepositoryCatalogSchemaV1
         command.Transaction = transaction;
         command.CommandText = "SELECT version,typeof(version) FROM schema_version WHERE component='session';";
         using var reader = command.ExecuteReader();
-        if (!reader.Read() || reader.GetString(1) != "integer" || reader.GetInt64(0) != 13 || reader.Read())
+        if (!reader.Read() || reader.GetString(1) != "integer" || reader.GetInt64(0) != 14 || reader.Read())
             throw new InvalidOperationException("local_repository_catalog_component_dependency_invalid");
     }
 

@@ -32,6 +32,63 @@ public sealed class RuntimeBackupPricingCompatibilityTests
     }
 
     [Fact]
+    public void Exact_legacy_session_13_pricing_parent_is_admitted_for_session_first_migration()
+    {
+        using var database = new PricingBackupDatabase();
+        database.CreateCore(alertVersion: 2);
+        database.EnsureRuntimeBackupAndPricing();
+        using (var connection = database.Open())
+            SessionVersion13TestFixture.DowngradeSessionEvents(connection);
+        database.Checkpoint();
+        var before = File.ReadAllBytes(database.Path);
+
+        var result = new SqliteRuntimeBackupService(database.Clock)
+            .PreflightForMigration(database.Path);
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Equal(13, result.ComponentVersions!["session"]);
+        Assert.Contains("session:13->14", result.MigrationSteps!);
+        Assert.DoesNotContain(result.MigrationSteps!, step =>
+            step.StartsWith("pricing:", StringComparison.Ordinal));
+        Assert.Equal(before, File.ReadAllBytes(database.Path));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    public void Pricing_parent_rejects_every_pre_13_session_stamp_without_mutation(int version)
+    {
+        using var database = new PricingBackupDatabase();
+        database.CreateCore(alertVersion: 2);
+        database.EnsureRuntimeBackupAndPricing();
+        using (var connection = database.Open())
+        {
+            database.Execute(
+                connection,
+                $"UPDATE schema_version SET version={version} WHERE component='session';");
+            database.Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        var before = File.ReadAllBytes(database.Path);
+
+        var result = new SqliteRuntimeBackupService(database.Clock)
+            .PreflightForMigration(database.Path);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
+        Assert.Equal(before, File.ReadAllBytes(database.Path));
+    }
+
+    [Fact]
     public void P1_source_reports_alert_upgrade_then_fixed_runtime_backup_pricing_tail()
     {
         using var database = new PricingBackupDatabase();

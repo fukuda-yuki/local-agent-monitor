@@ -471,7 +471,8 @@ public sealed class ProposalApplyServiceTests
 
         var apply = Task.Run(() => service.ApplyWithId(approved.DraftId));
         Assert.True(authorized.Wait(TimeSpan.FromSeconds(10)), "Apply did not reach the authorized barrier.");
-        Assert.Throws<InvalidOperationException>(() => store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(1)));
+        var blocked = Assert.Throws<ImprovementProposalStoreException>(() => store.UpdateImprovementProposalStatus(proposalId, ImprovementProposalStatus.Candidate, DateTimeOffset.UnixEpoch.AddMinutes(1)));
+        Assert.Equal(ImprovementProposalFailure.InvalidStatus, blocked.Failure);
         Assert.Equal(1, store.GetImprovementProposal(proposalId)!.Revision);
         Assert.Equal(ImprovementProposalStatus.Recommended, store.GetImprovementProposal(proposalId)!.Status);
 
@@ -606,10 +607,14 @@ public sealed class ProposalApplyServiceTests
             VALUES($id,'completed','full',NULL,NULL,$started,$ended,$ended,'not_captured',$started,$ended);
             INSERT INTO session_native_ids(session_id,source_surface,native_session_id,binding_kind,observed_at)
             VALUES($id,'copilot-sdk',$native,'native',$started);
+            INSERT INTO session_events(event_id,session_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state,terminal_outcome,terminal_policy_version)
+            VALUES($terminal_event,$id,'copilot-sdk','copilot-sdk-stream',$terminal_source,'session.task_complete',$ended,'not_captured','clean',1);
             INSERT INTO session_human_evaluation(session_id,verdict,recorded_at) VALUES($id,'expected',$ended);
             """;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         command.Parameters.AddWithValue("$native", "race-" + id.ToString("N"));
+        command.Parameters.AddWithValue("$terminal_event", Guid.CreateVersion7().ToString("D"));
+        command.Parameters.AddWithValue("$terminal_source", "complete-" + id.ToString("N"));
         command.Parameters.AddWithValue("$started", started.ToString("O")); command.Parameters.AddWithValue("$ended", ended.ToString("O"));
         command.ExecuteNonQuery();
         return id;

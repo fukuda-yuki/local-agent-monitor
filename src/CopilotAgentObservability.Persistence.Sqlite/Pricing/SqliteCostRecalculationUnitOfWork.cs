@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using CopilotAgentObservability.Alerts;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
@@ -676,6 +677,14 @@ public sealed partial class SqlitePricingStore
 
         foreach (var target in targets)
         {
+            if (!SessionCurrentUseEligibilitySqlV1.Contains(
+                    connection,
+                    transaction,
+                    Guid.Parse(target.SessionId)))
+                return new(
+                    PricingCompletionSnapshotStatus.StaleRecalculationInput,
+                    target.TargetOrdinal);
+
             using (var session = Command(
                 connection,
                 transaction,
@@ -897,7 +906,10 @@ public sealed partial class SqlitePricingStore
             foreach (var sessionId in request.SessionIds)
             {
                 var session = sessions[sessionId];
-                if (session.Status is not ("completed" or "failed"))
+                if (!SessionCurrentUseEligibilitySqlV1.Contains(
+                        connection,
+                        transaction,
+                        Guid.Parse(sessionId)))
                     return Rollback<string>(
                         transaction,
                         PricingStoreStatus.Conflict,
@@ -1126,13 +1138,10 @@ public sealed partial class SqlitePricingStore
         foreach (var scope in request.BudgetScopes.Where(item =>
                      item.ScopeKind == "session"))
         {
-            using var status = Command(
-                connection,
-                transaction,
-                "SELECT status FROM sessions WHERE session_id=$session;",
-                ("$session", scope.SessionId!));
-            if (status.ExecuteScalar() is not string sessionStatus
-                || sessionStatus is not ("completed" or "failed"))
+            if (!SessionCurrentUseEligibilitySqlV1.Contains(
+                    connection,
+                    transaction,
+                    Guid.Parse(scope.SessionId!)))
                 return false;
 
             var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
@@ -1153,18 +1162,19 @@ public sealed partial class SqlitePricingStore
         SqliteTransaction transaction,
         CostBudgetScopeV1 scope)
     {
-        const string select =
-            """
-            SELECT session_id
-            FROM sessions
-            WHERE status IN ('completed','failed')
+        var select = SessionCurrentUseEligibilitySqlV1.EligibleSessionIdsCte + """
+            SELECT session.session_id
+            FROM sessions session
+            JOIN current_session_use_eligibility eligible
+              ON eligible.session_id=session.session_id
+            WHERE 1=1
             """;
         return scope.ScopeKind switch
         {
             "session" => Command(
                 connection,
                 transaction,
-                select + " AND session_id=$session ORDER BY last_seen_at,session_id;",
+                select + " AND session.session_id=$session ORDER BY session.last_seen_at,session.session_id;",
                 ("$session", scope.SessionId!)),
             "utc_day" => BudgetAdmissionWindow(
                 connection,
@@ -1191,8 +1201,8 @@ public sealed partial class SqlitePricingStore
             connection,
             transaction,
             select
-                + " AND last_seen_at >= $start AND last_seen_at < $end"
-                + " ORDER BY last_seen_at,session_id;",
+                + " AND session.last_seen_at >= $start AND session.last_seen_at < $end"
+                + " ORDER BY session.last_seen_at,session.session_id;",
             ("$start", Format(window.Start)),
             ("$end", Format(window.End)));
 

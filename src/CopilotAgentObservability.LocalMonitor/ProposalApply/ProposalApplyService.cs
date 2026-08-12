@@ -36,10 +36,48 @@ internal sealed class ProposalApplyService
     {
         lock (sync)
         {
+            if (receipt.VerificationState != "active") return receipt;
             return TryGetCurrentApplicationUnsafe(receipt.ProposalId, receipt.ApplyId, out var application)
                 && application.ProposalRevision == receipt.ProposalRevision
                 ? receipt
                 : receipt with { VerificationState = "invalidated" };
+        }
+    }
+
+    public bool TryGetEffectCandidateSnapshot(
+        Guid proposalId,
+        Guid applyId,
+        int limit,
+        out EffectCandidateSnapshot snapshot)
+    {
+        lock (sync)
+        {
+            if (store is not IEffectCurrentUseStore currentUseStore)
+            {
+                snapshot = default!;
+                return false;
+            }
+
+            snapshot = currentUseStore.ReadEffectCandidateSnapshot(proposalId, applyId, limit);
+            return snapshot.Application is { } application
+                && IsCurrentEffectApplication(application);
+        }
+    }
+
+    public EffectComparisonDetail? GetEffectComparison(Guid comparisonId)
+    {
+        lock (sync)
+        {
+            if (store is not IEffectCurrentUseStore currentUseStore) return null;
+            var snapshot = currentUseStore.ReadEffectComparisonSnapshot(comparisonId);
+            if (snapshot is null) return null;
+            if (snapshot.Detail.Receipt.VerificationState != "active") return snapshot.Detail;
+            return snapshot.Application is { } application && IsCurrentEffectApplication(application)
+                ? snapshot.Detail
+                : snapshot.Detail with
+                {
+                    Receipt = snapshot.Detail.Receipt with { VerificationState = "invalidated" },
+                };
         }
     }
 
@@ -235,6 +273,26 @@ internal sealed class ProposalApplyService
         receipt = store!.ListApplicationReceipts(proposalId).SingleOrDefault(item => item.ApplyId == applyId)!;
         return receipt is not null && receipt.ProposalId == proposalId && CurrentReceiptState(receipt) == "active";
     }
+
+    private bool IsCurrentEffectApplication(EffectCurrentApplicationSnapshot application)
+    {
+        var receipt = application.Receipt;
+        if (receipt.State != "applied" || receipt.CurrentState != "active") return false;
+        var root = Roots.SingleOrDefault(item => item.RootId == application.ImmutableMetadata.Draft.RootId);
+        if (root is null || !Directory.Exists(root.CanonicalPath)) return false;
+        var draft = ReadReceiptDraft(receipt.DraftId);
+        if (draft is null || !MatchesImmutableReceipt(draft, receipt, application.ImmutableMetadata)) return false;
+        try
+        {
+            return draft.Files.All(file => string.Equals(
+                LineDiff.Sha256(File.ReadAllText(ApplyPathPolicy.Resolve(root, file.RelativePath).FullPath)),
+                file.ReplacementSha256,
+                StringComparison.Ordinal));
+        }
+        catch (ApplyPathException) { return false; }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
     private ProposalApplyDraft? ReadReceiptDraft(Guid draftId)
     {
         try { return JsonSerializer.Deserialize<ProposalApplyDraft>(File.ReadAllText(Path.Combine(draftPath, draftId.ToString("N") + ".json"))); }
@@ -243,9 +301,20 @@ internal sealed class ProposalApplyService
     private bool MatchesImmutableReceipt(ProposalApplyDraft draft, ProposalApplicationReceipt receipt)
     {
         var immutable = store!.GetProposalApplyImmutableMetadata(receipt.DraftId);
-        if (immutable is null || draft.DraftId != receipt.DraftId || draft.ProposalId != receipt.ProposalId || draft.ProposalRevision != receipt.ProposalRevision || draft.SelectionRevision != receipt.SelectionRevision || draft.Files.Count != receipt.FileCount) return false;
+        return immutable is not null && MatchesImmutableReceipt(draft, receipt, immutable);
+    }
+
+    private static bool MatchesImmutableReceipt(
+        ProposalApplyDraft draft,
+        ProposalApplicationReceipt receipt,
+        ProposalApplyImmutableMetadata immutable)
+    {
+        if (draft.DraftId != receipt.DraftId || draft.ProposalId != receipt.ProposalId || draft.ProposalRevision != receipt.ProposalRevision || draft.SelectionRevision != receipt.SelectionRevision || draft.Files.Count != receipt.FileCount) return false;
         if (immutable.Draft.ProposalId != draft.ProposalId || immutable.Draft.ProposalRevision != draft.ProposalRevision || immutable.Draft.RootId != draft.RootId || immutable.Draft.SelectionRevision != draft.SelectionRevision || immutable.Draft.FileCount != draft.Files.Count || immutable.Draft.ApprovalDigest != draft.ApprovalDigest || immutable.Revision.ApprovedAt is null) return false;
+        if (immutable.Revision.SelectionRevision != draft.SelectionRevision || immutable.Revision.ApprovalDigest != draft.ApprovalDigest) return false;
         if (!draft.Files.Select(file => (file.BaseSha256, file.ReplacementSha256)).SequenceEqual(immutable.Files)) return false;
+        var hunks = draft.Hunks.Select(hunk => (hunk.HunkId, hunk.Selected, LineDiff.Sha256(hunk.ReplacementText))).OrderBy(hunk => hunk.HunkId, StringComparer.Ordinal).ToArray();
+        if (!hunks.SequenceEqual(immutable.Hunks)) return false;
         return Digest(draft.DraftId, draft.ProposalId, draft.ProposalRevision, draft.RootId, draft.Files, draft.Hunks, draft.SelectionRevision) == draft.ApprovalDigest;
     }
     private static IReadOnlyList<ApplyTarget> RebuildFiles(IReadOnlyList<ApplyTarget> files, IReadOnlyList<ApplyHunk> hunks) => files.Select(file => { var replacement = LineDiff.Replay(file.OriginalText, hunks.Where(h => h.Selected && h.RelativePath == file.RelativePath)); return file with { ReplacementText = replacement, ReplacementSha256 = LineDiff.Sha256(replacement) }; }).Where(file => !string.Equals(file.OriginalText, file.ReplacementText, StringComparison.Ordinal)).ToArray();

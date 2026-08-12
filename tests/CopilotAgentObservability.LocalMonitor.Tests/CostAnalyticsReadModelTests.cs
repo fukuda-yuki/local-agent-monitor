@@ -63,6 +63,33 @@ public sealed class CostAnalyticsReadModelTests
     }
 
     [Fact]
+    public void ReadAnalytics_excludes_core_ineligible_sessions_from_membership_and_denominator()
+    {
+        using var database = new AnalyticsDatabase();
+        var catalog = PricingCatalog.Create(BundledPricingRegistry.Load());
+        var catalogBytes = PricingCanonicalJson.SerializeCatalogSnapshot(catalog);
+        var store = database.CreatePricingStore();
+        Assert.Equal(
+            PricingStoreStatus.Success,
+            store.PutCatalogSnapshot(catalogBytes).Status);
+        database.CommitConfiguration(store, catalog, catalogBytes);
+        database.InsertResolvedSession("eligible", "workspace");
+        database.InsertResolvedSession("no-fact", "workspace", hasTerminalFact: false);
+        database.InsertResolvedSession("non-full", "workspace", completeness: "rich");
+
+        var result = new SqlitePricingReadStore(database.Path)
+            .ReadAnalytics(Query(limit: 50), catalogBytes);
+
+        Assert.Equal(PricingReadStatus.Success, result.Status);
+        Assert.Equal(1, result.Value!.EligibleSessionCount);
+        Assert.Equal(1, result.Value.Overall!.EligibleSessionCount);
+        Assert.Equal(1, result.Value.Overall.MissingSessionCount);
+        Assert.Equal(0, result.Value.Overall.StaleSessionCount);
+        Assert.Equal(0, result.Value.Overall.CoverageBasisPoints);
+        Assert.Single(result.Value.Groups);
+    }
+
+    [Fact]
     public void ReadAnalytics_rejects_query_and_cursor_before_opening_the_database()
     {
         var store = new SqlitePricingReadStore(
@@ -489,7 +516,11 @@ public sealed class CostAnalyticsReadModelTests
                     []).Status);
         }
 
-        internal string InsertResolvedSession(string repository, string workspace)
+        internal string InsertResolvedSession(
+            string repository,
+            string workspace,
+            string completeness = "full",
+            bool hasTerminalFact = true)
         {
             var sessionId = Guid.NewGuid().ToString("D");
             using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -504,7 +535,7 @@ public sealed class CostAnalyticsReadModelTests
                 INSERT INTO sessions(
                     session_id,status,completeness,repository,workspace,last_seen_at,
                     raw_retention_state,created_at,updated_at)
-                VALUES($id,'completed','full',$repository,$workspace,
+                VALUES($id,'completed',$completeness,$repository,$workspace,
                     '2026-07-01T01:00:00.0000000+00:00','not_captured',
                     '2026-07-01T01:00:00.0000000+00:00',
                     '2026-07-01T02:00:00.0000000+00:00');
@@ -512,16 +543,21 @@ public sealed class CostAnalyticsReadModelTests
                 VALUES($run,$id,'vscode','completed');
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
-                VALUES($event,$id,$run,'vscode','synthetic',$source,'turn',
-                    '2026-07-01T01:00:00.0000000+00:00','not_captured','1.2.3');
+                    type,occurred_at,content_state,source_application_version,
+                    terminal_outcome,terminal_policy_version)
+                VALUES($event,$id,$run,'vscode','copilot-compatible-hook',$source,'SessionEnd',
+                    '2026-07-01T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    $terminal_outcome,$terminal_policy_version);
                 """;
             command.Parameters.AddWithValue("$id", sessionId);
             command.Parameters.AddWithValue("$repository", repository);
             command.Parameters.AddWithValue("$workspace", workspace);
+            command.Parameters.AddWithValue("$completeness", completeness);
             command.Parameters.AddWithValue("$run", "run-" + sessionId);
             command.Parameters.AddWithValue("$event", "event-" + sessionId);
             command.Parameters.AddWithValue("$source", "source-" + sessionId);
+            command.Parameters.AddWithValue("$terminal_outcome", hasTerminalFact ? "clean" : DBNull.Value);
+            command.Parameters.AddWithValue("$terminal_policy_version", hasTerminalFact ? 1 : DBNull.Value);
             command.ExecuteNonQuery();
             return sessionId;
         }

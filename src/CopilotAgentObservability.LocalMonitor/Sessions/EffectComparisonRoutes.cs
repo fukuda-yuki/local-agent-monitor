@@ -12,8 +12,9 @@ internal static class EffectComparisonRoutes
             context.Response.Headers.CacheControl = "no-store";
             if (!SessionRoutes.TryUuidV7(context.Request.Query["proposal_id"].ToString(), out var proposalId)
                 || !SessionRoutes.TryUuidV7(context.Request.Query["apply_id"].ToString(), out var applyId)) { await SessionRoutes.Failure(context, 400, "invalid_comparison_request"); return; }
-            if (!applies.TryGetCurrentApplication(proposalId, applyId, out var application)) { await SessionRoutes.Failure(context, 400, "application_not_active"); return; }
-            var items = store.ListMostRecent(200).Select(session => Candidate(store, session, application.AppliedAt));
+            if (!applies.TryGetEffectCandidateSnapshot(proposalId, applyId, 200, out var snapshot)) { await SessionRoutes.Failure(context, 400, "application_not_active"); return; }
+            var application = snapshot.Application!.Receipt;
+            var items = snapshot.Sessions.Select(session => Candidate(session, application.AppliedAt));
             await SessionRoutes.Json(context, new { proposal_id = proposalId, apply_id = applyId, proposal_revision = application.ProposalRevision, items });
         });
 
@@ -43,27 +44,25 @@ internal static class EffectComparisonRoutes
         {
             context.Response.Headers.CacheControl = "no-store";
             if (!SessionRoutes.TryUuidV7(comparisonId, out var id)) { await SessionRoutes.Failure(context, 400, "invalid_comparison_request"); return; }
-            var detail = store.GetEffectComparison(id);
+            var detail = applies.GetEffectComparison(id);
             if (detail is null) { await SessionRoutes.Failure(context, 404, "comparison_not_found"); return; }
-            await SessionRoutes.Json(context, Detail(detail with { Receipt = applies.ProjectEffectReceipt(detail.Receipt) }));
+            await SessionRoutes.Json(context, Detail(detail));
         });
     }
 
-    private static object Candidate(ISessionStore store, ObservedSession session, DateTimeOffset appliedAt)
+    private static object Candidate(EffectCandidateSessionSnapshot candidate, DateTimeOffset appliedAt)
     {
-        var exact = store.GetDetail(session.SessionId)?.NativeIds.Any(item => item.BindingKind == SessionBindingKind.Native) == true;
-        var terminal = session.Status is ObservedSessionStatus.Completed or ObservedSessionStatus.Failed;
-        var full = session.Completeness == SessionCompleteness.Full;
-        var pre = session.EndedAt is not null && session.EndedAt <= appliedAt;
-        var post = session.StartedAt is not null && session.StartedAt >= appliedAt;
+        var session = candidate.Session;
+        var pre = candidate.CurrentEligible && session.EndedAt is not null && session.EndedAt <= appliedAt;
+        var post = candidate.CurrentEligible && session.StartedAt is not null && session.StartedAt >= appliedAt;
         var boundary = pre ? "pre" : post ? "post" : "not_eligible";
-        var evidence = store.GetHumanEvaluation(session.SessionId) is not null || store.ListObjectiveEvaluations(session.SessionId).Count > 0;
+        var evidence = candidate.CurrentEligible && candidate.EvidenceAvailable;
         var reasons = new List<string>();
-        if (!exact) reasons.Add("not_exact_bound");
-        if (!terminal || !full) reasons.Add("not_comparable");
-        if (!evidence) reasons.Add("missing_evidence");
-        if (boundary == "not_eligible") reasons.Add("overlaps_application");
-        return new { session_id = session.SessionId, status = SessionWire.ToWire(session.Status), completeness = SessionWire.ToWire(session.Completeness), started_at = session.StartedAt, ended_at = session.EndedAt, exact_bound = exact, evidence_available = evidence, boundary_eligibility = boundary, suggestion_reasons = reasons };
+        if (!candidate.ExactBound) reasons.Add("not_exact_bound");
+        if (!candidate.CurrentEligible) reasons.Add("not_comparable");
+        if (!candidate.EvidenceAvailable) reasons.Add("missing_evidence");
+        if (candidate.CurrentEligible && boundary == "not_eligible") reasons.Add("overlaps_application");
+        return new { session_id = session.SessionId, status = SessionWire.ToWire(session.Status), completeness = SessionWire.ToWire(session.Completeness), started_at = session.StartedAt, ended_at = session.EndedAt, exact_bound = candidate.ExactBound, evidence_available = evidence, boundary_eligibility = boundary, suggestion_reasons = reasons };
     }
 
     private static object Receipt(EffectReceipt receipt) => new { comparison_id = receipt.ComparisonId, cohort_revision = receipt.CohortRevision, proposal_id = receipt.ProposalId, proposal_revision = receipt.ProposalRevision, apply_id = receipt.ApplyId, verdict = Verdict(receipt.Result.Verdict), verification_state = receipt.VerificationState, recorded_at = receipt.RecordedAt };

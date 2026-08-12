@@ -46,7 +46,7 @@ internal sealed class SessionEventNormalizer
             HasAllSurfaceRequiredEvidence: hasStart && hasInstruction && hasTerminal,
             HasUnsupportedVersion: hasUnsupported,
             HasIngestGap: !hasStart || hasGap));
-        var session = new ObservedSession(
+        var candidateSession = new ObservedSession(
             sessionId,
             hasTerminal ? ObservedSessionStatus.Completed : ObservedSessionStatus.Active,
             completeness,
@@ -73,13 +73,26 @@ internal sealed class SessionEventNormalizer
             .Where(item => string.Equals(item.SourceAdapter, envelope.SourceAdapter, StringComparison.Ordinal))
             .ToDictionary(item => item.SourceEventId, item => item.EventId, StringComparer.Ordinal);
         var existingSourceIds = knownEventIds.Keys.ToHashSet(StringComparer.Ordinal);
+        var hasNewDurableSourceIdentity = persistedInputEvents.Any(item => !existingSourceIds.Contains(item.SourceEventId!));
+        var session = existing is not null && !hasNewDurableSourceIdentity
+            ? existing.Session
+            : candidateSession;
         foreach (var item in persistedInputEvents)
         {
             knownEventIds.TryAdd(item.SourceEventId!, Guid.CreateVersion7());
         }
+        var callerEventIds = new Guid[persistedInputEvents.Length];
+        var usedCallerEventIds = new HashSet<Guid>();
+        for (var index = 0; index < persistedInputEvents.Length; index++)
+        {
+            var canonicalEventId = knownEventIds[persistedInputEvents[index].SourceEventId!];
+            callerEventIds[index] = usedCallerEventIds.Add(canonicalEventId)
+                ? canonicalEventId
+                : Guid.CreateVersion7();
+        }
 
-        var observedEvents = persistedInputEvents.Select(item => new ObservedSessionEvent(
-            knownEventIds[item.SourceEventId!],
+        var observedEvents = persistedInputEvents.Select((item, index) => new ObservedSessionEvent(
+            callerEventIds[index],
             sessionId,
             item.RunNativeId is not null && runsByNativeId.TryGetValue(item.RunNativeId, out var run) ? run.RunId : null,
             surface,
@@ -97,14 +110,43 @@ internal sealed class SessionEventNormalizer
             envelope.AdapterVersion,
             envelope.SchemaFingerprint,
             envelope.NormalizationVersion)).ToArray();
-        var contents = persistedInputEvents.Where(item => !existingSourceIds.Contains(item.SourceEventId!) && !IsUsage(item.Type!) && IsSupported(item.Type!)).Select(item => new SessionEventContent(
-            knownEventIds[item.SourceEventId!],
-            "application/json",
-            SessionSecretFilter.Filter(item.Type!, item.Payload),
-            now,
-            now.AddDays(90))).ToArray();
+        var terminalFacts = persistedInputEvents
+            .Select((item, index) => SessionTerminalPolicyV1.Classify(
+                callerEventIds[index], envelope.SourceAdapter!, surface, item.Type!, item.Payload))
+            .OfType<SessionTerminalFact>()
+            .ToArray();
+        var contentCandidates = persistedInputEvents
+            .Select((item, index) => new
+            {
+                Item = item,
+                EventId = callerEventIds[index],
+            })
+            .Where(candidate => !IsUsage(candidate.Item.Type!) && IsSupported(candidate.Item.Type!))
+            .Select(candidate => new
+            {
+                candidate.Item,
+                candidate.EventId,
+                ContentJson = SessionSecretFilter.Filter(candidate.Item.Type!, candidate.Item.Payload),
+            })
+            .ToArray();
+        var contents = contentCandidates
+            .Where(candidate => !existingSourceIds.Contains(candidate.Item.SourceEventId!))
+            .Select(candidate => new SessionEventContent(
+                candidate.EventId,
+                "application/json",
+                candidate.ContentJson,
+                now,
+                now.AddDays(90)))
+            .ToArray();
+        var replayContentCandidates = contentCandidates
+            .Where(candidate => existingSourceIds.Contains(candidate.Item.SourceEventId!))
+            .Select(candidate => new SessionReplayContentCandidate(
+                candidate.EventId,
+                "application/json",
+                candidate.ContentJson))
+            .ToArray();
 
-        store.Write(new SessionWriteBatch(
+        var batch = new SessionWriteBatch(
             new SessionDetail(
                 session,
                 [new SessionNativeId(
@@ -120,7 +162,11 @@ internal sealed class SessionEventNormalizer
                     lastSeen)],
                 runsByNativeId.Values.Where(run => existing?.Runs.All(old => old.RunId != run.RunId) ?? true).ToArray(),
                 observedEvents),
-            contents));
+            contents);
+        if (store is IClassifiedSessionStore classifiedStore)
+            classifiedStore.WriteClassified(batch, terminalFacts, replayContentCandidates);
+        else
+            store.Write(batch);
 
         var newUnsupportedCount = persistedInputEvents.Count(item => !IsSupported(item.Type!) && !existingSourceIds.Contains(item.SourceEventId!));
         if (newUnsupportedCount > 0)

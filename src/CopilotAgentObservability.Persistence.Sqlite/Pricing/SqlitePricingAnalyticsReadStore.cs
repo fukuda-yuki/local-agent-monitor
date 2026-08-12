@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using CopilotAgentObservability.Persistence.Sqlite.Costs;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Pricing;
 using Microsoft.Data.Sqlite;
 
@@ -121,14 +122,16 @@ public sealed partial class SqlitePricingReadStore
             using var command = Command(
                 connection,
                 transaction,
-                """
-                SELECT session_id,status,last_seen_at,updated_at,repository,workspace
-                FROM sessions
-                WHERE status IN ('completed','failed')
-                  AND last_seen_at >= $from AND last_seen_at < $to
-                  AND ($last_seen IS NULL OR last_seen_at>$last_seen
-                    OR (last_seen_at=$last_seen AND session_id>$last_session))
-                ORDER BY last_seen_at,session_id LIMIT 256;
+                SessionCurrentUseEligibilitySqlV1.EligibleSessionIdsCte + """
+                SELECT session.session_id,session.status,session.last_seen_at,
+                       session.updated_at,session.repository,session.workspace
+                FROM sessions session
+                JOIN current_session_use_eligibility eligible
+                  ON eligible.session_id=session.session_id
+                WHERE session.last_seen_at >= $from AND session.last_seen_at < $to
+                  AND ($last_seen IS NULL OR session.last_seen_at>$last_seen
+                    OR (session.last_seen_at=$last_seen AND session.session_id>$last_session))
+                ORDER BY session.last_seen_at,session.session_id LIMIT 256;
                 """,
                 ("$from", FormatAnalyticsTimestamp(query.From)),
                 ("$to", FormatAnalyticsTimestamp(query.To)),

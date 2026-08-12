@@ -161,7 +161,7 @@ public sealed class SessionObjectiveEvaluationRouteTests
         using var temp = new MonitorTempDirectory();
         var batch = CreateExactBatch();
         var errorEvent = batch.Detail.Events[0] with { Status = "error" };
-        batch = batch with { Detail = batch.Detail with { Events = [errorEvent] } };
+        batch = batch with { Detail = batch.Detail with { Events = [errorEvent, .. batch.Detail.Events.Skip(1)] } };
         var store = new SqliteSessionStore(temp.DatabasePath);
         store.CreateSchema();
         store.Write(batch);
@@ -171,7 +171,7 @@ public sealed class SessionObjectiveEvaluationRouteTests
     }
 
     [Fact]
-    public async Task Post_RejectsRealCrossSessionAndCrossRunEvidenceForEveryKind()
+    public async Task Post_RejectsCrossSessionEvidenceForEveryKindAndCrossRunScopedReferences()
     {
         using var temp = new MonitorTempDirectory();
         var first = CreateExactBatch();
@@ -200,8 +200,7 @@ public sealed class SessionObjectiveEvaluationRouteTests
         {
             Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"run\",\"reference_id\":\"" + first.Detail.Runs[0].RunId + "\"}]"),
             Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"event\",\"reference_id\":\"" + first.Detail.Events[0].EventId + "\"}]"),
-            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"trace\",\"reference_id\":\"trace-exact\"}]"),
-            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"}]")
+            Body(first, run: secondRun.RunId.ToString("D"), trace: secondRun.TraceId, evidence: "[{\"kind\":\"trace\",\"reference_id\":\"trace-exact\"}]")
         };
 
         foreach (var body in wrongSession.Concat(wrongRun))
@@ -210,6 +209,27 @@ public sealed class SessionObjectiveEvaluationRouteTests
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
             Assert.Equal("{\"error\":\"objective_evidence_not_exact\"}", await response.Content.ReadAsStringAsync());
         }
+    }
+
+    [Fact]
+    public async Task Post_AcceptsSessionScopedTerminalFactFromAnotherRun()
+    {
+        using var temp = new MonitorTempDirectory();
+        var batch = CreateExactBatch();
+        var selectedRun = batch.Detail.Runs[0] with { RunId = Guid.CreateVersion7(), TraceId = "trace-without-terminal" };
+        batch = batch with { Detail = batch.Detail with { Runs = [batch.Detail.Runs[0], selectedRun] } };
+        var store = new SqliteSessionStore(temp.DatabasePath);
+        store.CreateSchema();
+        store.Write(batch);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+
+        using var response = await host.Client.SendAsync(Request(Body(
+            batch,
+            run: selectedRun.RunId.ToString("D"),
+            trace: selectedRun.TraceId,
+            evidence: "[{\"kind\":\"gate\",\"reference_id\":\"terminal\"}]")));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     }
 
     [Fact]
@@ -351,9 +371,12 @@ public sealed class SessionObjectiveEvaluationRouteTests
     {
         var now = DateTimeOffset.Parse("2026-07-12T00:00:00Z");
         var session = new ObservedSession(Guid.CreateVersion7(), ObservedSessionStatus.Completed, SessionCompleteness.Full, null, null, now.AddMinutes(-1), now, now, SessionRawRetentionState.Expiring, now.AddMinutes(-1), now);
-        var native = new SessionNativeId(session.SessionId, SessionSourceSurface.CopilotSdk, "objective-native", SessionBindingKind.Native, now.AddMinutes(-1));
+        var native = new SessionNativeId(session.SessionId, SessionSourceSurface.CopilotSdk, "objective-native-" + session.SessionId.ToString("N"), SessionBindingKind.Native, now.AddMinutes(-1));
         var run = new ObservedSessionRun(Guid.CreateVersion7(), session.SessionId, null, null, "trace-exact", null, null, ObservedSessionStatus.Completed, now.AddMinutes(-1), now, null, null, null);
-        var @event = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, null, null, "trace-exact", null, "test", "event", "Stop", now, SessionContentState.NotCaptured);
-        return new(new(session, [native], [run], [@event]), []);
+        var terminal = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, "trace-exact", null, "copilot-sdk-stream", "complete-" + session.SessionId.ToString("N"), "session.task_complete", now, SessionContentState.NotCaptured);
+        var start = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, "trace-exact", null, "copilot-sdk-stream", "start-" + session.SessionId.ToString("N"), "session.start", now.AddMinutes(-1), SessionContentState.NotCaptured);
+        var instruction = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, "trace-exact", null, "copilot-sdk-stream", "message-" + session.SessionId.ToString("N"), "user.message", now.AddSeconds(-30), SessionContentState.NotCaptured);
+        var otel = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.ClaudeCode, null, "trace-exact", null, "claude-code-otel", "otel-" + session.SessionId.ToString("N"), "otel.span", now.AddSeconds(-15), SessionContentState.NotCaptured, MatchKind: SessionMatchKind.ExactNative);
+        return new(new(session, [native], [run], [terminal, start, instruction, otel]), []);
     }
 }

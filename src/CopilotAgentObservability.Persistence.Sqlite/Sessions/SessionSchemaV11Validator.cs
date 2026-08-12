@@ -21,6 +21,21 @@ internal static class SessionSchemaV11Validator
     private static readonly IReadOnlySet<string> CurrentV13ProfileFingerprintSet = new HashSet<string>(
         CurrentV13ProfileFingerprintValues,
         StringComparer.Ordinal);
+    private static readonly IReadOnlyList<string> CurrentV14LegacyProfileFingerprintValues = Array.AsReadOnly<string>(
+    [
+        "32702e2a9fc022d7b304c9d7022259de50ea4a03154d4f6b5b927e84843bb842",
+        "569a2b77a76c5c07bfb96acbfc739c8a678632391ddea16581ee50db7a87fad9",
+        "5e0467fa10c666a3ab960110cb331ad4c623cb54ed8a8bb6a5db512740ca8bf8",
+        "611e7f89b8beccb30a3f23a5e9eb7d6bd50555508d6b59fe780a36e5d57a8b3e",
+        "780c2fa7f659dfe2de5605682910eaf84a0228d642ece787e791cf6702e0f324",
+        "ada3d0727d0fcf661a8cffc2a91d793424497d7254c727f226d417a60e3b691c",
+        "ada3e9e27bbfc848cdb9934eced13b564349806349fe82def330df96a427bf04",
+        "bb940526e9e7cda9e362ac0767239b9aab73ab23f826a071df95c382a7a28218",
+        "c39fe817993fb06f686f5306b8bcf0e86e2527c98b1d04dc2854fbe8dd7381fc",
+    ]);
+    private static readonly IReadOnlySet<string> CurrentV14LegacyProfileFingerprintSet = new HashSet<string>(
+        CurrentV14LegacyProfileFingerprintValues,
+        StringComparer.Ordinal);
 
     private static readonly string[] ReservedPrefixes =
     [
@@ -64,7 +79,9 @@ internal static class SessionSchemaV11Validator
 
             var actual = ReadProfile(connection, transaction, expected.TableNames);
             return actual is not null
-                && expected.Profiles.Count(profile => ProfileEquals(profile, actual)) == 1;
+                && (expected.Profiles.Count(profile => ProfileEquals(profile, actual)) == 1
+                    || expectedVersion == 14
+                    && CurrentV14LegacyProfileFingerprintSet.Contains(Fingerprint(actual)));
         }
         catch (SqliteException)
         {
@@ -147,6 +164,9 @@ internal static class SessionSchemaV11Validator
             if (expectedVersion == 11)
             {
                 tableSql["session_events"] = RemoveColumnDefinition(tableSql["session_events"], "match_kind");
+                tableSql["session_events"] = RemoveColumnDefinition(tableSql["session_events"], "terminal_outcome");
+                tableSql["session_events"] = RemoveColumnDefinition(tableSql["session_events"], "terminal_policy_version");
+                tableSql["session_events"] = RemoveDefinitionContaining(tableSql["session_events"], "terminal_outcome");
             }
             var tableNames = tableSql.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
             var canonical = BuildProfile(tableSql, expectedVersion)
@@ -154,7 +174,7 @@ internal static class SessionSchemaV11Validator
 
             IReadOnlyDictionary<string, string> supportedHistoricalTableSql = tableSql;
             DatabaseProfile? migratedCanonical = null;
-            if (expectedVersion == 13)
+            if (expectedVersion >= 13)
             {
                 var migratedTableSql = new Dictionary<string, string>(
                     tableSql,
@@ -304,6 +324,20 @@ internal static class SessionSchemaV11Validator
         if (index < 0)
         {
             throw new InvalidOperationException($"Canonical Session DDL is missing {column}.");
+        }
+        definitions.RemoveAt(index);
+        return RecomposeCreateTable(sql, table, definitions);
+    }
+
+    private static string RemoveDefinitionContaining(string sql, string token)
+    {
+        var table = ParseCreateTable(sql);
+        var definitions = table.Definitions.ToList();
+        var index = definitions.FindIndex(definition =>
+            definition.Contains(token, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+        {
+            throw new InvalidOperationException($"Canonical Session DDL is missing constraint for {token}.");
         }
         definitions.RemoveAt(index);
         return RecomposeCreateTable(sql, table, definitions);

@@ -235,10 +235,12 @@ public sealed class PricingPersistenceFoundationTests
                 VALUES('run-1','{sessionId}','vscode','completed');
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
+                    type,occurred_at,content_state,source_application_version,
+                    terminal_outcome,terminal_policy_version)
                 VALUES(
-                    'event-1','{sessionId}','run-1','vscode','synthetic','source-event-1',
-                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                    'event-1','{sessionId}','run-1','vscode','copilot-compatible-hook','source-event-1',
+                    'SessionEnd','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    'clean',1);
                 """);
         }
         var request = CostRecalculationRequestCanonicalJsonV1.Create(
@@ -320,17 +322,29 @@ public sealed class PricingPersistenceFoundationTests
         using (var connection = database.Open())
         {
             InsertSession(connection, sessionId);
+            Execute(
+                connection,
+                $"""
+                INSERT INTO session_events(
+                    event_id,session_id,source_surface,source_adapter,source_event_id,
+                    type,occurred_at,content_state,terminal_outcome,terminal_policy_version)
+                VALUES(
+                    '{Guid.NewGuid():D}','{sessionId}','vscode','copilot-compatible-hook',
+                    'pricing-alert-terminal','SessionEnd',
+                    '2026-07-24T01:00:00.0000000+00:00','not_captured','clean',1);
+                """);
             using var transaction = connection.BeginTransaction();
             var source = SqliteCostSessionSourcePartitionResolverV1.Resolve(
                 connection,
                 transaction,
                 sessionId);
+            Assert.Equal(CostSessionSourcePartitionStateV1.Incomplete, source.State);
             target = new(
                 sessionId,
                 "completed",
                 new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero),
                 new DateTimeOffset(2026, 7, 24, 1, 0, 0, TimeSpan.Zero),
-                "missing",
+                "incomplete",
                 source.ObservationCount,
                 source.Digest,
                 source.SourceSurface,
@@ -567,8 +581,15 @@ public sealed class PricingPersistenceFoundationTests
         Assert.True(PricingSchemaV1.ValidateRows(afterMismatch, null));
     }
 
-    [Fact]
-    public void PricingApplicationCore_ChangedSessionSnapshotFailsBeforeAlertAppend()
+    [Theory]
+    [InlineData("updated_at", 0, 1)]
+    [InlineData("non_full", 0, 1)]
+    [InlineData("no_fact", 0, 1)]
+    [InlineData("later_no_fact", 1, 2)]
+    public void PricingApplicationCore_ChangedSessionSnapshotFailsBeforeAlertAppend(
+        string loss,
+        int expectedFailureOrdinal,
+        int targetCount)
     {
         using var database = new PricingDatabase();
         database.CreateDependencies();
@@ -583,28 +604,19 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(PricingStoreStatus.Success, store.PutConfigurationPreview(preview).Status);
         clock.UtcNow = calculationTime.AddMinutes(-59);
         Assert.Equal(PricingStoreStatus.Success, AppendIncompleteConfigurationCommit(store, preview).Status);
-        var sessionId = Guid.NewGuid().ToString("D");
+        var sessionIds = Enumerable.Range(0, targetCount)
+            .Select(_ => Guid.NewGuid().ToString("D"))
+            .ToArray();
         using (var connection = database.Open())
         {
-            InsertSession(connection, sessionId);
-            Execute(
-                connection,
-                $"""
-                INSERT INTO session_runs(run_id,session_id,source_surface,status)
-                VALUES('run-1','{sessionId}','vscode','completed');
-                INSERT INTO session_events(
-                    event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
-                VALUES(
-                    'event-1','{sessionId}','run-1','vscode','synthetic','source-event-1',
-                    'turn','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
-                """);
+            foreach (var sessionId in sessionIds)
+                InsertEligibleSession(connection, sessionId);
         }
         var request = CostRecalculationRequestCanonicalJsonV1.Create(
             preview.Configuration.ConfigurationId,
             1,
             catalog.CatalogSha256,
-            [sessionId],
+            sessionIds,
             [],
             "pricing-stale-session-0001");
         var runId = Guid.CreateVersion7().ToString("D");
@@ -617,18 +629,29 @@ public sealed class PricingPersistenceFoundationTests
         Assert.Equal(PricingStoreStatus.Success, store.MarkRecalculationRunning(runId).Status);
         using (var connection = database.Open())
         {
+            var affectedSessionId = sessionIds[^1];
             Execute(
                 connection,
-                """
-                UPDATE sessions
-                SET updated_at='2026-07-24T01:00:01.0000000+00:00';
-                """);
+                loss switch
+                {
+                    "updated_at" =>
+                        $"UPDATE sessions SET updated_at='2026-07-24T01:00:01.0000000+00:00' WHERE session_id='{affectedSessionId}';",
+                    "non_full" =>
+                        $"UPDATE sessions SET completeness='rich' WHERE session_id='{affectedSessionId}';",
+                    "no_fact" or "later_no_fact" =>
+                        $"UPDATE session_events SET terminal_outcome=NULL,terminal_policy_version=NULL WHERE session_id='{affectedSessionId}' AND terminal_outcome IS NOT NULL;",
+                    _ => throw new ArgumentOutOfRangeException(nameof(loss)),
+                });
         }
         clock.UtcNow = calculationTime.AddSeconds(2);
 
         var result = unitOfWork.Fail(
             runId,
-            [PricingTargetCompletionWrite.Unavailable(0, "source_mapping_unavailable")],
+            Enumerable.Range(0, targetCount)
+                .Select(ordinal => PricingTargetCompletionWrite.Unavailable(
+                    ordinal,
+                    "source_mapping_unavailable"))
+                .ToArray(),
             new("adapter", "target", 0, "source_adapter_failed"));
 
         Assert.Equal(0, participant.CallCount);
@@ -637,8 +660,19 @@ public sealed class PricingPersistenceFoundationTests
         using var read = database.Open();
         Assert.Equal("failed", Scalar<string>(read, "SELECT event_kind FROM pricing_recalculation_events WHERE event_sequence=2;"));
         Assert.Equal("head_input", Scalar<string>(read, "SELECT failure_phase FROM pricing_recalculation_events WHERE event_sequence=2;"));
-        Assert.Equal("stale_recalculation_input", Scalar<string>(read, "SELECT result_code FROM pricing_recalculation_target_results;"));
-        Assert.Equal("failed", Scalar<string>(read, "SELECT result_kind FROM pricing_session_attempts;"));
+        Assert.Equal(expectedFailureOrdinal, Scalar<long>(read, "SELECT failure_ordinal FROM pricing_recalculation_events WHERE event_sequence=2;"));
+        Assert.Equal(targetCount, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_recalculation_target_results;"));
+        Assert.Equal(
+            Enumerable.Repeat("stale_recalculation_input", targetCount),
+            Names(read, "SELECT result_code FROM pricing_recalculation_target_results ORDER BY target_ordinal;"));
+        Assert.Equal(
+            Enumerable.Repeat("failed", targetCount),
+            Names(read, "SELECT result_kind FROM pricing_session_attempts ORDER BY target_ordinal;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_estimates;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_estimate_heads;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM pricing_recalculation_budget_results;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_evaluations;"));
+        Assert.Equal(0L, Scalar<long>(read, "SELECT COUNT(*) FROM alert_receipts;"));
         Assert.True(PricingSchemaV1.ValidateRows(read, null));
     }
 
@@ -725,7 +759,7 @@ public sealed class PricingPersistenceFoundationTests
             """
             CREATE TABLE schema_version(component TEXT PRIMARY KEY,version INTEGER NOT NULL);
             INSERT INTO schema_version(component,version)
-            VALUES('session',13),('alert_engine',2),('runtime_backup',1);
+            VALUES('session',14),('alert_engine',2),('runtime_backup',1);
             CREATE TABLE sessions(session_id TEXT PRIMARY KEY);
             CREATE TABLE alert_evaluations(evaluation_id TEXT PRIMARY KEY,schema_version TEXT NOT NULL);
             CREATE TABLE alert_receipts(alert_id TEXT PRIMARY KEY,evaluation_id TEXT NOT NULL);
@@ -740,7 +774,7 @@ public sealed class PricingPersistenceFoundationTests
     }
 
     [Fact]
-    public void PricingSchemaV1_Ensure_RejectsExactSessionsTableWithoutFullSessionV13Component()
+    public void PricingSchemaV1_Ensure_RejectsExactSessionsTableWithoutFullCurrentSessionComponent()
     {
         using var database = new PricingDatabase();
         database.CreateDependencies();
@@ -776,7 +810,7 @@ public sealed class PricingPersistenceFoundationTests
             1L,
             Scalar<long>(
                 connection,
-                "SELECT COUNT(*) FROM schema_version WHERE component='session' AND version=13;"));
+                "SELECT COUNT(*) FROM schema_version WHERE component='session' AND version=14;"));
     }
 
     [Theory]
@@ -1068,14 +1102,14 @@ public sealed class PricingPersistenceFoundationTests
     }
 
     [Fact]
-    public void PricingSchemaV1_Ensure_AcceptsRealFullSessionV13AndReopensIdempotently()
+    public void PricingSchemaV1_Ensure_AcceptsRealFullCurrentSessionAndReopensIdempotently()
     {
         using var database = new PricingDatabase();
         database.CreateDependencies();
         var sessionId = Guid.NewGuid().ToString("D");
         using (var connection = database.Open())
         {
-            InsertSession(connection, sessionId);
+            InsertEligibleSession(connection, sessionId);
             using var transaction = connection.BeginTransaction(deferred: false);
             Assert.True(SqliteSessionStore.IsCurrentSchemaValid(connection, transaction));
             PricingSchemaV1.Ensure(connection, transaction);
@@ -2184,7 +2218,7 @@ public sealed class PricingPersistenceFoundationTests
         var sessionId = Guid.NewGuid().ToString("D");
         using (var connection = database.Open())
         {
-            InsertSession(connection, sessionId);
+            InsertEligibleSession(connection, sessionId);
             Execute(
                 connection,
                 $"""
@@ -2316,10 +2350,12 @@ public sealed class PricingPersistenceFoundationTests
                 """
                 INSERT INTO session_events(
                     event_id,session_id,run_id,source_surface,source_adapter,source_event_id,
-                    type,occurred_at,content_state,source_application_version)
+                    type,occurred_at,content_state,source_application_version,
+                    terminal_outcome,terminal_policy_version)
                 VALUES(
-                    $event,$session,$run,'vscode','synthetic',$source_event,'turn',
-                    '2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3');
+                    $event,$session,$run,'vscode','copilot-compatible-hook',$source_event,
+                    'SessionEnd','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3',
+                    'clean',1);
                 """;
             var eventId = eventCommand.Parameters.Add("$event", SqliteType.Text);
             var eventSessionId = eventCommand.Parameters.Add("$session", SqliteType.Text);
@@ -2453,7 +2489,7 @@ public sealed class PricingPersistenceFoundationTests
         var sessionId = Guid.NewGuid().ToString("D");
         using (var connection = database.Open())
         {
-            InsertSession(connection, sessionId);
+            InsertEligibleSession(connection, sessionId);
             Execute(
                 connection,
                 $"""
@@ -2652,6 +2688,47 @@ public sealed class PricingPersistenceFoundationTests
                 '2026-07-24T01:00:00.0000000+00:00');
             """;
         command.Parameters.AddWithValue("$id", sessionId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void InsertEligibleSession(SqliteConnection connection, string sessionId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO sessions(
+                session_id,status,completeness,ended_at,last_seen_at,raw_retention_state,created_at,updated_at)
+            VALUES($id,'completed','full','2026-07-24T01:00:00.0000000+00:00',
+                '2026-07-24T01:00:00.0000000+00:00',
+                'not_captured','2026-07-24T01:00:00.0000000+00:00',
+                '2026-07-24T01:00:00.0000000+00:00');
+            INSERT INTO session_native_ids(
+                session_id,source_surface,native_session_id,binding_kind,observed_at)
+            VALUES($id,'vscode',$native,'native','2026-07-24T00:59:56.0000000+00:00');
+            INSERT INTO session_events(
+                event_id,session_id,source_surface,source_adapter,source_event_id,
+                type,occurred_at,content_state,source_application_version,
+                terminal_outcome,terminal_policy_version)
+            VALUES
+                ($start,$id,'vscode','pricing-fixture',$source_start,
+                 'session.start','2026-07-24T00:59:57.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($instruction,$id,'vscode','pricing-fixture',$source_instruction,
+                 'user.message','2026-07-24T00:59:58.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($otel,$id,'vscode','otel-exact',$source_otel,
+                 'turn','2026-07-24T00:59:59.0000000+00:00','not_captured','1.2.3',NULL,NULL),
+                ($terminal,$id,'vscode','copilot-compatible-hook',$source_terminal,
+                 'SessionEnd','2026-07-24T01:00:00.0000000+00:00','not_captured','1.2.3','clean',1);
+            """;
+        command.Parameters.AddWithValue("$id", sessionId);
+        command.Parameters.AddWithValue("$native", $"pricing-native-{sessionId}");
+        command.Parameters.AddWithValue("$start", Guid.NewGuid().ToString("D"));
+        command.Parameters.AddWithValue("$instruction", Guid.NewGuid().ToString("D"));
+        command.Parameters.AddWithValue("$otel", Guid.NewGuid().ToString("D"));
+        command.Parameters.AddWithValue("$terminal", Guid.NewGuid().ToString("D"));
+        command.Parameters.AddWithValue("$source_start", $"pricing-start-{sessionId}");
+        command.Parameters.AddWithValue("$source_instruction", $"pricing-instruction-{sessionId}");
+        command.Parameters.AddWithValue("$source_otel", $"pricing-otel-{sessionId}");
+        command.Parameters.AddWithValue("$source_terminal", $"pricing-terminal-{sessionId}");
         command.ExecuteNonQuery();
     }
 
