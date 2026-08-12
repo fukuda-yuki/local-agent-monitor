@@ -418,12 +418,21 @@ A worker:
 
 Lease renewal is permitted only before expiry, only with an exact current token,
 and sets expiry to renewal time plus exactly 30 seconds. A token mismatch or
-expired token cannot renew, publish, or complete work.
+expired token cannot renew, publish, or complete work. This 30-second queue
+lease renewal governs the catalog queue row only. It is distinct from the
+two-minute Retention operation-grant renewal defined by the shared read
+authority in
+[Raw Store And Normalization](../layers/raw-store-normalization.md); a queue
+row renewal never renews, shortens, or re-admits a Retention grant.
 
-The worker never discovers another raw record at execution time. Missing or
-read-denied raw input produces terminal `input_unavailable`, no Repository or
-assignment claim, and no fabricated digest. A raw digest mismatch produces
-terminal `catalog_payload_digest_mismatch`.
+The worker never discovers another raw record at execution time. Terminal
+`input_unavailable`, no Repository or assignment claim, and no fabricated
+digest apply only when the worker cannot prove read access through the shared
+Retention read authority: a new admission fails, or a due renewal observes
+revision/readability drift. A still-live admitted grant remains consumable to
+its published expiry even if the original item expiry passes while the grant
+is active. A raw digest mismatch produces terminal
+`catalog_payload_digest_mismatch`.
 
 A missing exact Session Event produces `waiting_session`, no domain writes, no
 lease token, and becomes eligible exactly five seconds after `updated_at`.

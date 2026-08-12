@@ -328,13 +328,17 @@ transaction it:
 1. verifies the same desired generation, queue owner/generation and unexpired
    queue lease;
 2. extends that same queue lease to 30 seconds after heartbeat time; and
-3. renews every frontier Retention operation lease with its same item revision,
-   owner and lease generation when it has reached the Retention v1 renewal
-   deadline.
+3. renews every due frontier Retention operation lease through the shared
+   Retention renewal predicate: current item revision equal to the immutable
+   admission revision, current readability, exact source/receipt/coverage
+   proof, and the exact lease owner/generation.
 
 Retention v1's operation-lease duration is two minutes and its renewal deadline
 is one minute. Renewal never changes the frontier or reacquires a different
-item. If a heartbeat is busy, rejected, or observes any lost/expired lease, the
+item. A due renewal that observes revision or readability drift fails the
+heartbeat without shortening the existing grant, which remains consumable to
+its published expiry. If a heartbeat is busy, rejected, or observes any
+lost/expired lease, the
 worker cancels projection, discards all constructed rows, and must not publish.
 It may requeue the same generation as `retry_pending` only in a fresh
 transaction that proves the same queue owner/generation and unexpired queue
@@ -379,6 +383,11 @@ generation outcome = input_unavailable
 current OTel Skill claim = none
 ```
 
+This eligibility decision is made when the composite lease is acquired. After
+admission, the granted lease keeps its bounded grace across an item expiry
+boundary per the shared Retention read authority in
+[Raw Store And Normalization](raw-store-normalization.md).
+
 Before reading, the worker acquires one composite Retention operation lease
 covering every frontier item. It holds the lease through parsing, projection
 construction and publication. The lease capability binds each exact item,
@@ -391,8 +400,11 @@ The publication transaction revalidates all of:
 - current SourceCompatibility resolution is `resolved`;
 - generation is still the unique desired generation;
 - queue owner/generation and 30-second lease are current;
-- every Retention operation lease has the exact renewed
-  item-revision/owner/generation and expires after publication time;
+- every Retention operation lease satisfies the shared `grant_usable` check:
+  exact admitted item, lease kind, owner, and generation with persisted expiry
+  equal to the published expiry, expiry after publication time, and exact
+  admitted store/source identity. Publication never joins current item
+  revision, state, read denial, or item expiry;
 - persisted frontier rows recompute to `input_frontier_sha256`;
 - every tagged input-evidence item still satisfies its variant contract and,
   for `payload_sha256`, still matches the retained bytes; and
@@ -403,9 +415,12 @@ same unexpired queue owner/generation. If queue ownership or its lease was lost,
 the stale worker discards all work and makes no generation or queue mutation;
 the current/reclaiming owner alone controls that row. While queue ownership is
 still current, a compatibility, desired-generation, frontier or projector
-change sets generation/queue to `superseded`; a Retention-only lease loss sets
-the generation to `retry_pending` and returns the queue to `pending`; and
-authoritatively unavailable input sets both to `input_unavailable`. No failing
+change sets generation/queue to `superseded`; a Retention-only lease loss —
+the exact admitted lease tuple no longer persists — sets the generation to
+`retry_pending` and returns the queue to `pending`; and authoritatively
+unavailable input sets both to `input_unavailable`. A later mutable item-row
+change (state, revision, read denial, or item expiry) is not itself a
+publication fence while the exact admitted grant remains usable. No failing
 path publishes or preserves a current claim.
 
 ## Single current read authority

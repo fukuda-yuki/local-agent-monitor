@@ -848,6 +848,105 @@ timestamp, but deletion claim remains quiescent until the admitted lease is
 released or expires. A selector that reaches expiry before commit remains
 denied and receives no lease.
 
+### Read admission, grant consumption, renewal, and release
+
+The Retention catalog is the single owner of three distinct read predicates:
+`row_readable` for new admission, `grant_usable` for post-commit consumption
+of an admitted lease, and renewal eligibility for extending an operation
+grant. No consumer defines a parallel predicate.
+
+`row_readable(at)` requires exact current source/ownership/receipt/revision
+proof, `read_denied_at IS NULL`, and either `retained_by_policy` or
+`expiring AND at < expires_at`. `retained_by_policy` disables automatic
+expiry: its original `expires_at` is immutable historical metadata and is
+never nulled, reset, extended, or used by itself to deny a read or renewal.
+Only `expiring` rows expire by clock. The state-only classifier derives its
+disposition from lifecycle state and `read_denied_at` alone: readable,
+already denied, lifecycle denied, or expired expiring; historical expiry never
+classifies a pinned row as expired.
+
+New single-read admission evaluates in this exact first-result order:
+
+1. item absent;
+2. expected revision mismatch;
+3. already denied;
+4. nonreadable lifecycle;
+5. expired expiring row;
+6. source proof busy;
+7. source missing;
+8. source invalid/mismatched;
+9. lease conflict;
+10. capability/selector result;
+11. admit.
+
+Earlier results are never preempted by later proof evaluation. Every denial
+mutation is an exact revision/state compare-and-swap: the expiry denial
+matches item ID, admitted revision, `state='expiring'`, `expires_at <= now`,
+and null denial; the missing/invalid-source denial matches item ID, admitted
+revision, readable lifecycle, and null denial. A zero-row denial update
+returns stale denial without retry or broader mutation. Stale callers,
+selector null, lease conflict, and capability mismatch deny without lifecycle
+mutation.
+
+Admission publishes one immutable read grant carrying the admitted ownership
+key, item, admission revision, lease kind/owner/generation, a privately
+copied 32-byte source token, and one synchronized published lease expiry. Its
+only mutable value is the published lease expiry protected by its publication
+lock. `grant_usable(at)` is the immutable admitted catalog/store/item/source
+capability plus the exact live lease item/kind/owner/generation with persisted
+expiry equal to the published expiry and `at` before that expiry. It never
+rereads current item lifecycle, item expiry, read denial, or revision:
+cleanup, pin, unpin, or delete advancing the item after admission does not
+revoke the committed grant. Its exact consumption proof is:
+
+```sql
+SELECT EXISTS(
+    SELECT 1
+    FROM retention_leases AS lease
+    WHERE lease.item_id=$retention_read_item_id
+      AND lease.lease_kind=$retention_read_lease_kind
+      AND lease.owner=$retention_read_lease_owner
+      AND lease.generation=$retention_read_lease_generation
+      AND lease.expires_at=$retention_read_lease_expires_at
+      AND lease.expires_at>$at
+)
+AND <exact admitted store/source identity and current source owner-token match>;
+```
+
+The final arm is a closed switch over the five v1 store kinds and contains no
+`retention_items.state`, `revision`, `read_denied_at`, or item `expires_at`
+predicate. Admission selectors bind the admitted revision inside the same
+immediate transaction; post-commit consumers call only `grant_usable`.
+
+Renewal applies only to operation leases that are due at the fixed one-minute
+deadline and still `grant_usable`; access leases never renew. A due renewal
+additionally requires current item revision equal to the immutable admission
+revision, current `row_readable`, exact current source/ownership receipt, and
+the complete exact five-row adapter-coverage set, then commits exactly
+`renewal_at + 2 minutes` with no item-expiry cap. Acquisition and successful
+renewal always receive the full two-minute duration, even when it crosses an
+expiring item's policy expiry. A failed renewal never shortens the existing
+grant: the admitted lease remains consumable to its published expiry.
+Pin/unpin/delete/cleanup revision changes make an admitted grant
+nonrenewable but do not revoke it. Release matches only
+item/kind/owner/generation and never current item revision, state, or expiry.
+
+SQLite transaction order is always `BEGIN IMMEDIATE` first, then grant
+publication locks acquired in persisted canonical frontier order; release
+publication locks in reverse order. No path acquires these locks in the
+inverse order. A composite renewal updates the caller queue fence and every
+due Retention lease in one transaction, commits all or none, and then
+publishes every in-memory expiry while all publication locks are still held.
+
+Golden cross-expiry timeline: admit an `expiring` item at `T1 - 1 tick` and
+publish lease expiry `admission + 2 minutes`; cleanup at `T1` commits
+`expired_pending_deletion` then `deletion_queued` with equal denial/queue
+timestamps and total revision +2; consumption at lease expiry − 1 tick still
+succeeds despite the current state/revision/denial while the deletion claim
+stays quiescent; consumption at the exact lease expiry fails; the claim then
+becomes eligible and `deleting` advances the original item revision total to
++3.
+
 The immutable Issue #89 kickoff and inventory base are both
 `11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite
 inventory is [issue-89-raw-read-callsite-inventory.md](../../sprints/issue-89-raw-read-callsite-inventory.md).

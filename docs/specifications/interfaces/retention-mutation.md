@@ -155,6 +155,17 @@ non-v1 store cannot be manufactured by supplying an opaque-looking string.
 expiry as historical metadata while automatic expiry is disabled. It does not
 create a new policy or TTL. `expiring` is the unpinned/readable state.
 
+Readability, admitted-grant consumption, renewal, and release follow the
+shared Retention read authority in
+[Raw Store And Normalization](../layers/raw-store-normalization.md): pinned
+items ignore their historical original expiry on reads and renewals, admitted
+leases keep their bounded cross-expiry grace, and renewal alone rechecks
+current readability and the immutable admission revision. Every executed #90
+transition increments the item revision exactly once at its commit timestamp;
+those revision changes make an already-admitted operation grant nonrenewable
+but never revoke it, and expiry denial/queue applies the exact timestamps and
+revision effects defined by the shared authority.
+
 A Session command is atomic across all selected items: every item must be
 allowed or an explicit idempotent case for that operation. One rejected item
 prevents partial application to the other items. The effect columns below are
