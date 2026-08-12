@@ -141,7 +141,7 @@ public sealed class GitHubCopilotDoctorEvidenceMatrixTests
         var verification = Start(database.Path);
         var rawRecordId = CommitRaw(database.Path, SensitivePayload);
         CompleteProjection(database.Path, rawRecordId);
-        WriteSession(database.Path, SessionContentState.Available, SessionRawRetentionState.Expiring, "native-gates");
+        WriteFullSession(database.Path, "native-gates");
         if (scenario == "no_session")
         {
             Execute(database.Path, "DELETE FROM session_native_ids; DELETE FROM session_events; DELETE FROM session_runs; DELETE FROM sessions;", rawRecordId);
@@ -402,6 +402,61 @@ public sealed class GitHubCopilotDoctorEvidenceMatrixTests
             TraceId = TraceId,
         };
         store.Write(new SessionWriteBatch(new SessionDetail(session, [native], [run], [@event]), []));
+    }
+
+    private static void WriteFullSession(string databasePath, string nativeId)
+    {
+        // Doctor binding resolution accepts exactly one event per run/surface/trace/adapter,
+        // so the D079 lifecycle evidence that makes completeness durably Full lives on a
+        // second run that the binding filter never matches.
+        var store = new SqliteSessionStore(databasePath, new FixedTimeProvider(Now));
+        store.CreateSchema();
+        var session = ObservedSession.Create(
+            ObservedSessionStatus.Completed, SessionCompleteness.Full, null, null,
+            Now, Now, Now, SessionRawRetentionState.Expiring);
+        var native = new SessionNativeId(
+            session.SessionId, SessionSourceSurface.VisualStudioCode, nativeId, SessionBindingKind.Native, Now);
+        var run = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = TraceId,
+            StartedAt = Now,
+            EndedAt = Now,
+        };
+        var auxiliaryTrace = TraceId + "00";
+        var auxiliaryRun = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = auxiliaryTrace,
+            StartedAt = Now,
+            EndedAt = Now,
+        };
+        ObservedSessionEvent Lifecycle(string sourceEventId, string type) =>
+            ObservedSessionEvent.Create(session.SessionId, auxiliaryRun.RunId, "copilot-compatible-hook", sourceEventId, type, Now, SessionContentState.Available) with
+            {
+                SourceSurface = SessionSourceSurface.VisualStudioCode,
+                TraceId = auxiliaryTrace,
+            };
+        var @event = ObservedSessionEvent.Create(
+            session.SessionId, run.RunId, "copilot-compatible-hook", "event-1",
+            "assistant.completed", Now, SessionContentState.Available) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = TraceId,
+        };
+        var terminal = Lifecycle($"terminal-{nativeId}", "SessionEnd");
+        var exact = ObservedSessionEvent.Create(
+            session.SessionId, auxiliaryRun.RunId, "otel-exact", $"otel-{nativeId}", "otel.span", Now, SessionContentState.NotCaptured) with
+        {
+            SourceSurface = SessionSourceSurface.VisualStudioCode,
+            TraceId = auxiliaryTrace,
+            MatchKind = SessionMatchKind.ExactNative,
+        };
+        ((IClassifiedSessionStore)store).WriteClassified(
+            new SessionWriteBatch(
+                new SessionDetail(session, [native], [run, auxiliaryRun], [@event, Lifecycle($"start-{nativeId}", "SessionStart"), Lifecycle($"instruction-{nativeId}", "UserPromptSubmit"), terminal, exact]),
+                []),
+            [new SessionTerminalFact(terminal.EventId, SessionTerminalOutcome.Clean)]);
     }
 
     private static DoctorFactSnapshot WithReadyStaticFacts(DoctorFactSnapshot snapshot) => snapshot with

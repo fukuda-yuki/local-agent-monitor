@@ -506,7 +506,7 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
         var verification = Start(database.Path, sourceSurface);
         var rawRecordId = CommitRaw(database.Path, clientKind, "0123456789abcdef0123456789abcdef");
         CompleteProjection(database.Path, rawRecordId);
-        WriteSession(database.Path, "exact-native", "0123456789abcdef0123456789abcdef", nativeSurface, eventAdapter);
+        WriteFullSession(database.Path, "exact-native", "0123456789abcdef0123456789abcdef", nativeSurface, eventAdapter);
 
         var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
             database.Path,
@@ -1622,6 +1622,83 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
             observedAt,
             SessionContentState.Available) with { SourceSurface = surface, TraceId = traceId };
         store.Write(new SessionWriteBatch(new SessionDetail(session, [native], [run], [@event]), []));
+    }
+
+    private static void WriteFullSession(
+        string databasePath,
+        string nativeId,
+        string traceId,
+        string nativeSurface,
+        string eventAdapter)
+    {
+        // Doctor binding resolution accepts exactly one event per run/surface/trace/adapter,
+        // so the D079 lifecycle evidence that makes completeness durably Full lives on a
+        // second run that the binding filter never matches.
+        var observedAt = Now;
+        var store = new SqliteSessionStore(databasePath, new AdjustableTimeProvider(Now));
+        store.CreateSchema();
+        var session = ObservedSession.Create(
+            ObservedSessionStatus.Completed,
+            SessionCompleteness.Full,
+            repository: "must-not-be-used",
+            workspace: "must-not-be-used",
+            observedAt,
+            observedAt,
+            observedAt,
+            SessionRawRetentionState.Expiring);
+        var surface = SessionWire.ParseSourceSurface(nativeSurface);
+        var native = new SessionNativeId(session.SessionId, surface, nativeId, SessionBindingKind.Native, observedAt);
+        var run = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = surface,
+            TraceId = traceId,
+            StartedAt = observedAt,
+            EndedAt = observedAt,
+        };
+        var auxiliaryTrace = traceId + "00";
+        var auxiliaryRun = ObservedSessionRun.Create(session.SessionId, ObservedSessionStatus.Completed) with
+        {
+            SourceSurface = surface,
+            TraceId = auxiliaryTrace,
+            StartedAt = observedAt,
+            EndedAt = observedAt,
+        };
+        var (startType, instructionType, terminalType) = eventAdapter == "copilot-sdk-stream"
+            ? ("session.start", "user.message", "session.task_complete")
+            : ("SessionStart", "UserPromptSubmit", "SessionEnd");
+        ObservedSessionEvent Lifecycle(string sourceEventId, string type) =>
+            ObservedSessionEvent.Create(session.SessionId, auxiliaryRun.RunId, eventAdapter, sourceEventId, type, observedAt, SessionContentState.Available) with
+            {
+                SourceSurface = surface,
+                TraceId = auxiliaryTrace,
+            };
+        var @event = ObservedSessionEvent.Create(
+            session.SessionId,
+            run.RunId,
+            eventAdapter,
+            "event-1",
+            "assistant.completed",
+            observedAt,
+            SessionContentState.Available) with { SourceSurface = surface, TraceId = traceId };
+        var terminal = Lifecycle($"terminal-{nativeId}", terminalType);
+        var exact = ObservedSessionEvent.Create(
+            session.SessionId,
+            auxiliaryRun.RunId,
+            "otel-exact",
+            $"otel-{nativeId}",
+            "otel.span",
+            observedAt,
+            SessionContentState.NotCaptured) with
+        {
+            SourceSurface = surface,
+            TraceId = auxiliaryTrace,
+            MatchKind = SessionMatchKind.ExactNative,
+        };
+        ((IClassifiedSessionStore)store).WriteClassified(
+            new SessionWriteBatch(
+                new SessionDetail(session, [native], [run, auxiliaryRun], [@event, Lifecycle($"start-{nativeId}", startType), Lifecycle($"instruction-{nativeId}", instructionType), terminal, exact]),
+                []),
+            [new SessionTerminalFact(terminal.EventId, SessionTerminalOutcome.Clean)]);
     }
 
     private static void WriteSplitRunSession(string databasePath, string nativeId, string traceId)

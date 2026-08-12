@@ -357,12 +357,17 @@ public sealed class SourceCapabilityContractTests
             Assert.DoesNotContain("AgentName", fields[id].GetRawText(), StringComparison.Ordinal);
         }
 
-        foreach (var id in new[] { "hook.post_tool_use.duration_ms", "hook.post_tool_failure.duration_ms", "hook.post_tool_failure.error", "hook.stop_failure.error", "hook.session_end.reason" })
+        foreach (var id in new[] { "hook.post_tool_use.duration_ms", "hook.post_tool_failure.duration_ms", "hook.post_tool_failure.error", "hook.stop_failure.error" })
         {
             Assert.Null(NullableString(fields[id], "normalized_target"));
             Assert.DoesNotContain("MonitorSpanProjection.Status", fields[id].GetRawText(), StringComparison.Ordinal);
             Assert.DoesNotContain("MonitorSpanProjection.DurationMs", fields[id].GetRawText(), StringComparison.Ordinal);
         }
+
+        AssertField(fields, "hook.session_end.reason", "normalized", "session_terminal_policy_v1",
+            "CopilotAgentObservability.Telemetry.Sessions.ObservedSessionEvent.TerminalOutcome", HookRawTarget);
+        Assert.DoesNotContain("MonitorSpanProjection.Status", fields["hook.session_end.reason"].GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("MonitorSpanProjection.DurationMs", fields["hook.session_end.reason"].GetRawText(), StringComparison.Ordinal);
 
         var captureTime = Assert.Single(hook.RootElement.GetProperty("derived_mappings").EnumerateArray(), item => Value(item.GetProperty("mapping_id")) == "hook.capture_time");
         Assert.Equal("transport_metadata_only", Value(captureTime.GetProperty("authority")));
@@ -1221,10 +1226,10 @@ public sealed class SourceCapabilityContractTests
         new("hook.stop.last_assistant_message", "$.last_assistant_message", "string", true, "hook_event_name == \"Stop\"", "Stop configured", "raw_retained", "none", null, HookRawTarget),
         new("hook.stop.background_tasks", "$.background_tasks", "array", false, "hook_event_name == \"Stop\"", "Claude Code v2.1.145 or later AND task registry is reachable", "raw_retained", "none", null, HookRawTarget),
         new("hook.stop.session_crons", "$.session_crons", "array", false, "hook_event_name == \"Stop\"", "Claude Code v2.1.145 or later AND task registry is reachable", "raw_retained", "none", null, HookRawTarget),
-        new("hook.stop_failure.error", "$.error", "string enum", true, "hook_event_name == \"StopFailure\"", "StopFailure configured", "corroboration_only", "hook_lifecycle_only", null, HookRawTarget),
+        new("hook.stop_failure.error", "$.error", "string enum", true, "hook_event_name == \"StopFailure\"", "StopFailure configured", "corroboration_only", "hook_error_evidence_only", null, HookRawTarget),
         new("hook.stop_failure.error_details", "$.error_details", "string", false, "hook_event_name == \"StopFailure\"", "producer emits error_details", "raw_retained", "none", null, HookRawTarget),
         new("hook.stop_failure.last_assistant_message", "$.last_assistant_message", "string", false, "hook_event_name == \"StopFailure\"", "producer emits last_assistant_message", "raw_retained", "none", null, HookRawTarget),
-        new("hook.session_end.reason", "$.reason", "string enum", true, "hook_event_name == \"SessionEnd\"", "SessionEnd configured", "corroboration_only", "hook_lifecycle_only", null, HookRawTarget)
+        new("hook.session_end.reason", "$.reason", "string enum", true, "hook_event_name == \"SessionEnd\"", "SessionEnd configured", "normalized", "session_terminal_policy_v1", "CopilotAgentObservability.Telemetry.Sessions.ObservedSessionEvent.TerminalOutcome", HookRawTarget)
     ];
 
     private const string RawPayloadTarget = "CopilotAgentObservability.Telemetry.RawTelemetryRecord.PayloadJson";
@@ -1309,10 +1314,10 @@ public sealed class SourceCapabilityContractTests
         hook.stop.last_assistant_message|official-hooks|documented_not_live_observed|raw_response|Carry in Payload, then secret-filter before content storage.|Reject invalid event; never parse transcript path as fallback.
         hook.stop.background_tasks|official-hooks|documented_not_live_observed|raw_task_registry|Carry the producer array of objects in SessionIngestEvent.Payload, then secret-filter before content storage.|Keep absent; never infer task state or expose it through sanitized projections.
         hook.stop.session_crons|official-hooks|documented_not_live_observed|raw_cron_registry|Carry the producer array of objects in SessionIngestEvent.Payload, then secret-filter before content storage.|Keep absent; never infer scheduled work or expose it through sanitized projections.
-        hook.stop_failure.error|official-hooks|documented_not_live_observed|hook_terminal_error_category|Carry in Payload as Hook terminal evidence only.|Reject invalid event; never overwrite OTel Status or classify from free-form text.
+        hook.stop_failure.error|official-hooks|documented_not_live_observed|hook_error_category|Carry in Payload as nonterminal Hook error evidence only.|Reject invalid event; never overwrite OTel Status, classify Session outcome, or classify from free-form text.
         hook.stop_failure.error_details|official-hooks|documented_not_live_observed|raw_error_detail|Carry in Payload, then secret-filter before content storage.|Keep absent; never expose through sanitized reads.
         hook.stop_failure.last_assistant_message|official-hooks|documented_not_live_observed|raw_error_detail|Carry in Payload, then secret-filter before content storage.|Keep absent; never expose through sanitized reads.
-        hook.session_end.reason|official-hooks|documented_not_live_observed|hook_lifecycle_reason|Carry in Payload as Hook lifecycle evidence only.|Reject invalid event; never infer reason from process exit or overwrite OTel Status.
+        hook.session_end.reason|official-hooks|documented_not_live_observed|session_terminal_discriminator|Carry in Payload and classify only by the exact Claude SessionEnd reason table in canvas-session-workspace.md.|Reject the producer event through the existing invalid-mapping path and persist neither Event nor fact; never infer reason from process exit or overwrite OTel Status.
         """);
 
     private static readonly ExpectedDerivedMapping[] ExpectedOtelDerivedMappings =
