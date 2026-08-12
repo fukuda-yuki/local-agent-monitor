@@ -300,7 +300,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.DrainAsync();
             await monitor.PostOtlpAsync(Payload(TraceContinuityTraceId, sessionId: null));
             await monitor.ProjectOnlyAsync();
-            AddTraceContinuityEvents(databasePath, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
+            AddTraceContinuityHookContext(databasePath, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
             CreateObserver(databasePath, time).RunOnce();
 
             using var continuityStatus = RunFirstTrace(
@@ -849,7 +849,10 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
         return JsonDocument.Parse(item.GetRawText());
     }
 
-    private static void AddTraceContinuityEvents(
+    // D079's exact replay comparator aborts any claude-code-otel vector mismatch, so the
+    // fixture must not pre-materialize span events the enricher will later re-derive; the
+    // hook trace-context event alone ties the trace to the session for this scenario.
+    private static void AddTraceContinuityHookContext(
         string databasePath,
         TimeProvider time,
         string traceId,
@@ -873,23 +876,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             "UserPromptSubmit",
             time.GetUtcNow(),
             SessionContentState.NotCaptured);
-        var otelEvents = new[] { InteractionSpanId, SpanId, ToolSpanId }
-            .Select(spanId => new ObservedSessionEvent(
-                Guid.CreateVersion7(),
-                detail.Session.SessionId,
-                null,
-                SessionSourceSurface.ClaudeCode,
-                null,
-                traceId,
-                null,
-                "claude-code-otel",
-                $"{traceId}/{spanId}",
-                "otel.span",
-                time.GetUtcNow(),
-                SessionContentState.NotCaptured,
-                MatchKind: SessionMatchKind.TraceContinuity))
-            .ToArray();
-        store.Write(new SessionWriteBatch(detail with { Events = detail.Events.Append(hookEvent).Concat(otelEvents).ToArray() }, []));
+        store.Write(new SessionWriteBatch(detail with { Events = detail.Events.Append(hookEvent).ToArray() }, []));
     }
 
     private static JsonObject Attribute(string key, string value) => new()
