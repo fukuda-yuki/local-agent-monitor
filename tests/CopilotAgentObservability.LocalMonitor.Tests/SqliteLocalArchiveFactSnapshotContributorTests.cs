@@ -147,8 +147,10 @@ public sealed class SqliteLocalArchiveFactSnapshotContributorTests
             "out_of_chunk" => SessionTwo,
             _ => SessionOne,
         };
-        if (corruption is "kind_type" or "id_type")
-            database.OverrideTypeof();
+        if (corruption == "kind_type")
+            database.OverrideTypeof(firstKind);
+        if (corruption == "id_type")
+            database.OverrideTypeof((string)id);
         database.InsertLoose(kind, id, "active", 2L);
         if (corruption == "duplicate")
             database.InsertLoose(kind, id, "active", 2L);
@@ -238,8 +240,14 @@ public sealed class SqliteLocalArchiveFactSnapshotContributorTests
             Execute($"CREATE TABLE local_archive_current(target_kind{collation}, target_id{collation}, state, revision);");
         }
 
-        internal void OverrideTypeof() =>
-            connection.CreateFunction<string, string>("typeof", _ => "integer");
+        internal void OverrideTypeof(string selectedText) =>
+            connection.CreateFunction<object, string>("typeof", value => value switch
+            {
+                string text when text == selectedText => "integer",
+                string => "text",
+                long => "integer",
+                _ => "null",
+            });
 
         internal void Insert(string kind, string id, string state, long revision) =>
             InsertLoose(kind, id, state, revision);
