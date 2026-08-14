@@ -843,7 +843,7 @@ deletion or read denial produces `input_unavailable` and no current Skill
 claim. The complete participant and retry contract is
 [Skill Projection](skill-projection.md).
 
-The accepted future `skill_invocation_snapshot:1` component is a separate
+The separately owned `skill_invocation_snapshot:1` component is an independent
 index/metadata and equality-receipt owner over exact Session Event content; it
 is not a raw store kind and does not copy historical body/path bytes. The sole
 v2 writer must commit Session Event identity/content, Retention ownership,
@@ -853,9 +853,10 @@ as the one seven-authority transaction defined by
 No partial Event, content, Retention item, snapshot, claim state or receipt may
 survive failure. An OTel-only `not_captured` observation has no snapshot row,
 and a retained snapshot cannot create or resurrect a stale/invalid #154 claim.
-The component migration and writer remain blocked with the v2 wire/registry/
-byte-domain/classification/discovery gate; no compatibility, fallback,
-scan-on-read or second raw-content carrier is authorized.
+Its active decision, implementation, registration, and release status is owned
+solely by [Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md);
+this Retention owner neither reopens nor closes those gates. No compatibility,
+fallback, scan-on-read or second raw-content carrier is authorized.
 
 An access or operation lease whose shared-read transaction commits before the
 item expiry boundary keeps its bounded lease duration across that boundary.
