@@ -443,14 +443,14 @@ internal sealed class ClaudeDoctorFactCollector
             eligible.Select(record => record.Id).ToArray(),
             RetentionReadKind.Operation,
             CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
+        if (rawResult.Lease is null && rawResult.Disposition != RetentionReadDisposition.Empty)
         {
             return UnreadableWindow;
         }
 
         try
         {
-            var rawById = rawResult.Lease.Value
+            var rawById = (rawResult.Lease?.Value ?? rawResult.EmptyValue ?? [])
                 .Where(record => record.Id is not null)
                 .ToDictionary(record => record.Id!.Value);
             if (eligible.Any(item => !rawById.ContainsKey(item.Id)))
@@ -482,7 +482,7 @@ internal sealed class ClaudeDoctorFactCollector
         }
         finally
         {
-            rawResult.Lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 

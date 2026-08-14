@@ -114,8 +114,7 @@ internal sealed class SourceCompatibilityReconciler
             .AsTask()
             .GetAwaiter()
             .GetResult();
-        if (read.Disposition != RetentionReadDisposition.Granted
-            || read.Lease is not { Grant: { } grant } lease)
+        if (read.Lease is not { Grant: { } grant } lease)
         {
             throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
         }

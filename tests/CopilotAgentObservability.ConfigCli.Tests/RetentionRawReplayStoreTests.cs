@@ -185,7 +185,7 @@ public sealed class RetentionRawReplayStoreTests
             },
             CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        Assert.Null(result.Disposition);
         await using (var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease))
             Assert.Equal(Path.Combine(fixture.BundleParent, captureId), lease.Value);
         Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));

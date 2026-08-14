@@ -1207,7 +1207,7 @@ internal static class MonitorHost
                 }
 
                 var rawRead = await analysisStore.ReadRawSnapshotAsync(runId, context.RequestAborted);
-                if (rawRead.Disposition != RetentionReadDisposition.Granted || rawRead.Lease is null)
+                if (rawRead.Lease is null)
                 {
                     await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "analysis_run_not_found", "No analysis run exists for that trace.");
                     return;

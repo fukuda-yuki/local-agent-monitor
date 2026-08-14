@@ -87,11 +87,13 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            if (result.Disposition != RetentionReadDisposition.Granted || result.Lease is null)
+            if (result.Disposition == RetentionReadDisposition.Empty && result.EmptyValue is { } emptyValue)
+                return new(true, null, new RawReplaySnapshotLease(emptyValue, static () => ValueTask.CompletedTask));
+
+            if (result.Lease is null)
                 return Failure(result.Disposition switch
                 {
                     RetentionReadDisposition.Busy => "snapshot_store_busy",
-                    RetentionReadDisposition.NotFound => "snapshot_member_missing",
                     _ => "snapshot_read_denied",
                 });
 

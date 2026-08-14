@@ -475,7 +475,7 @@ public class MonitorAnalysisStoreTests
 
         var read = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
         Assert.Equal("raw result", lease.Value.ResultMarkdown);
         Assert.Null(lease.Value.ErrorMessage);
@@ -544,7 +544,7 @@ public class MonitorAnalysisStoreTests
             },
             CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<string>>(read.Lease);
         Assert.Equal("verified", lease.Value);
     }
@@ -584,7 +584,7 @@ public class MonitorAnalysisStoreTests
 
         var read = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         Assert.Equal(
             authorityBefore,
             FullRowDump(
@@ -635,7 +635,7 @@ public class MonitorAnalysisStoreTests
 
         var read = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
         Assert.False(lease.Value.Events is IList<AnalysisRunRawEvent> { IsReadOnly: false });
         Assert.Equal(new[] { "first raw event" }, lease.Value.Events.Select(@event => @event.Message));
@@ -664,7 +664,7 @@ public class MonitorAnalysisStoreTests
         Execute(temp.DatabasePath, "DELETE FROM retention_items WHERE store_kind = 'analysis_run_raw' AND source_item_id = $run_id;", run.RunId);
         var missing = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.NotFound, missing.Disposition);
+        Assert.Equal(RetentionReadDisposition.LifecycleDenied, missing.Disposition);
         Assert.NotNull(store.GetRun(run.RunId));
         var summaryAfterDenial = store.GenerateRepositorySafeSummary(run.RunId, DateTimeOffset.UnixEpoch.AddMinutes(3));
         Assert.Contains("trace-analysis", summaryAfterDenial.Markdown);
@@ -675,7 +675,7 @@ public class MonitorAnalysisStoreTests
         Execute(temp.DatabasePath, "UPDATE retention_items SET ownership_receipt = randomblob(32) WHERE store_kind = 'analysis_run_raw' AND source_item_id = $run_id;", mismatchedRun.RunId);
         var mismatched = await store.ReadRawSnapshotAsync(mismatchedRun.RunId, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Denied, mismatched.Disposition);
+        Assert.Equal(RetentionReadDisposition.LifecycleDenied, mismatched.Disposition);
         Assert.NotNull(store.GetRun(mismatchedRun.RunId));
     }
 
@@ -717,7 +717,7 @@ public class MonitorAnalysisStoreTests
             .AppendEvent(run.RunId, run.OperationToken, fence, "progress", "post-event", requestedAt.AddMinutes(3));
         await writer;
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
         Assert.Equal("pre-result", lease.Value.ResultMarkdown);
         Assert.Null(lease.Value.ErrorMessage);
@@ -763,7 +763,7 @@ public class MonitorAnalysisStoreTests
         releaseSelector.SetResult();
         var snapshot = await snapshotTask;
 
-        Assert.Equal(RetentionReadDisposition.Granted, snapshot.Disposition);
+        Assert.Null(snapshot.Disposition);
         {
             await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(snapshot.Lease);
             Assert.Equal("pre-result", lease.Value.ResultMarkdown);
@@ -890,7 +890,7 @@ public class MonitorAnalysisStoreTests
 
         var resultProperties = resultType.GetProperties(publicInstance);
         Assert.Equal(new[] { "Disposition", "Lease" }, resultProperties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Equal(typeof(RetentionReadDisposition), Assert.Single(resultProperties, property => property.Name == "Disposition").PropertyType);
+        Assert.Equal(typeof(RetentionReadDisposition?), Assert.Single(resultProperties, property => property.Name == "Disposition").PropertyType);
         Assert.Equal(typeof(RetentionReadLease<AnalysisRunRawSnapshot>), Assert.Single(resultProperties, property => property.Name == "Lease").PropertyType);
         Assert.Empty(resultType.GetFields(publicInstance));
         Assert.Empty(resultType.GetEvents(publicInstance));

@@ -193,7 +193,7 @@ public sealed class RetentionCatalogMigrationFixtureTests
             var adoptedStore = new RawTelemetryStore(copy, adoptedContext, new MutableTimeProvider(now));
             var result = await adoptedStore.GetRawRecordByIdAsync(rawId, RetentionReadKind.Access, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.NotFound, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(preAdoptionHash, Hash(copy));
             Assert.Equal("0000000000000000000000000000008a", Scalar<string>(copy, "SELECT store_instance_id FROM retention_store_instances WHERE id=1;"));

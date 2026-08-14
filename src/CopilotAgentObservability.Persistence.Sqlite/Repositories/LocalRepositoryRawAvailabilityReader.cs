@@ -116,7 +116,7 @@ internal sealed class LocalRepositoryRawAvailabilityReader
             return LocalRepositoryRawAvailabilityResult.Corrupt();
         }
         if (read.Disposition == RetentionReadDisposition.Busy) return LocalRepositoryRawAvailabilityResult.Busy();
-        if (read.Disposition != RetentionReadDisposition.Granted || read.Lease is null)
+        if (read.Lease is null)
         {
             return RetentionCatalogStore.LocalRepositoryAvailabilityFact(retentionContext, rawRecordId) switch
             {

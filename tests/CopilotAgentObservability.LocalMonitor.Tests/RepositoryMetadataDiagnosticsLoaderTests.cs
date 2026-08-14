@@ -63,7 +63,7 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
     {
         var store = new DiagnosticStore([Raw(1, "{}")] )
         {
-            ReadDisposition = RetentionReadDisposition.Denied,
+            ReadDisposition = RetentionReadDisposition.LifecycleDenied,
         };
         var loader = new RepositoryMetadataDiagnosticsLoader(store);
 
@@ -105,7 +105,7 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
         public int MaximumTotalPayloadBytes { get; private set; }
         public IReadOnlyList<long>? ReadIds { get; private set; }
         public RetentionReadKind? ReadKind { get; private set; }
-        public RetentionReadDisposition ReadDisposition { get; init; } = RetentionReadDisposition.Granted;
+        public RetentionReadDisposition? ReadDisposition { get; init; }
 
         public override IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
             int limit,
@@ -125,9 +125,9 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
         {
             ReadIds = ids;
             ReadKind = readKind;
-            return ValueTask.FromResult(ReadDisposition == RetentionReadDisposition.Granted
+            return ValueTask.FromResult(ReadDisposition is null
                 ? Granted<IReadOnlyList<RawTelemetryRecord>>(records)
-                : new RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>(ReadDisposition, null));
+                : RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(ReadDisposition.Value));
         }
     }
 }

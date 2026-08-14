@@ -77,7 +77,7 @@ internal sealed class ClaudeDoctorCandidateObserver
             candidates.Select(candidate => candidate.RawRecordId).ToArray(),
             RetentionReadKind.Operation,
             CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
+        if (rawResult.Lease is null)
         {
             return;
         }

@@ -73,13 +73,30 @@ internal sealed class RetentionRawReplayStore
         RetentionReadResult<RawReplayReceipt> result;
         try
         {
+            var ownershipKey = new RetentionOwnershipKey(
+                catalog.StoreInstanceId,
+                RetentionStoreKind.SensitiveBundle,
+                captureId);
             var request = new RetentionReadRequest(
-                new(catalog.StoreInstanceId, RetentionStoreKind.SensitiveBundle, captureId),
+                ownershipKey,
                 RetentionReadKind.Operation,
                 timeProvider.GetUtcNow(),
                 ExpectedRevision: null);
             result = await catalog.ReadAsync(request, (connection, transaction, grant, _) =>
                 ValueTask.FromResult(ReadReceipt(connection, transaction, grant, replayId, captureId)), cancellationToken).ConfigureAwait(false);
+
+            if (result.Lease is null)
+            {
+                var itemExists = result.Disposition == RetentionReadDisposition.LifecycleDenied
+                    && catalog.Find(ownershipKey) is not null;
+                return new(result.Disposition switch
+                {
+                    RetentionReadDisposition.LifecycleDenied when itemExists => RetainedRawReplayReadDisposition.Denied,
+                    RetentionReadDisposition.LifecycleDenied => RetainedRawReplayReadDisposition.NotFound,
+                    RetentionReadDisposition.Busy => RetainedRawReplayReadDisposition.Busy,
+                    _ => RetainedRawReplayReadDisposition.Denied,
+                }, null);
+            }
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -89,13 +106,6 @@ internal sealed class RetentionRawReplayStore
         {
             return new(RetainedRawReplayReadDisposition.Busy, null);
         }
-        if (result.Disposition != RetentionReadDisposition.Granted || result.Lease is null)
-            return new(result.Disposition switch
-            {
-                RetentionReadDisposition.NotFound => RetainedRawReplayReadDisposition.NotFound,
-                RetentionReadDisposition.Busy => RetainedRawReplayReadDisposition.Busy,
-                _ => RetainedRawReplayReadDisposition.Denied,
-            }, null);
         var lease = result.Lease;
         return new(RetainedRawReplayReadDisposition.Granted, new(lease.Value, lease.DisposeAsync));
     }

@@ -965,7 +965,7 @@ public sealed class RetentionCatalogStoreTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(1, checkpointCalls);
             Assert.Equal(0, selectorCalls);
@@ -1255,7 +1255,7 @@ public sealed class RetentionCatalogStoreTests
                 static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
 
             var denied = Assert.IsType<RetentionCatalogItem>(store.Find(key));
@@ -1277,7 +1277,7 @@ public sealed class RetentionCatalogStoreTests
                 new RetentionReadRequest(key, RetentionReadKind.Access, at, denied.Revision),
                 static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
                 CancellationToken.None);
-            Assert.Equal(RetentionReadDisposition.Denied, retry.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, retry.Disposition);
             Assert.Equal(deniedCatalog, ItemRowDump(path, denied.ItemId));
         }
         finally
@@ -1311,7 +1311,7 @@ public sealed class RetentionCatalogStoreTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(2, time.ReadCount);
             var denied = Assert.IsType<RetentionCatalogItem>(store.Find(key));

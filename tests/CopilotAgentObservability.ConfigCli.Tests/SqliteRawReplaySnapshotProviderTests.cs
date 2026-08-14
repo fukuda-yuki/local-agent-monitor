@@ -465,7 +465,7 @@ public sealed class SqliteRawReplaySnapshotProviderTests
             },
             CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        Assert.Null(result.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<int[]>>(result.Lease);
         Assert.Equal(0, Assert.Single(lease.Value));
     }

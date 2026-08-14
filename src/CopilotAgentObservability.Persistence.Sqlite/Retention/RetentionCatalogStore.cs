@@ -499,38 +499,38 @@ public sealed partial class RetentionCatalogStore
             using var transaction = connection.BeginTransaction(deferred: false);
             var transactionNow = timeProvider.GetUtcNow();
             var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-            if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
-            if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+            if (item is null) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
+            if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
             var readability = ClassifyRowReadability(item, transactionNow);
             if (readability != RetentionRowReadability.Readable)
             {
                 if (readability == RetentionRowReadability.ExpiredExpiring) DenyAndQueue(connection, transaction, item, transactionNow);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             var proof = SourceProof(connection, transaction, request.OwnershipKey);
-            if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
+            if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
             if (proof != SourceReceiptProof.Match)
             {
                 if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
                 else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             var owner = Guid.NewGuid().ToString("N");
             var leaseKind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
             var generation = AcquireLease(connection, transaction, item.ItemId, leaseKind, owner, transactionNow);
-            if (generation is null) { transaction.Commit(); return new(RetentionReadDisposition.Busy, null); }
+            if (generation is null) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
             var leaseExpiry = transactionNow.Add(RetentionV1Constants.LeaseDuration);
             var token = SourceToken(connection, transaction, request.OwnershipKey);
-            if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+            if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
             var grant = new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, leaseKind, owner, generation.Value, leaseExpiry, token);
             var value = await selector(connection, transaction, grant, cancellationToken).ConfigureAwait(false);
             if (value is null)
             {
                 ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
             }
             var boundaryNow = timeProvider.GetUtcNow();
             var boundaryReadability = ClassifyRowReadability(item, boundaryNow);
@@ -540,11 +540,10 @@ public sealed partial class RetentionCatalogStore
                 if (boundaryReadability == RetentionRowReadability.ExpiredExpiring)
                     DenyAndQueue(connection, transaction, item, boundaryNow);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
-            return new(
-                RetentionReadDisposition.Granted,
+            return RetentionReadResult<T>.FromHandle(
                 new RetentionReadLease<T>(
                     value,
                     RetentionRevisionFence.Create(),
@@ -557,7 +556,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            return new(RetentionReadDisposition.Busy, null);
+            return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
         finally
         {
@@ -573,7 +572,15 @@ public sealed partial class RetentionCatalogStore
         ArgumentNullException.ThrowIfNull(requests);
         ArgumentNullException.ThrowIfNull(selector);
         if (requests.Count == 0)
-            return new(RetentionReadDisposition.Granted, new RetentionBatchReadLease<T>(default!, RetentionRevisionFence.Create(), static () => ValueTask.CompletedTask));
+        {
+            using var emptyConnection = OpenExisting();
+            using var emptyTransaction = emptyConnection.BeginTransaction(deferred: true);
+            var emptyValue = await selector(emptyConnection, emptyTransaction, Array.Empty<RetentionReadGrant>(), cancellationToken).ConfigureAwait(false);
+            emptyTransaction.Commit();
+            return emptyValue is null
+                ? RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.SelectorUnavailable)
+                : RetentionBatchReadResult<T>.Empty(emptyValue);
+        }
 
         var gate = context?.Gate;
         if (gate is not null) await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -587,8 +594,8 @@ public sealed partial class RetentionCatalogStore
             foreach (var request in requests)
             {
                 var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-                if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
-                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+                if (item is null) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
+                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
                 items.Add(item);
             }
 
@@ -605,19 +612,19 @@ public sealed partial class RetentionCatalogStore
                             DenyAndQueue(connection, transaction, expiredItem, transactionNow);
                     }
                     transaction.Commit();
-                    return new(RetentionReadDisposition.Denied, null);
+                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
                 }
                 var proof = SourceProof(connection, transaction, request.OwnershipKey);
                 if (proof == SourceReceiptProof.CatalogBusy)
                 {
-                    transaction.Rollback(); return new(RetentionReadDisposition.Busy, null);
+                    transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
                 }
                 if (proof != SourceReceiptProof.Match)
                 {
                     if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
                     else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
                     transaction.Commit();
-                    return new(RetentionReadDisposition.Denied, null);
+                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
                 }
             }
 
@@ -632,10 +639,10 @@ public sealed partial class RetentionCatalogStore
                 var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, transactionNow);
                 if (generation is null)
                 {
-                    transaction.Rollback(); return new(RetentionReadDisposition.Busy, null);
+                    transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
                 }
                 var token = SourceToken(connection, transaction, request.OwnershipKey);
-                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
                 grants.Add(new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, kind, owner, generation.Value, leaseExpiry, token));
             }
 
@@ -644,7 +651,7 @@ public sealed partial class RetentionCatalogStore
             {
                 ReleaseWithinTransaction(connection, transaction, grants);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
             }
             var boundaryNow = timeProvider.GetUtcNow();
             var expiredMembers = items.Where(item => ClassifyRowReadability(item, boundaryNow) == RetentionRowReadability.ExpiredExpiring).ToList();
@@ -653,11 +660,10 @@ public sealed partial class RetentionCatalogStore
                 ReleaseWithinTransaction(connection, transaction, grants);
                 foreach (var item in expiredMembers) DenyAndQueue(connection, transaction, item, boundaryNow);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
-            return new(
-                RetentionReadDisposition.Granted,
+            return RetentionBatchReadResult<T>.FromHandle(
                 new RetentionBatchReadLease<T>(
                     value,
                     RetentionRevisionFence.Create(),
@@ -670,7 +676,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            return new(RetentionReadDisposition.Busy, null);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
         finally { gate?.Release(); }
     }
@@ -697,10 +703,10 @@ public sealed partial class RetentionCatalogStore
                 if (emptyValue is null)
                 {
                     transaction.Rollback();
-                    return new(RetentionReadDisposition.Denied, null);
+                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.SelectorUnavailable);
                 }
                 transaction.Commit();
-                return new(RetentionReadDisposition.Granted, new RetentionBatchReadLease<T>(emptyValue, RetentionRevisionFence.Create(), static () => ValueTask.CompletedTask));
+                return RetentionBatchReadResult<T>.Empty(emptyValue);
             }
 
             var transactionNow = timeProvider.GetUtcNow();
@@ -708,8 +714,8 @@ public sealed partial class RetentionCatalogStore
             foreach (var request in requests)
             {
                 var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-                if (item is null) { transaction.Commit(); return new(RetentionReadDisposition.NotFound, null); }
-                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+                if (item is null) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
+                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
                 items.Add(item);
             }
 
@@ -726,16 +732,16 @@ public sealed partial class RetentionCatalogStore
                             DenyAndQueue(connection, transaction, expiredItem, transactionNow);
                     }
                     transaction.Commit();
-                    return new(RetentionReadDisposition.Denied, null);
+                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
                 }
                 var proof = SourceProof(connection, transaction, request.OwnershipKey);
-                if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
+                if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
                 if (proof != SourceReceiptProof.Match)
                 {
                     if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
                     else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
                     transaction.Commit();
-                    return new(RetentionReadDisposition.Denied, null);
+                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
                 }
             }
 
@@ -748,9 +754,9 @@ public sealed partial class RetentionCatalogStore
                 var item = items[index];
                 var kind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
                 var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, transactionNow);
-                if (generation is null) { transaction.Rollback(); return new(RetentionReadDisposition.Busy, null); }
+                if (generation is null) { transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
                 var token = SourceToken(connection, transaction, request.OwnershipKey);
-                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return new(RetentionReadDisposition.Denied, null); }
+                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
                 grants.Add(new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, kind, owner, generation.Value, leaseExpiry, token));
             }
 
@@ -759,7 +765,7 @@ public sealed partial class RetentionCatalogStore
             {
                 ReleaseWithinTransaction(connection, transaction, grants);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
             }
             var boundaryNow = timeProvider.GetUtcNow();
             var expiredMembers = items.Where(item => ClassifyRowReadability(item, boundaryNow) == RetentionRowReadability.ExpiredExpiring).ToList();
@@ -768,11 +774,10 @@ public sealed partial class RetentionCatalogStore
                 ReleaseWithinTransaction(connection, transaction, grants);
                 foreach (var item in expiredMembers) DenyAndQueue(connection, transaction, item, boundaryNow);
                 transaction.Commit();
-                return new(RetentionReadDisposition.Denied, null);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
-            return new(
-                RetentionReadDisposition.Granted,
+            return RetentionBatchReadResult<T>.FromHandle(
                 new RetentionBatchReadLease<T>(
                     value,
                     RetentionRevisionFence.Create(),
@@ -785,7 +790,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            return new(RetentionReadDisposition.Busy, null);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
         finally { gate?.Release(); }
     }

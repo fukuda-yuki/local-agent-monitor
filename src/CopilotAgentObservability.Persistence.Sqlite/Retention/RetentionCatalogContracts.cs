@@ -171,7 +171,15 @@ public sealed class RetentionReadLeaseHandle : IDisposable
     }
 }
 
-internal enum RetentionReadDisposition { Granted, NotFound, Denied, Busy }
+internal enum RetentionReadDisposition
+{
+    Empty,
+    LifecycleDenied,
+    SelectorUnavailable,
+    ConsumptionUnavailable,
+    LeaseLost,
+    Busy
+}
 internal enum RetentionReadKind { Access, Operation }
 
 internal enum RetentionWorkKind { Queued, IntentRecovery }
@@ -211,9 +219,39 @@ internal sealed record RetentionReadRequest(
     DateTimeOffset Now,
     long? ExpectedRevision);
 
-internal sealed record RetentionReadResult<T>(RetentionReadDisposition Disposition, RetentionReadLease<T>? Lease);
+internal sealed record RetentionReadResult<T>(
+    RetentionReadDisposition? Disposition,
+    RetentionReadLease<T>? Lease)
+{
+    internal static RetentionReadResult<T> FromHandle(RetentionReadLease<T> lease) =>
+        new(null, lease ?? throw new ArgumentNullException(nameof(lease)));
 
-internal sealed record RetentionBatchReadResult<T>(RetentionReadDisposition Disposition, RetentionBatchReadLease<T>? Lease);
+    internal static RetentionReadResult<T> FromDisposition(RetentionReadDisposition disposition)
+    {
+        if (disposition == RetentionReadDisposition.Empty)
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        return new(disposition, null);
+    }
+}
+
+internal sealed record RetentionBatchReadResult<T>(
+    RetentionReadDisposition? Disposition,
+    RetentionBatchReadLease<T>? Lease,
+    T? EmptyValue)
+{
+    internal static RetentionBatchReadResult<T> FromHandle(RetentionBatchReadLease<T> lease) =>
+        new(null, lease ?? throw new ArgumentNullException(nameof(lease)), default);
+
+    internal static RetentionBatchReadResult<T> Empty(T value) =>
+        new(RetentionReadDisposition.Empty, null, value);
+
+    internal static RetentionBatchReadResult<T> FromDisposition(RetentionReadDisposition disposition)
+    {
+        if (disposition == RetentionReadDisposition.Empty)
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        return new(disposition, null, default);
+    }
+}
 
 internal sealed class RetentionRevisionFence
 {

@@ -168,7 +168,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             selection.RawRecordId,
             RetentionReadKind.Operation,
             CancellationToken.None);
-        if (rawResult.Disposition != RetentionReadDisposition.Granted || rawResult.Lease is null)
+        if (rawResult.Lease is null)
         {
             return Empty(
                 rawResult.Disposition == RetentionReadDisposition.Busy ? StoreBusy() : status,

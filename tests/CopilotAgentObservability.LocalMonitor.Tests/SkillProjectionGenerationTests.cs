@@ -650,7 +650,7 @@ public sealed class SkillProjectionGenerationTests
             new RawTelemetryStore(database.Path, retention, time));
         var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         var grant = Assert.Single(retentionLease.Grants);
@@ -736,7 +736,7 @@ public sealed class SkillProjectionGenerationTests
             checkpoint);
         var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         Assert.Equal(2, retentionLease.Grants.Count);
@@ -884,7 +884,7 @@ public sealed class SkillProjectionGenerationTests
                 new MutableTimeProvider(heartbeatAt)));
         var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         var grant = Assert.Single(retentionLease.Grants);
@@ -1749,7 +1749,7 @@ public sealed class SkillProjectionGenerationTests
         time.Advance(admissionAt - time.GetUtcNow());
 
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         SkillProjectionWorkOutcome outcome;
         await using (var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease))
@@ -1853,7 +1853,7 @@ public sealed class SkillProjectionGenerationTests
 
         var denied = await store.ReadFrontierAsync(lease, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Denied, denied.Disposition);
+        Assert.Equal(RetentionReadDisposition.LifecycleDenied, denied.Disposition);
         Assert.Null(denied.Lease);
         using (var connection = Open(database.Path))
         {
@@ -1922,7 +1922,7 @@ public sealed class SkillProjectionGenerationTests
 
         var repaired = await store.ReadFrontierAsync(lease, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, repaired.Disposition);
+        Assert.Null(repaired.Disposition);
         await using var repairedLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(repaired.Lease);
         Assert.Equal(2, repairedLease.Grants.Count);
@@ -1960,7 +1960,7 @@ public sealed class SkillProjectionGenerationTests
 
         var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         string retentionItemsAfterDrift;
@@ -2484,11 +2484,10 @@ public sealed class SkillProjectionGenerationTests
             {
                 time.Advance(TimeSpan.FromSeconds(31));
                 return ValueTask.FromResult(
-                    new RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>(
+                    RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(
                         disposition == "busy"
                             ? RetentionReadDisposition.Busy
-                            : RetentionReadDisposition.Denied,
-                        Lease: null));
+                            : RetentionReadDisposition.LifecycleDenied));
             });
 
         var outcome = await worker.RunNextAsync(claimedAt);

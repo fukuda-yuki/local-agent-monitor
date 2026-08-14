@@ -66,7 +66,7 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
             return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
         }
 
-        if (read.Disposition != RetentionReadDisposition.Granted || read.Lease is null)
+        if (read.Lease is null)
         {
             return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
         }

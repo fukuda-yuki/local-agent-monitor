@@ -17,10 +17,10 @@ internal static class RawStoreLeaseReader
         var context = RetentionCatalogContext.AdoptExistingCatalogV1(databasePath);
         var store = new RawTelemetryStore(databasePath, context);
         var result = await store.ListRecordsAsync(RetentionReadKind.Operation, CancellationToken.None);
-        if (result.Disposition != RetentionReadDisposition.Granted || result.Lease is null)
-        {
+        if (result.Disposition == RetentionReadDisposition.Empty && result.EmptyValue is { } emptyValue)
+            return reader(emptyValue);
+        if (result.Lease is null)
             throw new InvalidDataException("raw_store_unavailable");
-        }
 
         await using var lease = result.Lease;
         return reader(lease.Value);

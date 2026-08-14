@@ -1389,7 +1389,7 @@ public sealed class SqliteSessionStoreTests
             return true;
         }, CancellationToken.None);
 
-        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        Assert.Null(result.Disposition);
         Assert.True(Assert.IsType<RetentionReadLease<bool>>(result.Lease).Value);
         await result.Lease.DisposeAsync();
 

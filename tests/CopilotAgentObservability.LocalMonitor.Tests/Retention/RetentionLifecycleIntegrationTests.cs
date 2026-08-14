@@ -126,7 +126,7 @@ public sealed class RetentionLifecycleIntegrationTests
                     return ValueTask.FromResult<string?>("must-not-be-materialized");
                 },
                 CancellationToken.None);
-            Assert.Equal(RetentionReadDisposition.Denied, read.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, read.Disposition);
             Assert.Null(read.Lease);
             Assert.Equal(0, selectorCalls);
         }
@@ -216,7 +216,7 @@ public sealed class RetentionLifecycleIntegrationTests
                 new RetentionReadRequest(key, RetentionReadKind.Operation, time.GetUtcNow(), item.Revision),
                 static (_, _, _, _) => ValueTask.FromResult<string?>("materialized"),
                 CancellationToken.None);
-            Assert.Equal(RetentionReadDisposition.Granted, admission.Disposition);
+            Assert.Null(admission.Disposition);
             var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
             var grant = Assert.IsType<RetentionReadGrant>(lease.Grant);
             Assert.Equal(time.GetUtcNow() + RetentionV1Constants.LeaseDuration, grant.LeaseExpiresAt);

@@ -560,9 +560,8 @@ internal sealed partial class RawTelemetryStore
         var context = retentionContext ?? throw new Retention.RetentionCatalogUnavailableException();
         var requestedIds = ids.Distinct().ToArray();
         if (requestedIds.Length == 0)
-            return ValueTask.FromResult(new Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>(
-                Retention.RetentionReadDisposition.Granted,
-                new Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>([], Retention.RetentionRevisionFence.Create(), static () => ValueTask.CompletedTask)));
+            return ValueTask.FromResult(
+                Retention.RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.Empty([]));
         var now = timeProvider.GetUtcNow();
         var requests = requestedIds
             .Select(id => new Retention.RetentionReadRequest(

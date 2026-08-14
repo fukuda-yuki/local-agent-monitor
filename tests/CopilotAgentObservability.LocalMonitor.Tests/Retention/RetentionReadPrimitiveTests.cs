@@ -22,6 +22,87 @@ public sealed class RetentionReadPrimitiveTests
         """;
 
     [Fact]
+    public void ReadDisposition_UsesTheClosedSixWayFailureAndEmptyTaxonomy()
+    {
+        Assert.Equal(
+            [
+                "Empty",
+                "LifecycleDenied",
+                "SelectorUnavailable",
+                "ConsumptionUnavailable",
+                "LeaseLost",
+                "Busy",
+            ],
+            Enum.GetNames<RetentionReadDisposition>());
+    }
+
+    [Fact]
+    public async Task ReadBatchAsync_ZeroRequests_ReturnsOwnerEmptyWithoutHandleOrRetentionResources()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var time = new SequencedTimeProvider(now);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RetentionCatalogStore(context, time);
+            var ownerEmptyCalls = 0;
+            time.ResetReadCount();
+
+            var result = await store.ReadBatchAsync<string>(
+                [],
+                (_, _, grants, _) =>
+                {
+                    ownerEmptyCalls++;
+                    Assert.Empty(grants);
+                    return ValueTask.FromResult<string?>("owner-empty");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.Empty, result.Disposition);
+            Assert.Equal("owner-empty", result.EmptyValue);
+            Assert.Null(result.Lease);
+            Assert.Equal(1, ownerEmptyCalls);
+            Assert.Equal(0, time.ReadCount);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadSelectedBatchAsync_ZeroCandidates_ReturnsOwnerEmptyWithoutHandleOrRetentionResources()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var time = new SequencedTimeProvider(now);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RetentionCatalogStore(context, time);
+            var ownerEmptyCalls = 0;
+            time.ResetReadCount();
+
+            var result = await store.ReadSelectedBatchAsync<string>(
+                (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([]),
+                (_, _, grants, _) =>
+                {
+                    ownerEmptyCalls++;
+                    Assert.Empty(grants);
+                    return ValueTask.FromResult<string?>("owner-empty");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.Empty, result.Disposition);
+            Assert.Equal("owner-empty", result.EmptyValue);
+            Assert.Null(result.Lease);
+            Assert.Equal(1, ownerEmptyCalls);
+            Assert.Equal(0, time.ReadCount);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public async Task RawStore_ListRecordsAsync_GrantsOrderedMaterializedRecordsUnderOneCompositeLease()
     {
         var path = CopyFixture();
@@ -33,7 +114,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await store.ListRecordsAsync(RetentionReadKind.Access, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(result.Lease);
             Assert.Equal(ReadIds(path), lease.Value.Select(record => record.Id!.Value));
             Assert.All(lease.Value, record => Assert.NotEmpty(record.PayloadJson));
@@ -74,7 +155,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await store.ListRecordsAsync(RetentionReadKind.Access, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
         }
         finally { Delete(path); }
@@ -113,7 +194,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await store.GetRawRecordByIdAsync(id, RetentionReadKind.Access, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
         }
         finally { Delete(path); }
@@ -132,7 +213,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await store.GetRawRecordByIdAsync(id, RetentionReadKind.Access, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(result.Lease);
             Assert.Equal(id, lease.Value.Id);
             Assert.NotEmpty(lease.Value.PayloadJson);
@@ -153,7 +234,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await store.ReadRawRecordsAsync(ids, RetentionReadKind.Operation, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(result.Lease);
             Assert.Equal(ids, lease.Value.Select(record => record.Id!.Value));
         }
@@ -200,7 +281,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
             Assert.NotEmpty(lease.Value);
             Assert.NotNull(lease.RevisionFence);
@@ -246,7 +327,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
             try
             {
@@ -603,14 +684,14 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, _, _) => ValueTask.FromResult<string?>("must-not-leak"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
         }
         finally { Delete(path); }
     }
 
     [Fact]
-    public async Task ReadAsync_SelectorNullAfterLeaseAcquisitionReleasesLeaseBeforeDenying()
+    public async Task ReadAsync_SelectorNullAfterLeaseAcquisitionReturnsConsumptionUnavailableAndReleasesLease()
     {
         var path = CopyFixture();
         try
@@ -626,7 +707,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, _, _) => ValueTask.FromResult<string?>(null),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
@@ -655,7 +736,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
             var queued = Assert.IsType<RetentionCatalogItem>(store.Find(key));
@@ -728,7 +809,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await pendingRead.WaitAsync(TimeSpan.FromSeconds(5));
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsAssignableFrom<IAsyncDisposable>(result.Lease);
             try
             {
@@ -801,7 +882,7 @@ public sealed class RetentionReadPrimitiveTests
 
             var result = await pendingRead.WaitAsync(TimeSpan.FromSeconds(5));
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0, materializationCount);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
@@ -861,7 +942,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
             try
             {
@@ -912,7 +993,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0, materializationCount);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
@@ -952,7 +1033,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
             Assert.Equal(2, time.ReadCount);
             Assert.Equal(itemBefore, FullRowDump(path, "retention_items", "item_id", item.ItemId));
@@ -1028,7 +1109,7 @@ public sealed class RetentionReadPrimitiveTests
                 result = await store.ReadBatchAsync<string>(requests, Materialize, CancellationToken.None);
             }
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
             Assert.Equal(2, time.ReadCount);
             Assert.Equal(
@@ -1062,7 +1143,7 @@ public sealed class RetentionReadPrimitiveTests
             primitivePath,
             pinned,
             TimeSpan.FromMinutes(2),
-            RetentionReadDisposition.Denied);
+            RetentionReadDisposition.LifecycleDenied);
     }
 
     [Theory]
@@ -1080,7 +1161,7 @@ public sealed class RetentionReadPrimitiveTests
             primitivePath,
             pinned,
             TimeSpan.FromMinutes(2) - TimeSpan.FromTicks(1),
-            RetentionReadDisposition.Granted);
+            expectedDisposition: null);
     }
 
     [Fact]
@@ -1121,7 +1202,7 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
             Assert.NotEmpty(lease.Value);
 
@@ -1162,7 +1243,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, grants, _) => ValueTask.FromResult<string?>($"values={grants.Count}"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
             Assert.Equal("values=2", lease.Value);
             await lease.DisposeAsync();
@@ -1202,7 +1283,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, grants, _) => ValueTask.FromResult<string?>($"values={grants.Count}"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
 
             var boundaryDenied = Assert.IsType<RetentionCatalogItem>(store.Find(boundaryKey));
@@ -1249,7 +1330,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, grants, _) => ValueTask.FromResult<string?>($"values={grants.Count}"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
             Assert.Equal("values=2", lease.Value);
             await lease.DisposeAsync();
@@ -1290,7 +1371,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, grants, _) => ValueTask.FromResult<string?>($"values={grants.Count}"),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
 
             var boundaryDenied = Assert.IsType<RetentionCatalogItem>(store.Find(boundaryKey));
@@ -1352,7 +1433,7 @@ public sealed class RetentionReadPrimitiveTests
                     CancellationToken.None)
                 : await store.ReadBatchAsync<string>(requests, Materialize, CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
             var admittedGrants = Assert.IsAssignableFrom<IReadOnlyList<RetentionReadGrant>>(exposedGrants);
             Assert.Equal(2, admittedGrants.Count);
@@ -1433,7 +1514,7 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
-    public async Task ReadAsync_SelectorReturningNullDeniesWithoutItemMutation()
+    public async Task ReadAsync_SelectorReturningNullIsConsumptionUnavailableWithoutItemMutation()
     {
         var path = CopyFixture();
         try
@@ -1450,7 +1531,7 @@ public sealed class RetentionReadPrimitiveTests
                 static (_, _, _, _) => ValueTask.FromResult<string?>(null),
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.Denied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
             Assert.Equal(before, FullRowDump(path, "retention_items", "item_id", item.ItemId));
@@ -1475,7 +1556,7 @@ public sealed class RetentionReadPrimitiveTests
                 new RetentionReadRequest(key, RetentionReadKind.Operation, now, item.Revision),
                 static (_, _, _, _) => ValueTask.FromResult<string?>("materialized"),
                 CancellationToken.None);
-            Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+            Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
             var grant = Assert.IsType<RetentionReadGrant>(lease.Grant);
             try
@@ -1596,7 +1677,7 @@ public sealed class RetentionReadPrimitiveTests
         return usable;
     }
 
-    private static async Task<(RetentionReadDisposition Disposition, IAsyncDisposable? Lease)> ReadThroughPrimitiveAsync(
+    private static async Task<(RetentionReadDisposition? Disposition, IAsyncDisposable? Lease)> ReadThroughPrimitiveAsync(
         RetentionCatalogStore store,
         ReadPrimitivePath primitivePath,
         IReadOnlyList<RetentionReadRequest> requests,
@@ -1637,7 +1718,7 @@ public sealed class RetentionReadPrimitiveTests
         ReadPrimitivePath primitivePath,
         bool pinned,
         TimeSpan selectorDuration,
-        RetentionReadDisposition expectedDisposition)
+        RetentionReadDisposition? expectedDisposition)
     {
         var path = CopyFixture();
         try
@@ -1705,7 +1786,7 @@ public sealed class RetentionReadPrimitiveTests
                 sourceIds.Select(sourceId => FullRowDump(path, "raw_records", "id", sourceId)).ToArray());
             Assert.Equal(sentinelBefore, FullRowDump(path, "retention_leases", "item_id", sentinelItem.ItemId));
 
-            if (expectedDisposition == RetentionReadDisposition.Denied)
+            if (expectedDisposition == RetentionReadDisposition.LifecycleDenied)
             {
                 Assert.Null(result.Lease);
                 Assert.All(admittedGrants, grant => Assert.Equal(0L, LeaseTupleCount(path, grant)));
@@ -1729,7 +1810,7 @@ public sealed class RetentionReadPrimitiveTests
         finally { Delete(path); }
     }
 
-    private static async Task<(RetentionReadDisposition Disposition, IAsyncDisposable? Lease)> ReadThroughEveryPrimitiveAsync(
+    private static async Task<(RetentionReadDisposition? Disposition, IAsyncDisposable? Lease)> ReadThroughEveryPrimitiveAsync(
         RetentionCatalogStore store,
         ReadPrimitivePath primitivePath,
         IReadOnlyList<RetentionReadRequest> requests,

@@ -201,7 +201,7 @@ public class MonitorProjectionStoreTests
         var id = store.Insert(Raw("t1", T(1)));
 
         var read = await store.GetRawRecordByIdAsync(id, RetentionReadKind.Access, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(read.Lease);
         Assert.Equal("t1", lease.Value.TraceId);
 

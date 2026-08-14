@@ -1323,7 +1323,8 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             return new(SessionContentReadDisposition.Denied, null);
         }
         var detail = GetDetail(sessionId);
-        if (detail is null || !detail.Events.Any(item => item.EventId == eventId))
+        var eventRow = detail?.Events.FirstOrDefault(item => item.EventId == eventId);
+        if (eventRow is null || eventRow.ContentState is SessionContentState.NotCaptured or SessionContentState.Redacted or SessionContentState.Unsupported)
         {
             return new(SessionContentReadDisposition.NotFound, null);
         }
@@ -1349,13 +1350,11 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             return new SessionEventContent(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), ParseTimestamp(reader.GetString(3)), ParseTimestamp(reader.GetString(4)));
         }, cancellationToken).ConfigureAwait(false);
 
-        return result.Disposition switch
-        {
-            RetentionReadDisposition.Granted => new(SessionContentReadDisposition.Granted, new SessionContentReadLease(result.Lease!.Value, result.Lease.DisposeAsync)),
-            RetentionReadDisposition.NotFound => new(SessionContentReadDisposition.NotFound, null),
-            RetentionReadDisposition.Busy => new(SessionContentReadDisposition.Busy, null),
-            _ => new(SessionContentReadDisposition.Denied, null),
-        };
+        if (result.Lease is { } lease)
+            return new(SessionContentReadDisposition.Granted, new SessionContentReadLease(lease.Value, lease.DisposeAsync));
+        return result.Disposition == RetentionReadDisposition.Busy
+            ? new(SessionContentReadDisposition.Busy, null)
+            : new(SessionContentReadDisposition.Denied, null);
     }
 
     internal static void ConfigureContentReadMaterializationCommand(

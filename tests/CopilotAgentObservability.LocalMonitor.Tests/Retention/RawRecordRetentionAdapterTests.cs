@@ -33,7 +33,7 @@ public sealed class RawRecordRetentionAdapterTests
                 null,
                 "{\"resourceSpans\":[]}"));
             var admitted = await store.GetRawRecordByIdAsync(rawRecordId, RetentionReadKind.Access, CancellationToken.None);
-            Assert.Equal(RetentionReadDisposition.Granted, admitted.Disposition);
+            Assert.Null(admitted.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(admitted.Lease);
             using var connection = OpenDatabase(path);
             using var transaction = connection.BeginTransaction();

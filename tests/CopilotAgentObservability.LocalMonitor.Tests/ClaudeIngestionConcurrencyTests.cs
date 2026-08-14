@@ -197,7 +197,7 @@ public sealed class ClaudeIngestionConcurrencyTests
         temp.TimeProvider = new FixedTimeProvider(ObservedAt);
         var rawStore = temp.CreateRawStore();
         var held = await rawStore.ReadRawRecordsAsync([rawRecordId], RetentionReadKind.Operation, CancellationToken.None);
-        Assert.Equal(RetentionReadDisposition.Granted, held.Disposition);
+        Assert.Null(held.Disposition);
 
         await using (Assert.IsAssignableFrom<IAsyncDisposable>(held.Lease))
         {

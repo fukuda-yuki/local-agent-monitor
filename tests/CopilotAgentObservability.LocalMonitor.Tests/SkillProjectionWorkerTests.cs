@@ -149,8 +149,7 @@ public sealed class SkillProjectionWorkerTests
             releaseProjection,
             cancellationToken);
         captureFrontier(new(queueLease, retained.Grants, records));
-        return new(
-            RetentionReadDisposition.Granted,
+        return RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromHandle(
             new RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>(
                 records,
                 retained.RevisionFence,

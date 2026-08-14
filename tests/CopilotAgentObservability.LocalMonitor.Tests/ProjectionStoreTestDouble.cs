@@ -12,13 +12,14 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 internal abstract class ProjectionStoreTestDouble : IMonitorProjectionStore
 {
     protected static RetentionBatchReadResult<T> Granted<T>(T records) =>
-        new(RetentionReadDisposition.Granted, new RetentionBatchReadLease<T>(records, RetentionRevisionFence.Create(), () => ValueTask.CompletedTask));
+        RetentionBatchReadResult<T>.FromHandle(
+            new RetentionBatchReadLease<T>(records, RetentionRevisionFence.Create(), () => ValueTask.CompletedTask));
 
     protected static RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>> NotFoundBatch() =>
-        new(RetentionReadDisposition.NotFound, null);
+        RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
 
     protected static RetentionReadResult<RawTelemetryRecord> NotFound() =>
-        new(RetentionReadDisposition.NotFound, null);
+        RetentionReadResult<RawTelemetryRecord>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
 
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
         ValueTask.FromResult(NotFoundBatch());

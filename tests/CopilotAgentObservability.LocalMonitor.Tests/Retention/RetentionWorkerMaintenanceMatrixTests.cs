@@ -95,7 +95,7 @@ public sealed class RetentionWorkerMaintenanceMatrixTests
         foreach (var kind in new[] { RetentionReadKind.Access, RetentionReadKind.Operation })
         {
             var result = await second.ReadAsync(new RetentionReadRequest(key, kind, fixture.Now, null), static (_, _, _, _) => ValueTask.FromResult<string?>("safe"), CancellationToken.None);
-            Assert.NotEqual(RetentionReadDisposition.Granted, result.Disposition); Assert.Null(result.Lease);
+            Assert.NotNull(result.Disposition); Assert.Null(result.Lease);
         }
         var claim = await second.TryClaimDeletionAsync(new("fenced", 1, RetentionWorkKind.Queued), "worker", fixture.Now, CancellationToken.None);
         Assert.Equal(RetentionClaimDisposition.Contended, claim.Disposition); Assert.Equal(0L, Convert.ToInt64(Scalar(fixture.Path, "SELECT COUNT(*) FROM retention_leases")));
