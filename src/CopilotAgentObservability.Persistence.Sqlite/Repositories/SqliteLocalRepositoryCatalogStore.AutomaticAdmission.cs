@@ -9,7 +9,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed partial class SqliteLocalRepositoryCatalogStore
 {
-    public ValueTask ProcessAsync(
+    public ValueTask<ILocalRepositoryPreparedRawRecord> PrepareAsync(
         LocalRepositoryQueueLease queueLease,
         RawTelemetryRecord rawRecord,
         RetentionReadLease<RawTelemetryRecord> retentionLease,
@@ -24,30 +24,9 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             throw new ArgumentException("The raw record does not match the queue lease.", nameof(rawRecord));
         }
         cancellationToken.ThrowIfCancellationRequested();
-        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforeTransaction);
-
-        using var connection = Open();
-        using var transaction = connection.BeginTransaction(deferred: false);
-        if (!binding.Matches(connection, transaction))
-            throw new InvalidOperationException("local_repository_store_binding_mismatch");
-
-        var processingAt = timeProvider.GetUtcNow().ToUniversalTime();
-        if (retentionLease.Grant is not { } grant
-            || !RetentionCatalogStore.ValidateLocalRepositoryOperationLease(
-                connection,
-                transaction,
-                grant,
-                suppliedRawRecordId,
-                processingAt))
-        {
-            throw new InvalidOperationException("local_repository_retention_authority_lost");
-        }
-
         if (!IsValidInputEnvelope(queueLease, suppliedRawRecordId))
-        {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
-        }
+            return ValueTask.FromResult<ILocalRepositoryPreparedRawRecord>(
+                new PreparedAutomaticAdmission(this, retentionLease.Grant, null, null, "catalog_schema_violation"));
         if (!string.Equals(
             SkillProjectionHashing.InputDigest(rawRecord.PayloadJson),
             queueLease.RawPayloadSha256,
@@ -56,19 +35,30 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             throw new InvalidOperationException("local_repository_verified_payload_mismatch");
         }
 
-        var provenanceResult = LocalRepositorySessionEventJoin.ReadCaptureProvenance(
-            connection,
-            transaction,
-            suppliedRawRecordId,
-            queueLease.RawPayloadSha256!);
-        if (provenanceResult.Status != LocalRepositoryCaptureProvenanceStatus.Valid
-            || provenanceResult.Provenance is not { } provenance)
+        LocalRepositoryCaptureProvenance? provenance;
+        using (var connection = Open())
+        using (var transaction = connection.BeginTransaction(deferred: true))
         {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
+            if (!binding.Matches(connection, transaction))
+                throw new InvalidOperationException("local_repository_store_binding_mismatch");
+            var provenanceResult = LocalRepositorySessionEventJoin.ReadCaptureProvenance(
+                connection,
+                transaction,
+                suppliedRawRecordId,
+                queueLease.RawPayloadSha256!);
+            provenance = provenanceResult.Status == LocalRepositoryCaptureProvenanceStatus.Valid
+                ? provenanceResult.Provenance
+                : null;
+            transaction.Commit();
         }
 
-        LocalRepositoryObservationParseResult parsed;
+        if (provenance is null)
+            return ValueTask.FromResult<ILocalRepositoryPreparedRawRecord>(
+                new PreparedAutomaticAdmission(this, retentionLease.Grant, null, null, "catalog_schema_violation"));
+
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePayloadParsing);
+        LocalRepositoryObservationParseResult? parsed = null;
+        string? terminalReason = null;
         try
         {
             parsed = LocalRepositoryObservationParser.Parse(
@@ -81,42 +71,133 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         }
         catch (JsonException)
         {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_parse_failure", cancellationToken);
-            return ValueTask.CompletedTask;
+            terminalReason = "catalog_parse_failure";
         }
         catch (Exception exception) when (exception is ArgumentException or OverflowException)
         {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
+            terminalReason = "catalog_schema_violation";
         }
 
-        var join = JoinEveryContext(connection, transaction, provenance, parsed.ContextLinks);
-        if (join.HasSchemaViolation)
-        {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
-        }
-        if (join.HasIdentityConflict)
-        {
-            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_session_identity_conflict", cancellationToken);
-            return ValueTask.CompletedTask;
-        }
-        if (join.HasMissingSession)
-        {
-            CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: true);
-            return ValueTask.CompletedTask;
-        }
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff);
+        return ValueTask.FromResult<ILocalRepositoryPreparedRawRecord>(
+            new PreparedAutomaticAdmission(this, retentionLease.Grant, provenance, parsed, terminalReason));
+    }
 
-        if (join.Links.Count == 0)
-        {
-            _ = EnsurePublicationAuthority(
+    public async ValueTask ProcessAsync(
+        LocalRepositoryQueueLease queueLease,
+        RawTelemetryRecord rawRecord,
+        RetentionReadLease<RawTelemetryRecord> retentionLease,
+        CancellationToken cancellationToken)
+    {
+        await using var prepared = await PrepareAsync(
+            queueLease,
+            rawRecord,
+            retentionLease,
+            cancellationToken).ConfigureAwait(false);
+        var handoff = queue.Heartbeat(queueLease, retentionLease);
+        if (handoff.Status != LocalRepositoryQueueTransitionResult.Applied || handoff.Lease is null)
+            throw new InvalidOperationException("local_repository_queue_authority_lost");
+        await prepared.FinalizeAsync(handoff.Lease, cancellationToken).ConfigureAwait(false);
+    }
+
+    private ValueTask FinalizePreparedAsync(
+        LocalRepositoryQueueLease queueLease,
+        RetentionReadGrant grant,
+        LocalRepositoryCaptureProvenance? preparedProvenance,
+        LocalRepositoryObservationParseResult? parsed,
+        string? terminalReason,
+        CancellationToken cancellationToken)
+    {
+        var suppliedRawRecordId = queueLease.RawRecordId;
+        cancellationToken.ThrowIfCancellationRequested();
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforeTransaction);
+
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        if (!binding.Matches(connection, transaction))
+            throw new InvalidOperationException("local_repository_store_binding_mismatch");
+
+        var processingAt = timeProvider.GetUtcNow().ToUniversalTime();
+        if (!RetentionCatalogStore.ValidateLocalRepositoryOperationLease(
                 connection,
                 transaction,
                 grant,
                 suppliedRawRecordId,
+                processingAt))
+        {
+            throw new InvalidOperationException("local_repository_retention_authority_lost");
+        }
+
+        if (terminalReason is not null || preparedProvenance is null || parsed is null)
+        {
+            CompleteTerminal(
+                transaction,
+                connection,
+                queueLease,
+                grant,
+                suppliedRawRecordId,
+                terminalReason ?? "catalog_schema_violation",
                 cancellationToken);
-            CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: false);
             return ValueTask.CompletedTask;
+        }
+
+        var currentProvenance = LocalRepositorySessionEventJoin.ReadCaptureProvenance(
+            connection,
+            transaction,
+            suppliedRawRecordId,
+            queueLease.RawPayloadSha256!);
+        if (currentProvenance.Status != LocalRepositoryCaptureProvenanceStatus.Valid
+            || currentProvenance.Provenance != preparedProvenance)
+        {
+            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
+            return ValueTask.CompletedTask;
+        }
+
+        FinalizeParsed(
+            connection,
+            transaction,
+            queueLease,
+            grant,
+            preparedProvenance,
+            parsed,
+            processingAt,
+            cancellationToken);
+        return ValueTask.CompletedTask;
+    }
+
+    private void FinalizeParsed(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        LocalRepositoryQueueLease queueLease,
+        RetentionReadGrant grant,
+        LocalRepositoryCaptureProvenance provenance,
+        LocalRepositoryObservationParseResult parsed,
+        DateTimeOffset processingAt,
+        CancellationToken cancellationToken)
+    {
+        var suppliedRawRecordId = queueLease.RawRecordId;
+        var join = JoinEveryContext(connection, transaction, provenance, parsed.ContextLinks);
+        if (join.HasSchemaViolation)
+        {
+            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
+            return;
+        }
+        if (join.HasIdentityConflict)
+        {
+            CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_session_identity_conflict", cancellationToken);
+            return;
+        }
+        if (join.HasMissingSession)
+        {
+            CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: true);
+            return;
+        }
+
+        if (join.Links.Count == 0)
+        {
+            _ = EnsurePublicationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
+            CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: false);
+            return;
         }
 
         AdmissionPlan plan;
@@ -127,12 +208,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         catch (CatalogIdentityConflictException)
         {
             CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_identity_conflict", cancellationToken);
-            return ValueTask.CompletedTask;
+            return;
         }
         catch (Exception exception) when (IsPersistedScalarReadFailure(exception))
         {
             CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
+            return;
         }
 
         LocalRepositoryAssignmentResolver.AutomaticPreparation preparation;
@@ -150,20 +231,15 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         catch (Exception exception) when (IsAssignmentCatalogContradiction(exception))
         {
             CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_schema_violation", cancellationToken);
-            return ValueTask.CompletedTask;
+            return;
         }
         if (preparation.Status == LocalRepositoryAssignmentReconcileStatus.CardinalityExceeded)
         {
             CompleteTerminal(transaction, connection, queueLease, grant, suppliedRawRecordId, "catalog_cardinality_exceeded", cancellationToken);
-            return ValueTask.CompletedTask;
+            return;
         }
 
-        _ = EnsurePublicationAuthority(
-            connection,
-            transaction,
-            grant,
-            suppliedRawRecordId,
-            cancellationToken);
+        _ = EnsurePublicationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
 
         InsertRepositories(connection, transaction, plan.NewOwners);
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterRepositories);
@@ -182,15 +258,20 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         if (assignment.Status != LocalRepositoryAssignmentReconcileStatus.Applied)
             throw new InvalidOperationException("local_repository_assignment_publication_rejected");
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterAssignments);
-        var completionAt = ValidateFinalizationAuthority(
-            connection,
-            transaction,
-            grant,
-            suppliedRawRecordId,
-            cancellationToken);
+        var completionAt = ValidateFinalizationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
         RequireApplied(queue.TryComplete(connection, transaction, queueLease, completionAt));
         transaction.Commit();
-        return ValueTask.CompletedTask;
+    }
+
+    private sealed class PreparedAutomaticAdmission(
+        SqliteLocalRepositoryCatalogStore owner,
+        RetentionReadGrant grant,
+        LocalRepositoryCaptureProvenance? provenance,
+        LocalRepositoryObservationParseResult? parsed,
+        string? terminalReason) : ILocalRepositoryPreparedRawRecord
+    {
+        public ValueTask FinalizeAsync(LocalRepositoryQueueLease queueLease, CancellationToken cancellationToken) =>
+            owner.FinalizePreparedAsync(queueLease, grant, provenance, parsed, terminalReason, cancellationToken);
     }
 
     private static bool IsValidInputEnvelope(

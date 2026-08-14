@@ -560,8 +560,32 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
 
     private static AnalysisRunRawSnapshot? ReadRawSnapshot(SqliteConnection connection, SqliteTransaction transaction, RetentionReadGrant grant, long runId)
     {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        string? result;
+        string? error;
+        using (var resultCommand = connection.CreateCommand())
+        {
+            resultCommand.Transaction = transaction;
+            ConfigureRawResultMaterializerCommand(resultCommand, grant, runId);
+            using var reader = resultCommand.ExecuteReader();
+            if (!reader.Read()) return null;
+            result = reader.IsDBNull(0) ? null : reader.GetString(0);
+            error = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        var events = new List<AnalysisRunRawEvent>();
+        using (var eventsCommand = connection.CreateCommand())
+        {
+            eventsCommand.Transaction = transaction;
+            ConfigureRawEventsMaterializerCommand(eventsCommand, grant, runId);
+            using var reader = eventsCommand.ExecuteReader();
+            while (reader.Read()) events.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        }
+
+        return new AnalysisRunRawSnapshot(result, error, events.AsReadOnly());
+    }
+
+    internal static void ConfigureRawResultMaterializerCommand(SqliteCommand command, RetentionReadGrant grant, long runId)
+    {
         command.CommandText =
             """
             WITH authorized_run AS (
@@ -572,7 +596,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
                     AND i.store_kind = 'analysis_run_raw'
                     AND i.source_item_id = CAST($run_id AS TEXT)
                 JOIN retention_leases l ON l.item_id = i.item_id
-                    AND l.lease_kind = 'access'
+                    AND l.lease_kind = $retention_read_lease_kind
                     AND l.owner = $retention_read_lease_owner
                     AND l.generation = $retention_read_lease_generation
                     AND l.expires_at = $retention_read_lease_expires_at
@@ -581,7 +605,15 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
             )
             SELECT r.result_markdown, r.error_message
             FROM monitor_analysis_runs r JOIN authorized_run a ON a.id = r.id;
+            """;
+        AddParameter(command, "$run_id", runId);
+        grant.BindAdmissionSelectorCapability(command);
+    }
 
+    internal static void ConfigureRawEventsMaterializerCommand(SqliteCommand command, RetentionReadGrant grant, long runId)
+    {
+        command.CommandText =
+            """
             WITH authorized_run AS (
                 SELECT r.id
                 FROM monitor_analysis_runs r
@@ -590,7 +622,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
                     AND i.store_kind = 'analysis_run_raw'
                     AND i.source_item_id = CAST($run_id AS TEXT)
                 JOIN retention_leases l ON l.item_id = i.item_id
-                    AND l.lease_kind = 'access'
+                    AND l.lease_kind = $retention_read_lease_kind
                     AND l.owner = $retention_read_lease_owner
                     AND l.generation = $retention_read_lease_generation
                     AND l.expires_at = $retention_read_lease_expires_at
@@ -602,17 +634,7 @@ internal sealed class SqliteMonitorAnalysisStore : IMonitorAnalysisStore
             ORDER BY e.occurred_at, e.id;
             """;
         AddParameter(command, "$run_id", runId);
-        grant.BindSelectorCapability(command);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
-        var result = reader.IsDBNull(0) ? null : reader.GetString(0);
-        var error = reader.IsDBNull(1) ? null : reader.GetString(1);
-        var events = new List<AnalysisRunRawEvent>();
-        if (reader.NextResult())
-        {
-            while (reader.Read()) events.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
-        }
-        return new AnalysisRunRawSnapshot(result, error, events.AsReadOnly());
+        grant.BindAdmissionSelectorCapability(command);
     }
 
     internal static ValueTask<int> DeleteOwnedRawFieldsAsync(

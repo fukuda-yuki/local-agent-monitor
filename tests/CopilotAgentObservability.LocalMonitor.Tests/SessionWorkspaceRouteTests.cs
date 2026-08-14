@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -379,17 +380,78 @@ public sealed class SessionWorkspaceRouteTests
         using var list = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
         var sessionId = list!.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString();
         using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
-        var eventId = detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString();
+        var eventId = detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString()!;
+        var retentionItemBefore = ReadCompleteSessionRowBytes(temp.DatabasePath, "retention_items", eventId);
+        var contentBefore = ReadCompleteSessionRowBytes(temp.DatabasePath, "session_event_content", eventId);
 
         time.Advance(TimeSpan.FromDays(90));
 
         using var expiredList = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
-        Assert.Equal("expired_pending_deletion", expiredList!.RootElement.GetProperty("items")[0].GetProperty("raw_retention_state").GetString());
+        var expiredListState = expiredList!.RootElement.GetProperty("items")[0].GetProperty("raw_retention_state").GetString();
+        Assert.Equal("expired_pending_deletion", expiredListState);
+        using var expiredDetail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
+        var expiredDetailState = expiredDetail!.RootElement.GetProperty("session").GetProperty("raw_retention_state").GetString();
+        Assert.Equal(expiredListState, expiredDetailState);
 
         using var response = await host.Client.GetAsync($"/sessions/{sessionId}/events/{eventId}/content");
         Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        Assert.Equal("""{"error":"raw_content_expired","content_state":"expired_pending_deletion"}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"error":"raw_content_expired","content_state":"expired_pending_deletion"}"""u8.ToArray(), await response.Content.ReadAsByteArrayAsync());
+        var retentionItemAfter = ReadCompleteSessionRowBytes(temp.DatabasePath, "retention_items", eventId);
+        var contentAfter = ReadCompleteSessionRowBytes(temp.DatabasePath, "session_event_content", eventId);
+        AssertCompleteRowBytesEqualExcept(
+            retentionItemBefore,
+            retentionItemAfter,
+            new Dictionary<string, byte[]>(StringComparer.Ordinal)
+            {
+                ["state"] = EncodeSqliteValue("expired_pending_deletion"),
+                ["revision"] = EncodeSqliteValue(ReadSqliteInteger(retentionItemBefore, "revision") + 1),
+                ["read_denied_at"] = EncodeSqliteValue(time.GetUtcNow().ToString("O")),
+                ["queued_at"] = EncodeSqliteValue(time.GetUtcNow().ToString("O")),
+            });
+        AssertCompleteRowBytesEqual(contentBefore, contentAfter);
+    }
+
+    [Fact]
+    public async Task RawContent_PinnedPastHistoricalExpiryReturnsExactSuccessBytesWithoutMutation()
+    {
+        using var temp = new MonitorTempDirectory();
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-07-11T00:00:00Z"));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { TimeProvider = time });
+        using var ingest = IngestRequest(Envelope());
+        Assert.Equal(HttpStatusCode.NoContent, (await host.Client.SendAsync(ingest)).StatusCode);
+        using var list = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
+        var sessionId = list!.RootElement.GetProperty("items")[0].GetProperty("session_id").GetString()!;
+        using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
+        var eventId = detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString()!;
+        using (var connection = Open(temp.DatabasePath))
+        using (var pin = connection.CreateCommand())
+        {
+            pin.CommandText = "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='session_event_content' AND source_item_id=$event_id;";
+            pin.Parameters.AddWithValue("$event_id", eventId);
+            Assert.Equal(1, pin.ExecuteNonQuery());
+        }
+        var retentionItemBefore = ReadCompleteSessionRowBytes(temp.DatabasePath, "retention_items", eventId);
+        var contentBefore = ReadCompleteSessionRowBytes(temp.DatabasePath, "session_event_content", eventId);
+        time.Advance(TimeSpan.FromDays(91));
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/sessions/{sessionId}/events/{eventId}/content");
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal(
+            Encoding.UTF8.GetBytes($$"""{"event_id":"{{eventId}}","content_kind":"application/json","content":"{\u0022message\u0022:\u0022synthetic\u0022}","captured_at":"2026-07-11T00:00:00+00:00","expires_at":"2026-10-09T00:00:00+00:00"}"""),
+            await response.Content.ReadAsByteArrayAsync());
+        AssertCompleteRowBytesEqual(
+            retentionItemBefore,
+            ReadCompleteSessionRowBytes(temp.DatabasePath, "retention_items", eventId));
+        AssertCompleteRowBytesEqual(
+            contentBefore,
+            ReadCompleteSessionRowBytes(temp.DatabasePath, "session_event_content", eventId));
+        Assert.Equal(0L, CountSessionContentAccessLease(temp.DatabasePath, eventId));
     }
 
     [Theory]
@@ -433,6 +495,129 @@ public sealed class SessionWorkspaceRouteTests
             request.Headers.Add("X-CAO-Session-Event-Version", version);
         }
         return request;
+    }
+
+    private static IReadOnlyDictionary<string, byte[]> ReadCompleteSessionRowBytes(
+        string databasePath,
+        string tableName,
+        string eventId)
+    {
+        using var connection = Open(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = tableName switch
+        {
+            "retention_items" => "SELECT * FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$event_id;",
+            "session_event_content" => "SELECT * FROM session_event_content WHERE event_id=$event_id;",
+            _ => throw new ArgumentOutOfRangeException(nameof(tableName)),
+        };
+        command.Parameters.AddWithValue("$event_id", eventId);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        var value = Enumerable.Range(0, reader.FieldCount)
+            .ToDictionary(reader.GetName, index => EncodeSqliteValue(reader.GetValue(index)), StringComparer.Ordinal);
+        Assert.False(reader.Read());
+        return value;
+    }
+
+    private static long CountSessionContentAccessLease(string databasePath, string eventId)
+    {
+        using var connection = Open(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*)
+            FROM retention_leases AS lease
+            JOIN retention_items AS item ON item.item_id=lease.item_id
+            WHERE item.store_kind='session_event_content'
+              AND item.source_item_id=$event_id
+              AND lease.lease_kind='access';
+            """;
+        command.Parameters.AddWithValue("$event_id", eventId);
+        return (long)command.ExecuteScalar()!;
+    }
+
+    private static void AssertCompleteRowBytesEqual(
+        IReadOnlyDictionary<string, byte[]> expected,
+        IReadOnlyDictionary<string, byte[]> actual) =>
+        AssertCompleteRowBytesEqualExcept(
+            expected,
+            actual,
+            new Dictionary<string, byte[]>(StringComparer.Ordinal));
+
+    private static void AssertCompleteRowBytesEqualExcept(
+        IReadOnlyDictionary<string, byte[]> expected,
+        IReadOnlyDictionary<string, byte[]> actual,
+        IReadOnlyDictionary<string, byte[]> exactReplacements)
+    {
+        Assert.Equal(expected.Keys, actual.Keys);
+        Assert.All(exactReplacements.Keys, column => Assert.True(expected.ContainsKey(column), $"Missing complete-row column '{column}'."));
+        foreach (var column in expected.Keys)
+        {
+            if (exactReplacements.TryGetValue(column, out var replacement))
+            {
+                Assert.NotEqual(expected[column], replacement);
+                Assert.Equal(replacement, actual[column]);
+            }
+            else
+            {
+                Assert.Equal(expected[column], actual[column]);
+            }
+        }
+    }
+
+    private static long ReadSqliteInteger(IReadOnlyDictionary<string, byte[]> row, string column)
+    {
+        var value = row[column];
+        Assert.Equal(9, value.Length);
+        Assert.Equal((byte)1, value[0]);
+        return System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(value.AsSpan(1));
+    }
+
+    private static byte[] EncodeSqliteValue(object value)
+    {
+        switch (value)
+        {
+            case DBNull:
+                return [0];
+            case long integer:
+                {
+                    var bytes = new byte[9];
+                    bytes[0] = 1;
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(1), integer);
+                    return bytes;
+                }
+            case double real:
+                {
+                    var bytes = new byte[9];
+                    bytes[0] = 2;
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(1), BitConverter.DoubleToInt64Bits(real));
+                    return bytes;
+                }
+            case string text:
+                return PrefixSqliteValue(3, Encoding.UTF8.GetBytes(text));
+            case byte[] blob:
+                return PrefixSqliteValue(4, blob);
+            default:
+                throw new Xunit.Sdk.XunitException($"Unexpected SQLite value type '{value.GetType().FullName}'.");
+        }
+    }
+
+    private static byte[] PrefixSqliteValue(byte storageClass, byte[] value)
+    {
+        var bytes = new byte[value.Length + 1];
+        bytes[0] = storageClass;
+        value.CopyTo(bytes, 1);
+        return bytes;
+    }
+
+    private static SqliteConnection Open(string databasePath)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        return connection;
     }
 
     private static string Envelope(string payload = """{"message":"synthetic"}""") => $$"""

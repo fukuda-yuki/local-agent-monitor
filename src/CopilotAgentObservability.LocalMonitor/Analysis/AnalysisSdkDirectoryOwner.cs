@@ -6,7 +6,7 @@ namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
 internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
 {
-    internal const string MarkerFileName = ".copilot-agent-observability-owner";
+    internal const string MarkerFileName = RetentionAnalysisSdkDirectoryOwnershipMarker.FileName;
     private readonly RetentionCatalogStore catalog;
     private readonly TimeProvider timeProvider;
     private readonly Action? reservationCheckpoint;
@@ -35,26 +35,38 @@ internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
             reservationCheckpoint?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             EnsureParent(reservation.ParentLocator);
+            var activation = catalog.PrepareAndActivateAnalysisSdkDirectoryAndAcquireOperationLease(
+                reservation,
+                () =>
+                {
+                    var childExists = Directory.Exists(reservation.ChildLocator);
+                    if (!childExists)
+                    {
+                        if (!NativeDirectory.Create(reservation.ChildLocator)) throw new AnalysisOwnershipException();
+                        createdChild = true;
+                        childCreatedCheckpoint?.Invoke(reservation.ChildLocator);
+                    }
 
-            var childExists = Directory.Exists(reservation.ChildLocator);
-            if (!childExists)
-            {
-                if (!NativeDirectory.Create(reservation.ChildLocator)) throw new AnalysisOwnershipException();
-                createdChild = true;
-                childCreatedCheckpoint?.Invoke(reservation.ChildLocator);
-            }
+                    if (IsReparsePoint(reservation.ChildLocator)) throw new AnalysisOwnershipException();
+                    if (createdChild) WriteMarker(reservation.ChildLocator, reservation.OwnershipMarker, reservation.MarkerSha256);
+                    else if (IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false)) recoveredMarkerOnlyChild = true;
+                    else throw new AnalysisOwnershipException();
 
-            if (IsReparsePoint(reservation.ChildLocator)) throw new AnalysisOwnershipException();
-            if (createdChild) WriteMarker(reservation.ChildLocator, reservation.OwnershipMarker, reservation.MarkerSha256);
-            else if (IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false)) recoveredMarkerOnlyChild = true;
-            else throw new AnalysisOwnershipException();
-
-            if (!IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false)) throw new AnalysisOwnershipException();
-            var markerProvenOwnedEmptyChild = createdChild || IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false);
-            var activation = catalog.ActivateAnalysisSdkDirectoryAndAcquireOperationLease(reservation, reservation.OwnershipMarker, markerProvenOwnedEmptyChild, timeProvider.GetUtcNow());
+                    if (!IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false))
+                        throw new AnalysisOwnershipException();
+                });
             if (!activation.IsActive) throw new AnalysisOwnershipException();
             activatedLease = activation.Lease!;
-            return ValueTask.FromResult<IAnalysisSdkDirectoryScope>(new Scope(catalog, activatedLease, reservation.ChildLocator, timeProvider));
+            var initialObservation = catalog.RenewAndObserveAnalysisSdkDirectoryOperationLease(activatedLease);
+            if (initialObservation.Disposition == RetentionOperationRenewalDisposition.LeaseLost
+                || initialObservation.PublishedLeaseExpiresAt - initialObservation.ObservedAt <= RetentionV1Constants.LeaseRenewalDeadline)
+                throw new AnalysisOwnershipException();
+            return ValueTask.FromResult<IAnalysisSdkDirectoryScope>(new Scope(
+                catalog,
+                activatedLease,
+                reservation.ChildLocator,
+                timeProvider,
+                initialObservation));
         }
         catch (OperationCanceledException)
         {
@@ -91,22 +103,9 @@ internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
             _ = catalog.AbandonReservedAnalysisSdkDirectory(reservation);
             return;
         }
-        if (!DeleteOwnedChild(reservation, createdChild)) return;
-        _ = catalog.AbandonReservedAnalysisSdkDirectory(reservation);
-    }
-
-    private static bool DeleteOwnedChild(RetentionAnalysisSdkDirectoryReservation reservation, bool createdChild)
-    {
-        try
-        {
-            if (IsMarkerOnly(reservation.ChildLocator, reservation.OwnershipMarker, allowAbsent: false))
-                File.Delete(Path.Combine(reservation.ChildLocator, MarkerFileName));
-            else if (!createdChild || !IsEmpty(reservation.ChildLocator)) return false;
-            if (!IsEmpty(reservation.ChildLocator)) return false;
-            Directory.Delete(reservation.ChildLocator, recursive: false);
-            return !Directory.Exists(reservation.ChildLocator);
-        }
-        catch { return false; }
+        _ = catalog.CleanupAndAbandonReservedAnalysisSdkDirectory(
+            reservation,
+            allowMarkerlessEmptyChild: createdChild);
     }
 
     private static bool MatchesRequestedAt(RetentionAnalysisSdkDirectoryReservation reservation, DateTimeOffset requestedAt) =>
@@ -165,12 +164,6 @@ internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
         catch { return false; }
     }
 
-    private static bool IsEmpty(string child)
-    {
-        try { return Directory.Exists(child) && !IsReparsePoint(child) && !Directory.EnumerateFileSystemEntries(child).Any(); }
-        catch { return false; }
-    }
-
     private static bool IsReparsePoint(string path)
     {
         try { return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0; }
@@ -181,20 +174,27 @@ internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
     {
         private readonly RetentionCatalogStore catalog;
         private readonly RetentionAnalysisSdkDirectoryOperationLease lease;
-        private readonly TimeProvider timeProvider;
         private readonly CancellationTokenSource leaseLost = new();
         private readonly ITimer timer;
         private int disposed;
         private int lost;
 
-        internal Scope(RetentionCatalogStore catalog, RetentionAnalysisSdkDirectoryOperationLease lease, string childDirectory, TimeProvider timeProvider)
+        internal Scope(
+            RetentionCatalogStore catalog,
+            RetentionAnalysisSdkDirectoryOperationLease lease,
+            string childDirectory,
+            TimeProvider timeProvider,
+            RetentionAnalysisSdkDirectoryLeaseObservation initialObservation)
         {
             this.catalog = catalog;
             this.lease = lease;
-            this.timeProvider = timeProvider;
             ChildDirectory = childDirectory;
-            var interval = TimeSpan.FromTicks(RetentionV1Constants.LeaseDuration.Ticks / 2);
-            timer = timeProvider.CreateTimer(static state => ((Scope)state!).Renew(), this, interval, interval);
+            timer = timeProvider.CreateTimer(
+                static state => ((Scope)state!).Renew(),
+                this,
+                Timeout.InfiniteTimeSpan,
+                Timeout.InfiniteTimeSpan);
+            Schedule(NextDue(initialObservation));
         }
 
         public string ChildDirectory { get; }
@@ -204,14 +204,46 @@ internal sealed class AnalysisSdkDirectoryOwner : IAnalysisSdkDirectoryOwner
         private void Renew()
         {
             if (Volatile.Read(ref disposed) != 0 || IsLeaseLost) return;
-            RetentionRenewalResult result;
-            try { result = catalog.RenewAnalysisSdkDirectoryOperationLease(lease, timeProvider.GetUtcNow()); }
-            catch { result = RetentionRenewalResult.LeaseLost; }
-            if (result == RetentionRenewalResult.LeaseLost)
+            RetentionAnalysisSdkDirectoryLeaseObservation observation;
+            try { observation = catalog.RenewAndObserveAnalysisSdkDirectoryOperationLease(lease); }
+            catch
             {
-                Interlocked.Exchange(ref lost, 1);
-                leaseLost.Cancel();
+                LoseLease();
+                return;
             }
+
+            if (observation.Disposition == RetentionOperationRenewalDisposition.LeaseLost
+                || observation.ObservedAt >= observation.PublishedLeaseExpiresAt)
+            {
+                LoseLease();
+                return;
+            }
+
+            Schedule(NextDue(observation));
+        }
+
+        private static TimeSpan NextDue(RetentionAnalysisSdkDirectoryLeaseObservation observation)
+        {
+            var remaining = observation.PublishedLeaseExpiresAt - observation.ObservedAt;
+            if (observation.Disposition == RetentionOperationRenewalDisposition.NonrenewableGrantStillUsable
+                || observation.Disposition == RetentionOperationRenewalDisposition.CatalogBusy
+                    && remaining <= RetentionV1Constants.LeaseRenewalDeadline)
+                return remaining;
+            return remaining - RetentionV1Constants.LeaseRenewalDeadline;
+        }
+
+        private void LoseLease()
+        {
+            Interlocked.Exchange(ref lost, 1);
+            leaseLost.Cancel();
+        }
+
+        private void Schedule(TimeSpan dueTime)
+        {
+            if (Volatile.Read(ref disposed) != 0 || IsLeaseLost) return;
+            if (dueTime < TimeSpan.Zero) dueTime = TimeSpan.Zero;
+            try { _ = timer.Change(dueTime, Timeout.InfiniteTimeSpan); }
+            catch (ObjectDisposedException) when (Volatile.Read(ref disposed) != 0) { }
         }
 
         public async ValueTask DisposeAsync()

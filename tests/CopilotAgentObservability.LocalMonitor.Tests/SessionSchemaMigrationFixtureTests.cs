@@ -17,6 +17,8 @@ public sealed class SessionSchemaMigrationFixtureTests
     private const string VersionTenUpgraderCommit = "cf2b15f6c9b18a68aea8dc22f48fcb3177a81346";
     private const string GenerationCommand = "dotnet run --project scripts/test/GenerateSessionSchemaFixtures/GenerateSessionSchemaFixtures.csproj -- --output tests/CopilotAgentObservability.LocalMonitor.Tests/TestData/SchemaMigrations/session";
     private const string VersionFourLimitation = "Commit 601c2beb5cb528d1e87aba0fef150b65e1dbccc0 exposes no public proposal-apply persistence API; parameterized INSERTs populate proposal-apply rows only after its public CreateSchema, Write, and CreateImprovementProposal APIs create the schema and parent sentinels.";
+    private static readonly DateTimeOffset VersionFourteenMigrationNow =
+        DateTimeOffset.Parse("2026-11-08T00:00:00Z", CultureInfo.InvariantCulture);
 
     private static readonly IReadOnlyDictionary<int, string> ExpectedV11SemanticSchemaHashes = new Dictionary<int, string>
     {
@@ -597,6 +599,100 @@ public sealed class SessionSchemaMigrationFixtureTests
             SqliteConnection.ClearAllPools();
             DeleteDatabaseFiles(databasePath);
         }
+    }
+
+    [Fact]
+    public void Version13Migration_PinnedHistoricalExpiryClassifiesFromContentAndPreservesCompleteDescendants()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(VersionFourteenMigrationNow) };
+        var fixture = SessionVersion13TestFixture.CreateRetentionBackedDiscriminator(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            VersionFourteenMigrationNow.AddDays(-91),
+            retainedByPolicy: true,
+            includeInstalledSkillDescendants: true,
+            identity: "v13-pinned-discriminator");
+        string descendantsBefore;
+        using (var versionThirteen = Open(temp.DatabasePath))
+        {
+            SourceCompatibilitySchemaV11.Validate(versionThirteen, transaction: null);
+            SkillProjectionSchemaV1.Validate(versionThirteen, transaction: null);
+            Assert.Equal(13L, Scalar<long>(versionThirteen, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal("retained_by_policy", Scalar<string>(versionThirteen, "SELECT state FROM retention_items WHERE item_id=$id;", fixture.ItemId));
+            Assert.True(DateTimeOffset.Parse(fixture.ExpiresAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) < VersionFourteenMigrationNow);
+            Assert.Equal(32, fixture.OwnershipReceipt.Length);
+            Assert.Equal(fixture.OwnershipReceipt, Scalar<byte[]>(versionThirteen, "SELECT ownership_receipt FROM retention_items WHERE item_id=$id;", fixture.ItemId));
+            Assert.Equal(5L, Scalar<long>(versionThirteen, "SELECT COUNT(*) FROM retention_adapter_coverage;"));
+            Assert.Equal(0L, Scalar<long>(versionThirteen, "SELECT COUNT(*) FROM skill_projection_sdk_claims WHERE session_id=$id;", fixture.SessionId));
+            Assert.Equal(1L, Scalar<long>(versionThirteen, "SELECT COUNT(*) FROM skill_projection_invocations WHERE session_id=$id;", fixture.SessionId));
+            Assert.Equal(1L, Scalar<long>(versionThirteen, "SELECT COUNT(*) FROM skill_projection_inventories WHERE session_id=$id;", fixture.SessionId));
+            descendantsBefore = ReadDatabaseRowSnapshot(
+                versionThirteen,
+                "session_event_content",
+                "retention_",
+                "skill_projection_");
+        }
+
+        new SqliteSessionStore(temp.DatabasePath, temp.TimeProvider).CreateSchema();
+
+        using var migrated = Open(temp.DatabasePath);
+        Assert.Equal(14L, Scalar<long>(migrated, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal("failed", Scalar<string>(migrated, "SELECT terminal_outcome FROM session_events WHERE event_id=$id;", fixture.EventId));
+        Assert.Equal(1L, Scalar<long>(migrated, "SELECT terminal_policy_version FROM session_events WHERE event_id=$id;", fixture.EventId));
+        Assert.Equal("failed", Scalar<string>(migrated, "SELECT status FROM sessions WHERE session_id=$id;", fixture.SessionId));
+        Assert.Equal(
+            descendantsBefore,
+            ReadDatabaseRowSnapshot(migrated, "session_event_content", "retention_", "skill_projection_"));
+        Assert.Equal(0L, Scalar<long>(migrated, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+    }
+
+    [Fact]
+    public void Version13Migration_ExpiringContentAtExactMigrationNowIsUnavailable()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(VersionFourteenMigrationNow) };
+        var fixture = SessionVersion13TestFixture.CreateRetentionBackedDiscriminator(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            VersionFourteenMigrationNow.AddDays(-90),
+            retainedByPolicy: false,
+            includeInstalledSkillDescendants: false,
+            identity: "v13-expiring-boundary");
+        string descendantsBefore;
+        using (var versionThirteen = Open(temp.DatabasePath))
+        {
+            Assert.Equal(VersionFourteenMigrationNow.ToString("O", CultureInfo.InvariantCulture), fixture.ExpiresAt);
+            Assert.Equal("expiring", Scalar<string>(versionThirteen, "SELECT state FROM retention_items WHERE item_id=$id;", fixture.ItemId));
+            Assert.Equal(fixture.ExpiresAt, Scalar<string>(versionThirteen, "SELECT expires_at FROM retention_items WHERE item_id=$id;", fixture.ItemId));
+            descendantsBefore = ReadDatabaseRowSnapshot(versionThirteen, "session_event_content", "retention_");
+        }
+
+        new SqliteSessionStore(temp.DatabasePath, temp.TimeProvider).CreateSchema();
+
+        using var migrated = Open(temp.DatabasePath);
+        Assert.Equal("neutral", Scalar<string>(migrated, "SELECT terminal_outcome FROM session_events WHERE event_id=$id;", fixture.EventId));
+        Assert.Equal("unknown", Scalar<string>(migrated, "SELECT status FROM sessions WHERE session_id=$id;", fixture.SessionId));
+        Assert.Equal(descendantsBefore, ReadDatabaseRowSnapshot(migrated, "session_event_content", "retention_"));
+    }
+
+    [Fact]
+    public void MigratedVersion14_ReopenIsByteIdempotent()
+    {
+        using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(VersionFourteenMigrationNow) };
+        SessionVersion13TestFixture.CreateRetentionBackedDiscriminator(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            VersionFourteenMigrationNow.AddDays(-91),
+            retainedByPolicy: true,
+            includeInstalledSkillDescendants: false,
+            identity: "v14-reopen");
+        new SqliteSessionStore(temp.DatabasePath, temp.TimeProvider).CreateSchema();
+        SqliteConnection.ClearAllPools();
+        var before = CaptureDatabaseFileBytes(temp.DatabasePath);
+
+        new SqliteSessionStore(temp.DatabasePath, new MutableTimeProvider(VersionFourteenMigrationNow.AddDays(30))).CreateSchema();
+
+        SqliteConnection.ClearAllPools();
+        AssertDatabaseFileBytesEqual(before, CaptureDatabaseFileBytes(temp.DatabasePath));
     }
 
     [Theory]
@@ -1614,6 +1710,31 @@ public sealed class SessionSchemaMigrationFixtureTests
         return string.Join('\n', lines) + "\n";
     }
 
+    private static string ReadDatabaseRowSnapshot(SqliteConnection connection, params string[] tablePrefixes)
+    {
+        var lines = new List<string>();
+        foreach (var table in ReadTableNames(connection).Where(table =>
+                     tablePrefixes.Any(prefix => table.StartsWith(prefix, StringComparison.Ordinal))))
+        {
+            var columns = new List<string>();
+            using (var columnCommand = connection.CreateCommand())
+            {
+                columnCommand.CommandText = "SELECT name FROM pragma_table_xinfo($table) WHERE hidden=0 ORDER BY cid;";
+                columnCommand.Parameters.AddWithValue("$table", table);
+                using var columnReader = columnCommand.ExecuteReader();
+                while (columnReader.Read()) columns.Add(columnReader.GetString(0));
+            }
+            var projection = string.Join(',', columns.Select(QuoteIdentifier));
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT {projection} FROM {QuoteIdentifier(table)} ORDER BY {projection};";
+            using var reader = command.ExecuteReader();
+            lines.Add($"table|{table}|{string.Join('|', columns)}");
+            while (reader.Read())
+                lines.Add($"row|{table}|{string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(index => Encode(reader, index)))}");
+        }
+        return string.Join('\n', lines) + "\n";
+    }
+
     private static string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"")}\"";
 
     private static string CanonicalSql(string sql)
@@ -1947,6 +2068,20 @@ public sealed class SessionSchemaMigrationFixtureTests
     private static FileSnapshot CaptureFile(string path) => File.Exists(path)
         ? new(true, new FileInfo(path).Length, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant())
         : new(false, 0, string.Empty);
+
+    private static IReadOnlyDictionary<string, byte[]> CaptureDatabaseFileBytes(string databasePath) =>
+        new[] { databasePath, databasePath + "-journal", databasePath + "-wal", databasePath + "-shm" }
+            .Where(File.Exists)
+            .ToDictionary(path => Path.GetFileName(path), File.ReadAllBytes, StringComparer.Ordinal);
+
+    private static void AssertDatabaseFileBytesEqual(
+        IReadOnlyDictionary<string, byte[]> expected,
+        IReadOnlyDictionary<string, byte[]> actual)
+    {
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), actual.Keys.Order(StringComparer.Ordinal));
+        foreach (var name in expected.Keys)
+            Assert.Equal(expected[name], actual[name]);
+    }
 
     private static void DeleteDatabaseFiles(string databasePath)
     {

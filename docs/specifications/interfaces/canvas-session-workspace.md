@@ -298,7 +298,10 @@ profile before mutation; partial, mixed, future, or extra-object shapes fail
 closed. The migration rebuilds `session_events` with the exact column order and
 CHECK above while preserving every legacy event and every child/descendant row
 byte-for-byte, including `session_event_content`, Retention catalog/receipt
-state, and installed Skill projection/claim descendants.
+state, and installed Skill projection descendants, including production-valid
+OTel invocation/inventory claim rows. `skill_projection_sdk_claims` remains
+empty until the #158 writer is promoted, as required by the Skill projection
+authority.
 
 It verifies source/destination event counts, canonical IDs, all child joins,
 and every copied legacy value before classification, then enumerates every event
@@ -363,8 +366,9 @@ readiness. A second open of a valid v14 database is select-only and
 byte-idempotent.
 
 Required migration/reducer fixtures include content-bearing terminal events,
-Retention catalog/receipt descendants, installed Skill projection/claim
-descendants, pinned `retained_by_policy` content whose original expiry is past,
+Retention catalog/receipt descendants, installed Skill projection descendants
+with Session-bound OTel invocation/inventory claims, pinned
+`retained_by_policy` content whose original expiry is past,
 all tuple/outcome invalid pairs, and a Session whose otherwise-full evidence
 contains only `Stop`; the latter must lose terminal evidence and must not remain
 `full`.
@@ -785,8 +789,9 @@ physical-cleanup authority: every captured item has an exact catalog identity.
 Ordinary content reads follow the shared Retention read authority in
 [Raw Store And Normalization](../layers/raw-store-normalization.md): admission
 evaluates current row readability, pinned items stay readable regardless of
-their historical original expiry, an admitted grant keeps its bounded grace
-across an expiry boundary, and renewal alone rechecks. Expiry denies a new
+their historical original expiry, and an admitted grant keeps its bounded
+grace across an expiry boundary. Operation-heartbeat validation alone rechecks
+current authority, and only a validated due grant renews. Expiry denies a new
 read at admission before the item is queued for deletion. Session v1
 is a frozen lossy projection: `expiring` and `retained_by_policy` map to
 `expiring`; every denied catalog lifecycle maps to

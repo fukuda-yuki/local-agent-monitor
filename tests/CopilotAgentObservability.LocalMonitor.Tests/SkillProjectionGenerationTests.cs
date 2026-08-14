@@ -52,7 +52,10 @@ public sealed class SkillProjectionGenerationTests
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(2))));
         var lease = Assert.IsType<SkillProjectionQueueLease>(
             store.ClaimNext(ObservedAt.AddSeconds(1)));
 
@@ -124,7 +127,10 @@ public sealed class SkillProjectionGenerationTests
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(2))));
         var lease = Assert.IsType<SkillProjectionQueueLease>(
             store.ClaimNext(ObservedAt.AddSeconds(1)));
         Assert.Equal(
@@ -182,7 +188,10 @@ public sealed class SkillProjectionGenerationTests
         var ingestion = new SqliteIngestionCommitStore(database.Path);
         ingestion.Commit(CreateBatch("worker-generation", ObservedAt, SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
-        var rawStore = new RawTelemetryStore(database.Path, retention);
+        var rawStore = new RawTelemetryStore(
+            database.Path,
+            retention,
+            new MutableTimeProvider(ObservedAt.AddSeconds(1)));
         var store = new SqliteSkillProjectionStore(database.Path, rawStore);
         var worker = new SkillProjectionWorker(store);
 
@@ -218,7 +227,10 @@ public sealed class SkillProjectionGenerationTests
         var worker = new SkillProjectionWorker(
             new SqliteSkillProjectionStore(
                 database.Path,
-                new RawTelemetryStore(database.Path, retention)));
+                new RawTelemetryStore(
+                    database.Path,
+                    retention,
+                    new MutableTimeProvider(ObservedAt.AddSeconds(1)))));
         Assert.Equal(
             SkillProjectionWorkOutcome.Published,
             await worker.RunNextAsync(ObservedAt.AddSeconds(1)));
@@ -253,7 +265,10 @@ public sealed class SkillProjectionGenerationTests
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(1))));
         var worker = new SkillProjectionWorker(
             store,
             _ =>
@@ -283,6 +298,295 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
+    public async Task Publish_BlockedUntilExactQueueExpiryIsStaleAndDoesNotPublish()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("publish-post-wait-clock", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var time = new MutableTimeProvider(claimedAt);
+        using var checkpoint = new BlockingSkillTransactionCheckpoint(
+            SkillProjectionCheckpoint.AfterPublishTransactionBeganBeforeClockSample);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var projected = retentionLease.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+        using (var snapshotConnection = Open(database.Path))
+            checkpoint.ExpectedState = ReadSkillWorkState(snapshotConnection, lease.GenerationId);
+
+        var callerAt = claimedAt;
+        var publishTask = Task.Run(() => store.Publish(
+            lease,
+            projected,
+            retentionLease,
+            callerAt));
+        await checkpoint.WasReached.WaitAsync(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            time.Advance(lease.LeaseExpiresAt - time.GetUtcNow());
+            Assert.False(publishTask.IsCompleted);
+        }
+        finally
+        {
+            checkpoint.Continue();
+        }
+
+        Assert.Equal(
+            SkillProjectionWorkOutcome.StaleOwner,
+            await publishTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            checkpoint.ExpectedState,
+            ReadSkillWorkState(verification, lease.GenerationId));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventories;"));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventory_names;"));
+        Assert.Equal(
+            0,
+            ScalarLong(
+                verification,
+                "SELECT COUNT(*) FROM skill_projection_trace_heads WHERE current_generation_id IS NOT NULL;"));
+    }
+
+    [Fact]
+    public async Task Publish_FutureCallerTimeUsesTrustedClockForFencesAndPersistedTimes()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("publish-future-caller", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var trustedAt = claimedAt.AddSeconds(2);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time));
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var projected = retentionLease.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+        time.Advance(trustedAt - time.GetUtcNow());
+
+        var outcome = store.Publish(
+            lease,
+            projected,
+            retentionLease,
+            lease.LeaseExpiresAt.AddDays(1));
+
+        Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+        var expectedTime = trustedAt.ToString("O");
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            1,
+            ScalarLong(
+                verification,
+                """
+                SELECT COUNT(*)
+                FROM skill_projection_generations AS generation
+                JOIN skill_projection_queue AS queue
+                  ON queue.generation_id=generation.generation_id
+                JOIN skill_projection_trace_heads AS head
+                  ON head.trace_id=generation.trace_id
+                WHERE generation.generation_id=$generation_id
+                  AND generation.lifecycle='current'
+                  AND generation.updated_at=$trusted_at
+                  AND queue.state='completed'
+                  AND queue.lease_owner IS NULL
+                  AND queue.lease_expires_at IS NULL
+                  AND head.current_generation_id=generation.generation_id
+                  AND head.updated_at=$trusted_at;
+                """,
+                ("$generation_id", lease.GenerationId),
+                ("$trusted_at", expectedTime)));
+        Assert.Equal(
+            1,
+            ScalarLong(
+                verification,
+                "SELECT COUNT(*) FROM skill_projection_invocations WHERE projected_at=$trusted_at;",
+                ("$trusted_at", expectedTime)));
+        Assert.Equal(
+            1,
+            ScalarLong(
+                verification,
+                "SELECT COUNT(*) FROM skill_projection_inventories WHERE projected_at=$trusted_at;",
+                ("$trusted_at", expectedTime)));
+    }
+
+    [Theory]
+    [InlineData("retry")]
+    [InlineData("input-unavailable")]
+    [InlineData("terminal")]
+    public async Task FinishOwned_BlockedUntilExactQueueExpiryIsStaleAndDoesNotMutate(
+        string operation)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("retry-post-wait-clock", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var time = new MutableTimeProvider(claimedAt);
+        using var checkpoint = new BlockingSkillTransactionCheckpoint(
+            SkillProjectionCheckpoint.AfterFinishOwnedTransactionBeganBeforeClockSample);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        using (var snapshotConnection = Open(database.Path))
+            checkpoint.ExpectedState = ReadSkillWorkState(snapshotConnection, lease.GenerationId);
+
+        var callerAt = claimedAt;
+        var finishTask = Task.Run(() => operation switch
+        {
+            "retry" => store.RecordRetry(lease, callerAt, "retention_lease_lost"),
+            "input-unavailable" => store.RecordInputUnavailable(lease, callerAt),
+            "terminal" => store.RecordTerminal(
+                lease,
+                callerAt,
+                "skill_projection_input_digest_mismatch"),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        });
+        await checkpoint.WasReached.WaitAsync(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            time.Advance(lease.LeaseExpiresAt - time.GetUtcNow());
+            Assert.False(finishTask.IsCompleted);
+        }
+        finally
+        {
+            checkpoint.Continue();
+        }
+
+        Assert.Equal(
+            SkillProjectionWorkOutcome.StaleOwner,
+            await finishTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            checkpoint.ExpectedState,
+            ReadSkillWorkState(verification, lease.GenerationId));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventories;"));
+        Assert.Equal(
+            0,
+            ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventory_names;"));
+    }
+
+    [Theory]
+    [InlineData("retry", "retrying", "retry_pending", "pending", "retention_lease_lost")]
+    [InlineData("input-unavailable", "input-unavailable", "input_unavailable", "input_unavailable", "retention_input_unavailable")]
+    [InlineData("terminal", "failed-terminal", "failed_terminal", "failed_terminal", "skill_projection_input_digest_mismatch")]
+    public void FinishOwned_FutureCallerTimeUsesTrustedClockForFencesAndPersistedTimes(
+        string operation,
+        string expectedOutcome,
+        string expectedLifecycle,
+        string expectedQueueState,
+        string expectedErrorCode)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch($"{operation}-future-caller", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var trustedAt = claimedAt.AddSeconds(2);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time));
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        time.Advance(trustedAt - time.GetUtcNow());
+        var callerAt = lease.LeaseExpiresAt.AddDays(1);
+
+        var outcome = operation switch
+        {
+            "retry" => store.RecordRetry(lease, callerAt, expectedErrorCode),
+            "input-unavailable" => store.RecordInputUnavailable(lease, callerAt),
+            "terminal" => store.RecordTerminal(lease, callerAt, expectedErrorCode),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+        Assert.Equal(
+            expectedOutcome switch
+            {
+                "retrying" => SkillProjectionWorkOutcome.Retrying,
+                "input-unavailable" => SkillProjectionWorkOutcome.InputUnavailable,
+                "failed-terminal" => SkillProjectionWorkOutcome.FailedTerminal,
+                _ => throw new ArgumentOutOfRangeException(nameof(expectedOutcome)),
+            },
+            outcome);
+        var expectedNextAttempt = operation == "retry"
+            ? trustedAt.AddSeconds(1).ToString("O")
+            : null;
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            1,
+            ScalarLong(
+                verification,
+                """
+                SELECT COUNT(*)
+                FROM skill_projection_generations AS generation
+                JOIN skill_projection_queue AS queue
+                  ON queue.generation_id=generation.generation_id
+                WHERE generation.generation_id=$generation_id
+                  AND generation.lifecycle=$lifecycle
+                  AND generation.updated_at=$trusted_at
+                  AND queue.state=$queue_state
+                  AND queue.lease_owner IS NULL
+                  AND queue.lease_expires_at IS NULL
+                  AND queue.next_attempt_at IS $next_attempt_at
+                  AND queue.error_code=$error_code;
+                """,
+                ("$generation_id", lease.GenerationId),
+                ("$lifecycle", expectedLifecycle),
+                ("$trusted_at", trustedAt.ToString("O")),
+                ("$queue_state", expectedQueueState),
+                ("$next_attempt_at", expectedNextAttempt is null ? DBNull.Value : expectedNextAttempt),
+                ("$error_code", expectedErrorCode)));
+    }
+
+    [Fact]
     public async Task QueueAndRetentionHeartbeat_ExtendTheSameOwnedWorkFences()
     {
         using var database = new TestDatabase();
@@ -290,10 +594,13 @@ public sealed class SkillProjectionGenerationTests
         new SqliteIngestionCommitStore(database.Path)
             .Commit(CreateBatch("heartbeat", ObservedAt, SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var time = new MutableTimeProvider(claimedAt);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
-        var claimedAt = DateTimeOffset.UtcNow;
+            new RawTelemetryStore(database.Path, retention, time));
         var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
         var retentionLease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
@@ -301,6 +608,7 @@ public sealed class SkillProjectionGenerationTests
         {
             for (var seconds = 10; seconds <= 70; seconds += 10)
             {
+                time.Advance(TimeSpan.FromSeconds(10));
                 queueLease = Assert.IsType<SkillProjectionQueueLease>(
                     store.Heartbeat(
                         queueLease,
@@ -314,7 +622,7 @@ public sealed class SkillProjectionGenerationTests
                 ScalarText(connection, "SELECT lease_expires_at FROM skill_projection_queue;"));
             Assert.All(
                 retentionLease.Grants,
-                grant => Assert.True(grant.LeaseExpiresAt >= claimedAt.AddSeconds(180)));
+                grant => Assert.True(PublishedLeaseExpiry(grant) >= claimedAt.AddSeconds(180)));
             Assert.Equal(
                 1,
                 ScalarLong(
@@ -322,6 +630,568 @@ public sealed class SkillProjectionGenerationTests
                     "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation' AND expires_at>=$minimum_expiry;",
                     ("$minimum_expiry", claimedAt.AddSeconds(180).ToUniversalTime().ToString("O"))));
         }
+    }
+
+    [Fact]
+    public async Task Heartbeat_BlockedPastLeaseExpiry_DoesNotResurrectQueueOrRetentionLease()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("heartbeat-post-wait-clock", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time));
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var grant = Assert.Single(retentionLease.Grants);
+        var retentionExpiry = claimedAt.AddSeconds(20);
+        string queueExpiryBefore;
+        string persistedRetentionExpiryBefore;
+        DateTimeOffset publishedRetentionExpiryBefore;
+        using (var connection = Open(database.Path))
+        {
+            SetRetentionLeaseExpiry(connection, grant, retentionExpiry);
+            queueExpiryBefore = ScalarText(
+                connection,
+                "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                ("$generation_id", queueLease.GenerationId));
+            persistedRetentionExpiryBefore = ScalarText(
+                connection,
+                "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+                ("$item_id", grant.ItemId));
+            publishedRetentionExpiryBefore = PublishedLeaseExpiry(grant);
+        }
+
+        var callStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var blocker = Open(database.Path);
+        using var blockerTransaction = blocker.BeginTransaction(deferred: false);
+        var heartbeatTask = Task.Run(() =>
+        {
+            callStarted.SetResult();
+            return store.Heartbeat(queueLease, retentionLease, claimedAt);
+        });
+
+        try
+        {
+            await callStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(heartbeatTask.IsCompleted);
+            time.Advance(TimeSpan.FromSeconds(31));
+        }
+        finally
+        {
+            blockerTransaction.Rollback();
+        }
+
+        var heartbeat = await heartbeatTask.WaitAsync(TimeSpan.FromSeconds(5));
+        using var verification = Open(database.Path);
+        Assert.Null(heartbeat);
+        Assert.Equal(
+            queueExpiryBefore,
+            ScalarText(
+                verification,
+                "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                ("$generation_id", queueLease.GenerationId)));
+        Assert.Equal(
+            persistedRetentionExpiryBefore,
+            ScalarText(
+                verification,
+                "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+                ("$item_id", grant.ItemId)));
+        Assert.Equal(publishedRetentionExpiryBefore, PublishedLeaseExpiry(grant));
+    }
+
+    [Fact]
+    public async Task Heartbeat_BlockedOnFrontierPublicationPastExactExpiry_DoesNotRenewAnyAuthority()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("publication-clock-frontier-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch(
+            "publication-clock-frontier-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatStartedAt = claimedAt.AddSeconds(11);
+        var time = new MutableTimeProvider(heartbeatStartedAt);
+        var checkpoint = new SignalingSkillProjectionCheckpoint(
+            SkillProjectionCheckpoint.AfterHeartbeatTransactionBeganBeforePublicationScopes);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        Assert.Equal(2, retentionLease.Grants.Count);
+        var exactExpiry = queueLease.LeaseExpiresAt;
+
+        string[] skillStateBefore;
+        string[] retentionAuthorityBefore;
+        DateTimeOffset[] publishedExpiriesBefore;
+        using (var connection = Open(database.Path))
+        {
+            var persistedFrontier = ReadPersistedSkillFrontier(
+                connection,
+                queueLease.GenerationId);
+            Assert.Equal([0, 1], persistedFrontier.Select(static row => row.Ordinal));
+            Assert.Equal(
+                persistedFrontier.Select(static row => row.ItemId),
+                retentionLease.Grants.Select(static grant => grant.ItemId));
+            Assert.Equal(
+                exactExpiry.ToUniversalTime().ToString("O"),
+                ScalarText(
+                    connection,
+                    "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                    ("$generation_id", queueLease.GenerationId)));
+            foreach (var grant in retentionLease.Grants)
+                SetRetentionLeaseExpiry(connection, grant, exactExpiry);
+            skillStateBefore = ReadSkillProjectionState(connection);
+            retentionAuthorityBefore =
+            [
+                FullRowsSnapshot(connection, "retention_items"),
+                FullRowsSnapshot(connection, "raw_records"),
+                FullRowsSnapshot(connection, "retention_leases"),
+                FullRowsSnapshot(connection, "retention_adapter_coverage"),
+            ];
+            publishedExpiriesBefore = retentionLease.Grants
+                .Select(PublishedLeaseExpiry)
+                .ToArray();
+        }
+        Assert.All(publishedExpiriesBefore, expiry => Assert.Equal(exactExpiry, expiry));
+
+        var publicationEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releasePublication = new ManualResetEventSlim(initialState: false);
+        var publicationHolder = Task.Run(() =>
+        {
+            using var publication = retentionLease.Grants[1].EnterLeasePublication();
+            publicationEntered.TrySetResult();
+            if (!releasePublication.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("frontier publication scope was not released");
+        });
+        await publicationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var heartbeatCompleted = new TaskCompletionSource<(
+            SkillProjectionQueueLease? Lease,
+            Exception? Exception)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heartbeatThread = new Thread(() =>
+        {
+            try
+            {
+                heartbeatCompleted.TrySetResult((
+                    store.Heartbeat(
+                        queueLease,
+                        retentionLease,
+                        heartbeatStartedAt),
+                    null));
+            }
+            catch (Exception exception)
+            {
+                heartbeatCompleted.TrySetResult((null, exception));
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        heartbeatThread.Start();
+
+        try
+        {
+            await checkpoint.WasReached.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(SpinWait.SpinUntil(
+                () => heartbeatThread.ThreadState.HasFlag(ThreadState.WaitSleepJoin),
+                TimeSpan.FromSeconds(5)));
+            Assert.False(heartbeatCompleted.Task.IsCompleted);
+            using var publicationProbeConnection = Open(database.Path);
+            using var firstPublicationProbe = publicationProbeConnection.CreateCommand();
+            firstPublicationProbe.CommandText =
+                """
+                SELECT
+                    $retention_read_source_token,
+                    $retention_read_item_id,
+                    $retention_read_revision,
+                    $retention_read_lease_kind,
+                    $retention_read_lease_owner,
+                    $retention_read_lease_generation,
+                    $retention_read_lease_expires_at;
+                """;
+            Assert.False(
+                retentionLease.Grants[0]
+                    .TryBindAdmissionSelectorCapability(firstPublicationProbe));
+            time.Advance(exactExpiry - time.GetUtcNow());
+            Assert.Equal(exactExpiry, time.GetUtcNow());
+        }
+        finally
+        {
+            releasePublication.Set();
+        }
+
+        await publicationHolder.WaitAsync(TimeSpan.FromSeconds(5));
+        var heartbeat = await heartbeatCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Null(heartbeat.Exception);
+        Assert.Null(heartbeat.Lease);
+        using var verification = Open(database.Path);
+        Assert.Equal(skillStateBefore, ReadSkillProjectionState(verification));
+        Assert.Equal(
+            retentionAuthorityBefore,
+            new[]
+            {
+                FullRowsSnapshot(verification, "retention_items"),
+                FullRowsSnapshot(verification, "raw_records"),
+                FullRowsSnapshot(verification, "retention_leases"),
+                FullRowsSnapshot(verification, "retention_adapter_coverage"),
+            });
+        Assert.Equal(
+            publishedExpiriesBefore,
+            retentionLease.Grants.Select(PublishedLeaseExpiry).ToArray());
+    }
+
+    [Fact]
+    public async Task Heartbeat_BeforePersistedExpiry_RenewsTheSameQueueAndRetentionLeases()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("heartbeat-before-expiry-control", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatAt = claimedAt.AddSeconds(11);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(heartbeatAt)));
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var grant = Assert.Single(retentionLease.Grants);
+        using (var connection = Open(database.Path))
+            SetRetentionLeaseExpiry(connection, grant, claimedAt.AddSeconds(20));
+
+        var renewed = Assert.IsType<SkillProjectionQueueLease>(
+            store.Heartbeat(queueLease, retentionLease, heartbeatAt));
+
+        Assert.Equal(heartbeatAt.AddSeconds(30), renewed.LeaseExpiresAt);
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            heartbeatAt.AddSeconds(30).ToString("O"),
+            ScalarText(
+                verification,
+                "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                ("$generation_id", queueLease.GenerationId)));
+        Assert.Equal(
+            heartbeatAt.Add(RetentionV1Constants.LeaseDuration).ToString("O"),
+            ScalarText(
+                verification,
+                "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+                ("$item_id", grant.ItemId)));
+        Assert.Equal(
+            heartbeatAt.Add(RetentionV1Constants.LeaseDuration),
+            PublishedLeaseExpiry(grant));
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("revision")]
+    [InlineData("readability")]
+    [InlineData("source_receipt")]
+    [InlineData("coverage")]
+    public async Task Heartbeat_BeforeQueueIntervalIgnoresCurrentRenewalProofDrift(
+        string drift)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("early-heartbeat-authority", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                time));
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var grant = Assert.Single(retentionLease.Grants);
+        using var connection = Open(database.Path);
+        var queueExpiryBefore = ScalarText(
+            connection,
+            "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+            ("$generation_id", queueLease.GenerationId));
+        var persistedRetentionExpiryBefore = ScalarText(
+            connection,
+            "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+            ("$item_id", grant.ItemId));
+        var publishedRetentionExpiryBefore = PublishedLeaseExpiry(grant);
+        switch (drift)
+        {
+            case "none":
+                break;
+            case "revision":
+                Assert.Equal(
+                    1,
+                    Execute(
+                        connection,
+                        "UPDATE retention_items SET revision=revision+1 WHERE item_id=$item_id;",
+                        ("$item_id", grant.ItemId)));
+                break;
+            case "readability":
+                Assert.Equal(
+                    1,
+                    Execute(
+                        connection,
+                        "UPDATE retention_items SET state='expired_pending_deletion',read_denied_at=$at WHERE item_id=$item_id;",
+                        ("$at", claimedAt.ToString("O")),
+                        ("$item_id", grant.ItemId)));
+                break;
+            case "source_receipt":
+                Assert.Equal(
+                    1,
+                    Execute(
+                        connection,
+                        "UPDATE raw_records SET received_at=$received_at WHERE id=$raw_record_id;",
+                        ("$received_at", ObservedAt.AddSeconds(1).ToString("O")),
+                        ("$raw_record_id", Assert.Single(queueLease.Inputs).RawRecordId)));
+                break;
+            case "coverage":
+                Assert.Equal(
+                    1,
+                    Execute(
+                        connection,
+                        "DELETE FROM retention_adapter_coverage WHERE store_kind='raw_record';"));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(drift));
+        }
+        var retentionItemsBefore = FullRowsSnapshot(connection, "retention_items");
+        var sourcesBefore = FullRowsSnapshot(connection, "raw_records");
+        var leasesBefore = FullRowsSnapshot(connection, "retention_leases");
+        var coverageBefore = FullRowsSnapshot(connection, "retention_adapter_coverage");
+        Assert.True(
+            GrantIsUsable(
+                connection,
+                grant,
+                Assert.Single(queueLease.Inputs).RawRecordId,
+                claimedAt.AddSeconds(5)));
+
+        time.Advance(TimeSpan.FromSeconds(5));
+        var heartbeat = store.Heartbeat(
+            queueLease,
+            retentionLease,
+            claimedAt.AddSeconds(5));
+
+        var unchanged = Assert.IsType<SkillProjectionQueueLease>(heartbeat);
+        Assert.Equal(queueLease.LeaseExpiresAt, unchanged.LeaseExpiresAt);
+        Assert.Equal(
+            queueExpiryBefore,
+            ScalarText(
+                connection,
+                "SELECT lease_expires_at FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                ("$generation_id", queueLease.GenerationId)));
+        Assert.Equal(
+            persistedRetentionExpiryBefore,
+            ScalarText(
+                connection,
+                "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+                ("$item_id", grant.ItemId)));
+        Assert.Equal(publishedRetentionExpiryBefore, PublishedLeaseExpiry(grant));
+        Assert.Equal(retentionItemsBefore, FullRowsSnapshot(connection, "retention_items"));
+        Assert.Equal(sourcesBefore, FullRowsSnapshot(connection, "raw_records"));
+        Assert.Equal(leasesBefore, FullRowsSnapshot(connection, "retention_leases"));
+        Assert.Equal(coverageBefore, FullRowsSnapshot(connection, "retention_adapter_coverage"));
+        Assert.True(
+            GrantIsUsable(
+                connection,
+                grant,
+                Assert.Single(queueLease.Inputs).RawRecordId,
+                claimedAt.AddSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Heartbeat_SecondPersistedOrdinalRenewalCasFailureRollsBackEveryLeaseExpiry()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("composite-heartbeat-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch(
+            "composite-heartbeat-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatAt = claimedAt.AddSeconds(11);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(heartbeatAt)));
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        Assert.Equal(2, retentionLease.Grants.Count);
+        var dueExpiry = claimedAt.AddSeconds(20);
+        var renewedExpiry = heartbeatAt.Add(RetentionV1Constants.LeaseDuration);
+
+        using var connection = Open(database.Path);
+        var persistedFrontier = ReadPersistedSkillFrontier(
+            connection,
+            queueLease.GenerationId);
+        Assert.Equal([0, 1], persistedFrontier.Select(static row => row.Ordinal));
+        Assert.Equal(
+            persistedFrontier.Select(static row => row.RawRecordId),
+            queueLease.Inputs.Select(static input => input.RawRecordId));
+        Assert.Equal(
+            persistedFrontier.Select(static row => row.ItemId),
+            retentionLease.Grants.Select(static grant => grant.ItemId));
+        Assert.Equal(
+            persistedFrontier.Select(static row => row.RawRecordId.ToString(
+                System.Globalization.CultureInfo.InvariantCulture)),
+            retentionLease.Grants.Select(static grant => grant.OwnershipKey.SourceItemId));
+        foreach (var grant in retentionLease.Grants)
+            SetRetentionLeaseExpiry(connection, grant, dueExpiry);
+        InstallSecondOrdinalRenewalFailureTrigger(
+            connection,
+            persistedFrontier[0].ItemId,
+            persistedFrontier[1].ItemId,
+            renewedExpiry);
+        var queueBefore = FullRowsSnapshot(
+            connection,
+            "skill_projection_queue",
+            "generation_id",
+            queueLease.GenerationId);
+        var persistedLeasesBefore = persistedFrontier
+            .Select(row => FullRowsSnapshot(
+                connection,
+                "retention_leases",
+                "item_id",
+                row.ItemId))
+            .ToArray();
+        var publishedExpiriesBefore = retentionLease.Grants
+            .Select(PublishedLeaseExpiry)
+            .ToArray();
+
+        var renewed = store.Heartbeat(
+            queueLease,
+            retentionLease,
+            heartbeatAt);
+
+        Assert.Null(renewed);
+        Assert.Equal(
+            queueBefore,
+            FullRowsSnapshot(
+                connection,
+                "skill_projection_queue",
+                "generation_id",
+                queueLease.GenerationId));
+        Assert.Equal(
+            persistedLeasesBefore,
+            persistedFrontier
+                .Select(row => FullRowsSnapshot(
+                    connection,
+                    "retention_leases",
+                    "item_id",
+                    row.ItemId))
+                .ToArray());
+        Assert.Equal(
+            publishedExpiriesBefore,
+            retentionLease.Grants.Select(PublishedLeaseExpiry).ToArray());
+        Assert.All(publishedExpiriesBefore, expiry => Assert.Equal(dueExpiry, expiry));
+
+        Execute(connection, "DROP TRIGGER fail_second_skill_retention_renewal;");
+        Assert.Equal(
+            0,
+            ScalarLong(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='fail_second_skill_retention_renewal';"));
+        var control = Assert.IsType<SkillProjectionQueueLease>(
+            store.Heartbeat(queueLease, retentionLease, heartbeatAt));
+
+        Assert.Equal(heartbeatAt.AddSeconds(30), control.LeaseExpiresAt);
+        Assert.All(
+            persistedFrontier,
+            row => Assert.Equal(
+                renewedExpiry.ToUniversalTime().ToString("O"),
+                ScalarText(
+                    connection,
+                    "SELECT expires_at FROM retention_leases WHERE item_id=$item_id AND lease_kind='operation';",
+                    ("$item_id", row.ItemId))));
+        Assert.All(
+            retentionLease.Grants,
+            grant => Assert.Equal(renewedExpiry, PublishedLeaseExpiry(grant)));
+    }
+
+    [Fact]
+    public async Task Heartbeat_PublishesRetentionRenewalBeforeConcurrentValidatorCanBindIt()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("heartbeat-publication", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        using (var coverageConnection = Open(database.Path))
+            SeedExactAdapterCoverage(coverageConnection);
+        var checkpoint = new SkillRenewalPublicationCheckpoint(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatAt = claimedAt.AddSeconds(11);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(heartbeatAt)),
+            checkpoint);
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        var grant = Assert.Single(retentionLease.Grants);
+        using (var connection = Open(database.Path))
+            SetRetentionLeaseExpiry(connection, grant, claimedAt.AddSeconds(20));
+        checkpoint.Configure(
+            grant,
+            queueLease.GenerationId,
+            heartbeatAt.Add(RetentionV1Constants.LeaseDuration));
+
+        var renewed = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
+
+        Assert.NotNull(renewed);
+        await Assert.IsType<Task>(checkpoint.ConcurrentValidator)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(checkpoint.GrantBindingWasBlocked);
     }
 
     [Fact]
@@ -539,10 +1409,15 @@ public sealed class SkillProjectionGenerationTests
         new SqliteIngestionCommitStore(database.Path)
             .Commit(CreateBatch("retention-loss", ObservedAt, SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatAt = claimedAt.AddSeconds(10);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
-        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(ObservedAt.AddSeconds(1)));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(heartbeatAt)));
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
@@ -553,7 +1428,7 @@ public sealed class SkillProjectionGenerationTests
             Assert.Equal(1, delete.ExecuteNonQuery());
         }
 
-        Assert.Null(store.Heartbeat(lease, retentionLease, ObservedAt.AddSeconds(11)));
+        Assert.Null(store.Heartbeat(lease, retentionLease, heartbeatAt));
         var outcome = store.RecordRetry(
             lease,
             ObservedAt.AddSeconds(11),
@@ -592,7 +1467,10 @@ public sealed class SkillProjectionGenerationTests
         var worker = new SkillProjectionWorker(
             new SqliteSkillProjectionStore(
                 database.Path,
-                new RawTelemetryStore(database.Path, retention)));
+                new RawTelemetryStore(
+                    database.Path,
+                    retention,
+                    new MutableTimeProvider(ObservedAt.AddSeconds(2)))));
 
         var outcome = await worker.RunNextAsync(ObservedAt.AddSeconds(2));
 
@@ -660,7 +1538,10 @@ public sealed class SkillProjectionGenerationTests
         var worker = new SkillProjectionWorker(
             new SqliteSkillProjectionStore(
                 database.Path,
-                new RawTelemetryStore(database.Path, retention)));
+                new RawTelemetryStore(
+                    database.Path,
+                    retention,
+                    new MutableTimeProvider(ObservedAt.AddSeconds(2)))));
         Assert.Equal(
             SkillProjectionWorkOutcome.InputUnavailable,
             await worker.RunNextAsync(ObservedAt.AddSeconds(2)));
@@ -831,6 +1712,560 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
+    public async Task Publish_AdmitsPinnedMemberPastHistoricalExpiryWithoutCatalogMutation()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("pinned-publish", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var admissionAt = ObservedAt.AddSeconds(2);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                time));
+        var lease = Assert.IsType<SkillProjectionQueueLease>(
+            store.ClaimNext(claimedAt));
+        var historicalExpiry = ObservedAt.AddMilliseconds(1500).ToString("O");
+        (string Items, string Sources, string Leases) authorityBefore;
+        using (var connection = Open(database.Path))
+        {
+            Assert.Equal(
+                1,
+                Execute(
+                    connection,
+                    "UPDATE retention_items SET state='retained_by_policy',expires_at=$expires_at WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$expires_at", historicalExpiry),
+                    ("$raw_record_id", committed.RawRecordId)));
+            authorityBefore = (
+                FullRowsSnapshot(connection, "retention_items"),
+                FullRowsSnapshot(connection, "raw_records"),
+                FullRowsSnapshot(connection, "retention_leases"));
+        }
+        time.Advance(admissionAt - time.GetUtcNow());
+
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        SkillProjectionWorkOutcome outcome;
+        await using (var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease))
+        {
+            var projected = retentionLease.Value
+                .Select((record, index) => new SkillProjectionProjectedInput(
+                    record.Id!.Value,
+                    record,
+                    MonitorSkillProjectionBuilder.Build(
+                        record,
+                        lease.Inputs[index].SourceSurface,
+                        traceId => traceId == lease.TraceId
+                            ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                            : null)))
+                .ToArray();
+
+            outcome = store.Publish(
+                lease,
+                projected,
+                retentionLease,
+                admissionAt);
+        }
+
+        Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+        using var verification = Open(database.Path);
+        Assert.Equal(authorityBefore.Items, FullRowsSnapshot(verification, "retention_items"));
+        Assert.Equal(authorityBefore.Sources, FullRowsSnapshot(verification, "raw_records"));
+        Assert.Equal(authorityBefore.Leases, FullRowsSnapshot(verification, "retention_leases"));
+    }
+
+    [Fact]
+    public async Task ReadFrontier_FailsClosedAtAdmissionBoundaryWithoutPoisoningPinnedSibling()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        var first = ingestion.Commit(CreateBatch("mixed-admission-1", ObservedAt, SkillPayload));
+        var second = ingestion.Commit(CreateBatch(
+            "mixed-admission-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var admissionAt = ObservedAt.AddSeconds(2);
+        var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                time));
+        var lease = Assert.IsType<SkillProjectionQueueLease>(
+            store.ClaimNext(claimedAt));
+        var boundaryExpiry = admissionAt.ToString("O");
+        var pinnedExpiry = ObservedAt.AddMilliseconds(1500).ToString("O");
+        string pinnedItemBefore;
+        string boundaryImmutableBefore;
+        string sourcesBefore;
+        string leasesBefore;
+        string[] skillAuthorityBefore;
+        long boundaryRevision;
+        using (var connection = Open(database.Path))
+        {
+            Assert.Equal(
+                1,
+                Execute(
+                    connection,
+                    "UPDATE retention_items SET state='expiring',expires_at=$expires_at WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$expires_at", boundaryExpiry),
+                    ("$raw_record_id", first.RawRecordId)));
+            Assert.Equal(
+                1,
+                Execute(
+                    connection,
+                    "UPDATE retention_items SET state='retained_by_policy',expires_at=$expires_at WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$expires_at", pinnedExpiry),
+                    ("$raw_record_id", second.RawRecordId)));
+            boundaryRevision = ScalarLong(
+                connection,
+                "SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                ("$raw_record_id", first.RawRecordId));
+            boundaryImmutableBefore = FullRowsSnapshot(
+                connection,
+                "retention_items",
+                "source_item_id",
+                first.RawRecordId.ToString(),
+                "state",
+                "revision",
+                "read_denied_at",
+                "queued_at");
+            pinnedItemBefore = FullRowsSnapshot(
+                connection,
+                "retention_items",
+                "source_item_id",
+                second.RawRecordId.ToString());
+            sourcesBefore = FullRowsSnapshot(connection, "raw_records");
+            leasesBefore = FullRowsSnapshot(connection, "retention_leases");
+            skillAuthorityBefore = ReadSkillFrontierAuthority(connection);
+        }
+        time.Advance(admissionAt - time.GetUtcNow());
+
+        var denied = await store.ReadFrontierAsync(lease, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Denied, denied.Disposition);
+        Assert.Null(denied.Lease);
+        using (var connection = Open(database.Path))
+        {
+            Assert.Equal(
+                "expired_pending_deletion",
+                ScalarText(
+                    connection,
+                    "SELECT state FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$raw_record_id", first.RawRecordId)));
+            Assert.Equal(
+                boundaryRevision + 1,
+                ScalarLong(
+                    connection,
+                    "SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$raw_record_id", first.RawRecordId)));
+            Assert.Equal(
+                admissionAt.ToString("O"),
+                ScalarText(
+                    connection,
+                    "SELECT read_denied_at FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$raw_record_id", first.RawRecordId)));
+            Assert.Equal(
+                admissionAt.ToString("O"),
+                ScalarText(
+                    connection,
+                    "SELECT queued_at FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$raw_record_id", first.RawRecordId)));
+            Assert.Equal(
+                boundaryImmutableBefore,
+                FullRowsSnapshot(
+                    connection,
+                    "retention_items",
+                    "source_item_id",
+                    first.RawRecordId.ToString(),
+                    "state",
+                    "revision",
+                    "read_denied_at",
+                    "queued_at"));
+            Assert.Equal(
+                pinnedItemBefore,
+                FullRowsSnapshot(
+                    connection,
+                    "retention_items",
+                    "source_item_id",
+                    second.RawRecordId.ToString()));
+            Assert.Equal(sourcesBefore, FullRowsSnapshot(connection, "raw_records"));
+            Assert.Equal(leasesBefore, FullRowsSnapshot(connection, "retention_leases"));
+            Assert.Equal(skillAuthorityBefore, ReadSkillFrontierAuthority(connection));
+            Assert.Equal(
+                0,
+                ScalarLong(
+                    connection,
+                    "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+            Assert.Equal(
+                1,
+                Execute(
+                    connection,
+                    """
+                    UPDATE retention_items
+                    SET state='expiring',expires_at=$expires_at,read_denied_at=NULL,queued_at=NULL
+                    WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);
+                    """,
+                    ("$expires_at", admissionAt.AddDays(30).ToString("O")),
+                    ("$raw_record_id", first.RawRecordId)));
+        }
+
+        var repaired = await store.ReadFrontierAsync(lease, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, repaired.Disposition);
+        await using var repairedLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(repaired.Lease);
+        Assert.Equal(2, repairedLease.Grants.Count);
+    }
+
+    [Theory]
+    [InlineData("pin")]
+    [InlineData("pin-unpin")]
+    [InlineData("cleanup-read-denied")]
+    public async Task Publish_PostAdmissionCatalogLifecycleDriftUsesExactLiveGrant(
+        string lifecycleDrift)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var primary = new SqliteIngestionCommitStore(database.Path)
+            .Commit(CreateBatch("post-admission-publish", ObservedAt, SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var naturalExpiry = RetentionUnpinExpiryCalculator.Recalculate(
+            ObservedAt,
+            "raw-default-90d",
+            1);
+        var claimedAt = naturalExpiry.AddSeconds(-1);
+        var time = new MutableTimeProvider(claimedAt);
+        var rawStore = new RawTelemetryStore(database.Path, retention, time);
+        var sentinelRawRecordId = rawStore.Insert(
+            new RawTelemetryRecord(
+                null,
+                RawTelemetrySources.RawOtlp,
+                "44444444444444444444444444444444",
+                ObservedAt.AddMinutes(1),
+                ResourceAttributesJson: null,
+                PayloadJson: "{}"));
+        var store = new SqliteSkillProjectionStore(database.Path, rawStore);
+        var queueLease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(claimedAt));
+
+        var read = await store.ReadFrontierAsync(queueLease, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        string retentionItemsAfterDrift;
+        string sourcesAfterDrift;
+        string sameItemAccessBefore;
+        string unrelatedOperationBefore;
+        await using (retentionLease)
+        {
+            var record = Assert.Single(retentionLease.Value);
+            var grant = Assert.Single(retentionLease.Grants);
+            var queuedInput = Assert.Single(queueLease.Inputs);
+            Assert.Equal(primary.RawRecordId, record.Id);
+            Assert.Equal(primary.RawRecordId, queuedInput.RawRecordId);
+            Assert.Equal(primary.RawRecordId.ToString(), grant.OwnershipKey.SourceItemId);
+            using (var frontierConnection = Open(database.Path))
+            {
+                var persisted = Assert.Single(
+                    ReadPersistedSkillFrontier(frontierConnection, queueLease.GenerationId));
+                Assert.Equal(0, persisted.Ordinal);
+                Assert.Equal(primary.RawRecordId, persisted.RawRecordId);
+                Assert.Equal(grant.ItemId, persisted.ItemId);
+            }
+
+            var projected = new[]
+            {
+                new SkillProjectionProjectedInput(
+                    record.Id!.Value,
+                    record,
+                    MonitorSkillProjectionBuilder.Build(
+                        record,
+                        queuedInput.SourceSurface,
+                        traceId => traceId == queueLease.TraceId
+                            ? (TraceSourceVersionResolutionState.Resolved, queueLease.ExactVersion)
+                            : null)),
+            };
+            var mutationAt = lifecycleDrift == "cleanup-read-denied"
+                ? naturalExpiry
+                : claimedAt.AddMilliseconds(500);
+            time.Advance(mutationAt - time.GetUtcNow());
+
+            string leasesBeforePublish;
+            using (var connection = Open(database.Path))
+            {
+                var initialRevision = ScalarLong(
+                    connection,
+                    "SELECT revision FROM retention_items WHERE item_id=$item_id;",
+                    ("$item_id", grant.ItemId));
+                var excludedColumns = lifecycleDrift switch
+                {
+                    "pin" => new[] { "state", "revision" },
+                    "pin-unpin" => new[] { "state", "expires_at", "revision" },
+                    "cleanup-read-denied" =>
+                        new[] { "state", "revision", "read_denied_at", "queued_at" },
+                    _ => throw new ArgumentOutOfRangeException(nameof(lifecycleDrift)),
+                };
+                var immutableTargetBefore = FullRowsSnapshot(
+                    connection,
+                    "retention_items",
+                    "item_id",
+                    grant.ItemId,
+                    excludedColumns);
+                var sentinelItemId = ScalarText(
+                    connection,
+                    "SELECT item_id FROM retention_items WHERE store_kind='raw_record' AND source_item_id=CAST($raw_record_id AS TEXT);",
+                    ("$raw_record_id", sentinelRawRecordId));
+                var sentinelItemBefore = FullRowsSnapshot(
+                    connection,
+                    "retention_items",
+                    "item_id",
+                    sentinelItemId);
+                var sourcesBefore = FullRowsSnapshot(connection, "raw_records");
+                var expectedState = lifecycleDrift switch
+                {
+                    "pin" => "retained_by_policy",
+                    "pin-unpin" => "expiring",
+                    "cleanup-read-denied" => "expired_pending_deletion",
+                    _ => throw new ArgumentOutOfRangeException(nameof(lifecycleDrift)),
+                };
+                var expectedRevision = initialRevision +
+                    (lifecycleDrift == "pin-unpin" ? 2 : 1);
+                var expectedReadDeniedAt = lifecycleDrift == "cleanup-read-denied"
+                    ? mutationAt.ToString("O")
+                    : null;
+                var expectedQueuedAt = expectedReadDeniedAt;
+                var driftedRows = lifecycleDrift switch
+                {
+                    "pin" => Execute(
+                        connection,
+                        """
+                        UPDATE retention_items
+                        SET state='retained_by_policy',revision=revision+1
+                        WHERE item_id=$item_id
+                          AND state='expiring'
+                          AND read_denied_at IS NULL
+                          AND expires_at>$at;
+                        """,
+                        ("$item_id", grant.ItemId),
+                        ("$at", mutationAt.ToString("O"))),
+                    "pin-unpin" => Execute(
+                        connection,
+                        """
+                        UPDATE retention_items
+                        SET state='retained_by_policy',revision=revision+1
+                        WHERE item_id=$item_id
+                          AND state='expiring'
+                          AND read_denied_at IS NULL
+                          AND expires_at>$at;
+                        UPDATE retention_items
+                        SET state='expiring',expires_at=$expires_at,revision=revision+1
+                        WHERE item_id=$item_id
+                          AND state='retained_by_policy'
+                          AND read_denied_at IS NULL;
+                        """,
+                        ("$item_id", grant.ItemId),
+                        ("$at", mutationAt.ToString("O")),
+                        ("$expires_at", naturalExpiry.ToString("O"))),
+                    "cleanup-read-denied" => Execute(
+                        connection,
+                        """
+                        UPDATE retention_items
+                        SET state='expired_pending_deletion',
+                            read_denied_at=$at,
+                            queued_at=$at,
+                            revision=revision+1
+                        WHERE item_id=$item_id
+                          AND state='expiring'
+                          AND read_denied_at IS NULL
+                          AND expires_at<=$at;
+                        """,
+                        ("$item_id", grant.ItemId),
+                        ("$at", mutationAt.ToString("O"))),
+                    _ => throw new ArgumentOutOfRangeException(nameof(lifecycleDrift)),
+                };
+                Assert.Equal(lifecycleDrift == "pin-unpin" ? 2 : 1, driftedRows);
+                Assert.Equal(
+                    1,
+                    ScalarLong(
+                        connection,
+                        """
+                        SELECT COUNT(*)
+                        FROM retention_items
+                        WHERE item_id=$item_id
+                          AND state=$state
+                          AND expires_at=$expires_at
+                          AND revision=$revision
+                          AND read_denied_at IS $read_denied_at
+                          AND queued_at IS $queued_at;
+                        """,
+                        ("$item_id", grant.ItemId),
+                        ("$state", expectedState),
+                        ("$expires_at", naturalExpiry.ToString("O")),
+                        ("$revision", expectedRevision),
+                        ("$read_denied_at", expectedReadDeniedAt is null
+                            ? DBNull.Value
+                            : expectedReadDeniedAt),
+                        ("$queued_at", expectedQueuedAt is null
+                            ? DBNull.Value
+                            : expectedQueuedAt)));
+                Assert.Equal(
+                    immutableTargetBefore,
+                    FullRowsSnapshot(
+                        connection,
+                        "retention_items",
+                        "item_id",
+                        grant.ItemId,
+                        excludedColumns));
+                Assert.Equal(
+                    sentinelItemBefore,
+                    FullRowsSnapshot(
+                        connection,
+                        "retention_items",
+                        "item_id",
+                        sentinelItemId));
+                Assert.Equal(sourcesBefore, FullRowsSnapshot(connection, "raw_records"));
+
+                Assert.Equal(
+                    2,
+                    Execute(
+                        connection,
+                        """
+                        INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+                        VALUES($item_id,'access','same-item-access-sentinel',$expires_at,73);
+                        INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+                        VALUES($sentinel_item_id,'operation','unrelated-operation-sentinel',$expires_at,74);
+                        """,
+                        ("$item_id", grant.ItemId),
+                        ("$sentinel_item_id", sentinelItemId),
+                        ("$expires_at", mutationAt.AddMinutes(3).ToString("O"))));
+                retentionItemsAfterDrift = FullRowsSnapshot(connection, "retention_items");
+                sourcesAfterDrift = FullRowsSnapshot(connection, "raw_records");
+                leasesBeforePublish = FullRowsSnapshot(connection, "retention_leases");
+                sameItemAccessBefore = FullRowsSnapshot(
+                    connection,
+                    "retention_leases",
+                    "lease_kind",
+                    "access");
+                unrelatedOperationBefore = FullRowsSnapshot(
+                    connection,
+                    "retention_leases",
+                    "item_id",
+                    sentinelItemId);
+            }
+
+            var outcome = store.Publish(
+                queueLease,
+                projected,
+                retentionLease,
+                mutationAt.AddDays(1));
+
+            Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+            using var published = Open(database.Path);
+            Assert.Equal(
+                1,
+                ScalarLong(
+                    published,
+                    """
+                    SELECT COUNT(*)
+                    FROM skill_projection_generations AS generation
+                    JOIN skill_projection_queue AS queue
+                      ON queue.generation_id=generation.generation_id
+                    JOIN skill_projection_trace_heads AS head
+                      ON head.trace_id=generation.trace_id
+                    WHERE generation.generation_id=$generation_id
+                      AND generation.lifecycle='current'
+                      AND generation.updated_at=$published_at
+                      AND queue.state='completed'
+                      AND queue.lease_owner IS NULL
+                      AND queue.lease_expires_at IS NULL
+                      AND queue.next_attempt_at IS NULL
+                      AND queue.error_code IS NULL
+                      AND head.desired_generation_id=generation.generation_id
+                      AND head.current_generation_id=generation.generation_id
+                      AND head.updated_at=$published_at;
+                    """,
+                    ("$generation_id", queueLease.GenerationId),
+                    ("$published_at", mutationAt.ToString("O"))));
+            Assert.Equal(
+                1,
+                ScalarLong(
+                    published,
+                    "SELECT COUNT(*) FROM skill_projection_invocations WHERE generation_id=$generation_id AND raw_record_id=$raw_record_id;",
+                    ("$generation_id", queueLease.GenerationId),
+                    ("$raw_record_id", primary.RawRecordId)));
+            Assert.Equal(
+                1,
+                ScalarLong(
+                    published,
+                    "SELECT COUNT(*) FROM skill_projection_inventories WHERE generation_id=$generation_id AND raw_record_id=$raw_record_id;",
+                    ("$generation_id", queueLease.GenerationId),
+                    ("$raw_record_id", primary.RawRecordId)));
+            Assert.Equal(
+                1,
+                ScalarLong(
+                    published,
+                    """
+                    SELECT COUNT(*)
+                    FROM skill_projection_inventory_names AS name
+                    JOIN skill_projection_inventories AS inventory
+                      ON inventory.inventory_id=name.inventory_id
+                    WHERE inventory.generation_id=$generation_id
+                      AND inventory.raw_record_id=$raw_record_id;
+                    """,
+                    ("$generation_id", queueLease.GenerationId),
+                    ("$raw_record_id", primary.RawRecordId)));
+            Assert.Equal(retentionItemsAfterDrift, FullRowsSnapshot(published, "retention_items"));
+            Assert.Equal(sourcesAfterDrift, FullRowsSnapshot(published, "raw_records"));
+            Assert.Equal(leasesBeforePublish, FullRowsSnapshot(published, "retention_leases"));
+            SourceCompatibilitySchemaV11.Validate(published, transaction: null);
+            SkillProjectionSchemaV1.Validate(published, transaction: null);
+        }
+
+        using var released = Open(database.Path);
+        Assert.Equal(
+            0,
+            ScalarLong(
+                released,
+                """
+                SELECT COUNT(*)
+                FROM retention_leases
+                WHERE item_id=$item_id
+                  AND lease_kind='operation'
+                  AND owner=$owner
+                  AND generation=$generation;
+                """,
+                ("$item_id", retentionLease.Grants[0].ItemId),
+                ("$owner", retentionLease.Grants[0].LeaseOwner),
+                ("$generation", retentionLease.Grants[0].LeaseGeneration)));
+        Assert.Equal(2, ScalarLong(released, "SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(
+            retentionItemsAfterDrift,
+            FullRowsSnapshot(released, "retention_items"));
+        Assert.Equal(sourcesAfterDrift, FullRowsSnapshot(released, "raw_records"));
+        Assert.Equal(
+            sameItemAccessBefore,
+            FullRowsSnapshot(released, "retention_leases", "lease_kind", "access"));
+        Assert.Equal(
+            unrelatedOperationBefore,
+            FullRowsSnapshot(
+                released,
+                "retention_leases",
+                "owner",
+                "unrelated-operation-sentinel"));
+    }
+
+    [Fact]
     public async Task LostRetentionLease_CannotPublishConstructedRows()
     {
         using var database = new TestDatabase();
@@ -840,7 +2275,10 @@ public sealed class SkillProjectionGenerationTests
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(2))));
         var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(ObservedAt.AddSeconds(1)));
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
         await using var retentionLease =
@@ -893,7 +2331,10 @@ public sealed class SkillProjectionGenerationTests
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(2))));
         var lease = Assert.IsType<SkillProjectionQueueLease>(
             store.ClaimNext(ObservedAt.AddSeconds(1)));
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
@@ -931,8 +2372,8 @@ public sealed class SkillProjectionGenerationTests
             new RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>(
                 retentionLease.Value,
                 RetentionRevisionFence.Create(),
-                static () => ValueTask.CompletedTask,
-                grants);
+                grants,
+                static _ => ValueTask.CompletedTask);
 
         var outcome = store.Publish(
             lease,
@@ -972,10 +2413,14 @@ public sealed class SkillProjectionGenerationTests
             ObservedAt.AddMilliseconds(1),
             SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var claimedAt = ObservedAt.AddSeconds(1);
+        var heartbeatAt = claimedAt.AddSeconds(11);
         var store = new SqliteSkillProjectionStore(
             database.Path,
-            new RawTelemetryStore(database.Path, retention));
-        var claimedAt = ObservedAt.AddSeconds(1);
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(heartbeatAt)));
         var lease = Assert.IsType<SkillProjectionQueueLease>(
             store.ClaimNext(claimedAt));
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
@@ -996,13 +2441,13 @@ public sealed class SkillProjectionGenerationTests
         };
         var forged = lease with { Inputs = forgedInputs };
         var grantExpiries = retentionLease.Grants
-            .Select(static grant => grant.LeaseExpiresAt)
+            .Select(PublishedLeaseExpiry)
             .ToArray();
 
         var renewed = store.Heartbeat(
             forged,
             retentionLease,
-            claimedAt.AddSeconds(11));
+            heartbeatAt);
 
         Assert.Null(renewed);
         using var verification = Open(database.Path);
@@ -1012,7 +2457,7 @@ public sealed class SkillProjectionGenerationTests
         Assert.Equal(
             grantExpiries,
             retentionLease.Grants
-                .Select(static grant => grant.LeaseExpiresAt)
+                .Select(PublishedLeaseExpiry)
                 .ToArray());
     }
 
@@ -1027,11 +2472,11 @@ public sealed class SkillProjectionGenerationTests
         new SqliteIngestionCommitStore(database.Path)
             .Commit(CreateBatch("delayed-unavailable", ObservedAt, SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
-        var store = new SqliteSkillProjectionStore(
-            database.Path,
-            new RawTelemetryStore(database.Path, retention));
         var claimedAt = ObservedAt.AddSeconds(1);
         var time = new MutableTimeProvider(claimedAt);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time));
         var worker = new SkillProjectionWorker(
             store,
             timeProvider: time,
@@ -1278,6 +2723,391 @@ public sealed class SkillProjectionGenerationTests
         foreach (var parameter in parameters)
             command.Parameters.AddWithValue(parameter.Name, parameter.Value);
         return Convert.ToString(command.ExecuteScalar()) ?? string.Empty;
+    }
+
+    private static int Execute(
+        SqliteConnection connection,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        return command.ExecuteNonQuery();
+    }
+
+    private static IReadOnlyList<PersistedSkillFrontierMember> ReadPersistedSkillFrontier(
+        SqliteConnection connection,
+        long generationId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT input.input_ordinal,input.raw_record_id,item.item_id
+            FROM skill_projection_generation_inputs AS input
+            JOIN retention_items AS item
+              ON item.store_kind='raw_record'
+             AND item.source_item_id=CAST(input.raw_record_id AS TEXT)
+            WHERE input.generation_id=$generation_id
+            ORDER BY input.input_ordinal;
+            """;
+        command.Parameters.AddWithValue("$generation_id", generationId);
+        using var reader = command.ExecuteReader();
+        var rows = new List<PersistedSkillFrontierMember>();
+        while (reader.Read())
+            rows.Add(new(reader.GetInt32(0), reader.GetInt64(1), reader.GetString(2)));
+        return rows;
+    }
+
+    private static void InstallSecondOrdinalRenewalFailureTrigger(
+        SqliteConnection connection,
+        string firstItemId,
+        string secondItemId,
+        DateTimeOffset renewedExpiry)
+    {
+        var firstItemLiteral = SqlLiteral(connection, firstItemId);
+        var secondItemLiteral = SqlLiteral(connection, secondItemId);
+        var renewedExpiryLiteral = SqlLiteral(
+            connection,
+            renewedExpiry.ToUniversalTime().ToString("O"));
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $$"""
+            CREATE TRIGGER fail_second_skill_retention_renewal
+            BEFORE UPDATE OF expires_at ON retention_leases
+            WHEN OLD.item_id={{secondItemLiteral}}
+              AND NEW.expires_at={{renewedExpiryLiteral}}
+              AND EXISTS(
+                    SELECT 1
+                    FROM retention_leases
+                    WHERE item_id={{firstItemLiteral}}
+                      AND lease_kind='operation'
+                      AND expires_at={{renewedExpiryLiteral}}
+              )
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END;
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static string SqlLiteral(SqliteConnection connection, object value) =>
+        ScalarText(connection, "SELECT quote($value);", ("$value", value));
+
+    private static string FullRowsSnapshot(
+        SqliteConnection connection,
+        string table,
+        string? keyColumn = null,
+        object? key = null,
+        params string[] excludedColumns)
+    {
+        var columns = new List<(string Name, int PrimaryKeyOrdinal)>();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA table_info({QuoteIdentifier(table)});";
+            using var reader = pragma.ExecuteReader();
+            while (reader.Read())
+                columns.Add((reader.GetString(1), reader.GetInt32(5)));
+        }
+
+        Assert.NotEmpty(columns);
+        Assert.All(
+            excludedColumns,
+            excluded => Assert.Contains(columns, column => column.Name == excluded));
+        if (keyColumn is not null)
+            Assert.Contains(columns, column => column.Name == keyColumn);
+        var selectedColumns = columns
+            .Where(column => !excludedColumns.Contains(column.Name, StringComparer.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(selectedColumns);
+        var orderColumns = selectedColumns
+            .Where(static column => column.PrimaryKeyOrdinal > 0)
+            .OrderBy(static column => column.PrimaryKeyOrdinal)
+            .ToArray();
+        if (orderColumns.Length == 0)
+            orderColumns = selectedColumns;
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT {string.Join(',', selectedColumns.Select(column => $"quote({QuoteIdentifier(column.Name)})"))} FROM {QuoteIdentifier(table)}";
+        if (keyColumn is not null)
+        {
+            command.CommandText += $" WHERE {QuoteIdentifier(keyColumn)}=$snapshot_key";
+            command.Parameters.AddWithValue("$snapshot_key", key ?? DBNull.Value);
+        }
+        command.CommandText +=
+            $" ORDER BY {string.Join(',', orderColumns.Select(column => $"{QuoteIdentifier(column.Name)} COLLATE BINARY"))};";
+
+        var rows = new List<string>
+        {
+            string.Join('|', selectedColumns.Select(static column => column.Name)),
+        };
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                rows.Add(string.Join(
+                    '|',
+                    Enumerable.Range(0, reader.FieldCount).Select(reader.GetString)));
+            }
+        }
+        if (keyColumn is not null)
+            Assert.Equal(2, rows.Count);
+        return string.Join('\n', rows);
+    }
+
+    private static string[] ReadSkillFrontierAuthority(SqliteConnection connection) =>
+    [
+        FullRowsSnapshot(connection, "skill_projection_generations"),
+        FullRowsSnapshot(connection, "skill_projection_generation_inputs"),
+        FullRowsSnapshot(connection, "skill_projection_queue"),
+        FullRowsSnapshot(connection, "skill_projection_trace_heads"),
+    ];
+
+    private static string[] ReadSkillProjectionState(SqliteConnection connection) =>
+    [
+        .. ReadSkillFrontierAuthority(connection),
+        FullRowsSnapshot(connection, "skill_projection_invocations"),
+        FullRowsSnapshot(connection, "skill_projection_inventories"),
+        FullRowsSnapshot(connection, "skill_projection_inventory_names"),
+    ];
+
+    private static string QuoteIdentifier(string value) =>
+        $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    private sealed record PersistedSkillFrontierMember(
+        int Ordinal,
+        long RawRecordId,
+        string ItemId);
+
+    private static string[] ReadSkillWorkState(
+        SqliteConnection connection,
+        long generationId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT generation.*,queue.*,head.*
+            FROM skill_projection_generations AS generation
+            JOIN skill_projection_queue AS queue
+              ON queue.generation_id=generation.generation_id
+            JOIN skill_projection_trace_heads AS head
+              ON head.trace_id=generation.trace_id
+            WHERE generation.generation_id=$generation_id;
+            """;
+        command.Parameters.AddWithValue("$generation_id", generationId);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        var values = Enumerable.Range(0, reader.FieldCount)
+            .Select(index => reader.IsDBNull(index)
+                ? "<null>"
+                : reader.GetValue(index) is byte[] bytes
+                    ? Convert.ToHexString(bytes)
+                    : Convert.ToString(reader.GetValue(index)) ?? string.Empty)
+            .ToArray();
+        Assert.False(reader.Read());
+        return values;
+    }
+
+    private static DateTimeOffset PublishedLeaseExpiry(RetentionReadGrant grant)
+    {
+        using var publication = grant.EnterLeasePublication();
+        return publication.LeaseExpiresAt;
+    }
+
+    private static bool GrantIsUsable(
+        SqliteConnection connection,
+        RetentionReadGrant grant,
+        long rawRecordId,
+        DateTimeOffset at)
+    {
+        using var transaction = connection.BeginTransaction();
+        var usable = RetentionCatalogStore.IsGrantUsable(
+            connection,
+            transaction,
+            grant,
+            rawRecordId,
+            at);
+        transaction.Rollback();
+        return usable;
+    }
+
+    private static void SetRetentionLeaseExpiry(
+        SqliteConnection connection,
+        RetentionReadGrant grant,
+        DateTimeOffset expiry)
+    {
+        Assert.Equal(
+            1,
+            Execute(
+                connection,
+                """
+                UPDATE retention_leases
+                SET expires_at=$expiry
+                WHERE item_id=$item_id
+                  AND lease_kind='operation'
+                  AND owner=$owner
+                  AND generation=$generation;
+                """,
+                ("$expiry", expiry.ToUniversalTime().ToString("O")),
+                ("$item_id", grant.ItemId),
+                ("$owner", grant.LeaseOwner),
+                ("$generation", grant.LeaseGeneration)));
+        grant.AdvanceExpiry(expiry);
+    }
+
+    private static void SeedExactAdapterCoverage(SqliteConnection connection) =>
+        Assert.Equal(
+            5,
+            Execute(
+                connection,
+                """
+                INSERT INTO retention_adapter_coverage(store_kind,coverage_version)
+                VALUES
+                    ('session_event_content',1),
+                    ('raw_record',1),
+                    ('analysis_run_raw',1),
+                    ('sensitive_bundle',1),
+                    ('analysis_sdk_directory',1);
+                """));
+
+    private sealed class SkillRenewalPublicationCheckpoint(string databasePath)
+        : ISkillProjectionCheckpoint
+    {
+        private RetentionReadGrant? grant;
+        private long generationId;
+        private DateTimeOffset expectedExpiry;
+
+        internal bool GrantBindingWasBlocked { get; private set; }
+        internal Task? ConcurrentValidator { get; private set; }
+
+        internal void Configure(
+            RetentionReadGrant configuredGrant,
+            long configuredGenerationId,
+            DateTimeOffset configuredExpectedExpiry)
+        {
+            grant = configuredGrant;
+            generationId = configuredGenerationId;
+            expectedExpiry = configuredExpectedExpiry;
+        }
+
+        public void Reached(SkillProjectionCheckpoint checkpoint)
+        {
+            if (checkpoint != SkillProjectionCheckpoint.BeforeRetentionRenewalPublication)
+                return;
+            using (var connection = Open(databasePath))
+            {
+                Assert.Equal(
+                    "leased",
+                    ScalarText(
+                        connection,
+                        "SELECT state FROM skill_projection_queue WHERE generation_id=$generation_id;",
+                        ("$generation_id", generationId)));
+            }
+
+            var configuredGrant = grant
+                ?? throw new InvalidOperationException("heartbeat checkpoint was not configured");
+            var transactionStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var grantBindingAttempted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var completed = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            ConcurrentValidator = completed.Task;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    using var connection = Open(databasePath);
+                    using var transaction = connection.BeginTransaction(deferred: false);
+                    transactionStarted.TrySetResult();
+                    using var bindingProbe = connection.CreateCommand();
+                    bindingProbe.Transaction = transaction;
+                    bindingProbe.CommandText = """
+                        SELECT r.payload_json
+                        FROM retention_items i
+                        JOIN raw_records r ON r.id=CAST(i.source_item_id AS INTEGER)
+                          AND r.retention_owner_token=$retention_read_source_token
+                        JOIN retention_leases l ON i.item_id=$retention_read_item_id
+                          AND i.revision=$retention_read_revision
+                          AND l.item_id=i.item_id
+                          AND l.lease_kind=$retention_read_lease_kind
+                          AND l.owner=$retention_read_lease_owner
+                          AND l.generation=$retention_read_lease_generation
+                          AND l.expires_at=$retention_read_lease_expires_at;
+                        """;
+                    var bound = configuredGrant.TryBindAdmissionSelectorCapability(bindingProbe);
+                    grantBindingAttempted.TrySetResult();
+                    if (bound)
+                        throw new InvalidOperationException(
+                            "retention renewal publication was not protected");
+
+                    GrantBindingWasBlocked = true;
+                    using var publication = configuredGrant.EnterLeasePublication();
+                    Assert.Equal(expectedExpiry, publication.LeaseExpiresAt);
+                    transaction.Rollback();
+                    completed.TrySetResult();
+                }
+                catch (Exception exception)
+                {
+                    transactionStarted.TrySetResult();
+                    grantBindingAttempted.TrySetResult();
+                    completed.TrySetException(exception);
+                }
+            })
+            {
+                IsBackground = true,
+            };
+            thread.Start();
+
+            Assert.True(transactionStarted.Task.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(grantBindingAttempted.Task.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(completed.Task.IsCompleted);
+        }
+    }
+
+    private sealed class BlockingSkillTransactionCheckpoint(
+        SkillProjectionCheckpoint target) : ISkillProjectionCheckpoint, IDisposable
+    {
+        private readonly ManualResetEventSlim continuation = new(initialState: false);
+        private readonly TaskCompletionSource reached =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task WasReached => reached.Task;
+        internal string[] ExpectedState { get; set; } = [];
+
+        public void Reached(SkillProjectionCheckpoint checkpoint)
+        {
+            if (checkpoint != target)
+                return;
+            reached.TrySetResult();
+            if (!continuation.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("skill projection transaction checkpoint was not released");
+        }
+
+        internal void Continue() => continuation.Set();
+
+        public void Dispose()
+        {
+            continuation.Set();
+            continuation.Dispose();
+        }
+    }
+
+    private sealed class SignalingSkillProjectionCheckpoint(
+        SkillProjectionCheckpoint target) : ISkillProjectionCheckpoint
+    {
+        private readonly TaskCompletionSource reached =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task WasReached => reached.Task;
+
+        public void Reached(SkillProjectionCheckpoint checkpoint)
+        {
+            if (checkpoint == target)
+                reached.TrySetResult();
+        }
     }
 
     private sealed class TestDatabase : IDisposable

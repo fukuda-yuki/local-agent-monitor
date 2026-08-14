@@ -31,6 +31,13 @@ internal enum LocalRepositoryReconciliationCheckpoint
     BeforeDiscoveryRawAvailabilityRead,
     BeforeRawAvailabilityRead,
     AfterRawAvailabilityRead,
+    AfterHeartbeatTransactionBegun,
+    BeforeHeartbeatPublicationLock,
+    AfterPeriodicHeartbeatApplied,
+    AfterPeriodicHeartbeatRejected,
+    BeforeHandoffHeartbeat,
+    AfterHandoffHeartbeat,
+    AfterHandoffRejected,
     BeforeRetentionRenewalPublication,
     AfterHeartbeatBusy,
     HeartbeatLeaseExpired,
@@ -256,54 +263,47 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
     internal LocalRepositoryQueueHeartbeatResult Heartbeat(
         LocalRepositoryQueueLease lease,
         RetentionReadLease<RawTelemetryRecord> retentionLease,
+        // Caller time is scheduling evidence only; trusted time is sampled after BEGIN IMMEDIATE and publication locks.
         DateTimeOffset? heartbeatAt = null)
     {
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentNullException.ThrowIfNull(retentionLease);
-        var at = (heartbeatAt ?? timeProvider.GetUtcNow()).ToUniversalTime();
-        if (retentionLease.Grant is not { } grant)
-            return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
-        var queueExpiry = at + LeaseDuration;
+        var grant = retentionLease.Grant;
         try
         {
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
-            if (!RetentionCatalogStore.ValidateLocalRepositoryOperationLease(connection, transaction, grant, lease.RawRecordId, at)
+            checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterHeartbeatTransactionBegun);
+            checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeHeartbeatPublicationLock);
+            using var publications = RetentionGrantPublicationSet.EnterInOrder(
+                [new RetentionGrantPublicationMember(grant, 0)]);
+            var at = timeProvider.GetUtcNow().ToUniversalTime();
+            var queueExpiry = at + LeaseDuration;
+            if (!RetentionCatalogStore.TryPrepareOperationLeaseRenewals(
+                    connection,
+                    transaction,
+                    [grant],
+                    [lease.RawRecordId],
+                    publications,
+                    at,
+                    out var renewedGrantIndices)
                 || !UpdateOwned(connection, transaction, lease, at, "lease_expires_at=$expiry,updated_at=$at", ("$expiry", Timestamp(queueExpiry))))
             {
                 transaction.Rollback();
                 return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
             }
-            using (var publication = grant.EnterLeasePublication())
+            transaction.Commit();
+            if (renewedGrantIndices.Count > 0)
             {
-                if (publication.LeaseExpiresAt - at <= RetentionV1Constants.LeaseRenewalDeadline)
+                var retentionExpiry = at.Add(RetentionV1Constants.LeaseDuration);
+                try
                 {
-                    var retentionExpiry = at + RetentionV1Constants.LeaseDuration;
-                    using var renewRetention = connection.CreateCommand();
-                    renewRetention.Transaction = transaction;
-                    renewRetention.CommandText = """
-                        UPDATE retention_leases SET expires_at=$expiry
-                        WHERE item_id=$item_id AND lease_kind='operation' AND owner=$owner
-                          AND generation=$generation AND expires_at=$previous_expiry AND expires_at>$at;
-                        """;
-                    renewRetention.Parameters.AddWithValue("$expiry", Timestamp(retentionExpiry));
-                    renewRetention.Parameters.AddWithValue("$item_id", grant.ItemId);
-                    renewRetention.Parameters.AddWithValue("$owner", grant.LeaseOwner);
-                    renewRetention.Parameters.AddWithValue("$generation", grant.LeaseGeneration);
-                    renewRetention.Parameters.AddWithValue("$previous_expiry", Timestamp(publication.LeaseExpiresAt));
-                    renewRetention.Parameters.AddWithValue("$at", Timestamp(at));
-                    if (renewRetention.ExecuteNonQuery() != 1)
-                    {
-                        transaction.Rollback();
-                        return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
-                    }
-                    transaction.Commit();
                     checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeRetentionRenewalPublication);
-                    publication.AdvanceExpiry(retentionExpiry);
                 }
-                else
+                finally
                 {
-                    transaction.Commit();
+                    foreach (var index in renewedGrantIndices)
+                        publications.AdvanceExpiry(index, retentionExpiry);
                 }
             }
             return new(LocalRepositoryQueueTransitionResult.Applied, lease with { LeaseExpiresAt = queueExpiry });

@@ -802,7 +802,14 @@ or migrate a database. Adoption validates the catalog component version and
 database identity and reports only `retention_catalog_unavailable` on a missing
 or invalid catalog. A read holds one `BEGIN IMMEDIATE` SQLite transaction while
 it validates catalog state and receipt, creates its bounded access/operation
-lease, and fully materializes the selector result. The selector receives only
+lease, and fully materializes the selector result. Retention owns the
+authoritative clock: single and fixed-batch admission take their initial sample
+immediately after that transaction begins; selected-batch admission takes its
+initial sample after candidate selection while the transaction remains held.
+Every mode samples again after selector materialization and before commit so an
+expiry boundary crossed during selection is denied. Caller timestamps are
+scheduling evidence only and cannot advance or backdate admission, denial, or
+the full two-minute lease expiry. The selector receives only
 an opaque capability that binds the exact ownership token, catalog item/revision,
 and lease owner/generation predicates. The transaction commits before a value
 is returned; a null selector result, expiry boundary, stale revision, or failed
@@ -888,11 +895,12 @@ returns stale denial without retry or broader mutation. Stale callers,
 selector null, lease conflict, and capability mismatch deny without lifecycle
 mutation.
 
-Admission publishes one immutable read grant carrying the admitted ownership
-key, item, admission revision, lease kind/owner/generation, a privately
-copied 32-byte source token, and one synchronized published lease expiry. Its
-only mutable value is the published lease expiry protected by its publication
-lock. `grant_usable(at)` is the immutable admitted catalog/store/item/source
+Admission publishes one read grant carrying the admitted ownership key, item,
+admission revision, lease kind/owner/generation, a privately copied 32-byte
+source token, and the immutable expiry recorded at admission. The grant also
+owns one synchronized published lease expiry; this is its only mutable value
+and is protected by its publication lock. The admitted expiry is diagnostic
+evidence only after renewal. `grant_usable(at)` is the immutable admitted catalog/store/item/source
 capability plus the exact live lease item/kind/owner/generation with persisted
 expiry equal to the published expiry and `at` before that expiry. It never
 rereads current item lifecycle, item expiry, read denial, or revision:
@@ -919,17 +927,23 @@ predicate. Admission selectors bind the admitted revision inside the same
 immediate transaction; post-commit consumers call only `grant_usable`.
 
 Renewal applies only to operation leases that are due at the fixed one-minute
-deadline and still `grant_usable`; access leases never renew. A due renewal
-additionally requires current item revision equal to the immutable admission
-revision, current `row_readable`, exact current source/ownership receipt, and
-the complete exact five-row adapter-coverage set, then commits exactly
-`renewal_at + 2 minutes` with no item-expiry cap. Acquisition and successful
-renewal always receive the full two-minute duration, even when it crosses an
-expiring item's policy expiry. A failed renewal never shortens the existing
-grant: the admitted lease remains consumable to its published expiry.
-Pin/unpin/delete/cleanup revision changes make an admitted grant
-nonrenewable but do not revoke it. Release matches only
-item/kind/owner/generation and never current item revision, state, or expiry.
+deadline and still `grant_usable`; access leases never renew. A live operation
+grant outside that deadline returns `not_due` unchanged without rereading
+current item revision, readability, source/ownership receipt, or adapter
+coverage. A due renewal additionally requires current item revision equal to
+the immutable admission revision, current `row_readable`, exact current source/
+ownership receipt, and the complete exact five-row adapter-coverage set, then
+commits exactly `renewal_at + 2 minutes` with no item-expiry cap.
+`renewal_at` is the one trusted catalog/queue-owner clock sample taken after the
+caller's `BEGIN IMMEDIATE` succeeds; a caller-supplied timestamp cannot override
+it or resurrect authority that expired while waiting for the transaction.
+Acquisition and successful renewal always receive the full two-minute
+duration, even when it crosses an expiring item's policy expiry. A failed due
+proof or renewal never shortens the existing grant: the admitted lease
+remains consumable to its published expiry. Pin/unpin/delete/cleanup revision
+changes make an admitted grant nonrenewable but do not revoke it. Release
+matches only item/kind/owner/generation and never current item revision,
+state, or expiry.
 
 SQLite transaction order is always `BEGIN IMMEDIATE` first, then grant
 publication locks acquired in persisted canonical frontier order; release
@@ -962,8 +976,15 @@ base-to-final raw-bearing creator and cannot treat future stores as covered.
 directory and not a cleanup target. For each analysis run, the catalog must,
 before any filesystem or SDK operation, reserve one opaque generated child
 directly below that exact canonical parent. The child is the only directory
-passed to the SDK. Its `analysis_sdk_directory` item uses the exact persisted
-owning `monitor_analysis_runs.requested_at` value as `captured_at`; no start,
+passed to the SDK: both the SDK base directory and runtime working directory
+are that child. The SDK client uses empty mode and each Session allows only the
+exact source-qualified run-scoped custom tool declarations; wildcard custom,
+ambient built-in, MCP, plugin, instruction, and environment capabilities are
+not enabled. The Session working directory and large-tool-output spill
+directory are the same child, and every unexpected permission request is denied
+without user interaction. Its
+`analysis_sdk_directory` item uses the exact persisted owning
+`monitor_analysis_runs.requested_at` value as `captured_at`; no start,
 reservation, filesystem, recovery, or current time may replace it.
 
 The reservation binds the catalog instance, analysis run, exact requested-at
@@ -971,10 +992,36 @@ text and UTC ticks, and private ownership token. Its private ownership marker
 is kind-bound to `analysis_sdk_directory` and that same binding; it is not a
 generic marker and cannot authorize another kind, run, parent, or child.
 Activation atomically creates the item and an operation lease after the
-marker-proven child is quiescent. The operation lease is held and renewed for
-the complete SDK use, including Session and Client disposal, and is released
-only after that use ends. A lost or unavailable lease prevents SDK use and
-later mutation.
+marker-proven child is quiescent. Activation uses the catalog's single trusted
+clock sample taken immediately after its `BEGIN IMMEDIATE` succeeds. Renewal
+takes its authoritative sample after `BEGIN IMMEDIATE` succeeds and after
+canonical publication scopes are acquired, before proof and compare-and-swap.
+An owner/caller timestamp cannot move the policy boundary or resurrect an
+expired lease. The operation lease is held and renewed for the complete SDK use,
+including Session and Client disposal, and is released only after that use ends.
+A lost or unavailable lease prevents SDK use and later mutation.
+
+Reserved-child preparation and abandonment are serialized by the catalog writer
+transaction. After restart or failed activation, abandonment may delete the
+exact reserved child only when it is an ordinary empty directory or an ordinary
+marker-only directory whose marker bytes and digest exactly match that
+reservation; it then deletes the exact reserved row. Unexpected entries,
+invalid markers, reparse points, and non-directory material are preserved while
+the unusable reservation is abandoned. Failure before exact child-shape and
+marker proof completes returns conflict without changing either child or
+reservation. Filesystem deletion and the catalog commit are not one atomic
+boundary: an indeterminate failure after exact-child deletion begins returns
+conflict, never stale success, and leaves only a forward-recoverable reservation
+paired with its exact marker-only, empty, or absent child; a reservation paired
+with markerless unexpected material that appeared after exact marker proof and
+deletion; or a reservation that the commit already removed. In the post-proof
+raced-material state, conflict retains the exact reserved row and preserves the
+unexpected material. The next successful serialized open or abandonment must
+preserve that material while retiring only that exact row, so a subsequent open
+can create fresh authority. Every other forward-recoverable state must likewise
+be safely recovered or finished by the next successful serialized operation.
+Stale no-op is reserved for a capability proven stale before mutation. The
+configured parent and every sibling are never mutated.
 
 After quiescence and before deletion, the catalog snapshots only that exact
 owned child. The immutable snapshot and the first delete intent are one

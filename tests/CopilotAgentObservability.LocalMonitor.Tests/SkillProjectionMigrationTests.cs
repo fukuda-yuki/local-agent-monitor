@@ -1346,14 +1346,18 @@ public sealed class SkillProjectionMigrationTests
         new SqliteSourceCompatibilityStore(path).CreateSchema();
         new SqliteIngestionCommitStore(path).Commit(CreateBatch(SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(path);
+        var claimedAt = ObservedAt.AddSeconds(1);
         var worker = new SkillProjectionWorker(
             new SqliteSkillProjectionStore(
                 path,
-                new RawTelemetryStore(path, retention)));
+                new RawTelemetryStore(
+                    path,
+                    retention,
+                    new MutableTimeProvider(claimedAt))));
 
         Assert.Equal(
             SkillProjectionWorkOutcome.Published,
-            await worker.RunNextAsync(ObservedAt.AddSeconds(1)));
+            await worker.RunNextAsync(claimedAt));
     }
 
     private static string SanitizerCorruption(string corruption) => corruption switch

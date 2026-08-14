@@ -483,6 +483,146 @@ public class MonitorAnalysisStoreTests
         Assert.Equal("first raw event", entry.Message);
     }
 
+    [Theory]
+    [InlineData("$retention_read_source_token")]
+    [InlineData("$retention_read_item_id")]
+    [InlineData("$retention_read_revision")]
+    [InlineData("$retention_read_lease_kind")]
+    [InlineData("$retention_read_lease_owner")]
+    [InlineData("$retention_read_lease_generation")]
+    [InlineData("$retention_read_lease_expires_at")]
+    public async Task AnalysisRawMaterializers_RequireEveryAdmittedCapabilityComponentForBothResultShapes(string parameterName)
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        var now = temp.TimeProvider.GetUtcNow();
+        var run = store.StartRun("trace-analysis-capability", 42, "span-capability", MonitorAnalysisFocus.Errors, now);
+        var fence = store.AppendEvent(run.RunId, run.OperationToken, null, "progress", "capability event", now.AddMinutes(1));
+        store.CompleteRun(run.RunId, run.OperationToken, fence, "capability result", now.AddMinutes(2));
+        var key = new RetentionOwnershipKey(
+            temp.RetentionContext.StoreInstanceId,
+            RetentionStoreKind.AnalysisRunRaw,
+            run.RunId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var catalog = new RetentionCatalogStore(temp.RetentionContext, temp.TimeProvider);
+
+        var read = await catalog.ReadAsync(
+            new RetentionReadRequest(key, RetentionReadKind.Access, now, ExpectedRevision: null),
+            (connection, transaction, grant, _) =>
+            {
+                using (var resultBaseline = connection.CreateCommand())
+                {
+                    resultBaseline.Transaction = transaction;
+                    SqliteMonitorAnalysisStore.ConfigureRawResultMaterializerCommand(resultBaseline, grant, run.RunId);
+                    Assert.Equal(1, CountRows(resultBaseline));
+                }
+
+                using (var eventsBaseline = connection.CreateCommand())
+                {
+                    eventsBaseline.Transaction = transaction;
+                    SqliteMonitorAnalysisStore.ConfigureRawEventsMaterializerCommand(eventsBaseline, grant, run.RunId);
+                    Assert.Equal(1, CountRows(eventsBaseline));
+                }
+
+                using (var resultPerturbed = connection.CreateCommand())
+                {
+                    resultPerturbed.Transaction = transaction;
+                    SqliteMonitorAnalysisStore.ConfigureRawResultMaterializerCommand(resultPerturbed, grant, run.RunId);
+                    PerturbAdmissionCapability(resultPerturbed, parameterName);
+                    Assert.Equal(0, CountRows(resultPerturbed));
+                }
+
+                using (var eventsPerturbed = connection.CreateCommand())
+                {
+                    eventsPerturbed.Transaction = transaction;
+                    SqliteMonitorAnalysisStore.ConfigureRawEventsMaterializerCommand(eventsPerturbed, grant, run.RunId);
+                    PerturbAdmissionCapability(eventsPerturbed, parameterName);
+                    Assert.Equal(0, CountRows(eventsPerturbed));
+                }
+
+                return ValueTask.FromResult<string?>("verified");
+            },
+            CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        await using var lease = Assert.IsType<RetentionReadLease<string>>(read.Lease);
+        Assert.Equal("verified", lease.Value);
+    }
+
+    [Fact]
+    public async Task AnalysisRawReader_PinnedPastHistoricalExpiryMaterializesOnlyInsideLeaseAndPreservesAuthority()
+    {
+        using var temp = new MonitorTempDirectory();
+        var now = new DateTimeOffset(2026, 7, 20, 0, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        temp.TimeProvider = time;
+        var store = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        var run = store.StartRun("trace-analysis-pinned", 42, "span-pinned", MonitorAnalysisFocus.Errors, now.AddMinutes(-3));
+        var fence = store.AppendEvent(run.RunId, run.OperationToken, null, "progress", "PINNED_ANALYSIS_EVENT_RAW_MARKER", now.AddMinutes(-2));
+        store.CompleteRun(run.RunId, run.OperationToken, fence, "PINNED_ANALYSIS_RESULT_RAW_MARKER", now.AddMinutes(-1));
+        var originalExpiry = ReadAnalysisRawExpiry(temp.DatabasePath, run.RunId);
+        Assert.True(time.GetUtcNow() < originalExpiry);
+        Execute(
+            temp.DatabasePath,
+            "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='analysis_run_raw' AND source_item_id=$run_id;",
+            run.RunId);
+        var authorityBefore = FullRowDump(
+            temp.DatabasePath,
+            "retention_items",
+            "source_item_id",
+            run.RunId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var runSourceBefore = FullRowDump(temp.DatabasePath, "monitor_analysis_runs", "id", run.RunId);
+        var eventSourceBefore = FullRowsDump(temp.DatabasePath, "monitor_analysis_events", "run_id", run.RunId);
+        var ownerToken = ReadRetentionOwnerToken(temp.DatabasePath, run.RunId);
+        var ownerTokenHex = Convert.ToHexString(ownerToken);
+        var ownerTokenBase64 = Convert.ToBase64String(ownerToken);
+        Assert.Contains("deletion_started_at=NULL", authorityBefore, StringComparison.Ordinal);
+        Assert.Contains($"retention_owner_token=X'{ownerTokenHex}'", runSourceBefore, StringComparison.OrdinalIgnoreCase);
+        time.Advance(originalExpiry - time.GetUtcNow() + TimeSpan.FromTicks(1));
+        Assert.True(time.GetUtcNow() > originalExpiry);
+
+        var read = await store.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, read.Disposition);
+        Assert.Equal(
+            authorityBefore,
+            FullRowDump(
+                temp.DatabasePath,
+                "retention_items",
+                "source_item_id",
+                run.RunId.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        Assert.Equal(runSourceBefore, FullRowDump(temp.DatabasePath, "monitor_analysis_runs", "id", run.RunId));
+        Assert.Equal(eventSourceBefore, FullRowsDump(temp.DatabasePath, "monitor_analysis_events", "run_id", run.RunId));
+        Assert.Equal(ownerToken, ReadRetentionOwnerToken(temp.DatabasePath, run.RunId));
+        Assert.Equal(1, CountAnalysisRawAccessLeases(temp.DatabasePath, run.RunId));
+        {
+            await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
+            Assert.Same(lease, read.Lease);
+            Assert.Equal("PINNED_ANALYSIS_RESULT_RAW_MARKER", lease.Value.ResultMarkdown);
+            Assert.Equal("PINNED_ANALYSIS_EVENT_RAW_MARKER", Assert.Single(lease.Value.Events).Message);
+
+            var outsideValueBoundary = string.Join('|', read, lease, lease.Grant);
+            Assert.DoesNotContain("PINNED_ANALYSIS_RESULT_RAW_MARKER", outsideValueBoundary, StringComparison.Ordinal);
+            Assert.DoesNotContain("PINNED_ANALYSIS_EVENT_RAW_MARKER", outsideValueBoundary, StringComparison.Ordinal);
+            Assert.DoesNotContain(ownerTokenHex, outsideValueBoundary, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(ownerTokenBase64, outsideValueBoundary, StringComparison.Ordinal);
+            AssertExactAnalysisRawReadPublicSurface(read.GetType(), lease.GetType());
+        }
+
+        Assert.Equal(0, CountAnalysisRawAccessLeases(temp.DatabasePath, run.RunId));
+        Assert.Equal(
+            authorityBefore,
+            FullRowDump(
+                temp.DatabasePath,
+                "retention_items",
+                "source_item_id",
+                run.RunId.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        Assert.Equal(runSourceBefore, FullRowDump(temp.DatabasePath, "monitor_analysis_runs", "id", run.RunId));
+        Assert.Equal(eventSourceBefore, FullRowsDump(temp.DatabasePath, "monitor_analysis_events", "run_id", run.RunId));
+        Assert.Equal(ownerToken, ReadRetentionOwnerToken(temp.DatabasePath, run.RunId));
+    }
+
     [Fact]
     public async Task AnalysisRawReader_EventsAreNotConsumerMutable()
     {
@@ -645,6 +785,132 @@ public class MonitorAnalysisStoreTests
         command.CommandText = "SELECT COUNT(*) FROM retention_items WHERE store_kind='analysis_run_raw' AND source_item_id=$run_id;";
         command.Parameters.AddWithValue("$run_id", runId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int CountAnalysisRawAccessLeases(string databasePath, long runId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.store_kind='analysis_run_raw' AND i.source_item_id=$run_id AND l.lease_kind='access';";
+        command.Parameters.AddWithValue("$run_id", runId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int CountRows(SqliteCommand command)
+    {
+        using var reader = command.ExecuteReader();
+        var count = 0;
+        while (reader.Read()) count++;
+        return count;
+    }
+
+    private static void PerturbAdmissionCapability(SqliteCommand command, string parameterName)
+    {
+        var parameter = command.Parameters[parameterName];
+        parameter.Value = parameterName switch
+        {
+            "$retention_read_source_token" => PerturbToken(Assert.IsType<byte[]>(parameter.Value)),
+            "$retention_read_item_id" => Assert.IsType<string>(parameter.Value) + "-wrong",
+            "$retention_read_revision" => Assert.IsType<long>(parameter.Value) + 1,
+            "$retention_read_lease_kind" => "operation",
+            "$retention_read_lease_owner" => Assert.IsType<string>(parameter.Value) + "-wrong",
+            "$retention_read_lease_generation" => Assert.IsType<long>(parameter.Value) + 1,
+            "$retention_read_lease_expires_at" => DateTimeOffset.ParseExact(
+                Assert.IsType<string>(parameter.Value),
+                "O",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None)
+                .AddTicks(1)
+                .ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            _ => throw new ArgumentOutOfRangeException(nameof(parameterName), parameterName, null),
+        };
+    }
+
+    private static byte[] PerturbToken(byte[] token)
+    {
+        var perturbed = token.ToArray();
+        perturbed[0] ^= byte.MaxValue;
+        return perturbed;
+    }
+
+    private static string FullRowDump(string databasePath, string table, string keyColumn, object keyValue) =>
+        Assert.Single(FullRowsDump(databasePath, table, keyColumn, keyValue));
+
+    private static string[] FullRowsDump(string databasePath, string table, string keyColumn, object keyValue)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        var columns = new List<string>();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA table_info({table});";
+            using var columnReader = pragma.ExecuteReader();
+            while (columnReader.Read()) columns.Add(columnReader.GetString(1));
+        }
+
+        Assert.NotEmpty(columns);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT {string.Join(", ", columns.Select(column => $"quote({column})"))} FROM {table} WHERE {keyColumn}=$key ORDER BY rowid;";
+        command.Parameters.AddWithValue("$key", keyValue);
+        using var rowReader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (rowReader.Read())
+        {
+            rows.Add(string.Join(
+                "|",
+                columns.Select((column, index) => $"{column}={rowReader.GetString(index)}")));
+        }
+
+        return rows.ToArray();
+    }
+
+    private static DateTimeOffset ReadAnalysisRawExpiry(string databasePath, long runId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT expires_at FROM retention_items WHERE store_kind='analysis_run_raw' AND source_item_id=$run_id;";
+        command.Parameters.AddWithValue("$run_id", runId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return DateTimeOffset.ParseExact(
+            Assert.IsType<string>(command.ExecuteScalar()),
+            "O",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None);
+    }
+
+    private static void AssertExactAnalysisRawReadPublicSurface(Type resultType, Type leaseType)
+    {
+        const System.Reflection.BindingFlags publicInstance =
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+        const System.Reflection.BindingFlags declaredPublicInstance =
+            publicInstance | System.Reflection.BindingFlags.DeclaredOnly;
+
+        var resultProperties = resultType.GetProperties(publicInstance);
+        Assert.Equal(new[] { "Disposition", "Lease" }, resultProperties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Equal(typeof(RetentionReadDisposition), Assert.Single(resultProperties, property => property.Name == "Disposition").PropertyType);
+        Assert.Equal(typeof(RetentionReadLease<AnalysisRunRawSnapshot>), Assert.Single(resultProperties, property => property.Name == "Lease").PropertyType);
+        Assert.Empty(resultType.GetFields(publicInstance));
+        Assert.Empty(resultType.GetEvents(publicInstance));
+        Assert.Equal(
+            new[] { "<Clone>$", "Deconstruct", "Equals", "Equals", "GetHashCode", "ToString" },
+            resultType.GetMethods(declaredPublicInstance)
+                .Where(method => !method.IsSpecialName)
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
+
+        Assert.Empty(leaseType.GetProperties(publicInstance));
+        Assert.Empty(leaseType.GetFields(publicInstance));
+        Assert.Empty(leaseType.GetEvents(publicInstance));
+        Assert.Equal(
+            new[] { nameof(IAsyncDisposable.DisposeAsync) },
+            leaseType.GetMethods(declaredPublicInstance)
+                .Where(method => !method.IsSpecialName)
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(leaseType.GetConstructors(publicInstance));
     }
 
     private static (long RunId, MonitorAnalysisOperationToken OperationToken, RetentionRevisionFence Fence) BootstrapRawRun(SqliteMonitorAnalysisStore store, DateTimeOffset requestedAt)

@@ -334,6 +334,244 @@ public sealed class LocalRepositoryAutomaticAdmissionTests
         Assert.Equal(2, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observation_contexts;"));
         Assert.Equal(2, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
     }
+
+    [Theory]
+    [InlineData("expiring")]
+    [InlineData("retained_by_policy")]
+    [InlineData("expired_pending_deletion")]
+    [InlineData("deletion_queued")]
+    public async Task AdmittedOperationGrant_RemainsAuthoritativeAcrossCurrentRetentionLifecycleDrift(
+        string lifecycle)
+    {
+        var checkpoint = new AdmittedRetentionLifecycleCheckpoint(lifecycle);
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint);
+        fixture.Clock.Advance(
+            DateTimeOffset.ParseExact(
+                LocalRepositoryAdmissionFixture.ObservedAt,
+                "O",
+                CultureInfo.InvariantCulture) - fixture.Clock.GetUtcNow());
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(
+                new LocalRepositoryAdmissionFixture.SpanInput(
+                    LocalRepositoryAdmissionFixture.Trace(1),
+                    LocalRepositoryAdmissionFixture.Span(1),
+                    "https://github.com/Example/AdmittedGrant")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+        var sentinelRawRecordId = fixture.InsertRawForRetentionSentinel("{\"resourceSpans\":[]}");
+        checkpoint.Configure(fixture.DatabasePath, prepared.RawRecordId, sentinelRawRecordId);
+
+        var outcome = await fixture.RunPreparedAsync(prepared);
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal(1, checkpoint.Count);
+        Assert.True(checkpoint.AdmittedTupleWasLiveAfterMutation);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observation_contexts;"));
+        Assert.Null(fixture.LastProcessorException);
+        Assert.Equal(
+            lifecycle,
+            fixture.ScalarText($"SELECT state FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{prepared.RawRecordId}';"));
+        Assert.Equal(
+            checkpoint.AdmissionRevision + 1,
+            fixture.ScalarLong($"SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{prepared.RawRecordId}';"));
+        Assert.Equal(0, checkpoint.ExactTargetOperationLeaseCount());
+        Assert.Equal(2, checkpoint.ExactSentinelLeaseCount());
+    }
+
+    private sealed class AdmittedRetentionLifecycleCheckpoint(string lifecycle) : ILocalRepositoryAdmissionCheckpoint
+    {
+        private const string Timestamp = LocalRepositoryAdmissionFixture.ObservedAt;
+        private string? databasePath;
+        private long rawRecordId;
+        private long sentinelRawRecordId;
+        private string itemId = string.Empty;
+        private string unrelatedItemId = string.Empty;
+        private string leaseOwner = string.Empty;
+        private string leaseExpiry = string.Empty;
+        private long leaseGeneration;
+
+        internal int Count { get; private set; }
+        internal long AdmissionRevision { get; private set; }
+        internal bool AdmittedTupleWasLiveAfterMutation { get; private set; }
+
+        internal void Configure(
+            string configuredDatabasePath,
+            long configuredRawRecordId,
+            long configuredSentinelRawRecordId)
+        {
+            databasePath = configuredDatabasePath;
+            rawRecordId = configuredRawRecordId;
+            sentinelRawRecordId = configuredSentinelRawRecordId;
+        }
+
+        public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryAdmissionCheckpoint.BeforeTransaction)
+                return;
+            if (++Count != 1)
+                throw new InvalidOperationException("automatic admission transaction checkpoint repeated");
+
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            using (var admitted = connection.CreateCommand())
+            {
+                admitted.Transaction = transaction;
+                admitted.CommandText = """
+                    SELECT item.item_id,item.revision,hex(raw.retention_owner_token),
+                           lease.owner,lease.generation,lease.expires_at
+                    FROM retention_items AS item
+                    JOIN raw_records AS raw
+                      ON raw.id=CAST(item.source_item_id AS INTEGER)
+                    JOIN retention_leases AS lease
+                      ON lease.item_id=item.item_id AND lease.lease_kind='operation'
+                    WHERE item.store_kind='raw_record' AND item.source_item_id=$raw_record_id;
+                    """;
+                admitted.Parameters.AddWithValue("$raw_record_id", rawRecordId.ToString(CultureInfo.InvariantCulture));
+                using var reader = admitted.ExecuteReader();
+                if (!reader.Read())
+                    throw new InvalidOperationException("admitted operation tuple was not present at the transaction checkpoint");
+                itemId = reader.GetString(0);
+                AdmissionRevision = reader.GetInt64(1);
+                var sourceToken = reader.GetString(2);
+                leaseOwner = reader.GetString(3);
+                leaseGeneration = reader.GetInt64(4);
+                leaseExpiry = reader.GetString(5);
+                if (reader.Read())
+                    throw new InvalidOperationException("admitted operation tuple was not unique");
+                reader.Close();
+
+                MutateCurrentLifecycle(connection, transaction);
+                SeedLeaseSentinels(connection, transaction);
+                AdmittedTupleWasLiveAfterMutation = ExactAdmittedTupleCount(
+                    connection,
+                    transaction,
+                    sourceToken) == 1;
+            }
+            transaction.Commit();
+        }
+
+        internal long ExactTargetOperationLeaseCount() => ExactLeaseCount(itemId, "operation");
+
+        internal long ExactSentinelLeaseCount() =>
+            ExactLeaseCount(itemId, "access") + ExactLeaseCount(unrelatedItemId, "operation");
+
+        private void MutateCurrentLifecycle(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            var denied = lifecycle is "expired_pending_deletion" or "deletion_queued";
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE retention_items
+                SET state=$state,
+                    revision=revision+1,
+                    read_denied_at=CASE WHEN $denied=1 THEN $at ELSE NULL END,
+                    queued_at=CASE WHEN $denied=1 THEN $at ELSE NULL END
+                WHERE item_id=$item_id AND revision=$revision;
+                """;
+            command.Parameters.AddWithValue("$state", lifecycle);
+            command.Parameters.AddWithValue("$denied", denied ? 1 : 0);
+            command.Parameters.AddWithValue("$at", Timestamp);
+            command.Parameters.AddWithValue("$item_id", itemId);
+            command.Parameters.AddWithValue("$revision", AdmissionRevision);
+            if (command.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("current Retention lifecycle mutation did not apply");
+        }
+
+        private void SeedLeaseSentinels(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            using var item = connection.CreateCommand();
+            item.Transaction = transaction;
+            item.CommandText = """
+                SELECT item_id
+                FROM retention_items
+                WHERE store_kind='raw_record' AND source_item_id=$source_item_id;
+                """;
+            item.Parameters.AddWithValue("$source_item_id", sentinelRawRecordId.ToString(CultureInfo.InvariantCulture));
+            unrelatedItemId = Convert.ToString(item.ExecuteScalar(), CultureInfo.InvariantCulture)
+                ?? throw new InvalidOperationException("Retention sentinel item was not created");
+
+            using var leases = connection.CreateCommand();
+            leases.Transaction = transaction;
+            leases.CommandText = """
+                INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+                VALUES
+                    ($item_id,'access',$owner,$expiry,$generation),
+                    ($sentinel_item_id,'operation',$owner,$expiry,$generation);
+                """;
+            leases.Parameters.AddWithValue("$item_id", itemId);
+            leases.Parameters.AddWithValue("$sentinel_item_id", unrelatedItemId);
+            leases.Parameters.AddWithValue("$owner", leaseOwner);
+            leases.Parameters.AddWithValue("$expiry", leaseExpiry);
+            leases.Parameters.AddWithValue("$generation", leaseGeneration);
+            if (leases.ExecuteNonQuery() != 2)
+                throw new InvalidOperationException("Retention lease sentinels were not created");
+        }
+
+        private long ExactAdmittedTupleCount(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            string sourceToken)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT COUNT(*)
+                FROM retention_items AS item
+                JOIN raw_records AS raw
+                  ON raw.id=CAST(item.source_item_id AS INTEGER)
+                 AND hex(raw.retention_owner_token)=$source_token
+                JOIN retention_leases AS lease
+                  ON lease.item_id=item.item_id
+                 AND lease.lease_kind='operation'
+                 AND lease.owner=$owner
+                 AND lease.generation=$generation
+                 AND lease.expires_at=$expiry
+                 AND lease.expires_at>$at
+                WHERE item.item_id=$item_id;
+                """;
+            command.Parameters.AddWithValue("$source_token", sourceToken);
+            command.Parameters.AddWithValue("$owner", leaseOwner);
+            command.Parameters.AddWithValue("$generation", leaseGeneration);
+            command.Parameters.AddWithValue("$expiry", leaseExpiry);
+            command.Parameters.AddWithValue("$at", Timestamp);
+            command.Parameters.AddWithValue("$item_id", itemId);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        private long ExactLeaseCount(string exactItemId, string leaseKind)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COUNT(*)
+                FROM retention_leases
+                WHERE item_id=$item_id AND lease_kind=$lease_kind AND owner=$owner
+                  AND generation=$generation AND expires_at=$expiry;
+                """;
+            command.Parameters.AddWithValue("$item_id", exactItemId);
+            command.Parameters.AddWithValue("$lease_kind", leaseKind);
+            command.Parameters.AddWithValue("$owner", leaseOwner);
+            command.Parameters.AddWithValue("$generation", leaseGeneration);
+            command.Parameters.AddWithValue("$expiry", leaseExpiry);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        private SqliteConnection Open()
+        {
+            var path = databasePath ?? throw new InvalidOperationException("automatic admission checkpoint was not configured");
+            var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Pooling = false,
+            }.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys=ON;";
+            command.ExecuteNonQuery();
+            return connection;
+        }
+    }
 }
 
 internal sealed class LocalRepositoryAdmissionFixture : IDisposable
@@ -363,7 +601,22 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         new SqliteSessionStore(temp.DatabasePath).CreateSchema();
         using var connection = Open();
         LocalRepositoryCatalogSchemaV1.Ensure(connection);
-        queue = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, temp.TimeProvider, static () => new string('a', 64));
+        using var coverage = connection.CreateCommand();
+        coverage.CommandText = """
+            INSERT INTO retention_adapter_coverage(store_kind,coverage_version)
+            VALUES
+                ('session_event_content',1),
+                ('raw_record',1),
+                ('analysis_run_raw',1),
+                ('sensitive_bundle',1),
+                ('analysis_sdk_directory',1);
+            """;
+        coverage.ExecuteNonQuery();
+        queue = new SqliteLocalRepositoryReconciliationStore(
+            temp.DatabasePath,
+            temp.TimeProvider,
+            static () => new string('a', 64),
+            reconciliationCheckpoint);
         this.processorTimeProvider = processorTimeProvider ?? temp.TimeProvider;
         this.idFactory = idFactory ?? ids.Next;
     }
@@ -417,6 +670,8 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         DateTimeOffset.ParseExact(ObservedAt, "O", CultureInfo.InvariantCulture),
         null,
         payload));
+
+    internal long InsertRawForRetentionSentinel(string payload) => InsertRaw(payload);
 
     internal async Task<LocalRepositoryReconciliationWorkOutcome> RunPreparedAsync(
         PreparedInput prepared,
@@ -770,6 +1025,25 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
         ILocalRepositoryRawRecordProcessor inner,
         Action<Exception> capture) : ILocalRepositoryRawRecordProcessor
     {
+        public async ValueTask<ILocalRepositoryPreparedRawRecord> PrepareAsync(
+            LocalRepositoryQueueLease queueLease,
+            RawTelemetryRecord rawRecord,
+            RetentionReadLease<RawTelemetryRecord> retentionLease,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                return new CapturingPreparedRawRecord(
+                    await inner.PrepareAsync(queueLease, rawRecord, retentionLease, cancellationToken),
+                    capture);
+            }
+            catch (Exception exception)
+            {
+                capture(exception);
+                throw;
+            }
+        }
+
         public async ValueTask ProcessAsync(
             LocalRepositoryQueueLease queueLease,
             RawTelemetryRecord rawRecord,
@@ -786,12 +1060,45 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
                 throw;
             }
         }
+
+        private sealed class CapturingPreparedRawRecord(
+            ILocalRepositoryPreparedRawRecord inner,
+            Action<Exception> capture) : ILocalRepositoryPreparedRawRecord
+        {
+            public async ValueTask FinalizeAsync(
+                LocalRepositoryQueueLease queueLease,
+                CancellationToken cancellationToken)
+            {
+                try
+                {
+                    await inner.FinalizeAsync(queueLease, cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    capture(exception);
+                    throw;
+                }
+            }
+
+            public ValueTask DisposeAsync() => inner.DisposeAsync();
+        }
     }
 
     private sealed class PayloadSubstitutingProcessor(
         ILocalRepositoryRawRecordProcessor inner,
         string payloadJson) : ILocalRepositoryRawRecordProcessor
     {
+        public ValueTask<ILocalRepositoryPreparedRawRecord> PrepareAsync(
+            LocalRepositoryQueueLease queueLease,
+            RawTelemetryRecord rawRecord,
+            RetentionReadLease<RawTelemetryRecord> retentionLease,
+            CancellationToken cancellationToken) =>
+            inner.PrepareAsync(
+                queueLease,
+                rawRecord with { PayloadJson = payloadJson },
+                retentionLease,
+                cancellationToken);
+
         public ValueTask ProcessAsync(
             LocalRepositoryQueueLease queueLease,
             RawTelemetryRecord rawRecord,

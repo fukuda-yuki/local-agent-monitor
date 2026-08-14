@@ -157,8 +157,16 @@ public sealed partial class RetentionCatalogStore
             sourceEventId,
             ownerToken));
         if (!RetentionOwnershipReceipt.Matches(expectedReceipt, receipt)) throw InvalidAuthority();
-        if (denied || state is not ("expiring" or "retained_by_policy")) return null;
-        if (state == "expiring" && (catalogExpiresAt <= migrationNow || expiresAt <= migrationNow)) return null;
+        var lifecycle = state switch
+        {
+            "expiring" => RetentionItemLifecycle.Expiring,
+            "retained_by_policy" => RetentionItemLifecycle.RetainedByPolicy,
+            _ => (RetentionItemLifecycle?)null,
+        };
+        if (lifecycle is null
+            || ClassifyRowReadability(lifecycle.Value, catalogExpiresAt, denied, migrationNow) != RetentionRowReadability.Readable)
+            return null;
+        if (lifecycle == RetentionItemLifecycle.Expiring && expiresAt <= migrationNow) return null;
         return new(contentKind, contentJson, capturedAt, expiresAt);
     }
 

@@ -310,6 +310,187 @@ public sealed class SourceCompatibilityReconciliationTests
                 $"SELECT resolution_state FROM source_trace_version_observations WHERE source_observation_id={committed.ObservationId} AND trace_id='{TraceId}';"));
     }
 
+    [Theory]
+    [InlineData("pin", "retained_by_policy", 2)]
+    [InlineData("unpin", "expiring", 3)]
+    [InlineData("cleanup_read_denied", "deletion_queued", 3)]
+    public void DecoderRevision_PostAdmissionLifecycleDriftCommitsFromLiveGrantAndReleasesExactOperationLease(
+        string mutation,
+        string expectedState,
+        long expectedRevision)
+    {
+        using var database = new TestDatabase();
+        var compatibility = new SqliteSourceCompatibilityStore(database.Path);
+        compatibility.CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path).Commit(
+            CreateBatch(
+                $"post-admission-{mutation}",
+                TraceSourceVersionResolutionState.Missing,
+                sourceApplicationVersion: null,
+                VersionPayload("1.0.74")));
+        var unrelatedRawRecordId = new RawTelemetryStore(
+                database.Path,
+                RetentionCatalogContext.AdoptExistingCatalogV1(database.Path),
+                new MutableTimeProvider(ObservedAt.AddMinutes(1)))
+            .Insert(new RawTelemetryRecord(
+                Id: null,
+                RawTelemetrySources.RawOtlp,
+                TraceId: null,
+                ObservedAt,
+                ResourceAttributesJson: null,
+                PayloadJson: "{}"));
+        using (var beforeConnection = Open(database.Path))
+        {
+            Assert.Equal(1, ScalarLong(
+                beforeConnection,
+                $"SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId}';"));
+        }
+        var rawBefore = SnapshotTable(database.Path, "raw_records");
+        string? retentionAfterDrift = null;
+        string? accessLeaseBefore = null;
+        string? unrelatedOperationLeaseBefore = null;
+        var admissionCheckpointCount = 0;
+        var reconciler = CreateReconciler(
+            database.Path,
+            checkpoint =>
+            {
+                if (checkpoint != SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission)
+                    return;
+                admissionCheckpointCount++;
+                using var connection = Open(database.Path);
+                Assert.Equal(1, ScalarLong(
+                    connection,
+                    $"SELECT COUNT(*) FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.store_kind='raw_record' AND i.source_item_id='{committed.RawRecordId}' AND l.lease_kind='operation' AND l.expires_at>'{ObservedAt.AddMinutes(1):O}';"));
+                ApplyPostAdmissionRetentionMutation(
+                    connection,
+                    committed.RawRecordId,
+                    mutation);
+                Assert.Equal(expectedState, ScalarText(
+                    connection,
+                    $"SELECT state FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId}';"));
+                Assert.Equal(expectedRevision, ScalarLong(
+                    connection,
+                    $"SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId}';"));
+                retentionAfterDrift = SnapshotTable(connection, "retention_items");
+                InsertUnrelatedAccessLease(connection, committed.RawRecordId);
+                accessLeaseBefore = SnapshotRawLease(connection, committed.RawRecordId, "access");
+                InsertUnrelatedOperationLease(
+                    connection,
+                    committed.RawRecordId,
+                    unrelatedRawRecordId);
+                unrelatedOperationLeaseBefore = SnapshotRawLease(
+                    connection,
+                    unrelatedRawRecordId,
+                    "operation");
+            });
+
+        var result = reconciler.Reconcile(
+            Request(
+                $"post-admission-{mutation}-operation",
+                committed.ObservationId,
+                SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-2",
+                "registry-1"));
+
+        Assert.Equal(1, admissionCheckpointCount);
+        Assert.Equal(SourceCompatibilityReconciliationOutcome.Changed, result.Outcome);
+        Assert.Equal(1, result.InterpretationRevision);
+        Assert.Equal(
+            new TraceSourceVersionResolutionRow(
+                TraceId,
+                TraceSourceVersionResolutionState.Resolved,
+                "1.0.74"),
+            compatibility.GetTraceSourceVersionResolution(TraceId));
+        Assert.Equal(rawBefore, SnapshotTable(database.Path, "raw_records"));
+        using var verification = Open(database.Path);
+        Assert.Equal(expectedState, ScalarText(
+            verification,
+            $"SELECT state FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId}';"));
+        Assert.Equal(expectedRevision, ScalarLong(
+            verification,
+            $"SELECT revision FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{committed.RawRecordId}';"));
+        Assert.Equal(retentionAfterDrift, SnapshotTable(verification, "retention_items"));
+        Assert.Equal(0, ScalarLong(
+            verification,
+            $"SELECT COUNT(*) FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.store_kind='raw_record' AND i.source_item_id='{committed.RawRecordId}' AND l.lease_kind='operation';"));
+        Assert.Equal(
+            accessLeaseBefore,
+            SnapshotRawLease(verification, committed.RawRecordId, "access"));
+        Assert.Equal(
+            unrelatedOperationLeaseBefore,
+            SnapshotRawLease(verification, unrelatedRawRecordId, "operation"));
+        Assert.Equal(1, ScalarLong(
+            verification,
+            "SELECT COUNT(*) FROM source_compatibility_reconciliation_receipts;"));
+        SourceCompatibilitySchemaV11.Validate(verification, transaction: null);
+        SkillProjectionSchemaV1.Validate(verification, transaction: null);
+    }
+
+    [Theory]
+    [InlineData("owner")]
+    [InlineData("generation")]
+    public void DecoderRevision_ReplacedOperationLeaseTupleAfterAdmissionFailsWithoutDeletingReplacement(
+        string tupleMember)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path).Commit(
+            CreateBatch(
+                "post-admission-replaced-lease",
+                TraceSourceVersionResolutionState.Missing,
+                sourceApplicationVersion: null,
+                VersionPayload("1.0.74")));
+        var rawBefore = SnapshotTable(database.Path, "raw_records");
+        var retentionItemBefore = SnapshotTable(database.Path, "retention_items");
+        var publicationBefore = SnapshotAtomicCounts(database.Path);
+        string? replacementLeaseBefore = null;
+        string? accessLeaseBefore = null;
+        var reconciler = CreateReconciler(
+            database.Path,
+            checkpoint =>
+            {
+                if (checkpoint != SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission)
+                    return;
+                using var connection = Open(database.Path);
+                Assert.Equal(1, ScalarLong(
+                    connection,
+                    $"SELECT COUNT(*) FROM retention_leases l JOIN retention_items i ON i.item_id=l.item_id WHERE i.store_kind='raw_record' AND i.source_item_id='{committed.RawRecordId}' AND l.lease_kind='operation' AND l.expires_at>'{ObservedAt.AddMinutes(1):O}';"));
+                ReplaceOperationLeaseTuple(
+                    connection,
+                    committed.RawRecordId,
+                    tupleMember);
+                replacementLeaseBefore = SnapshotRawLease(
+                    connection,
+                    committed.RawRecordId,
+                    "operation");
+                InsertUnrelatedAccessLease(connection, committed.RawRecordId);
+                accessLeaseBefore = SnapshotRawLease(
+                    connection,
+                    committed.RawRecordId,
+                    "access");
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(() => reconciler.Reconcile(
+            Request(
+                $"post-admission-replaced-{tupleMember}-operation",
+                committed.ObservationId,
+                SourceCompatibilityReconciliationTrigger.DecoderRevision,
+                "resolver-2",
+                "registry-1")));
+
+        Assert.Equal("source_compatibility_retained_input_unavailable", exception.Message);
+        Assert.Equal(rawBefore, SnapshotTable(database.Path, "raw_records"));
+        Assert.Equal(retentionItemBefore, SnapshotTable(database.Path, "retention_items"));
+        Assert.Equal(publicationBefore, SnapshotAtomicCounts(database.Path));
+        using var verification = Open(database.Path);
+        Assert.Equal(
+            replacementLeaseBefore,
+            SnapshotRawLease(verification, committed.RawRecordId, "operation"));
+        Assert.Equal(
+            accessLeaseBefore,
+            SnapshotRawLease(verification, committed.RawRecordId, "access"));
+    }
+
     [Fact]
     public void EmptyPayload_CannotBeDeclaredResolvedAndBecomesSemanticNoOp()
     {
@@ -1220,6 +1401,121 @@ public sealed class SourceCompatibilityReconciliationTests
         Assert.Equal(1, command.ExecuteNonQuery());
     }
 
+    private static void ApplyPostAdmissionRetentionMutation(
+        SqliteConnection connection,
+        long rawRecordId,
+        string mutation)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = mutation switch
+        {
+            "pin" =>
+                "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$raw_record_id;",
+            "unpin" =>
+                "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$raw_record_id; " +
+                "UPDATE retention_items SET state='expiring',revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$raw_record_id;",
+            "cleanup_read_denied" =>
+                "UPDATE retention_items SET state='expired_pending_deletion',read_denied_at=$at,revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$raw_record_id; " +
+                "UPDATE retention_items SET state='deletion_queued',queued_at=$at,revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$raw_record_id;",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+        };
+        command.Parameters.AddWithValue(
+            "$raw_record_id",
+            rawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$at", ObservedAt.AddMinutes(1).ToString("O"));
+        Assert.Equal(mutation == "pin" ? 1 : 2, command.ExecuteNonQuery());
+    }
+
+    private static void InsertUnrelatedAccessLease(
+        SqliteConnection connection,
+        long rawRecordId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+            SELECT item_id,'access','source-compatibility-access',$expires_at,41
+            FROM retention_items
+            WHERE store_kind='raw_record' AND source_item_id=$raw_record_id;
+            """;
+        command.Parameters.AddWithValue(
+            "$raw_record_id",
+            rawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$expires_at", ObservedAt.AddMinutes(4).ToString("O"));
+        Assert.Equal(1, command.ExecuteNonQuery());
+    }
+
+    private static void InsertUnrelatedOperationLease(
+        SqliteConnection connection,
+        long selectedRawRecordId,
+        long unrelatedRawRecordId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+            SELECT unrelated.item_id,'operation',selected_lease.owner,
+                   selected_lease.expires_at,selected_lease.generation
+            FROM retention_items AS selected
+            JOIN retention_leases AS selected_lease
+              ON selected_lease.item_id=selected.item_id
+             AND selected_lease.lease_kind='operation'
+            JOIN retention_items AS unrelated
+              ON unrelated.store_kind='raw_record'
+             AND unrelated.source_item_id=$unrelated_raw_record_id
+            WHERE selected.store_kind='raw_record'
+              AND selected.source_item_id=$selected_raw_record_id;
+            """;
+        command.Parameters.AddWithValue(
+            "$selected_raw_record_id",
+            selectedRawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue(
+            "$unrelated_raw_record_id",
+            unrelatedRawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(1, command.ExecuteNonQuery());
+    }
+
+    private static void ReplaceOperationLeaseTuple(
+        SqliteConnection connection,
+        long rawRecordId,
+        string tupleMember)
+    {
+        using var command = connection.CreateCommand();
+        var replacement = tupleMember switch
+        {
+            "owner" => "owner='replacement-source-compatibility-operation'",
+            "generation" => "generation=generation+1",
+            _ => throw new ArgumentOutOfRangeException(nameof(tupleMember)),
+        };
+        command.CommandText =
+            $"""
+            UPDATE retention_leases
+            SET {replacement}
+            WHERE item_id=(
+                SELECT item_id
+                FROM retention_items
+                WHERE store_kind='raw_record' AND source_item_id=$raw_record_id)
+              AND lease_kind='operation';
+            """;
+        command.Parameters.AddWithValue(
+            "$raw_record_id",
+            rawRecordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(1, command.ExecuteNonQuery());
+    }
+
+    private static string SnapshotRawLease(
+        SqliteConnection connection,
+        long rawRecordId,
+        string leaseKind) =>
+        ScalarText(
+            connection,
+            $"""
+            SELECT quote(l.item_id) || '|' || quote(l.lease_kind) || '|' || quote(l.owner) || '|' || quote(l.expires_at) || '|' || quote(l.generation)
+            FROM retention_leases AS l
+            JOIN retention_items AS i ON i.item_id=l.item_id
+            WHERE i.store_kind='raw_record' AND i.source_item_id='{rawRecordId}' AND l.lease_kind='{leaseKind}';
+            """);
+
     private static void DeleteRaw(string path, long rawRecordId)
     {
         using var connection = Open(path);
@@ -1379,6 +1675,12 @@ public sealed class SourceCompatibilityReconciliationTests
             snapshot.Append(']');
         }
         return snapshot.ToString();
+    }
+
+    private static string SnapshotTable(string path, string table)
+    {
+        using var connection = Open(path);
+        return SnapshotTable(connection, table);
     }
 
     private static void SetRawPayloadToNullWithoutChangingStoredSchema(

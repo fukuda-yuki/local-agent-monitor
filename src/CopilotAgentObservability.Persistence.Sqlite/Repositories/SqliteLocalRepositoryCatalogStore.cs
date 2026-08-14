@@ -6,6 +6,8 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal enum LocalRepositoryAdmissionCheckpoint
 {
+    BeforePayloadParsing,
+    AfterPreparationBeforeHandoff,
     BeforeTransaction,
     BeforePublication,
     AfterRepositories,

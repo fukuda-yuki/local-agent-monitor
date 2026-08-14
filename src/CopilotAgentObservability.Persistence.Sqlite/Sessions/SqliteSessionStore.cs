@@ -1337,28 +1337,13 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         var result = await catalog.ReadAsync(request, async (connection, transaction, grant, token) =>
         {
             using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
-                SELECT c.event_id,c.content_kind,c.content_json,c.captured_at,c.expires_at
-                FROM session_event_content c
-                JOIN session_events e ON e.event_id=c.event_id
-                JOIN retention_items i ON i.item_id=$retention_read_item_id
-                    AND i.store_instance_id=$retention_store_instance_id
-                    AND i.store_kind='session_event_content'
-                    AND i.source_item_id=c.event_id
-                    AND i.revision=$retention_read_revision
-                JOIN retention_leases l ON l.item_id=i.item_id
-                    AND l.lease_kind='access'
-                    AND l.owner=$retention_read_lease_owner
-                    AND l.generation=$retention_read_lease_generation
-                    AND l.expires_at=$retention_read_lease_expires_at
-                WHERE c.event_id=$event_id AND e.session_id=$session_id
-                    AND c.retention_owner_token=$retention_read_source_token;
-                """;
-            Add(command, "$event_id", Id(eventId));
-            Add(command, "$session_id", Id(sessionId));
-            Add(command, "$retention_store_instance_id", retentionContext.StoreInstanceId);
-            grant.BindSelectorCapability(command);
+            ConfigureContentReadMaterializationCommand(
+                command,
+                transaction,
+                grant,
+                retentionContext.StoreInstanceId,
+                sessionId,
+                eventId);
             using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
             if (!await reader.ReadAsync(token).ConfigureAwait(false)) return null;
             return new SessionEventContent(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), ParseTimestamp(reader.GetString(3)), ParseTimestamp(reader.GetString(4)));
@@ -1373,6 +1358,42 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         };
     }
 
+    internal static void ConfigureContentReadMaterializationCommand(
+        SqliteCommand command,
+        SqliteTransaction transaction,
+        RetentionReadGrant grant,
+        string storeInstanceId,
+        Guid sessionId,
+        Guid eventId)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(grant);
+        ArgumentException.ThrowIfNullOrWhiteSpace(storeInstanceId);
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT c.event_id,c.content_kind,c.content_json,c.captured_at,c.expires_at
+            FROM session_event_content c
+            JOIN session_events e ON e.event_id=c.event_id
+            JOIN retention_items i ON i.item_id=$retention_read_item_id
+                AND i.store_instance_id=$retention_store_instance_id
+                AND i.store_kind='session_event_content'
+                AND i.source_item_id=c.event_id
+                AND i.revision=$retention_read_revision
+            JOIN retention_leases l ON l.item_id=i.item_id
+                AND l.lease_kind=$retention_read_lease_kind
+                AND l.owner=$retention_read_lease_owner
+                AND l.generation=$retention_read_lease_generation
+                AND l.expires_at=$retention_read_lease_expires_at
+            WHERE c.event_id=$event_id AND e.session_id=$session_id
+                AND c.retention_owner_token=$retention_read_source_token;
+            """;
+        Add(command, "$event_id", Id(eventId));
+        Add(command, "$session_id", Id(sessionId));
+        Add(command, "$retention_store_instance_id", storeInstanceId);
+        grant.BindAdmissionSelectorCapability(command);
+    }
+
     public SessionRawRetentionState GetRawRetentionState(Guid sessionId)
     {
         if (retentionContext is null)
@@ -1380,32 +1401,12 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             return SessionRawRetentionState.NotCaptured;
         }
         using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT CASE
-              WHEN EXISTS (
-                SELECT 1 FROM retention_items i
-                JOIN session_events e ON e.event_id=i.source_item_id
-                WHERE e.session_id=$session_id
-                  AND i.store_instance_id=$store_instance_id
-                  AND i.store_kind='session_event_content'
-                  AND i.state IN ('expiring','retained_by_policy')
-                  AND i.read_denied_at IS NULL AND i.expires_at > $now
-              ) THEN 'expiring'
-              WHEN EXISTS (
-                SELECT 1 FROM retention_items i
-                JOIN session_events e ON e.event_id=i.source_item_id
-                WHERE e.session_id=$session_id
-                  AND i.store_instance_id=$store_instance_id
-                  AND i.store_kind='session_event_content'
-              ) THEN 'expired_pending_deletion'
-              ELSE 'not_captured'
-            END;
-            """;
-        Add(command, "$session_id", Id(sessionId));
-        Add(command, "$store_instance_id", retentionContext.StoreInstanceId);
-        Add(command, "$now", Timestamp(timeProvider.GetUtcNow()));
-        return SessionWire.ParseRawRetentionState((string)command.ExecuteScalar()!);
+        return SessionWire.ParseRawRetentionState(RetentionCatalogStore.ProjectSessionRawRetentionState(
+            connection,
+            transaction: null,
+            retentionContext.StoreInstanceId,
+            Id(sessionId),
+            timeProvider.GetUtcNow()));
     }
     public SessionProjectionState? GetProjectionState(string projectorKey)
     {

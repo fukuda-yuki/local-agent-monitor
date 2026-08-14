@@ -15,6 +15,7 @@ internal sealed partial class RawTelemetryStore
     private readonly Retention.RetentionCatalogContext? retentionContext;
 
     internal string DatabasePath => databasePath;
+    internal TimeProvider Clock => timeProvider;
     private readonly TimeProvider timeProvider;
 
     public RawTelemetryStore(string databasePath, RawTelemetryStoreConnectionOptions? connectionOptions = null, Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null)
@@ -1086,18 +1087,28 @@ internal sealed partial class RawTelemetryStore
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
+        ConfigureExactRawRecordMaterializationCommand(command, id, grant);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadRawRecord(reader) : null;
+    }
+
+    internal static void ConfigureExactRawRecordMaterializationCommand(
+        SqliteCommand command,
+        long id,
+        Retention.RetentionReadGrant grant)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(grant);
         command.CommandText =
             """
             SELECT id, source, trace_id, received_at, resource_attributes_json, payload_json, schema_version
             FROM raw_records
             WHERE id=$id AND retention_owner_token=$retention_read_source_token
               AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
-              AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
+              AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind=$retention_read_lease_kind AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
             """;
         AddParameter(command, "$id", id);
-        grant.BindSelectorCapability(command);
-        using var reader = command.ExecuteReader();
-        return reader.Read() ? ReadRawRecord(reader) : null;
+        grant.BindAdmissionSelectorCapability(command);
     }
 
     private static IReadOnlyList<RawTelemetryRecord>? SelectExactRawRecords(

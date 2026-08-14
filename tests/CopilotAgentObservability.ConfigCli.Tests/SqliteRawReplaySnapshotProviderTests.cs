@@ -91,6 +91,266 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     }
 
     [Fact]
+    public async Task CaptureAsync_MixedThreeMemberBoundaryReturnsNoPartialSnapshotAndMutatesOnlyExpiredExpiringMember()
+    {
+        using var temp = new TempDirectory();
+        var boundary = Now.AddSeconds(1);
+        var fixture = SeedSelectedBatchFixture(temp, boundary);
+        var authorityBefore = CaptureRetentionAuthorityState(temp.DatabasePath, fixture.SelectedItemIds);
+        var pinnedCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId);
+        var unexpiredCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.UnexpiredItem.ItemId);
+        var boundarySiblingCatalogBefore = FullRowDump(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.BoundarySiblingItem.ItemId);
+        var boundaryInvariantBefore = RowDumpExcluding(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.BoundaryItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "queued_at");
+        var pinnedSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId);
+        var unexpiredSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId);
+        var boundarySourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId);
+        var boundarySiblingSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId);
+        AuditRawOperationLeaseAcquisitions(
+            temp.DatabasePath,
+            fixture.CanonicalIds,
+            fixture.UnrelatedItem.ItemId,
+            guardMutationMemberId: fixture.BoundaryId);
+        var checkpoint = new AdvanceTimeAfterMaterializationCheckpoint(fixture.Clock, boundary);
+
+        var result = await new SqliteRawReplaySnapshotProvider(
+                temp.DatabasePath,
+                fixture.Context,
+                fixture.Clock,
+                checkpoint)
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: fixture.RequestedIds), false, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_read_denied", result.ErrorCode);
+        Assert.Null(result.Lease);
+        Assert.Equal(1, checkpoint.InvocationCount);
+        var acquisitionAudit = ReadLeaseAcquisitionAudit(temp.DatabasePath);
+        Assert.Equal(
+            new[]
+            {
+                $"{fixture.PinnedId}|1",
+                $"{fixture.UnexpiredId}|2",
+                $"{fixture.BoundaryId}|3",
+            },
+            acquisitionAudit.Select(static row => $"{row.SourceItemId}|{row.ActiveCount}"));
+        AssertSharedCompositeLeaseTuple(acquisitionAudit);
+        AssertUnrelatedLeaseSurvives(temp.DatabasePath, fixture, acquisitionAudit[0]);
+
+        var catalog = new RetentionCatalogStore(fixture.Context, new FixedTimeProvider(boundary));
+        var denied = Assert.IsType<RetentionCatalogItem>(catalog.Find(fixture.BoundaryItem.OwnershipKey));
+        Assert.Equal(RetentionItemLifecycle.ExpiredPendingDeletion, denied.State);
+        Assert.Equal(boundary, denied.ReadDeniedAt);
+        Assert.Equal(fixture.BoundaryItem.Revision + 1, denied.Revision);
+        var unselectedBoundary = Assert.IsType<RetentionCatalogItem>(catalog.Find(fixture.BoundarySiblingItem.OwnershipKey));
+        Assert.Equal(RetentionItemLifecycle.Expiring, unselectedBoundary.State);
+        Assert.Null(unselectedBoundary.ReadDeniedAt);
+        Assert.Equal(fixture.BoundarySiblingItem.Revision, unselectedBoundary.Revision);
+        Assert.Equal(boundary.ToString("O", CultureInfo.InvariantCulture), TextScalar(
+            temp.DatabasePath,
+            $"SELECT queued_at FROM retention_items WHERE item_id='{fixture.BoundaryItem.ItemId}';"));
+        Assert.Null(TextScalar(
+            temp.DatabasePath,
+            $"SELECT error_code FROM retention_items WHERE item_id='{fixture.BoundaryItem.ItemId}';"));
+
+        Assert.Equal(pinnedCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId));
+        Assert.Equal(unexpiredCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.UnexpiredItem.ItemId));
+        Assert.Equal(
+            boundarySiblingCatalogBefore,
+            FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundarySiblingItem.ItemId));
+        Assert.Equal(boundaryInvariantBefore, RowDumpExcluding(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.BoundaryItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "queued_at"));
+        Assert.Equal(pinnedSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId));
+        Assert.Equal(unexpiredSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId));
+        Assert.Equal(boundarySourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId));
+        Assert.Equal(
+            boundarySiblingSourceBefore,
+            FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId));
+        AssertRetentionAuthorityChangedOnly(
+            temp.DatabasePath,
+            fixture,
+            authorityBefore,
+            acquisitionAudit[0],
+            fixture.BoundaryItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "queued_at");
+    }
+
+    [Fact]
+    public async Task CaptureAsync_SelectorNullAfterThreeMemberLeaseAcquisitionReleasesAllLeasesWithoutCatalogMutation()
+    {
+        using var temp = new TempDirectory();
+        var fixture = SeedSelectedBatchFixture(temp, Now.AddMinutes(1));
+        var authorityBefore = CaptureRetentionAuthorityState(temp.DatabasePath, fixture.SelectedItemIds);
+        var catalogBefore = fixture.Items
+            .Select(item => FullRowDump(temp.DatabasePath, "retention_items", "item_id", item.ItemId))
+            .ToArray();
+        var boundarySiblingCatalogBefore = FullRowDump(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.BoundarySiblingItem.ItemId);
+        var unexpiredSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId);
+        var boundarySourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId);
+        var boundarySiblingSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId);
+        AuditRawOperationLeaseAcquisitions(
+            temp.DatabasePath,
+            fixture.CanonicalIds,
+            fixture.UnrelatedItem.ItemId,
+            deleteWhenMemberId: fixture.BoundaryId,
+            deletedMemberId: fixture.PinnedId);
+
+        var result = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, fixture.Context, fixture.Clock)
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: fixture.RequestedIds), false, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_read_denied", result.ErrorCode);
+        Assert.Null(result.Lease);
+        var acquisitionAudit = ReadLeaseAcquisitionAudit(temp.DatabasePath);
+        Assert.Equal(
+            new[]
+            {
+                $"{fixture.PinnedId}|1",
+                $"{fixture.UnexpiredId}|2",
+                $"{fixture.BoundaryId}|3",
+            },
+            acquisitionAudit.Select(static row => $"{row.SourceItemId}|{row.ActiveCount}"));
+        AssertSharedCompositeLeaseTuple(acquisitionAudit);
+        AssertUnrelatedLeaseSurvives(temp.DatabasePath, fixture, acquisitionAudit[0]);
+        Assert.Equal(0, Scalar<long>(temp.DatabasePath, $"SELECT COUNT(*) FROM raw_records WHERE id={fixture.PinnedId};"));
+        Assert.Equal(catalogBefore, fixture.Items
+            .Select(item => FullRowDump(temp.DatabasePath, "retention_items", "item_id", item.ItemId))
+            .ToArray());
+        Assert.Equal(
+            boundarySiblingCatalogBefore,
+            FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundarySiblingItem.ItemId));
+        Assert.Equal(unexpiredSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId));
+        Assert.Equal(boundarySourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId));
+        Assert.Equal(
+            boundarySiblingSourceBefore,
+            FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId));
+        AssertRetentionAuthorityChangedOnly(
+            temp.DatabasePath,
+            fixture,
+            authorityBefore,
+            acquisitionAudit[0],
+            normalizedItemId: null);
+    }
+
+    [Fact]
+    public async Task CaptureAsync_SecondMemberSourceDisappearsBeforeTokenCaptureReleasesCurrentAndPriorLeasesAndDeniesOnlyMissingMember()
+    {
+        using var temp = new TempDirectory();
+        var fixture = SeedSelectedBatchFixture(temp, Now.AddMinutes(1));
+        var authorityBefore = CaptureRetentionAuthorityState(temp.DatabasePath, fixture.SelectedItemIds);
+        var pinnedCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId);
+        var boundaryCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundaryItem.ItemId);
+        var boundarySiblingCatalogBefore = FullRowDump(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.BoundarySiblingItem.ItemId);
+        var corruptInvariantBefore = RowDumpExcluding(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.UnexpiredItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "error_code");
+        var pinnedSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId);
+        var boundarySourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId);
+        var boundarySiblingSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId);
+        AuditRawOperationLeaseAcquisitions(
+            temp.DatabasePath,
+            fixture.CanonicalIds,
+            fixture.UnrelatedItem.ItemId,
+            deleteWhenMemberId: fixture.UnexpiredId,
+            deletedMemberId: fixture.UnexpiredId,
+            guardMutationMemberId: fixture.UnexpiredId);
+
+        var result = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, fixture.Context, fixture.Clock)
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: fixture.RequestedIds), false, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("snapshot_read_denied", result.ErrorCode);
+        Assert.Null(result.Lease);
+        var acquisitionAudit = ReadLeaseAcquisitionAudit(temp.DatabasePath);
+        Assert.Equal(
+            new[]
+            {
+                $"{fixture.PinnedId}|1",
+                $"{fixture.UnexpiredId}|2",
+            },
+            acquisitionAudit.Select(static row => $"{row.SourceItemId}|{row.ActiveCount}"));
+        AssertSharedCompositeLeaseTuple(acquisitionAudit);
+        AssertUnrelatedLeaseSurvives(temp.DatabasePath, fixture, acquisitionAudit[0]);
+        Assert.Equal(0, Scalar<long>(temp.DatabasePath, $"SELECT COUNT(*) FROM raw_records WHERE id={fixture.UnexpiredId};"));
+
+        var catalog = new RetentionCatalogStore(fixture.Context, new FixedTimeProvider(Now));
+        var corrupt = Assert.IsType<RetentionCatalogItem>(catalog.Find(fixture.UnexpiredItem.OwnershipKey));
+        Assert.Equal(RetentionItemLifecycle.DeletionFailed, corrupt.State);
+        Assert.Equal(Now, corrupt.ReadDeniedAt);
+        Assert.Equal(fixture.UnexpiredItem.Revision + 1, corrupt.Revision);
+        Assert.Equal("retention_invalid_identity", TextScalar(
+            temp.DatabasePath,
+            $"SELECT error_code FROM retention_items WHERE item_id='{fixture.UnexpiredItem.ItemId}';"));
+        Assert.Null(TextScalar(
+            temp.DatabasePath,
+            $"SELECT queued_at FROM retention_items WHERE item_id='{fixture.UnexpiredItem.ItemId}';"));
+
+        Assert.Equal(pinnedCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId));
+        Assert.Equal(boundaryCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundaryItem.ItemId));
+        Assert.Equal(
+            boundarySiblingCatalogBefore,
+            FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundarySiblingItem.ItemId));
+        Assert.Equal(corruptInvariantBefore, RowDumpExcluding(
+            temp.DatabasePath,
+            "retention_items",
+            "item_id",
+            fixture.UnexpiredItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "error_code"));
+        Assert.Equal(pinnedSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId));
+        Assert.Equal(boundarySourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId));
+        Assert.Equal(
+            boundarySiblingSourceBefore,
+            FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId));
+        AssertRetentionAuthorityChangedOnly(
+            temp.DatabasePath,
+            fixture,
+            authorityBefore,
+            acquisitionAudit[0],
+            fixture.UnexpiredItem.ItemId,
+            "state",
+            "revision",
+            "read_denied_at",
+            "error_code");
+    }
+
+    [Fact]
     public async Task CaptureAsync_MissingExplicitRawMemberFailsTheWholeSelection()
     {
         using var temp = new TempDirectory();
@@ -143,6 +403,71 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         Assert.Equal("{\"text\":\"synthetic\"}", content.ContentJson);
         Assert.Equal(2, Scalar<long>(temp.DatabasePath, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
         Assert.Equal(1, Scalar<long>(temp.DatabasePath, "SELECT COUNT(DISTINCT owner) FROM retention_leases WHERE lease_kind='operation';"));
+    }
+
+    [Theory]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_source_token")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_item_id")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_revision")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_lease_kind")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_lease_owner")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_lease_generation")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations, "$retention_read_lease_expires_at")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_source_token")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_item_id")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_revision")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_lease_kind")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_lease_owner")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_lease_generation")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations, "$retention_read_lease_expires_at")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_source_token")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_item_id")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_revision")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_lease_kind")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_lease_owner")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_lease_generation")]
+    [InlineData((int)SqliteRawReplaySnapshotProvider.SnapshotReadShape.SessionContent, "$retention_read_lease_expires_at")]
+    public async Task SnapshotReadCommand_EachAdmissionCapabilityMismatchReturnsNoRows(
+        int shapeValue,
+        string parameterName)
+    {
+        using var temp = new TempDirectory();
+        var shape = (SqliteRawReplaySnapshotProvider.SnapshotReadShape)shapeValue;
+        var fixture = SeedSnapshotCommandFixture(temp, shape);
+        var request = new RetentionReadRequest(
+            new RetentionOwnershipKey(fixture.Context.StoreInstanceId, fixture.StoreKind, fixture.SourceId),
+            RetentionReadKind.Operation,
+            Now,
+            ExpectedRevision: null);
+
+        var result = await new RetentionCatalogStore(fixture.Context, new FixedTimeProvider(Now)).ReadAsync<int[]>(
+            request,
+            (connection, transaction, grant, _) =>
+            {
+                using (var baseline = SqliteRawReplaySnapshotProvider.CreateSnapshotReadCommand(
+                    connection,
+                    transaction,
+                    shape,
+                    fixture.SourceId,
+                    grant))
+                {
+                    Assert.Equal(1, CountRows(baseline));
+                }
+
+                using var perturbed = SqliteRawReplaySnapshotProvider.CreateSnapshotReadCommand(
+                    connection,
+                    transaction,
+                    shape,
+                    fixture.SourceId,
+                    grant);
+                PerturbAdmissionParameter(perturbed, parameterName);
+                return ValueTask.FromResult<int[]?>([CountRows(perturbed)]);
+            },
+            CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        await using var lease = Assert.IsType<RetentionReadLease<int[]>>(result.Lease);
+        Assert.Equal(0, Assert.Single(lease.Value));
     }
 
     [Theory]
@@ -265,6 +590,522 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         transaction.Commit();
     }
 
+    private static SnapshotCommandFixture SeedSnapshotCommandFixture(
+        TempDirectory temp,
+        SqliteRawReplaySnapshotProvider.SnapshotReadShape shape)
+    {
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var rawStore = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        rawStore.CreateMonitorSchema();
+        if (shape is SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithObservations
+            or SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations)
+        {
+            var rawRecordId = rawStore.Insert(new RawTelemetryRecord(
+                null,
+                RawTelemetrySources.RawOtlp,
+                "trace-selector-capability",
+                Now,
+                null,
+                "{\"resourceSpans\":[]}"));
+            if (shape == SqliteRawReplaySnapshotProvider.SnapshotReadShape.RawRecordWithoutObservations)
+                Execute(temp.DatabasePath, "DROP TABLE source_schema_observations;");
+            return new(context, RetentionStoreKind.RawRecord, rawRecordId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        var sessionStore = new SqliteSessionStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        sessionStore.CreateSchema();
+        var sessionId = Guid.CreateVersion7();
+        var runId = Guid.CreateVersion7();
+        var eventId = Guid.CreateVersion7();
+        sessionStore.Write(new SessionWriteBatch(
+            new SessionDetail(
+                new ObservedSession(
+                    sessionId,
+                    ObservedSessionStatus.Completed,
+                    SessionCompleteness.Full,
+                    null,
+                    null,
+                    Now,
+                    Now,
+                    Now,
+                    SessionRawRetentionState.Expiring,
+                    Now,
+                    Now),
+                [],
+                [new ObservedSessionRun(
+                    runId,
+                    sessionId,
+                    SessionSourceSurface.CopilotCli,
+                    "run-selector-capability",
+                    "trace-selector-capability",
+                    null,
+                    "fixture-model",
+                    ObservedSessionStatus.Completed,
+                    Now,
+                    Now,
+                    1,
+                    2,
+                    3)],
+                [new ObservedSessionEvent(
+                    eventId,
+                    sessionId,
+                    runId,
+                    SessionSourceSurface.CopilotCli,
+                    null,
+                    "trace-selector-capability",
+                    "ok",
+                    "copilot-compatible-hook",
+                    "source-event-selector-capability",
+                    "assistant.completed",
+                    Now,
+                    SessionContentState.Available,
+                    "app-v1",
+                    "adapter-v1",
+                    "schema-v1",
+                    "normalization-v1",
+                    SessionMatchKind.ExactNative)]),
+            [new SessionEventContent(
+                eventId,
+                "assistant_response",
+                "{\"text\":\"synthetic\"}",
+                Now,
+                Now.AddDays(1))]));
+        return new(context, RetentionStoreKind.SessionEventContent, eventId.ToString("D"));
+    }
+
+    private static int CountRows(SqliteCommand command)
+    {
+        using var reader = command.ExecuteReader();
+        var count = 0;
+        while (reader.Read()) count++;
+        return count;
+    }
+
+    private static void PerturbAdmissionParameter(SqliteCommand command, string parameterName)
+    {
+        var parameter = command.Parameters[parameterName];
+        parameter.Value = parameterName switch
+        {
+            "$retention_read_source_token" => PerturbedToken(Assert.IsType<byte[]>(parameter.Value)),
+            "$retention_read_item_id" => Assert.IsType<string>(parameter.Value) + "-mismatch",
+            "$retention_read_revision" => Assert.IsType<long>(parameter.Value) + 1,
+            "$retention_read_lease_kind" => Assert.IsType<string>(parameter.Value) == "operation" ? "access" : "operation",
+            "$retention_read_lease_owner" => Assert.IsType<string>(parameter.Value) + "-mismatch",
+            "$retention_read_lease_generation" => Assert.IsType<long>(parameter.Value) + 1,
+            "$retention_read_lease_expires_at" => DateTimeOffset.Parse(
+                    Assert.IsType<string>(parameter.Value),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind)
+                .AddTicks(1)
+                .ToString("O", CultureInfo.InvariantCulture),
+            _ => throw new ArgumentOutOfRangeException(nameof(parameterName)),
+        };
+    }
+
+    private static byte[] PerturbedToken(byte[] sourceToken)
+    {
+        var value = sourceToken.ToArray();
+        value[0] ^= byte.MaxValue;
+        return value;
+    }
+
+    private static SelectedBatchFixture SeedSelectedBatchFixture(TempDirectory temp, DateTimeOffset boundaryExpiresAt)
+    {
+        var pinnedCapturedAt = Now.AddDays(-91);
+        var clock = new TestTimeProvider(pinnedCapturedAt);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, clock);
+        var store = new RawTelemetryStore(temp.DatabasePath, context, clock);
+        store.CreateMonitorSchema();
+        var pinned = store.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "trace-pinned-past-expiry",
+            pinnedCapturedAt,
+            null,
+            "{\"member\":\"pinned\"}"));
+        Execute(
+            temp.DatabasePath,
+            "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='raw_record' AND source_item_id=$id AND state='expiring' AND read_denied_at IS NULL AND expires_at>$now;",
+            ("$id", pinned.ToString(CultureInfo.InvariantCulture)),
+            ("$now", pinnedCapturedAt.ToString("O", CultureInfo.InvariantCulture)));
+        clock.Set(Now);
+        var unexpired = store.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "trace-unexpired-expiring",
+            Now,
+            null,
+            "{\"member\":\"unexpired\"}"));
+        var boundary = store.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "trace-boundary-expiring",
+            boundaryExpiresAt.AddDays(-90),
+            null,
+            "{\"member\":\"boundary\"}"));
+        var boundarySibling = store.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "trace-unselected-boundary-expiring",
+            boundaryExpiresAt.AddDays(-90),
+            null,
+            "{\"member\":\"unselected-boundary\"}"));
+        var unrelated = store.Insert(new RawTelemetryRecord(
+            null,
+            RawTelemetrySources.RawOtlp,
+            "trace-unrelated-live-lease",
+            Now,
+            null,
+            "{\"member\":\"unrelated\"}"));
+        Assert.True(pinned < unexpired
+            && unexpired < boundary
+            && boundary < boundarySibling
+            && boundarySibling < unrelated);
+
+        var catalog = new RetentionCatalogStore(context, clock);
+        var pinnedItem = Assert.IsType<RetentionCatalogItem>(catalog.Find(new(
+            context.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            pinned.ToString(CultureInfo.InvariantCulture))));
+        var unexpiredItem = Assert.IsType<RetentionCatalogItem>(catalog.Find(new(
+            context.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            unexpired.ToString(CultureInfo.InvariantCulture))));
+        var boundaryItem = Assert.IsType<RetentionCatalogItem>(catalog.Find(new(
+            context.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            boundary.ToString(CultureInfo.InvariantCulture))));
+        var boundarySiblingItem = Assert.IsType<RetentionCatalogItem>(catalog.Find(new(
+            context.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            boundarySibling.ToString(CultureInfo.InvariantCulture))));
+        var unrelatedItem = Assert.IsType<RetentionCatalogItem>(catalog.Find(new(
+            context.StoreInstanceId,
+            RetentionStoreKind.RawRecord,
+            unrelated.ToString(CultureInfo.InvariantCulture))));
+        Assert.Equal(RetentionItemLifecycle.RetainedByPolicy, pinnedItem.State);
+        Assert.True(pinnedItem.ExpiresAt < Now);
+        Assert.Equal(RetentionItemLifecycle.Expiring, unexpiredItem.State);
+        Assert.True(unexpiredItem.ExpiresAt > boundaryExpiresAt);
+        Assert.Equal(RetentionItemLifecycle.Expiring, boundaryItem.State);
+        Assert.Equal(boundaryExpiresAt, boundaryItem.ExpiresAt);
+        Assert.Equal(RetentionItemLifecycle.Expiring, boundarySiblingItem.State);
+        Assert.Equal(boundaryExpiresAt, boundarySiblingItem.ExpiresAt);
+        Assert.Equal(0, Scalar<long>(temp.DatabasePath, "SELECT COUNT(*) FROM retention_leases;"));
+        return new(
+            context,
+            clock,
+            pinned,
+            unexpired,
+            boundary,
+            boundarySibling,
+            unrelatedItem,
+            pinnedItem,
+            unexpiredItem,
+            boundaryItem,
+            boundarySiblingItem);
+    }
+
+    private static void AuditRawOperationLeaseAcquisitions(
+        string path,
+        IReadOnlyList<long> selectedMemberIds,
+        string unrelatedSentinelItemId,
+        long? deleteWhenMemberId = null,
+        long? deletedMemberId = null,
+        long? guardMutationMemberId = null)
+    {
+        Assert.Equal(deleteWhenMemberId.HasValue, deletedMemberId.HasValue);
+        var selectedIds = string.Join(
+            ',',
+            selectedMemberIds.Select(id => $"'{id.ToString(CultureInfo.InvariantCulture)}'"));
+        var deleteClause = deleteWhenMemberId is { } leaseMemberId && deletedMemberId is { } deletedId
+            ? $"""
+                DELETE FROM raw_records
+                WHERE id={deletedId.ToString(CultureInfo.InvariantCulture)}
+                  AND NEW.item_id=(
+                    SELECT item_id FROM retention_items
+                    WHERE store_kind='raw_record'
+                      AND source_item_id='{leaseMemberId.ToString(CultureInfo.InvariantCulture)}');
+                """
+            : string.Empty;
+        var guardClause = guardMutationMemberId is { } guardedMemberId
+            ? $"""
+                CREATE TRIGGER test_raw_replay_mutation_after_release_guard
+                BEFORE UPDATE ON retention_items
+                WHEN OLD.item_id=(
+                    SELECT item_id FROM retention_items
+                    WHERE store_kind='raw_record'
+                      AND source_item_id='{guardedMemberId.ToString(CultureInfo.InvariantCulture)}')
+                  AND EXISTS(
+                    SELECT 1
+                    FROM retention_leases AS lease
+                    JOIN retention_items AS selected ON selected.item_id=lease.item_id
+                    WHERE lease.lease_kind='operation'
+                      AND selected.store_kind='raw_record'
+                      AND selected.source_item_id IN ({selectedIds}))
+                BEGIN
+                    SELECT RAISE(ABORT, 'selected leases must release before catalog mutation');
+                END;
+                """
+            : string.Empty;
+        Execute(path, $"""
+            CREATE TABLE test_raw_replay_lease_audit(
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_item_id TEXT NOT NULL,
+                active_count INTEGER NOT NULL,
+                lease_kind TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                generation INTEGER NOT NULL);
+            CREATE TRIGGER test_raw_replay_lease_audit_trigger
+            AFTER INSERT ON retention_leases
+            WHEN NEW.lease_kind='operation'
+              AND EXISTS(
+                SELECT 1 FROM retention_items
+                WHERE item_id=NEW.item_id
+                  AND store_kind='raw_record'
+                  AND source_item_id IN ({selectedIds}))
+            BEGIN
+                INSERT INTO test_raw_replay_lease_audit(
+                    source_item_id,active_count,lease_kind,owner,expires_at,generation)
+                SELECT source_item_id,(
+                    SELECT COUNT(*)
+                    FROM retention_leases AS lease
+                    JOIN retention_items AS selected ON selected.item_id=lease.item_id
+                    WHERE lease.lease_kind='operation'
+                      AND selected.store_kind='raw_record'
+                      AND selected.source_item_id IN ({selectedIds}))
+                    ,NEW.lease_kind,NEW.owner,NEW.expires_at,NEW.generation
+                FROM retention_items
+                WHERE item_id=NEW.item_id AND store_kind='raw_record';
+                INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation)
+                VALUES('{unrelatedSentinelItemId}',NEW.lease_kind,NEW.owner,NEW.expires_at,NEW.generation)
+                ON CONFLICT(item_id,lease_kind) DO UPDATE SET
+                    owner=excluded.owner,
+                    expires_at=excluded.expires_at,
+                    generation=excluded.generation;
+                {deleteClause}
+            END;
+            {guardClause}
+            """);
+    }
+
+    private static void AssertUnrelatedLeaseSurvives(
+        string path,
+        SelectedBatchFixture fixture,
+        LeaseAcquisitionAudit acquisition)
+    {
+        Assert.Equal(1, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(
+            QuotedRow(
+                path,
+                fixture.UnrelatedItem.ItemId,
+                acquisition.LeaseKind,
+                acquisition.Owner,
+                acquisition.ExpiresAt,
+                acquisition.Generation),
+            FullRowDump(path, "retention_leases", "item_id", fixture.UnrelatedItem.ItemId));
+    }
+
+    private static IReadOnlyList<LeaseAcquisitionAudit> ReadLeaseAcquisitionAudit(string path)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT source_item_id,active_count,lease_kind,owner,expires_at,generation FROM test_raw_replay_lease_audit ORDER BY sequence;";
+        using var reader = command.ExecuteReader();
+        var rows = new List<LeaseAcquisitionAudit>();
+        while (reader.Read())
+            rows.Add(new(
+                reader.GetString(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetInt64(5)));
+        return rows;
+    }
+
+    private static void AssertSharedCompositeLeaseTuple(IReadOnlyList<LeaseAcquisitionAudit> acquisitions)
+    {
+        Assert.NotEmpty(acquisitions);
+        var expected = acquisitions[0];
+        Assert.Equal("operation", expected.LeaseKind);
+        Assert.Matches("^[0-9a-f]{32}$", expected.Owner);
+        Assert.Equal(Now.AddMinutes(2).ToString("O", CultureInfo.InvariantCulture), expected.ExpiresAt);
+        Assert.Equal(1, expected.Generation);
+        Assert.All(acquisitions, acquisition =>
+        {
+            Assert.Equal(expected.LeaseKind, acquisition.LeaseKind);
+            Assert.Equal(expected.Owner, acquisition.Owner);
+            Assert.Equal(expected.ExpiresAt, acquisition.ExpiresAt);
+            Assert.Equal(expected.Generation, acquisition.Generation);
+        });
+    }
+
+    private static void AssertRetentionAuthorityChangedOnly(
+        string path,
+        SelectedBatchFixture fixture,
+        RetentionAuthorityState before,
+        LeaseAcquisitionAudit sentinelTuple,
+        string? normalizedItemId,
+        params string[] normalizedItemColumns)
+    {
+        var after = CaptureRetentionAuthorityState(path, fixture.SelectedItemIds);
+        var quotedNormalizedItemId = normalizedItemId is null
+            ? null
+            : Assert.Single(QuotedValues(path, normalizedItemId));
+        var expectedSentinel = QuotedValues(
+            path,
+            fixture.UnrelatedItem.ItemId,
+            sentinelTuple.LeaseKind,
+            sentinelTuple.Owner,
+            sentinelTuple.ExpiresAt,
+            sentinelTuple.Generation);
+        Assert.Equal(
+            NormalizeRetentionAuthoritySnapshot(
+                before,
+                quotedNormalizedItemId,
+                normalizedItemColumns,
+                expectedSentinel),
+            NormalizeRetentionAuthoritySnapshot(
+                after,
+                quotedNormalizedItemId,
+                normalizedItemColumns,
+                additionalLeaseRow: null));
+    }
+
+    private static RetentionAuthorityState CaptureRetentionAuthorityState(
+        string path,
+        IReadOnlyList<string> selectedItemIds)
+    {
+        using var connection = Open(path);
+        var tableNames = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'retention_*' ORDER BY name COLLATE BINARY;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) tableNames.Add(reader.GetString(0));
+        }
+
+        var tables = new List<RetentionAuthorityTable>();
+        foreach (var tableName in tableNames)
+        {
+            var columns = new List<RetentionAuthorityColumn>();
+            using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = $"PRAGMA table_info({QuoteIdentifier(tableName)});";
+                using var reader = pragma.ExecuteReader();
+                while (reader.Read())
+                    columns.Add(new(reader.GetString(1), reader.GetInt32(5)));
+            }
+
+            Assert.NotEmpty(columns);
+            var primaryKey = columns
+                .Where(static column => column.PrimaryKeyOrdinal > 0)
+                .OrderBy(static column => column.PrimaryKeyOrdinal)
+                .ToArray();
+            var orderColumns = primaryKey.Length > 0 ? primaryKey : columns.ToArray();
+            using var rowsCommand = connection.CreateCommand();
+            rowsCommand.CommandText = $"SELECT {string.Join(',', columns.Select(column => $"quote({QuoteIdentifier(column.Name)})"))} FROM {QuoteIdentifier(tableName)}";
+            if (string.Equals(tableName, "retention_leases", StringComparison.Ordinal))
+            {
+                var parameterNames = new string[selectedItemIds.Count];
+                for (var index = 0; index < selectedItemIds.Count; index++)
+                {
+                    parameterNames[index] = $"$selected_item_{index}";
+                    rowsCommand.Parameters.AddWithValue(parameterNames[index], selectedItemIds[index]);
+                }
+
+                rowsCommand.CommandText += $" WHERE NOT (lease_kind='operation' AND item_id IN ({string.Join(',', parameterNames)}))";
+            }
+
+            rowsCommand.CommandText += $" ORDER BY {string.Join(',', orderColumns.Select(column => $"{QuoteIdentifier(column.Name)} COLLATE BINARY"))};";
+            using var rowsReader = rowsCommand.ExecuteReader();
+            var rows = new List<IReadOnlyList<string>>();
+            while (rowsReader.Read())
+                rows.Add(Enumerable.Range(0, rowsReader.FieldCount).Select(rowsReader.GetString).ToArray());
+            tables.Add(new(tableName, columns, rows));
+        }
+
+        return new(tables);
+    }
+
+    private static string NormalizeRetentionAuthoritySnapshot(
+        RetentionAuthorityState state,
+        string? quotedNormalizedItemId,
+        IReadOnlyCollection<string> normalizedItemColumns,
+        IReadOnlyList<string>? additionalLeaseRow)
+    {
+        var lines = new List<string>();
+        foreach (var table in state.Tables)
+        {
+            lines.Add($"TABLE|{table.Name}|{string.Join(',', table.Columns.Select(column => $"{column.Name}:{column.PrimaryKeyOrdinal}"))}");
+            var rows = table.Rows.Select(static row => row.ToArray()).ToList();
+            if (additionalLeaseRow is not null
+                && string.Equals(table.Name, "retention_leases", StringComparison.Ordinal))
+            {
+                Assert.Equal(table.Columns.Count, additionalLeaseRow.Count);
+                rows.Add(additionalLeaseRow.ToArray());
+            }
+
+            if (quotedNormalizedItemId is not null
+                && string.Equals(table.Name, "retention_items", StringComparison.Ordinal))
+            {
+                var itemIdIndex = table.Columns.FindIndex(static column => column.Name == "item_id");
+                Assert.True(itemIdIndex >= 0);
+                foreach (var row in rows.Where(row => row[itemIdIndex] == quotedNormalizedItemId))
+                {
+                    foreach (var columnName in normalizedItemColumns)
+                    {
+                        var columnIndex = table.Columns.FindIndex(column => column.Name == columnName);
+                        Assert.True(columnIndex >= 0);
+                        row[columnIndex] = $"<normalized:{columnName}>";
+                    }
+                }
+            }
+
+            var primaryKeyIndexes = table.Columns
+                .Select((column, index) => (column.PrimaryKeyOrdinal, Index: index))
+                .Where(static entry => entry.PrimaryKeyOrdinal > 0)
+                .OrderBy(static entry => entry.PrimaryKeyOrdinal)
+                .Select(static entry => entry.Index)
+                .ToArray();
+            if (primaryKeyIndexes.Length == 0)
+                primaryKeyIndexes = Enumerable.Range(0, table.Columns.Count).ToArray();
+            rows.Sort((left, right) => CompareRows(left, right, primaryKeyIndexes));
+            lines.AddRange(rows.Select(static row => $"ROW|{string.Join('|', row)}"));
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static int CompareRows(IReadOnlyList<string> left, IReadOnlyList<string> right, IReadOnlyList<int> ordinals)
+    {
+        foreach (var ordinal in ordinals)
+        {
+            var comparison = StringComparer.Ordinal.Compare(left[ordinal], right[ordinal]);
+            if (comparison != 0) return comparison;
+        }
+
+        return 0;
+    }
+
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    private static string QuotedRow(string path, params object[] values) => string.Join('|', QuotedValues(path, values));
+
+    private static IReadOnlyList<string> QuotedValues(string path, params object[] values)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT {string.Join(',', values.Select((_, index) => $"quote($value_{index})"))};";
+        for (var index = 0; index < values.Length; index++)
+            command.Parameters.AddWithValue($"$value_{index}", values[index]);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        return Enumerable.Range(0, reader.FieldCount).Select(reader.GetString).ToArray();
+    }
+
     private static async Task AssertPreflightFailure(
         string databasePath,
         RetentionCatalogContext context,
@@ -299,6 +1140,37 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         return rows;
     }
 
+    private static string FullRowDump(string path, string table, string keyColumn, object key) =>
+        RowDumpExcluding(path, table, keyColumn, key);
+
+    private static string RowDumpExcluding(
+        string path,
+        string table,
+        string keyColumn,
+        object key,
+        params string[] excludedColumns)
+    {
+        using var connection = Open(path);
+        var columns = new List<string>();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA table_info({table});";
+            using var reader = pragma.ExecuteReader();
+            while (reader.Read())
+            {
+                var column = reader.GetString(1);
+                if (!excludedColumns.Contains(column, StringComparer.Ordinal)) columns.Add(column);
+            }
+        }
+
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT {string.Join(',', columns.Select(column => $"quote({column})"))} FROM {table} WHERE {keyColumn}=$key;";
+        command.Parameters.AddWithValue("$key", key);
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        return string.Join("|", Enumerable.Range(0, row.FieldCount).Select(row.GetString));
+    }
+
     private static void SetTextLength(string path, string table, string column, string keyColumn, object key, int size)
     {
         using var connection = Open(path);
@@ -324,6 +1196,15 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
     }
 
+    private static string? TextScalar(string path, string sql)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        var value = command.ExecuteScalar();
+        return value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
     private static void Execute(string path, string sql, params (string Name, object Value)[] parameters)
     {
         using var connection = Open(path);
@@ -343,6 +1224,70 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     {
         public override DateTimeOffset GetUtcNow() => value;
     }
+
+    private sealed class TestTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        private DateTimeOffset current = value;
+
+        public override DateTimeOffset GetUtcNow() => current;
+
+        internal void Set(DateTimeOffset value) => current = value;
+    }
+
+    private sealed class AdvanceTimeAfterMaterializationCheckpoint(
+        TestTimeProvider timeProvider,
+        DateTimeOffset boundary) : IRawReplaySnapshotCheckpoint
+    {
+        internal int InvocationCount { get; private set; }
+
+        public void Reached(RawReplaySnapshotCheckpoint checkpoint)
+        {
+            Assert.Equal(RawReplaySnapshotCheckpoint.AfterNonNullMaterialization, checkpoint);
+            InvocationCount++;
+            timeProvider.Set(boundary);
+        }
+    }
+
+    private sealed record SelectedBatchFixture(
+        RetentionCatalogContext Context,
+        TestTimeProvider Clock,
+        long PinnedId,
+        long UnexpiredId,
+        long BoundaryId,
+        long BoundarySiblingId,
+        RetentionCatalogItem UnrelatedItem,
+        RetentionCatalogItem PinnedItem,
+        RetentionCatalogItem UnexpiredItem,
+        RetentionCatalogItem BoundaryItem,
+        RetentionCatalogItem BoundarySiblingItem)
+    {
+        internal IReadOnlyList<long> CanonicalIds => [PinnedId, UnexpiredId, BoundaryId];
+        internal IReadOnlyList<long> RequestedIds => [BoundaryId, UnexpiredId, PinnedId];
+        internal IReadOnlyList<string> SelectedItemIds => [PinnedItem.ItemId, UnexpiredItem.ItemId, BoundaryItem.ItemId];
+        internal IReadOnlyList<RetentionCatalogItem> Items => [PinnedItem, UnexpiredItem, BoundaryItem];
+    }
+
+    private sealed record LeaseAcquisitionAudit(
+        string SourceItemId,
+        long ActiveCount,
+        string LeaseKind,
+        string Owner,
+        string ExpiresAt,
+        long Generation);
+
+    private sealed record RetentionAuthorityColumn(string Name, int PrimaryKeyOrdinal);
+
+    private sealed record RetentionAuthorityTable(
+        string Name,
+        List<RetentionAuthorityColumn> Columns,
+        List<IReadOnlyList<string>> Rows);
+
+    private sealed record RetentionAuthorityState(List<RetentionAuthorityTable> Tables);
+
+    private sealed record SnapshotCommandFixture(
+        RetentionCatalogContext Context,
+        RetentionStoreKind StoreKind,
+        string SourceId);
 
     private sealed class TempDirectory : IDisposable
     {

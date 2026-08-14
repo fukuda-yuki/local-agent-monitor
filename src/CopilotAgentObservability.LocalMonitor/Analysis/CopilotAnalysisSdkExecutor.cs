@@ -9,34 +9,37 @@ namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
 internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
 {
+    private readonly Func<CopilotClientOptions, SessionConfig, CopilotClient> createClient;
+
+    internal CopilotAnalysisSdkExecutor()
+        : this(static (options, _) => new CopilotClient(options)) { }
+
+    internal CopilotAnalysisSdkExecutor(Func<CopilotClientOptions, SessionConfig, CopilotClient> createClient)
+    {
+        ArgumentNullException.ThrowIfNull(createClient);
+        this.createClient = createClient;
+    }
+
     public async Task<string> ExecuteAsync(string childDirectory, CopilotAnalysisExecutionSettings settings, CopilotAnalysisToolRequest request, CancellationToken cancellationToken)
     {
-        var client = new CopilotClient(new CopilotClientOptions { BaseDirectory = childDirectory, WorkingDirectory = Directory.GetCurrentDirectory() });
+        var sessionConfig = CreateSessionConfig(
+            settings,
+            request,
+            request.Data.InstructionFindingCollector,
+            childDirectory);
+        var clientOptions = new CopilotClientOptions
+        {
+            Mode = CopilotClientMode.Empty,
+            BaseDirectory = childDirectory,
+            WorkingDirectory = childDirectory,
+        };
+        var client = createClient(clientOptions, sessionConfig);
         CopilotSession? session = null;
         ExceptionDispatchInfo? primaryFailure = null;
         try
         {
             await client.StartAsync(cancellationToken);
-            var tools = new List<AIFunctionDeclaration>
-            {
-                DefineTool("get_raw_trace", "Return the raw trace records for this Local Monitor analysis run.", () => Serialize(request.Data.RawTrace)),
-                DefineTool("get_raw_record", "Return the selected raw record for this Local Monitor analysis run.", () => Serialize(request.Data.RawRecord)),
-                DefineTool("get_raw_span_context", "Return the selected raw span context for this Local Monitor analysis run.", () => Serialize(request.Data.RawSpanContext)),
-                DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSummary)),
-                DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSpanTree)),
-                DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(request.Data.CacheSummary)),
-                DefineTool("get_instruction_evidence", "Return deterministic instruction evidence for this Local Monitor analysis run.", () => Serialize(request.Data.InstructionEvidence)),
-            };
-            if (request.Data.InstructionFindingCollector is { } collector)
-            {
-                tools.Add(DefineInstructionFindingSubmissionTool(collector));
-            }
-            session = await client.CreateSessionAsync(new SessionConfig
-            {
-                Model = settings.Model, Streaming = true, OnPermissionRequest = PermissionHandler.ApproveAll, Provider = settings.Provider,
-                Tools = tools,
-                SystemMessage = new SystemMessageConfig { Mode = SystemMessageMode.Append, Content = "You are analyzing a local Copilot/agent observability trace. Use the provided tools for raw data. Do not claim the response is repository-safe." },
-            }, cancellationToken);
+            session = await client.CreateSessionAsync(sessionConfig, cancellationToken);
             var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var final = new StringBuilder();
             using var subscription = session.On<SessionEvent>(evt =>
@@ -67,6 +70,46 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             if (primaryFailure is null && disposeFailure is not null) ExceptionDispatchInfo.Capture(disposeFailure).Throw();
         }
     }
+
+    private static SessionConfig CreateSessionConfig(
+        CopilotAnalysisExecutionSettings settings,
+        CopilotAnalysisToolRequest request,
+        InstructionFindingSubmissionCollectorV1? instructionFindingCollector,
+        string childDirectory)
+    {
+        var tools = new List<AIFunctionDeclaration>
+        {
+            DefineTool("get_raw_trace", "Return the raw trace records for this Local Monitor analysis run.", () => Serialize(request.Data.RawTrace)),
+            DefineTool("get_raw_record", "Return the selected raw record for this Local Monitor analysis run.", () => Serialize(request.Data.RawRecord)),
+            DefineTool("get_raw_span_context", "Return the selected raw span context for this Local Monitor analysis run.", () => Serialize(request.Data.RawSpanContext)),
+            DefineTool("get_trace_summary", "Return the sanitized trace summary for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSummary)),
+            DefineTool("get_trace_span_tree", "Return the sanitized span tree for this Local Monitor analysis run.", () => Serialize(request.Data.TraceSpanTree)),
+            DefineTool("get_cache_summary", "Return the sanitized cache summary for this Local Monitor analysis run.", () => Serialize(request.Data.CacheSummary)),
+            DefineTool("get_instruction_evidence", "Return deterministic instruction evidence for this Local Monitor analysis run.", () => Serialize(request.Data.InstructionEvidence)),
+        };
+        if (instructionFindingCollector is not null)
+            tools.Add(DefineInstructionFindingSubmissionTool(instructionFindingCollector));
+        var availableTools = new ToolSet();
+        foreach (var tool in tools)
+            availableTools.AddCustom(tool.Name);
+        return new SessionConfig
+        {
+            Model = settings.Model,
+            Streaming = true,
+            OnPermissionRequest = static (_, _) => Task.FromResult(DenyPermission()),
+            Provider = settings.Provider,
+            Tools = tools,
+            AvailableTools = availableTools,
+            WorkingDirectory = childDirectory,
+            LargeOutput = new LargeToolOutputConfig { Enabled = true, OutputDirectory = childDirectory },
+            SystemMessage = new SystemMessageConfig { Mode = SystemMessageMode.Append, Content = "You are analyzing a local Copilot/agent observability trace. Use the provided tools for raw data. Do not claim the response is repository-safe." },
+        };
+    }
+
+#pragma warning disable GHCP001
+    private static GitHub.Copilot.Rpc.PermissionDecision DenyPermission() =>
+        GitHub.Copilot.Rpc.PermissionDecision.UserNotAvailable();
+#pragma warning restore GHCP001
 
     private static AIFunction DefineTool(string name, string description, Func<string> tool) => CopilotTool.DefineTool((([Description("No input is required for this run-scoped Local Monitor tool.")] string? _ = null) => tool()), new CopilotToolOptions { SkipPermission = true }, new AIFunctionFactoryOptions { Name = name, Description = description });
 

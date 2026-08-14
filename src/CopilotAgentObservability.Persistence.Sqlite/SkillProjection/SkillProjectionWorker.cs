@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
@@ -36,7 +37,10 @@ internal sealed class SkillProjectionWorker
         if (queueLease is null)
             return SkillProjectionWorkOutcome.NoWork;
         var elapsed = Stopwatch.StartNew();
-        var read = await readFrontier(queueLease, cancellationToken).ConfigureAwait(false);
+        using var projectionCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var projectionToken = projectionCancellation.Token;
+        var read = await readFrontier(queueLease, projectionToken).ConfigureAwait(false);
         if (read.Disposition == RetentionReadDisposition.Busy)
             return store.RecordRetry(
                 queueLease,
@@ -54,6 +58,7 @@ internal sealed class SkillProjectionWorker
             retentionLease,
             now,
             elapsed,
+            projectionCancellation,
             heartbeatCancellation.Token);
         var records = retentionLease.Value;
         string? terminalErrorCode = null;
@@ -67,7 +72,7 @@ internal sealed class SkillProjectionWorker
             {
                 for (var index = 0; index < records.Count; index++)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    projectionToken.ThrowIfCancellationRequested();
                     var input = queueLease.Inputs[index];
                     var record = records[index];
                     if (input.EvidenceKind != SkillProjectionInputEvidenceKind.PayloadSha256
@@ -89,8 +94,15 @@ internal sealed class SkillProjectionWorker
                     projected.Add(new(input.RawRecordId, record, projection));
                 }
             }
+            projectionToken.ThrowIfCancellationRequested();
             if (terminalErrorCode is null)
                 beforePublish?.Invoke(queueLease);
+        }
+        catch (OperationCanceledException exception) when (
+            exception.CancellationToken == projectionToken
+            && projectionCancellation.IsCancellationRequested
+            && !cancellationToken.IsCancellationRequested)
+        {
         }
         finally
         {
@@ -110,23 +122,35 @@ internal sealed class SkillProjectionWorker
         RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease,
         DateTimeOffset startedAt,
         Stopwatch elapsed,
+        CancellationTokenSource projectionCancellation,
         CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+        using var timer = new PeriodicTimer(
+            TimeSpan.FromSeconds(10),
+            timeProvider ?? TimeProvider.System);
         try
         {
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
                 var renewed = store.Heartbeat(
                     queueLease,
-                    retentionLease,
-                    CurrentTime(startedAt, elapsed));
+                    retentionLease);
                 if (renewed is null)
+                {
+                    projectionCancellation.Cancel();
                     return false;
+                }
                 queueLease = renewed;
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            projectionCancellation.Cancel();
+            return false;
+        }
+        catch (OperationCanceledException exception) when (
+            exception.CancellationToken == cancellationToken
+            && cancellationToken.IsCancellationRequested)
         {
         }
         return true;

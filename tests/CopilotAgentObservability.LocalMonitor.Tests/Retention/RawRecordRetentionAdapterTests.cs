@@ -7,6 +7,56 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
 public sealed class RawRecordRetentionAdapterTests
 {
+    [Theory]
+    [InlineData("$retention_read_source_token")]
+    [InlineData("$retention_read_item_id")]
+    [InlineData("$retention_read_revision")]
+    [InlineData("$retention_read_lease_kind")]
+    [InlineData("$retention_read_lease_owner")]
+    [InlineData("$retention_read_lease_generation")]
+    [InlineData("$retention_read_lease_expires_at")]
+    public async Task RawMaterialization_RejectsEachPerturbedAdmissionParameter(string parameterName)
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"raw-materialization-capability-{Guid.NewGuid():N}.db");
+        try
+        {
+            var now = new DateTimeOffset(2026, 8, 13, 1, 2, 3, TimeSpan.Zero);
+            var time = new MutableTimeProvider(now);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RawTelemetryStore(path, context, time);
+            store.CreateMonitorSchema();
+            var rawRecordId = store.Insert(new RawTelemetryRecord(
+                null,
+                RawTelemetrySources.RawOtlp,
+                "admitted-trace",
+                now,
+                null,
+                "{\"resourceSpans\":[]}"));
+            var admitted = await store.GetRawRecordByIdAsync(rawRecordId, RetentionReadKind.Access, CancellationToken.None);
+            Assert.Equal(RetentionReadDisposition.Granted, admitted.Disposition);
+            await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(admitted.Lease);
+            using var connection = OpenDatabase(path);
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            RawTelemetryStore.ConfigureExactRawRecordMaterializationCommand(command, rawRecordId, lease.Grant);
+
+            Assert.Equal(1, CountRows(command));
+            var parameter = command.Parameters[parameterName];
+            var boundValue = parameter.Value;
+            Assert.NotNull(boundValue);
+            parameter.Value = Perturb(parameterName, boundValue);
+
+            Assert.Equal(0, CountRows(command));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var file in new[] { path, path + "-wal", path + "-shm" })
+                if (File.Exists(file)) File.Delete(file);
+        }
+    }
+
     [Fact]
     public async Task RawAdapter_DeletesOwnedRowAndRetainsProjection()
     {
@@ -40,6 +90,38 @@ public sealed class RawRecordRetentionAdapterTests
         Assert.Equal(0L, fixture.Scalar("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$item;"));
         Assert.Equal("deleting", fixture.Text("SELECT state FROM retention_items WHERE item_id=$item;"));
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item;"));
+    }
+
+    private static int CountRows(SqliteCommand command)
+    {
+        using var reader = command.ExecuteReader();
+        var count = 0;
+        while (reader.Read()) count++;
+        return count;
+    }
+
+    private static object Perturb(string parameterName, object value) => parameterName switch
+    {
+        "$retention_read_source_token" => PerturbToken(Assert.IsType<byte[]>(value)),
+        "$retention_read_item_id" or "$retention_read_lease_owner" => Assert.IsType<string>(value) + "-different",
+        "$retention_read_revision" or "$retention_read_lease_generation" => Convert.ToInt64(value, CultureInfo.InvariantCulture) + 1,
+        "$retention_read_lease_kind" => Assert.IsType<string>(value) == "access" ? "operation" : "access",
+        "$retention_read_lease_expires_at" => DateTimeOffset.Parse(Assert.IsType<string>(value), CultureInfo.InvariantCulture).AddTicks(1).ToString("O", CultureInfo.InvariantCulture),
+        _ => throw new ArgumentOutOfRangeException(nameof(parameterName), parameterName, null),
+    };
+
+    private static byte[] PerturbToken(byte[] value)
+    {
+        var perturbed = value.ToArray();
+        perturbed[0] ^= 0xff;
+        return perturbed;
+    }
+
+    private static SqliteConnection OpenDatabase(string path)
+    {
+        var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+        connection.Open();
+        return connection;
     }
 
     private sealed class Fixture : IDisposable

@@ -855,13 +855,19 @@ is the configured parent only: a run must never give that parent directly to
 the SDK. Before any filesystem or SDK operation, the run reserves its
 catalog-owned opaque child under that exact parent as defined in
 [raw-store normalization](raw-store-normalization.md#analysis-sdk-directory-capture-and-cleanup-d3),
-and gives only that child to the SDK. The operation lease remains held and is
-renewed until both the SDK Session and Client have been disposed. The runner
-must not persist provider API keys or raw provider errors containing
-credentials. An ownership/setup failure records only the fixed message `Local
-analysis ownership could not be established.`; any other SDK failure records
-only `SDK analysis failed.`. Neither message, events, nor diagnostics may
-contain a local path, raw value, credential, secret, or exception text.
+and gives only that child to the SDK as both its base directory and runtime
+working directory. The SDK client must use empty mode, and each Session must
+allow only its exact source-qualified run-scoped custom tool declarations: no
+wildcard custom, ambient built-in, MCP, plugin, instruction, or environment
+capability is enabled. Session working-directory and large-tool-output spill
+paths are that same child, and unexpected permission requests are denied without
+user interaction. The operation lease remains held and is renewed until both
+the SDK Session and Client have been disposed. The runner must not persist
+provider API keys or raw provider errors containing credentials. An
+ownership/setup failure records only the fixed message `Local analysis
+ownership could not be established.`; any other SDK failure records only `SDK
+analysis failed.`. Neither message, events, nor diagnostics may contain a local
+path, raw value, credential, secret, or exception text.
 
 ## Local Ingestion Monitor Windows Startup
 

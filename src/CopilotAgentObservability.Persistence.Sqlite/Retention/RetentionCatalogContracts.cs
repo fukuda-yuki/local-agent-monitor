@@ -152,6 +152,7 @@ public sealed class RetentionCatalogUnavailableException : InvalidOperationExcep
 public sealed class RetentionReadLeaseHandle : IDisposable
 {
     private readonly Action release;
+    private int released;
     internal RetentionReadLeaseHandle(string itemId, long revision, long generation, Action release)
     {
         ItemId = itemId;
@@ -163,7 +164,11 @@ public sealed class RetentionReadLeaseHandle : IDisposable
     public string ItemId { get; }
     public long Revision { get; }
     public long Generation { get; }
-    public void Dispose() => release();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref released, 1) == 0)
+            release();
+    }
 }
 
 internal enum RetentionReadDisposition { Granted, NotFound, Denied, Busy }
@@ -198,6 +203,7 @@ internal sealed record RetentionIntentResult(RetentionIntentDisposition Disposit
 internal enum RetentionMutationDisposition { Applied, NoOpAlreadyFinalized, StaleNoOp, CatalogBusy }
 internal sealed record RetentionFailureResult(RetentionMutationDisposition Disposition, int AttemptNumber, DateTimeOffset? RetryAt, bool RetryExhausted);
 internal enum RetentionRenewalResult { Renewed, LeaseLost, CatalogBusy }
+internal enum RetentionOperationRenewalDisposition { NotDue, Renewed, NonrenewableGrantStillUsable, LeaseLost, CatalogBusy }
 
 internal sealed record RetentionReadRequest(
     RetentionOwnershipKey OwnershipKey,
@@ -279,14 +285,14 @@ internal sealed class RetentionRevisionFenceRejectedException : InvalidOperation
 
 internal sealed class RetentionReadLease<T> : IAsyncDisposable
 {
-    private readonly Func<ValueTask> release;
+    private readonly Func<RetentionReadGrant, ValueTask> release;
     private int released;
 
     internal RetentionReadLease(
         T value,
         RetentionRevisionFence revisionFence,
-        Func<ValueTask> release,
-        RetentionReadGrant? grant = null)
+        RetentionReadGrant grant,
+        Func<RetentionReadGrant, ValueTask> release)
     {
         Value = value;
         RevisionFence = revisionFence;
@@ -296,9 +302,9 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
 
     internal T Value { get; }
     internal RetentionRevisionFence RevisionFence { get; }
-    internal RetentionReadGrant? Grant { get; }
+    internal RetentionReadGrant Grant { get; }
 
-    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release(Grant) : ValueTask.CompletedTask;
 }
 
 internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
@@ -309,17 +315,51 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
     internal RetentionBatchReadLease(
         T value,
         RetentionRevisionFence revisionFence,
-        Func<ValueTask> release,
-        IReadOnlyList<RetentionReadGrant>? grants = null)
+        Func<ValueTask> release)
     {
         Value = value;
         RevisionFence = revisionFence;
         this.release = release;
-        Grants = grants ?? [];
+        Grants = Array.Empty<RetentionReadGrant>();
+    }
+
+    internal RetentionBatchReadLease(
+        T value,
+        RetentionRevisionFence revisionFence,
+        IReadOnlyList<RetentionReadGrant> grants,
+        Func<RetentionReadGrant, ValueTask> release)
+    {
+        ArgumentNullException.ThrowIfNull(grants);
+        ArgumentNullException.ThrowIfNull(release);
+        var admittedGrants = grants.ToArray();
+        Value = value;
+        RevisionFence = revisionFence;
+        Grants = Array.AsReadOnly(admittedGrants);
+        this.release = () => ReleaseEveryAsync(admittedGrants, release);
     }
 
     internal T Value { get; }
     internal RetentionRevisionFence RevisionFence { get; }
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+
+    private static async ValueTask ReleaseEveryAsync(
+        IReadOnlyList<RetentionReadGrant> grants,
+        Func<RetentionReadGrant, ValueTask> release)
+    {
+        Exception? firstFailure = null;
+        foreach (var grant in grants)
+        {
+            try
+            {
+                await release(grant).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                firstFailure ??= exception;
+            }
+        }
+        if (firstFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
+    }
 }

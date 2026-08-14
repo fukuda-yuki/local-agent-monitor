@@ -58,19 +58,53 @@ internal sealed class LocalRepositoryReconciliationWorker
                 return MapTransition(queue.RecordCatalogSchemaViolation(lease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.Corrupt);
             if (raw.Availability != LocalRepositoryRawAvailability.Available || raw.Lease is null)
                 return MapTransition(queue.RecordInputUnavailable(lease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.InputUnavailable);
-            using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var heartbeat = HeartbeatAsync(lease, raw.Lease, heartbeatCancellation);
+            using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var heartbeatStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var handoffRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var heartbeat = HeartbeatAsync(
+                lease,
+                raw.Lease,
+                attemptCancellation,
+                heartbeatStop.Token,
+                handoffRequested.Task);
+            ILocalRepositoryPreparedRawRecord? prepared = null;
+            var ownedLease = lease;
+            var heartbeatDrained = false;
             try
             {
-                await processor.ProcessAsync(lease, raw.Lease.Value, raw.Lease, heartbeatCancellation.Token).ConfigureAwait(false);
-                await heartbeatCancellation.CancelAsync().ConfigureAwait(false);
-                return await heartbeat.ConfigureAwait(false)
-                    ? LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked
-                    : LocalRepositoryReconciliationWorkOutcome.StaleOwner;
+                prepared = await processor.PrepareAsync(
+                    lease,
+                    raw.Lease.Value,
+                    raw.Lease,
+                    attemptCancellation.Token).ConfigureAwait(false);
+                attemptCancellation.Token.ThrowIfCancellationRequested();
+
+                checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeHandoffHeartbeat);
+                attemptCancellation.Token.ThrowIfCancellationRequested();
+                handoffRequested.TrySetResult();
+                var heartbeatResult = await DrainHeartbeatAsync(heartbeat, ownedLease).ConfigureAwait(false);
+                heartbeatDrained = true;
+                ownedLease = heartbeatResult.Lease;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!heartbeatResult.AuthorityHeld || !heartbeatResult.HandoffApplied)
+                {
+                    return MapTransition(
+                        queue.ReturnPending(ownedLease, timeProvider.GetUtcNow()),
+                        LocalRepositoryReconciliationWorkOutcome.Retrying);
+                }
+                attemptCancellation.Token.ThrowIfCancellationRequested();
+                await prepared.FinalizeAsync(ownedLease, attemptCancellation.Token).ConfigureAwait(false);
+                return LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                return MapTransition(queue.ReturnPending(lease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.Retrying);
+                await heartbeatStop.CancelAsync().ConfigureAwait(false);
+                if (!heartbeatDrained)
+                {
+                    ownedLease = (await DrainHeartbeatAsync(heartbeat, ownedLease).ConfigureAwait(false)).Lease;
+                    heartbeatDrained = true;
+                }
+                return MapTransition(queue.ReturnPending(ownedLease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.Retrying);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -78,35 +112,63 @@ internal sealed class LocalRepositoryReconciliationWorker
             }
             catch
             {
-                return MapTransition(queue.ReturnPending(lease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.Retrying);
+                await heartbeatStop.CancelAsync().ConfigureAwait(false);
+                if (!heartbeatDrained)
+                {
+                    ownedLease = (await DrainHeartbeatAsync(heartbeat, ownedLease).ConfigureAwait(false)).Lease;
+                    heartbeatDrained = true;
+                }
+                return MapTransition(queue.ReturnPending(ownedLease, timeProvider.GetUtcNow()), LocalRepositoryReconciliationWorkOutcome.Retrying);
             }
             finally
             {
-                await heartbeatCancellation.CancelAsync().ConfigureAwait(false);
-                await heartbeat.ConfigureAwait(false);
+                await heartbeatStop.CancelAsync().ConfigureAwait(false);
+                if (!heartbeatDrained)
+                    await DrainHeartbeatAsync(heartbeat, ownedLease).ConfigureAwait(false);
+                if (prepared is not null)
+                    await prepared.DisposeAsync().ConfigureAwait(false);
             }
         }
     }
 
-    private async Task<bool> HeartbeatAsync(
+    private async Task<HeartbeatResult> HeartbeatAsync(
         LocalRepositoryQueueLease initialLease,
         RetentionReadLease<RawTelemetryRecord> retentionLease,
-        CancellationTokenSource cancellation)
+        CancellationTokenSource attemptCancellation,
+        CancellationToken heartbeatStop,
+        Task handoffRequested)
     {
         var lease = initialLease;
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10), timeProvider);
-            while (await timer.WaitForNextTickAsync(cancellation.Token).ConfigureAwait(false))
+            while (true)
             {
+                var tick = timer.WaitForNextTickAsync(heartbeatStop).AsTask();
+                var ready = await Task.WhenAny(handoffRequested, tick).ConfigureAwait(false);
+                if (ready == handoffRequested || handoffRequested.IsCompleted)
+                {
+                    heartbeatStop.ThrowIfCancellationRequested();
+                    var handoff = queue.Heartbeat(lease, retentionLease);
+                    if (handoff.Status != LocalRepositoryQueueTransitionResult.Applied || handoff.Lease is null)
+                    {
+                        checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterHandoffRejected);
+                        return new(false, lease, false);
+                    }
+                    lease = handoff.Lease;
+                    checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterHandoffHeartbeat);
+                    return new(true, lease, true);
+                }
+                if (!await tick.ConfigureAwait(false))
+                    break;
                 var at = timeProvider.GetUtcNow().ToUniversalTime();
                 if (at >= lease.LeaseExpiresAt)
                 {
                     checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.HeartbeatLeaseExpired);
-                    cancellation.Cancel();
-                    return false;
+                    attemptCancellation.Cancel();
+                    return new(false, lease, false);
                 }
-                var renewed = queue.Heartbeat(lease, retentionLease, at);
+                var renewed = queue.Heartbeat(lease, retentionLease);
                 if (renewed.Status == LocalRepositoryQueueTransitionResult.Busy)
                 {
                     checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterHeartbeatBusy);
@@ -114,22 +176,45 @@ internal sealed class LocalRepositoryReconciliationWorker
                 }
                 if (renewed.Status != LocalRepositoryQueueTransitionResult.Applied || renewed.Lease is null)
                 {
-                    cancellation.Cancel();
-                    return false;
+                    checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatRejected);
+                    attemptCancellation.Cancel();
+                    return new(false, lease, false);
                 }
                 lease = renewed.Lease;
+                checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatApplied);
             }
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        return true;
+        catch (OperationCanceledException) when (heartbeatStop.IsCancellationRequested) { }
+        catch
+        {
+            attemptCancellation.Cancel();
+            return new(false, lease, false);
+        }
+        return new(true, lease, false);
+    }
+
+    private sealed record HeartbeatResult(bool AuthorityHeld, LocalRepositoryQueueLease Lease, bool HandoffApplied);
+
+    private static async Task<HeartbeatResult> DrainHeartbeatAsync(
+        Task<HeartbeatResult> heartbeat,
+        LocalRepositoryQueueLease fallbackLease)
+    {
+        try
+        {
+            return await heartbeat.ConfigureAwait(false);
+        }
+        catch
+        {
+            return new(false, fallbackLease, false);
+        }
     }
 
     private static LocalRepositoryReconciliationWorkOutcome MapTransition(
         LocalRepositoryQueueTransitionResult result,
         LocalRepositoryReconciliationWorkOutcome applied) => result switch
-    {
-        LocalRepositoryQueueTransitionResult.Applied => applied,
-        LocalRepositoryQueueTransitionResult.Busy => LocalRepositoryReconciliationWorkOutcome.Busy,
-        _ => LocalRepositoryReconciliationWorkOutcome.StaleOwner,
-    };
+        {
+            LocalRepositoryQueueTransitionResult.Applied => applied,
+            LocalRepositoryQueueTransitionResult.Busy => LocalRepositoryReconciliationWorkOutcome.Busy,
+            _ => LocalRepositoryReconciliationWorkOutcome.StaleOwner,
+        };
 }

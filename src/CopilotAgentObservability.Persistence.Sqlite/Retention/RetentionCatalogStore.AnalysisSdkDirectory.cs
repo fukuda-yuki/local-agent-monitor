@@ -40,12 +40,89 @@ public sealed partial class RetentionCatalogStore
         catch (UnauthorizedAccessException) { return SourceReceiptProof.CatalogBusy; }
     }
 
+    private static SourceReceiptProof ValidateAnalysisSdkDirectoryActiveEvidence(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string store,
+        string captureId,
+        byte[] receipt,
+        bool verifyMarker)
+    {
+        try
+        {
+            if (!IsCanonicalId(captureId)
+                || !string.Equals(store, StoreId(connection, transaction), StringComparison.Ordinal))
+                return SourceReceiptProof.InvalidIdentity;
+            using var item = connection.CreateCommand();
+            item.Transaction = transaction;
+            item.CommandText =
+                "SELECT private_locator FROM retention_items WHERE store_instance_id=$store AND store_kind='analysis_sdk_directory' AND source_item_id=$capture;";
+            item.Parameters.AddWithValue("$store", store);
+            item.Parameters.AddWithValue("$capture", captureId);
+            var locator = item.ExecuteScalar() as string;
+            var row = LoadSdkReservationByCapture(connection, transaction, captureId);
+            if (row is null) return SourceReceiptProof.Missing;
+            var authority = LoadAnalysisRunAuthority(connection, transaction, row.RunId);
+            if (locator is null
+                || authority is null
+                || row.Phase != RetentionAnalysisSdkDirectoryPhase.Active
+                || !string.Equals(row.StoreInstanceId, store, StringComparison.Ordinal)
+                || !string.Equals(row.ChildLocator, locator, StringComparison.Ordinal)
+                || !string.Equals(row.RequestedAtText, authority.RequestedAtText, StringComparison.Ordinal)
+                || row.RequestedAtTicks != authority.RequestedAtTicks
+                || !RetentionOwnershipReceipt.Matches(row.AnalysisOwnerTokenSha256, SHA256.HashData(authority.OwnerToken))
+                || !RetentionOwnershipReceipt.Matches(
+                    receipt,
+                    RetentionOwnershipReceipt.CreateAnalysisSdkDirectory(
+                        new(
+                            row.StoreInstanceId,
+                            row.CaptureId,
+                            row.RunId,
+                            row.RequestedAtText,
+                            row.RequestedAtTicks,
+                            row.MarkerSha256,
+                            row.OwnerToken))))
+                return SourceReceiptProof.InvalidOrMismatched;
+            if (!verifyMarker) return SourceReceiptProof.Match;
+
+            if (EntryKind(row.ChildLocator) == SdkEntryKind.Absent)
+                return SourceReceiptProof.Missing;
+            if (EntryKind(row.ChildLocator) != SdkEntryKind.Directory)
+                return SourceReceiptProof.InvalidOrMismatched;
+            var markerPath = Path.Combine(row.ChildLocator, RetentionAnalysisSdkDirectoryOwnershipMarker.FileName);
+            if (EntryKind(markerPath) == SdkEntryKind.Absent)
+                return SourceReceiptProof.Missing;
+            if (EntryKind(markerPath) != SdkEntryKind.File)
+                return SourceReceiptProof.InvalidOrMismatched;
+            var expectedMarker = RetentionAnalysisSdkDirectoryOwnershipMarker.Create(
+                row.StoreInstanceId,
+                row.CaptureId,
+                row.RunId,
+                row.RequestedAtText,
+                row.RequestedAtTicks,
+                row.OwnerToken);
+            var marker = ReadBounded(markerPath, expectedMarker.Length);
+            return marker.Length == expectedMarker.Length
+                && CryptographicOperations.FixedTimeEquals(marker.Bytes, expectedMarker)
+                && RetentionOwnershipReceipt.Matches(marker.Sha, row.MarkerSha256)
+                    ? SourceReceiptProof.Match
+                    : SourceReceiptProof.InvalidOrMismatched;
+        }
+        catch (SdkIdentityException) { return SourceReceiptProof.InvalidOrMismatched; }
+        catch (ArgumentException) { return SourceReceiptProof.InvalidIdentity; }
+        catch (FormatException) { return SourceReceiptProof.InvalidIdentity; }
+        catch (UnauthorizedAccessException) { return SourceReceiptProof.CatalogBusy; }
+        catch (IOException) { return SourceReceiptProof.CatalogBusy; }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return SourceReceiptProof.CatalogBusy; }
+    }
+
     internal RetentionAnalysisSdkDirectoryDeletionPlanResult LoadAnalysisSdkDirectoryDeletionPlan(RetentionDeleteContext context, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(context);
         try
         {
-            using var connection = OpenExisting(); using var transaction = connection.BeginTransaction(deferred: false);
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
             using var item = connection.CreateCommand(); item.Transaction = transaction;
             item.CommandText = "SELECT store_instance_id,source_item_id,ownership_receipt,private_locator,state,revision,adapter_coverage_version FROM retention_items WHERE item_id=$id;";
             item.Parameters.AddWithValue("$id", context.ItemId);
@@ -102,45 +179,123 @@ public sealed partial class RetentionCatalogStore
         catch (Exception exception) when (exception is SqliteException or FormatException or ArgumentException or InvalidOperationException) { throw new RetentionCatalogUnavailableException(); }
     }
 
-    internal RetentionAnalysisSdkDirectoryActivationResult ActivateAnalysisSdkDirectoryAndAcquireOperationLease(RetentionAnalysisSdkDirectoryReservation reservation, byte[] marker, bool exclusivelyCreatedEmptyChild, DateTimeOffset now)
+    internal RetentionAnalysisSdkDirectoryActivationResult ActivateAnalysisSdkDirectoryAndAcquireOperationLease(RetentionAnalysisSdkDirectoryReservation reservation, byte[] marker, bool exclusivelyCreatedEmptyChild)
+        => ActivateAnalysisSdkDirectoryAndAcquireOperationLeaseCore(
+            reservation,
+            marker,
+            exclusivelyCreatedEmptyChild,
+            prepareOwnedChild: null);
+
+    internal RetentionAnalysisSdkDirectoryActivationResult PrepareAndActivateAnalysisSdkDirectoryAndAcquireOperationLease(
+        RetentionAnalysisSdkDirectoryReservation reservation,
+        Action prepareOwnedChild)
+    {
+        ArgumentNullException.ThrowIfNull(prepareOwnedChild);
+        return ActivateAnalysisSdkDirectoryAndAcquireOperationLeaseCore(
+            reservation,
+            reservation?.OwnershipMarker ?? [],
+            exclusivelyCreatedEmptyChild: true,
+            prepareOwnedChild);
+    }
+
+    private RetentionAnalysisSdkDirectoryActivationResult ActivateAnalysisSdkDirectoryAndAcquireOperationLeaseCore(
+        RetentionAnalysisSdkDirectoryReservation reservation,
+        byte[] marker,
+        bool exclusivelyCreatedEmptyChild,
+        Action? prepareOwnedChild)
     {
         if (reservation is null || marker is not { Length: > 0 } || !exclusivelyCreatedEmptyChild) return RetentionAnalysisSdkDirectoryActivationResult.Closed;
         try
         {
-            using var connection = OpenExisting(); using var transaction = connection.BeginTransaction();
+            using var connection = OpenExisting();
+            analysisSdkDirectoryCheckpoint?.Invoke("activation_transaction_starting");
+            using var transaction = connection.BeginTransaction(deferred: false);
+            analysisSdkDirectoryCheckpoint?.Invoke("activation_transaction_began");
+            var transactionNow = timeProvider.GetUtcNow();
+            var store = StoreId(connection, transaction);
             var row = LoadSdkReservation(connection, transaction, reservation.AnalysisRunId);
             var authority = LoadAnalysisRunAuthority(connection, transaction, reservation.AnalysisRunId);
-            if (row is null || authority is null || !row.Matches(reservation) || !RetentionOwnershipReceipt.Matches(row.AnalysisOwnerTokenSha256, SHA256.HashData(authority.OwnerToken)) || row.Phase != RetentionAnalysisSdkDirectoryPhase.Reserved || !RetentionOwnershipReceipt.Matches(row.MarkerSha256, SHA256.HashData(marker))) { transaction.Commit(); return RetentionAnalysisSdkDirectoryActivationResult.Closed; }
-            if (row.RequestedAt + RetentionV1Constants.RawDefaultTtl <= now) { transaction.Commit(); return RetentionAnalysisSdkDirectoryActivationResult.Closed; }
+            if (row is null
+                || authority is null
+                || !row.Matches(reservation)
+                || !string.Equals(row.StoreInstanceId, store, StringComparison.Ordinal)
+                || !string.Equals(row.RequestedAtText, authority.RequestedAtText, StringComparison.Ordinal)
+                || row.RequestedAtTicks != authority.RequestedAtTicks
+                || !RetentionOwnershipReceipt.Matches(row.AnalysisOwnerTokenSha256, SHA256.HashData(authority.OwnerToken))
+                || row.Phase != RetentionAnalysisSdkDirectoryPhase.Reserved
+                || !RetentionOwnershipReceipt.Matches(row.MarkerSha256, SHA256.HashData(marker)))
+            {
+                transaction.Commit();
+                return RetentionAnalysisSdkDirectoryActivationResult.Closed;
+            }
+            if (row.RequestedAt + RetentionV1Constants.RawDefaultTtl <= transactionNow) { transaction.Commit(); return RetentionAnalysisSdkDirectoryActivationResult.Closed; }
+            prepareOwnedChild?.Invoke();
             var receipt = RetentionOwnershipReceipt.CreateAnalysisSdkDirectory(new(row.StoreInstanceId, row.CaptureId, row.RunId, row.RequestedAtText, row.RequestedAtTicks, row.MarkerSha256, row.OwnerToken));
             var itemId = Guid.NewGuid().ToString("N");
+            var key = new RetentionOwnershipKey(row.StoreInstanceId, RetentionStoreKind.AnalysisSdkDirectory, row.CaptureId);
             SdkExec(connection, transaction, "INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,private_locator,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) VALUES($item,$store,'analysis_sdk_directory',$source,1,$receipt,$locator,$captured,$expires,'raw-default-90d',1,'expiring',1,1);", ("$item", itemId), ("$store", row.StoreInstanceId), ("$source", row.CaptureId), ("$receipt", receipt), ("$locator", row.ChildLocator), ("$captured", row.RequestedAtText), ("$expires", Timestamp(row.RequestedAt + RetentionV1Constants.RawDefaultTtl)));
             analysisSdkDirectoryCheckpoint?.Invoke("activation_item_inserted");
+            var catalogItem = FindForUpdate(connection, transaction, key);
+            if (catalogItem is null
+                || !string.Equals(catalogItem.ItemId, itemId, StringComparison.Ordinal)
+                || ClassifyRowReadability(catalogItem, transactionNow) != RetentionRowReadability.Readable)
+                throw new RetentionCatalogUnavailableException();
             var owner = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
-            var generation = AcquireLease(connection, transaction, itemId, RetentionLeaseKind.Operation, owner, now, row.RequestedAt + RetentionV1Constants.RawDefaultTtl);
+            var generation = AcquireLease(connection, transaction, itemId, RetentionLeaseKind.Operation, owner, transactionNow);
             if (generation is null) throw new RetentionCatalogUnavailableException();
             analysisSdkDirectoryCheckpoint?.Invoke("activation_lease_inserted");
-            using (var phase = connection.CreateCommand()) { phase.Transaction = transaction; phase.CommandText = "UPDATE retention_analysis_sdk_directory_reservations SET phase='active',revision=revision+1,updated_at=$updated WHERE capture_id=$capture AND phase='reserved';"; phase.Parameters.AddWithValue("$capture", row.CaptureId); phase.Parameters.AddWithValue("$updated", Timestamp(now)); if (phase.ExecuteNonQuery() != 1) throw new RetentionCatalogUnavailableException(); }
+            using (var phase = connection.CreateCommand()) { phase.Transaction = transaction; phase.CommandText = "UPDATE retention_analysis_sdk_directory_reservations SET phase='active',revision=revision+1,updated_at=$updated WHERE capture_id=$capture AND phase='reserved';"; phase.Parameters.AddWithValue("$capture", row.CaptureId); phase.Parameters.AddWithValue("$updated", Timestamp(transactionNow)); if (phase.ExecuteNonQuery() != 1) throw new RetentionCatalogUnavailableException(); }
             analysisSdkDirectoryCheckpoint?.Invoke("activation_phase_updated");
+            if (ValidateAnalysisSdkDirectoryActiveEvidence(connection, transaction, row.StoreInstanceId, row.CaptureId, receipt, verifyMarker: true) != SourceReceiptProof.Match)
+                throw new RetentionCatalogUnavailableException();
+            var sourceToken = SourceToken(connection, transaction, key);
+            if (sourceToken is null) throw new RetentionCatalogUnavailableException();
+            var grant = new RetentionReadGrant(
+                key,
+                itemId,
+                catalogItem.Revision,
+                RetentionLeaseKind.Operation,
+                owner,
+                generation.Value,
+                transactionNow.Add(RetentionV1Constants.LeaseDuration),
+                sourceToken);
+            if (!IsGrantUsable(connection, transaction, grant, transactionNow))
+                throw new RetentionCatalogUnavailableException();
             transaction.Commit();
-            return RetentionAnalysisSdkDirectoryActivationResult.Active(new(itemId, 1, owner, generation.Value, row.CaptureId, reservation));
+            return RetentionAnalysisSdkDirectoryActivationResult.Active(new(grant, row.CaptureId, reservation));
         }
         catch (RetentionCatalogUnavailableException) { return RetentionAnalysisSdkDirectoryActivationResult.Closed; }
         catch (Exception exception) when (exception is SqliteException or ArgumentException or InvalidOperationException) { return RetentionAnalysisSdkDirectoryActivationResult.Closed; }
     }
 
-    internal RetentionRenewalResult RenewAnalysisSdkDirectoryOperationLease(RetentionAnalysisSdkDirectoryOperationLease lease, DateTimeOffset now)
+    internal RetentionOperationRenewalDisposition RenewAnalysisSdkDirectoryOperationLease(RetentionAnalysisSdkDirectoryOperationLease lease)
     {
-        if (lease is null) return RetentionRenewalResult.LeaseLost;
-        try { using var c = OpenExisting(); using var t = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "UPDATE retention_leases SET expires_at=$expires WHERE item_id=$item AND lease_kind='operation' AND owner=$owner AND generation=$generation AND expires_at>$now AND EXISTS(SELECT 1 FROM retention_items WHERE item_id=$item AND revision=$revision AND state IN ('expiring','retained_by_policy') AND expires_at>$now);"; q.Parameters.AddWithValue("$expires", Timestamp(now + RetentionV1Constants.LeaseDuration)); q.Parameters.AddWithValue("$item", lease.ItemId); q.Parameters.AddWithValue("$owner", lease.Owner); q.Parameters.AddWithValue("$generation", lease.Generation); q.Parameters.AddWithValue("$revision", lease.Revision); q.Parameters.AddWithValue("$now", Timestamp(now)); var count = q.ExecuteNonQuery(); t.Commit(); return count == 1 ? RetentionRenewalResult.Renewed : RetentionRenewalResult.LeaseLost; }
-        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return RetentionRenewalResult.CatalogBusy; }
-        catch (SqliteException) { return RetentionRenewalResult.LeaseLost; }
+        if (lease is null) return RetentionOperationRenewalDisposition.LeaseLost;
+        return RenewOperationLease(lease.Grant);
+    }
+
+    internal RetentionAnalysisSdkDirectoryLeaseObservation RenewAndObserveAnalysisSdkDirectoryOperationLease(
+        RetentionAnalysisSdkDirectoryOperationLease lease)
+    {
+        if (lease is null)
+        {
+            var observedAt = timeProvider.GetUtcNow();
+            return new(
+                RetentionOperationRenewalDisposition.LeaseLost,
+                observedAt,
+                DateTimeOffset.MinValue);
+        }
+
+        var disposition = RenewOperationLease(lease.Grant);
+        using var publication = lease.Grant.EnterLeasePublication();
+        analysisSdkDirectoryCheckpoint?.Invoke("renewal_observation_starting");
+        return new(disposition, timeProvider.GetUtcNow(), publication.LeaseExpiresAt);
     }
 
     internal RetentionMutationDisposition ReleaseAnalysisSdkDirectoryOperationLease(RetentionAnalysisSdkDirectoryOperationLease lease)
     {
         if (lease is null) return RetentionMutationDisposition.StaleNoOp;
-        try { using var c = OpenExisting(); using var t = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner=$owner AND generation=$generation AND EXISTS(SELECT 1 FROM retention_items WHERE item_id=$item AND revision=$revision);"; q.Parameters.AddWithValue("$item", lease.ItemId); q.Parameters.AddWithValue("$owner", lease.Owner); q.Parameters.AddWithValue("$generation", lease.Generation); q.Parameters.AddWithValue("$revision", lease.Revision); var count = q.ExecuteNonQuery(); t.Commit(); return count == 1 ? RetentionMutationDisposition.Applied : RetentionMutationDisposition.StaleNoOp; }
+        try { using var c = OpenExisting(); using var t = c.BeginTransaction(deferred: false); using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind=$kind AND owner=$owner AND generation=$generation;"; q.Parameters.AddWithValue("$item", lease.Grant.ItemId); q.Parameters.AddWithValue("$kind", lease.Grant.LeaseKind.ToString().ToLowerInvariant()); q.Parameters.AddWithValue("$owner", lease.Grant.LeaseOwner); q.Parameters.AddWithValue("$generation", lease.Grant.LeaseGeneration); var count = q.ExecuteNonQuery(); t.Commit(); return count == 1 ? RetentionMutationDisposition.Applied : RetentionMutationDisposition.StaleNoOp; }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return RetentionMutationDisposition.CatalogBusy; }
         catch (SqliteException) { return RetentionMutationDisposition.StaleNoOp; }
     }
@@ -155,8 +310,199 @@ public sealed partial class RetentionCatalogStore
     internal RetentionCaptureMutationDisposition AbandonReservedAnalysisSdkDirectory(RetentionAnalysisSdkDirectoryReservation reservation)
     {
         if (reservation is null) return RetentionCaptureMutationDisposition.Conflict;
-        try { using var c = OpenExisting(); using var t = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "DELETE FROM retention_analysis_sdk_directory_reservations WHERE capture_id=$capture AND analysis_run_id=$run AND owner_token=$token AND phase='reserved';"; q.Parameters.AddWithValue("$capture", reservation.CaptureId); q.Parameters.AddWithValue("$run", reservation.AnalysisRunId); q.Parameters.AddWithValue("$token", reservation.OwnerToken); var count = q.ExecuteNonQuery(); t.Commit(); return count == 1 ? RetentionCaptureMutationDisposition.Applied : RetentionCaptureMutationDisposition.StaleNoOp; }
-        catch (SqliteException) { return RetentionCaptureMutationDisposition.StaleNoOp; }
+        try
+        {
+            using var connection = OpenExisting();
+            analysisSdkDirectoryCheckpoint?.Invoke("abandon_transaction_starting");
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var store = StoreId(connection, transaction);
+            var row = LoadSdkReservation(connection, transaction, reservation.AnalysisRunId);
+            var authority = LoadAnalysisRunAuthority(connection, transaction, reservation.AnalysisRunId);
+            if (row is null
+                || authority is null
+                || row.Phase != RetentionAnalysisSdkDirectoryPhase.Reserved
+                || !row.Matches(reservation)
+                || !string.Equals(row.StoreInstanceId, store, StringComparison.Ordinal)
+                || !string.Equals(row.RequestedAtText, authority.RequestedAtText, StringComparison.Ordinal)
+                || row.RequestedAtTicks != authority.RequestedAtTicks
+                || !RetentionOwnershipReceipt.Matches(row.AnalysisOwnerTokenSha256, SHA256.HashData(authority.OwnerToken)))
+            {
+                transaction.Commit();
+                return RetentionCaptureMutationDisposition.StaleNoOp;
+            }
+
+            var childKind = EntryKind(row.ChildLocator);
+            if (childKind == SdkEntryKind.Absent)
+                analysisSdkDirectoryCheckpoint?.Invoke("abandon_child_observed_absent");
+            var childCleanup = CleanupOwnedReservedSdkChild(
+                row,
+                allowMarkerlessEmptyChild: true);
+            if (childCleanup == ReservedSdkChildCleanupDisposition.Conflict)
+            {
+                transaction.Commit();
+                return RetentionCaptureMutationDisposition.Conflict;
+            }
+
+            using var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText =
+                "DELETE FROM retention_analysis_sdk_directory_reservations " +
+                "WHERE capture_id=$capture AND analysis_run_id=$run AND store_instance_id=$store " +
+                "AND requested_at=$requested AND requested_at_utc_ticks=$ticks " +
+                "AND parent_locator=$parent AND child_locator=$child " +
+                "AND analysis_owner_token_sha256=$runToken AND owner_token=$token AND marker_sha256=$marker " +
+                "AND phase='reserved' AND revision=$revision;";
+            delete.Parameters.AddWithValue("$capture", row.CaptureId);
+            delete.Parameters.AddWithValue("$run", row.RunId);
+            delete.Parameters.AddWithValue("$store", row.StoreInstanceId);
+            delete.Parameters.AddWithValue("$requested", row.RequestedAtText);
+            delete.Parameters.AddWithValue("$ticks", row.RequestedAtTicks);
+            delete.Parameters.AddWithValue("$parent", row.ParentLocator);
+            delete.Parameters.AddWithValue("$child", row.ChildLocator);
+            delete.Parameters.AddWithValue("$runToken", row.AnalysisOwnerTokenSha256);
+            delete.Parameters.AddWithValue("$token", row.OwnerToken);
+            delete.Parameters.AddWithValue("$marker", row.MarkerSha256);
+            delete.Parameters.AddWithValue("$revision", row.Revision);
+            if (delete.ExecuteNonQuery() != 1)
+                return RetentionCaptureMutationDisposition.Conflict;
+            if (childCleanup == ReservedSdkChildCleanupDisposition.Deleted)
+                analysisSdkDirectoryCheckpoint?.Invoke("abandon_child_cleaned_before_catalog_commit");
+            transaction.Commit();
+            return RetentionCaptureMutationDisposition.Applied;
+        }
+        catch (SqliteException) { return RetentionCaptureMutationDisposition.Conflict; }
+        catch (Exception exception) when (exception is RetentionCatalogUnavailableException
+            or SdkIdentityException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or InvalidOperationException)
+        {
+            return RetentionCaptureMutationDisposition.Conflict;
+        }
+    }
+
+    internal RetentionCaptureMutationDisposition CleanupAndAbandonReservedAnalysisSdkDirectory(
+        RetentionAnalysisSdkDirectoryReservation reservation,
+        bool allowMarkerlessEmptyChild)
+    {
+        if (reservation is null) return RetentionCaptureMutationDisposition.Conflict;
+        try
+        {
+            using var connection = OpenExisting();
+            analysisSdkDirectoryCheckpoint?.Invoke("cleanup_and_abandon_transaction_starting");
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var store = StoreId(connection, transaction);
+            var row = LoadSdkReservation(connection, transaction, reservation.AnalysisRunId);
+            var authority = LoadAnalysisRunAuthority(connection, transaction, reservation.AnalysisRunId);
+            if (row is null
+                || authority is null
+                || row.Phase != RetentionAnalysisSdkDirectoryPhase.Reserved
+                || !row.Matches(reservation)
+                || !string.Equals(row.StoreInstanceId, store, StringComparison.Ordinal)
+                || !string.Equals(row.RequestedAtText, authority.RequestedAtText, StringComparison.Ordinal)
+                || row.RequestedAtTicks != authority.RequestedAtTicks
+                || !RetentionOwnershipReceipt.Matches(row.AnalysisOwnerTokenSha256, SHA256.HashData(authority.OwnerToken)))
+            {
+                transaction.Commit();
+                return RetentionCaptureMutationDisposition.StaleNoOp;
+            }
+
+            var childCleanup = CleanupOwnedReservedSdkChild(row, allowMarkerlessEmptyChild);
+            if (childCleanup == ReservedSdkChildCleanupDisposition.Conflict)
+            {
+                transaction.Commit();
+                return RetentionCaptureMutationDisposition.Conflict;
+            }
+
+            using var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText =
+                "DELETE FROM retention_analysis_sdk_directory_reservations " +
+                "WHERE capture_id=$capture AND analysis_run_id=$run AND store_instance_id=$store " +
+                "AND requested_at=$requested AND requested_at_utc_ticks=$ticks " +
+                "AND parent_locator=$parent AND child_locator=$child " +
+                "AND analysis_owner_token_sha256=$runToken AND owner_token=$token AND marker_sha256=$marker " +
+                "AND phase='reserved' AND revision=$revision;";
+            delete.Parameters.AddWithValue("$capture", row.CaptureId);
+            delete.Parameters.AddWithValue("$run", row.RunId);
+            delete.Parameters.AddWithValue("$store", row.StoreInstanceId);
+            delete.Parameters.AddWithValue("$requested", row.RequestedAtText);
+            delete.Parameters.AddWithValue("$ticks", row.RequestedAtTicks);
+            delete.Parameters.AddWithValue("$parent", row.ParentLocator);
+            delete.Parameters.AddWithValue("$child", row.ChildLocator);
+            delete.Parameters.AddWithValue("$runToken", row.AnalysisOwnerTokenSha256);
+            delete.Parameters.AddWithValue("$token", row.OwnerToken);
+            delete.Parameters.AddWithValue("$marker", row.MarkerSha256);
+            delete.Parameters.AddWithValue("$revision", row.Revision);
+            if (delete.ExecuteNonQuery() != 1)
+                return RetentionCaptureMutationDisposition.Conflict;
+            if (childCleanup == ReservedSdkChildCleanupDisposition.Deleted)
+                analysisSdkDirectoryCheckpoint?.Invoke("abandon_child_cleaned_before_catalog_commit");
+            transaction.Commit();
+            return RetentionCaptureMutationDisposition.Applied;
+        }
+        catch (SqliteException) { return RetentionCaptureMutationDisposition.Conflict; }
+        catch (Exception exception) when (exception is RetentionCatalogUnavailableException
+            or SdkIdentityException
+            or IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or InvalidOperationException)
+        {
+            return RetentionCaptureMutationDisposition.Conflict;
+        }
+    }
+
+    private ReservedSdkChildCleanupDisposition CleanupOwnedReservedSdkChild(
+        SdkRow row,
+        bool allowMarkerlessEmptyChild)
+    {
+        try
+        {
+            if (EntryKind(row.ChildLocator) != SdkEntryKind.Directory)
+                return ReservedSdkChildCleanupDisposition.Preserved;
+            var entries = Directory.EnumerateFileSystemEntries(row.ChildLocator).Take(2).ToArray();
+            if (entries.Length == 1
+                && string.Equals(
+                    Path.GetFileName(entries[0]),
+                    RetentionAnalysisSdkDirectoryOwnershipMarker.FileName,
+                    StringComparison.Ordinal)
+                && EntryKind(entries[0]) == SdkEntryKind.File)
+            {
+                var expectedMarker = RetentionAnalysisSdkDirectoryOwnershipMarker.Create(
+                    row.StoreInstanceId,
+                    row.CaptureId,
+                    row.RunId,
+                    row.RequestedAtText,
+                    row.RequestedAtTicks,
+                    row.OwnerToken);
+                if (new FileInfo(entries[0]).Length != expectedMarker.Length)
+                    return ReservedSdkChildCleanupDisposition.Preserved;
+                var marker = ReadBounded(entries[0], expectedMarker.Length);
+                if (marker.Length != expectedMarker.Length
+                    || !CryptographicOperations.FixedTimeEquals(marker.Bytes, expectedMarker)
+                    || !RetentionOwnershipReceipt.Matches(marker.Sha, row.MarkerSha256))
+                    return ReservedSdkChildCleanupDisposition.Preserved;
+                File.Delete(entries[0]);
+                analysisSdkDirectoryCheckpoint?.Invoke("abandon_marker_deleted_before_empty_recheck");
+            }
+            else if (!allowMarkerlessEmptyChild || entries.Length != 0)
+            {
+                return ReservedSdkChildCleanupDisposition.Preserved;
+            }
+
+            if (Directory.EnumerateFileSystemEntries(row.ChildLocator).Any())
+                return ReservedSdkChildCleanupDisposition.Conflict;
+            Directory.Delete(row.ChildLocator, recursive: false);
+            return EntryKind(row.ChildLocator) == SdkEntryKind.Absent
+                ? ReservedSdkChildCleanupDisposition.Deleted
+                : ReservedSdkChildCleanupDisposition.Conflict;
+        }
+        catch
+        {
+            return ReservedSdkChildCleanupDisposition.Conflict;
+        }
     }
 
     private static SdkRow? LoadSdkReservationByCapture(SqliteConnection c, SqliteTransaction t, string capture)
@@ -180,7 +526,7 @@ public sealed partial class RetentionCatalogStore
     {
         if (EntryKind(row.ChildLocator) == SdkEntryKind.Absent) return null;
         if (EntryKind(row.ChildLocator) != SdkEntryKind.Directory) throw new SdkIdentityException();
-        var markerPath = Path.Combine(row.ChildLocator, RetentionFileCaptureContracts.OwnerMarkerName);
+        var markerPath = Path.Combine(row.ChildLocator, RetentionAnalysisSdkDirectoryOwnershipMarker.FileName);
         if (EntryKind(markerPath) != SdkEntryKind.File) throw new SdkIdentityException();
         var marker = ReadBounded(markerPath, RetentionFileCaptureContracts.MaximumMemberBytes);
         if (!CryptographicOperations.FixedTimeEquals(marker.Bytes, RetentionAnalysisSdkDirectoryOwnershipMarker.Create(row.StoreInstanceId, row.CaptureId, row.RunId, row.RequestedAtText, row.RequestedAtTicks, row.OwnerToken)) || !RetentionOwnershipReceipt.Matches(SHA256.HashData(marker.Bytes), row.MarkerSha256)) throw new SdkIdentityException();
@@ -195,7 +541,7 @@ public sealed partial class RetentionCatalogStore
                 if (!RetentionFileCaptureContracts.IsCanonicalRelativePath(child)) throw new SdkIdentityException();
                 var kind = EntryKind(path); if (kind is SdkEntryKind.Absent or SdkEntryKind.Reparse) throw new SdkIdentityException();
                 if (kind == SdkEntryKind.Directory) { entries.Add((child, RetentionFileCaptureMemberKind.Directory, null, null)); pending.Push((path, child)); }
-                else if (child == RetentionFileCaptureContracts.OwnerMarkerName) entries.Add((child, RetentionFileCaptureMemberKind.OwnerMarker, null, null));
+                else if (child == RetentionAnalysisSdkDirectoryOwnershipMarker.FileName) entries.Add((child, RetentionFileCaptureMemberKind.OwnerMarker, null, null));
                 else { var value = ReadBounded(path, RetentionFileCaptureContracts.MaximumMemberBytes - total); total += value.Length; entries.Add((child, RetentionFileCaptureMemberKind.File, value.Length, value.Sha)); }
                 if (entries.Count > RetentionFileCaptureContracts.MaximumMemberCount) throw new SdkIdentityException();
             }
@@ -231,6 +577,7 @@ public sealed partial class RetentionCatalogStore
     private sealed class SdkMissingException : Exception;
     private sealed class SdkIdentityException : Exception;
     private enum SdkEntryKind { Absent, File, Directory, Reparse }
+    private enum ReservedSdkChildCleanupDisposition { Preserved, Deleted, Conflict }
     private static bool TryCanonicalParent(string value, out string parent) { parent = string.Empty; if (string.IsNullOrWhiteSpace(value)) return false; try { parent = Path.GetFullPath(value); return parent == value; } catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException) { return false; } }
     private static void SdkExec(SqliteConnection c, SqliteTransaction t, string sql, params (string Name, object Value)[] values) { using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = sql; foreach (var (name, value) in values) q.Parameters.AddWithValue(name, value); q.ExecuteNonQuery(); }
     private static AnalysisRunAuthority? LoadAnalysisRunAuthority(SqliteConnection c, SqliteTransaction t, long runId) { if (!TableExists(c, t, "monitor_analysis_runs")) return null; using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "SELECT requested_at,retention_owner_token FROM monitor_analysis_runs WHERE id=$id;"; q.Parameters.AddWithValue("$id", runId); using var r = q.ExecuteReader(); if (!r.Read() || r.IsDBNull(0) || r.IsDBNull(1) || r.GetFieldValue<byte[]>(1).Length != 32 || !DateTimeOffset.TryParseExact(r.GetString(0), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var requested)) return null; return new(r.GetString(0), requested.UtcDateTime.Ticks, r.GetFieldValue<byte[]>(1)); }
@@ -238,24 +585,60 @@ public sealed partial class RetentionCatalogStore
     private static bool IsCanonicalId(string value) => value is { Length: 32 } && value.All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
     private sealed record AnalysisRunAuthority(string RequestedAtText, long RequestedAtTicks, byte[] OwnerToken);
     private sealed record SdkRow(string CaptureId, long RunId, string StoreInstanceId, string RequestedAtText, long RequestedAtTicks, string ParentLocator, string ChildLocator, byte[] AnalysisOwnerTokenSha256, byte[] OwnerToken, byte[] MarkerSha256, RetentionAnalysisSdkDirectoryPhase Phase, long Revision, DateTimeOffset RequestedAt)
-    { internal bool Matches(RetentionAnalysisSdkDirectoryReservation reservation) => CaptureId == reservation.CaptureId && RunId == reservation.AnalysisRunId && StoreInstanceId == reservation.StoreInstanceId && RetentionOwnershipReceipt.Matches(OwnerToken, reservation.OwnerToken); internal RetentionAnalysisSdkDirectoryReservation ToReservation() { var marker = RetentionAnalysisSdkDirectoryOwnershipMarker.Create(StoreInstanceId, CaptureId, RunId, RequestedAtText, RequestedAtTicks, OwnerToken); return new(CaptureId, RunId, StoreInstanceId, ParentLocator, ChildLocator, OwnerToken, marker, MarkerSha256, RequestedAtText, RequestedAtTicks, Phase, Revision); } internal RetentionAnalysisSdkDirectoryRecoverySnapshot ToRecovery() => new(CaptureId, RunId, StoreInstanceId, Phase, Revision, OwnerToken, MarkerSha256); }
+    { internal bool Matches(RetentionAnalysisSdkDirectoryReservation reservation) => CaptureId == reservation.CaptureId && RunId == reservation.AnalysisRunId && StoreInstanceId == reservation.StoreInstanceId && RequestedAtText == reservation.RequestedAtText && RequestedAtTicks == reservation.RequestedAtUtcTicks && ParentLocator == reservation.ParentLocator && ChildLocator == reservation.ChildLocator && Phase == reservation.Phase && Revision == reservation.Revision && RetentionOwnershipReceipt.Matches(OwnerToken, reservation.OwnerToken) && RetentionOwnershipReceipt.Matches(MarkerSha256, reservation.MarkerSha256); internal RetentionAnalysisSdkDirectoryReservation ToReservation() { var marker = RetentionAnalysisSdkDirectoryOwnershipMarker.Create(StoreInstanceId, CaptureId, RunId, RequestedAtText, RequestedAtTicks, OwnerToken); return new(CaptureId, RunId, StoreInstanceId, ParentLocator, ChildLocator, OwnerToken, marker, MarkerSha256, RequestedAtText, RequestedAtTicks, Phase, Revision); } internal RetentionAnalysisSdkDirectoryRecoverySnapshot ToRecovery() => new(CaptureId, RunId, StoreInstanceId, Phase, Revision, OwnerToken, MarkerSha256); }
 }
 
 internal enum RetentionAnalysisSdkDirectoryPhase { Reserved, Active, Sealed }
 internal sealed class RetentionAnalysisSdkDirectoryReservation
 {
     internal RetentionAnalysisSdkDirectoryReservation(string captureId, long runId, string store, string parent, string child, byte[] token, byte[] marker, byte[] markerDigest, string requested, long ticks, RetentionAnalysisSdkDirectoryPhase phase, long revision) => (CaptureId, AnalysisRunId, StoreInstanceId, ParentLocator, ChildLocator, OwnerToken, OwnershipMarker, MarkerSha256, RequestedAtText, RequestedAtUtcTicks, Phase, Revision) = (captureId, runId, store, parent, child, token.ToArray(), marker.ToArray(), markerDigest.ToArray(), requested, ticks, phase, revision);
-    internal string CaptureId { get; } internal long AnalysisRunId { get; } internal string StoreInstanceId { get; } internal string ParentLocator { get; } internal string ChildLocator { get; } internal byte[] OwnerToken { get; } internal byte[] OwnershipMarker { get; } internal byte[] MarkerSha256 { get; } internal string RequestedAtText { get; } internal long RequestedAtUtcTicks { get; } internal RetentionAnalysisSdkDirectoryPhase Phase { get; } internal long Revision { get; } public override string ToString() => nameof(RetentionAnalysisSdkDirectoryReservation);
+    internal string CaptureId { get; }
+    internal long AnalysisRunId { get; }
+    internal string StoreInstanceId { get; }
+    internal string ParentLocator { get; }
+    internal string ChildLocator { get; }
+    internal byte[] OwnerToken { get; }
+    internal byte[] OwnershipMarker { get; }
+    internal byte[] MarkerSha256 { get; }
+    internal string RequestedAtText { get; }
+    internal long RequestedAtUtcTicks { get; }
+    internal RetentionAnalysisSdkDirectoryPhase Phase { get; }
+    internal long Revision { get; }
+    public override string ToString() => nameof(RetentionAnalysisSdkDirectoryReservation);
 }
 internal sealed class RetentionAnalysisSdkDirectoryOperationLease
 {
-    internal RetentionAnalysisSdkDirectoryOperationLease(string itemId, long revision, string owner, long generation, string captureId, RetentionAnalysisSdkDirectoryReservation capability) => (ItemId, Revision, Owner, Generation, CaptureId, Capability) = (itemId, revision, owner, generation, captureId, capability);
-    internal string ItemId { get; } internal long Revision { get; } internal string Owner { get; } internal long Generation { get; } internal string CaptureId { get; } internal RetentionAnalysisSdkDirectoryReservation Capability { get; } public override string ToString() => nameof(RetentionAnalysisSdkDirectoryOperationLease);
+    internal RetentionAnalysisSdkDirectoryOperationLease(RetentionReadGrant grant, string captureId, RetentionAnalysisSdkDirectoryReservation capability)
+    {
+        ArgumentNullException.ThrowIfNull(grant);
+        ArgumentNullException.ThrowIfNull(capability);
+        if (grant.LeaseKind != RetentionLeaseKind.Operation
+            || grant.OwnershipKey.StoreKind != RetentionStoreKind.AnalysisSdkDirectory
+            || !string.Equals(grant.OwnershipKey.SourceItemId, captureId, StringComparison.Ordinal)
+            || !string.Equals(capability.CaptureId, captureId, StringComparison.Ordinal))
+            throw new ArgumentException("The SDK directory lease capability does not match the grant.", nameof(grant));
+        Grant = grant;
+        CaptureId = captureId;
+        Capability = capability;
+    }
+    internal RetentionReadGrant Grant { get; }
+    internal string ItemId => Grant.ItemId;
+    internal long Revision => Grant.AdmissionRevision;
+    internal string Owner => Grant.LeaseOwner;
+    internal long Generation => Grant.LeaseGeneration;
+    internal string CaptureId { get; }
+    internal RetentionAnalysisSdkDirectoryReservation Capability { get; }
+    public override string ToString() => nameof(RetentionAnalysisSdkDirectoryOperationLease);
 }
+internal sealed record RetentionAnalysisSdkDirectoryLeaseObservation(
+    RetentionOperationRenewalDisposition Disposition,
+    DateTimeOffset ObservedAt,
+    DateTimeOffset PublishedLeaseExpiresAt);
 internal sealed class RetentionAnalysisSdkDirectoryActivationResult
 {
     private RetentionAnalysisSdkDirectoryActivationResult(RetentionAnalysisSdkDirectoryOperationLease? lease) => Lease = lease;
-    internal RetentionAnalysisSdkDirectoryOperationLease? Lease { get; } internal bool IsActive => Lease is not null; internal static RetentionAnalysisSdkDirectoryActivationResult Closed { get; } = new(null); internal static RetentionAnalysisSdkDirectoryActivationResult Active(RetentionAnalysisSdkDirectoryOperationLease lease) => new(lease); public override string ToString() => nameof(RetentionAnalysisSdkDirectoryActivationResult);
+    internal RetentionAnalysisSdkDirectoryOperationLease? Lease { get; }
+    internal bool IsActive => Lease is not null; internal static RetentionAnalysisSdkDirectoryActivationResult Closed { get; } = new(null); internal static RetentionAnalysisSdkDirectoryActivationResult Active(RetentionAnalysisSdkDirectoryOperationLease lease) => new(lease); public override string ToString() => nameof(RetentionAnalysisSdkDirectoryActivationResult);
 }
 internal sealed record RetentionAnalysisSdkDirectoryRecoverySnapshot(string CaptureId, long AnalysisRunId, string StoreInstanceId, RetentionAnalysisSdkDirectoryPhase Phase, long Revision, byte[] OwnerToken, byte[] MarkerSha256) { public override string ToString() => nameof(RetentionAnalysisSdkDirectoryRecoverySnapshot); }
 
@@ -271,6 +654,7 @@ internal sealed class RetentionAnalysisSdkDirectoryDeletionPlan
 {
     private readonly byte[] markerBytes; private readonly byte[] markerSha256; private readonly IReadOnlyList<RetentionFileCaptureMember> members;
     internal RetentionAnalysisSdkDirectoryDeletionPlan(string child, byte[] marker, byte[] markerDigest, IReadOnlyList<RetentionFileCaptureMember> values, int cursor) { Child = child; markerBytes = marker.ToArray(); markerSha256 = markerDigest.ToArray(); members = values.Select(static member => member with { Sha256 = member.Sha256?.ToArray() }).ToArray(); Cursor = cursor; }
-    internal string Child { get; } internal byte[] MarkerBytes => markerBytes.ToArray(); internal byte[] MarkerSha256 => markerSha256.ToArray(); internal IReadOnlyList<RetentionFileCaptureMember> Members => members.Select(static member => member with { Sha256 = member.Sha256?.ToArray() }).ToArray(); internal int Cursor { get; }
+    internal string Child { get; }
+    internal byte[] MarkerBytes => markerBytes.ToArray(); internal byte[] MarkerSha256 => markerSha256.ToArray(); internal IReadOnlyList<RetentionFileCaptureMember> Members => members.Select(static member => member with { Sha256 = member.Sha256?.ToArray() }).ToArray(); internal int Cursor { get; }
     public override string ToString() => nameof(RetentionAnalysisSdkDirectoryDeletionPlan);
 }

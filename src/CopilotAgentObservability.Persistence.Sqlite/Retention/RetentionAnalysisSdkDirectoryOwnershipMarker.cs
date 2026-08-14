@@ -6,6 +6,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 internal static class RetentionAnalysisSdkDirectoryOwnershipMarker
 {
+    internal const string FileName = ".copilot-agent-observability-owner";
     private static readonly byte[] Domain = "copilot-agent-observability/retention-analysis-sdk-directory-owner-marker/v1"u8.ToArray();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 

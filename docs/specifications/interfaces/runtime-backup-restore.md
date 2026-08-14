@@ -934,7 +934,8 @@ ledgers only; a raw backup is never copied into repository evidence.
 
 The automated rows include Session v13-to-v14 restore and safety-snapshot
 fixtures with Event content, Retention catalog/receipt children, installed
-Skill projection/claim descendants, exact catalog-v1/pricing-v1 Session-13
+Skill projection descendants with Session-bound OTel invocation/inventory
+claims and no unpromoted SDK claim rows, exact catalog-v1/pricing-v1 Session-13
 legacy pairs, rejection of those children with Session 1..12, and proof that
 the safety manifest/hash comes from the migrated private copy while the live
 target remains byte-identical.

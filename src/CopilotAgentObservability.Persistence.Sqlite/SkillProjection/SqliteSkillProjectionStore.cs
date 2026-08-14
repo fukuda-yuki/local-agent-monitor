@@ -40,14 +40,32 @@ internal sealed record SkillProjectionProjectedInput(
     RawTelemetryRecord RawRecord,
     MonitorSkillProjectionBatch Projection);
 
+internal enum SkillProjectionCheckpoint
+{
+    AfterHeartbeatTransactionBeganBeforePublicationScopes,
+    AfterPublishTransactionBeganBeforeClockSample,
+    AfterFinishOwnedTransactionBeganBeforeClockSample,
+    BeforeRetentionRenewalPublication,
+}
+
+internal interface ISkillProjectionCheckpoint
+{
+    void Reached(SkillProjectionCheckpoint checkpoint);
+}
+
 internal sealed class SqliteSkillProjectionStore
 {
     private static readonly TimeSpan QueueLeaseDuration = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan QueueHeartbeatInterval = TimeSpan.FromSeconds(10);
     private readonly string databasePath;
     private readonly RawTelemetryStore rawStore;
+    private readonly TimeProvider timeProvider;
+    private readonly ISkillProjectionCheckpoint? checkpoint;
 
-    internal SqliteSkillProjectionStore(string databasePath, RawTelemetryStore rawStore)
+    internal SqliteSkillProjectionStore(
+        string databasePath,
+        RawTelemetryStore rawStore,
+        ISkillProjectionCheckpoint? checkpoint = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
@@ -57,6 +75,8 @@ internal sealed class SqliteSkillProjectionStore
                 StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("The raw store belongs to a different database.", nameof(rawStore));
         this.databasePath = databasePath;
+        timeProvider = rawStore.Clock;
+        this.checkpoint = checkpoint;
     }
 
     internal SkillProjectionQueueLease? ClaimNext(DateTimeOffset claimedAt)
@@ -197,12 +217,28 @@ internal sealed class SqliteSkillProjectionStore
     internal SkillProjectionQueueLease? Heartbeat(
         SkillProjectionQueueLease lease,
         RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease,
-        DateTimeOffset heartbeatAt)
+        // Caller time is scheduling evidence only; trusted time is sampled after BEGIN IMMEDIATE and publication locks.
+        DateTimeOffset? heartbeatAt = null)
     {
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentNullException.ThrowIfNull(retentionLease);
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        var persistedInputs = ReadInputs(connection, transaction, lease.GenerationId);
+        if (retentionLease.Grants.Count != persistedInputs.Count)
+        {
+            transaction.Rollback();
+            return null;
+        }
+        checkpoint?.Reached(
+            SkillProjectionCheckpoint.AfterHeartbeatTransactionBeganBeforePublicationScopes);
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            retentionLease.Grants
+                .Select((grant, index) => new RetentionGrantPublicationMember(
+                    grant,
+                    persistedInputs[index].Ordinal))
+                .ToArray());
+        var renewalAt = timeProvider.GetUtcNow();
         var persistedExpiryText = ScalarText(
             connection,
             transaction,
@@ -221,14 +257,9 @@ internal sealed class SqliteSkillProjectionStore
             ("$generation_id", lease.GenerationId),
             ("$owner", lease.LeaseOwner),
             ("$lease_generation", lease.LeaseGeneration),
-            ("$heartbeat_at", Timestamp(heartbeatAt)));
-        if (persistedExpiryText is null)
-        {
-            transaction.Rollback();
-            return null;
-        }
-        var persistedInputs = ReadInputs(connection, transaction, lease.GenerationId);
-        if (!LeaseFrontierMatches(lease, persistedInputs))
+            ("$heartbeat_at", Timestamp(renewalAt)));
+        if (persistedExpiryText is null
+            || !LeaseFrontierMatches(lease, persistedInputs))
         {
             transaction.Rollback();
             return null;
@@ -238,86 +269,67 @@ internal sealed class SqliteSkillProjectionStore
             CultureInfo.InvariantCulture,
             DateTimeStyles.RoundtripKind);
         var previousHeartbeatAt = persistedExpiry.Subtract(QueueLeaseDuration);
-        if (heartbeatAt - previousHeartbeatAt < QueueHeartbeatInterval)
-        {
-            transaction.Commit();
-            return lease with { LeaseExpiresAt = persistedExpiry };
-        }
-        if (!RetentionCatalogStore.ValidateSkillProjectionOperationLeases(
+        if (!RetentionCatalogStore.TryPrepareOperationLeaseRenewals(
                 connection,
                 transaction,
                 retentionLease.Grants,
                 persistedInputs.Select(static input => input.RawRecordId).ToArray(),
-                heartbeatAt))
+                publications,
+                renewalAt,
+                out var renewedGrantIndices))
         {
             transaction.Rollback();
             return null;
         }
 
-        var queueExpiry = heartbeatAt.Add(QueueLeaseDuration);
-        Execute(
-            connection,
-            transaction,
-            """
-            UPDATE skill_projection_queue
-            SET lease_expires_at=$lease_expires_at
-            WHERE generation_id=$generation_id
-              AND state='leased'
-              AND lease_owner=$owner
-              AND lease_generation=$lease_generation
-              AND lease_expires_at>$heartbeat_at
-              AND EXISTS(
-                    SELECT 1
-                    FROM skill_projection_trace_heads
-                    WHERE trace_id=$trace_id
-                      AND desired_generation_id=$generation_id
-              );
-            """,
-            ("$lease_expires_at", Timestamp(queueExpiry)),
-            ("$generation_id", lease.GenerationId),
-            ("$owner", lease.LeaseOwner),
-            ("$lease_generation", lease.LeaseGeneration),
-            ("$heartbeat_at", Timestamp(heartbeatAt)),
-            ("$trace_id", lease.TraceId));
-        if (Changes(connection, transaction) != 1)
+        var queueExpiry = persistedExpiry;
+        if (renewalAt - previousHeartbeatAt >= QueueHeartbeatInterval)
         {
-            transaction.Rollback();
-            return null;
-        }
-
-        var renewedRetentionExpiry = heartbeatAt.Add(RetentionV1Constants.LeaseDuration);
-        var renewedGrants = new List<RetentionReadGrant>();
-        foreach (var grant in retentionLease.Grants)
-        {
-            if (grant.LeaseExpiresAt - heartbeatAt > RetentionV1Constants.LeaseRenewalDeadline)
-                continue;
+            queueExpiry = renewalAt.Add(QueueLeaseDuration);
             Execute(
                 connection,
                 transaction,
                 """
-                UPDATE retention_leases
-                SET expires_at=$expires_at
-                WHERE item_id=$item_id
-                  AND lease_kind='operation'
-                  AND owner=$owner
-                  AND generation=$generation
-                  AND expires_at>$heartbeat_at;
+                UPDATE skill_projection_queue
+                SET lease_expires_at=$lease_expires_at
+                WHERE generation_id=$generation_id
+                  AND state='leased'
+                  AND lease_owner=$owner
+                  AND lease_generation=$lease_generation
+                  AND lease_expires_at>$heartbeat_at
+                  AND EXISTS(
+                        SELECT 1
+                        FROM skill_projection_trace_heads
+                        WHERE trace_id=$trace_id
+                          AND desired_generation_id=$generation_id
+                  );
                 """,
-                ("$expires_at", Timestamp(renewedRetentionExpiry)),
-                ("$item_id", grant.ItemId),
-                ("$owner", grant.LeaseOwner),
-                ("$generation", grant.LeaseGeneration),
-                ("$heartbeat_at", Timestamp(heartbeatAt)));
+                ("$lease_expires_at", Timestamp(queueExpiry)),
+                ("$generation_id", lease.GenerationId),
+                ("$owner", lease.LeaseOwner),
+                ("$lease_generation", lease.LeaseGeneration),
+                ("$heartbeat_at", Timestamp(renewalAt)),
+                ("$trace_id", lease.TraceId));
             if (Changes(connection, transaction) != 1)
             {
                 transaction.Rollback();
                 return null;
             }
-            renewedGrants.Add(grant);
         }
         transaction.Commit();
-        foreach (var grant in renewedGrants)
-            grant.AdvanceExpiry(renewedRetentionExpiry);
+        if (renewedGrantIndices.Count > 0)
+        {
+            var renewedRetentionExpiry = renewalAt.Add(RetentionV1Constants.LeaseDuration);
+            try
+            {
+                checkpoint?.Reached(SkillProjectionCheckpoint.BeforeRetentionRenewalPublication);
+            }
+            finally
+            {
+                foreach (var index in renewedGrantIndices)
+                    publications.AdvanceExpiry(index, renewedRetentionExpiry);
+            }
+        }
         return lease with { LeaseExpiresAt = queueExpiry };
     }
 
@@ -332,7 +344,10 @@ internal sealed class SqliteSkillProjectionStore
         ArgumentNullException.ThrowIfNull(retentionLease);
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
-        if (!OwnsCurrentQueueLease(connection, transaction, lease, publishedAt))
+        checkpoint?.Reached(
+            SkillProjectionCheckpoint.AfterPublishTransactionBeganBeforeClockSample);
+        var transactionAt = timeProvider.GetUtcNow();
+        if (!OwnsCurrentQueueLease(connection, transaction, lease, transactionAt))
         {
             transaction.Rollback();
             return SkillProjectionWorkOutcome.StaleOwner;
@@ -345,10 +360,10 @@ internal sealed class SqliteSkillProjectionStore
                 connection,
                 transaction,
                 lease,
-                publishedAt,
+                transactionAt,
                 "skill_projection_input_unavailable");
         if (!FrontierMatches(lease, persistedInputs, projectedInputs))
-            return FinishTerminal(connection, transaction, lease, publishedAt, "skill_projection_frontier_mismatch");
+            return FinishTerminal(connection, transaction, lease, transactionAt, "skill_projection_frontier_mismatch");
         var current = SourceCompatibilityReconciler.ReadEffectiveTrace(connection, transaction, lease.TraceId);
         var revision = ScalarLong(
             connection,
@@ -370,20 +385,20 @@ internal sealed class SqliteSkillProjectionStore
             || !string.Equals(current.SourceApplicationVersion, lease.ExactVersion, StringComparison.Ordinal)
             || !string.Equals(lease.ProjectorVersion, SkillProjectionGenerationParticipant.CurrentProjectorVersion, StringComparison.Ordinal))
         {
-            return FinishSuperseded(connection, transaction, lease, publishedAt);
+            return FinishSuperseded(connection, transaction, lease, transactionAt);
         }
         if (!RetentionCatalogStore.ValidateSkillProjectionOperationLeases(
                 connection,
                 transaction,
                 retentionLease.Grants,
                 persistedInputs.Select(static input => input.RawRecordId).ToArray(),
-                publishedAt))
+                transactionAt))
         {
-            return FinishRetry(connection, transaction, lease, publishedAt, "retention_lease_lost");
+            return FinishRetry(connection, transaction, lease, transactionAt, "retention_lease_lost");
         }
 
         foreach (var projectedInput in projectedInputs)
-            InsertProjection(connection, transaction, lease.GenerationId, projectedInput, publishedAt);
+            InsertProjection(connection, transaction, lease.GenerationId, projectedInput, transactionAt);
         Execute(
             connection,
             transaction,
@@ -392,7 +407,7 @@ internal sealed class SqliteSkillProjectionStore
             SET lifecycle='current',updated_at=$updated_at
             WHERE generation_id=$generation_id AND lifecycle='pending';
             """,
-            ("$updated_at", Timestamp(publishedAt)),
+            ("$updated_at", Timestamp(transactionAt)),
             ("$generation_id", lease.GenerationId));
         Execute(
             connection,
@@ -417,7 +432,7 @@ internal sealed class SqliteSkillProjectionStore
             WHERE trace_id=$trace_id AND desired_generation_id=$generation_id;
             """,
             ("$generation_id", lease.GenerationId),
-            ("$updated_at", Timestamp(publishedAt)),
+            ("$updated_at", Timestamp(transactionAt)),
             ("$trace_id", lease.TraceId));
         transaction.Commit();
         return SkillProjectionWorkOutcome.Published;
@@ -468,13 +483,16 @@ internal sealed class SqliteSkillProjectionStore
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
-        if (!OwnsCurrentQueueLease(connection, transaction, lease, at))
+        checkpoint?.Reached(
+            SkillProjectionCheckpoint.AfterFinishOwnedTransactionBeganBeforeClockSample);
+        var transactionAt = timeProvider.GetUtcNow();
+        if (!OwnsCurrentQueueLease(connection, transaction, lease, transactionAt))
         {
             transaction.Rollback();
             return SkillProjectionWorkOutcome.StaleOwner;
         }
         var nextAttemptAt = queueState == "pending"
-            ? Timestamp(at.AddSeconds(RetryDelaySeconds(lease.AttemptCount)))
+            ? Timestamp(transactionAt.AddSeconds(RetryDelaySeconds(lease.AttemptCount)))
             : null;
         Execute(
             connection,
@@ -485,7 +503,7 @@ internal sealed class SqliteSkillProjectionStore
             WHERE generation_id=$generation_id;
             """,
             ("$lifecycle", generationLifecycle),
-            ("$updated_at", Timestamp(at)),
+            ("$updated_at", Timestamp(transactionAt)),
             ("$generation_id", lease.GenerationId));
         Execute(
             connection,

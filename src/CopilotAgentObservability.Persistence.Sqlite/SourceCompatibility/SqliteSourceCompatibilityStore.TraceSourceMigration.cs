@@ -51,9 +51,35 @@ internal sealed partial class SqliteSourceCompatibilityStore
 
     internal static void TransitionRetainedTraceSourceAttribution(
         SqliteConnection connection,
-        SqliteTransaction transaction)
+        SqliteTransaction transaction) =>
+        TransitionRetainedTraceSourceAttribution(
+            connection,
+            transaction,
+            TimeProvider.System);
+
+    internal static void TransitionRetainedTraceSourceAttribution(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TimeProvider timeProvider) =>
+        TransitionRetainedTraceSourceAttribution(
+            connection,
+            transaction,
+            timeProvider,
+            rawPayloadMaterializationCheckpoint: null);
+
+    internal static void TransitionRetainedTraceSourceAttribution(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TimeProvider timeProvider,
+        Action<long>? rawPayloadMaterializationCheckpoint)
     {
-        var retainedRaw = ReadRetainedRawSourceEvidence(connection, transaction);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        var migrationNow = timeProvider.GetUtcNow().ToUniversalTime();
+        var retainedRaw = ReadRetainedRawSourceEvidence(
+            connection,
+            transaction,
+            migrationNow,
+            rawPayloadMaterializationCheckpoint);
         var ingestions = ReadProjectedIngestions(connection, transaction);
         var traces = ReadProjectedTraces(connection, transaction);
         var spans = ReadProjectedSpanMembership(connection, transaction);
@@ -190,7 +216,9 @@ internal sealed partial class SqliteSourceCompatibilityStore
 
     private static IReadOnlyDictionary<long, RetainedRawSourceEvidence> ReadRetainedRawSourceEvidence(
         SqliteConnection connection,
-        SqliteTransaction transaction)
+        SqliteTransaction transaction,
+        DateTimeOffset migrationNow,
+        Action<long>? rawPayloadMaterializationCheckpoint)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -211,7 +239,6 @@ internal sealed partial class SqliteSourceCompatibilityStore
             }
         }
         var result = new Dictionary<long, RetainedRawSourceEvidence>();
-        var now = DateTimeOffset.UtcNow;
         foreach (var row in rows)
         {
             var rawRecordId = row.RawRecordId;
@@ -219,11 +246,12 @@ internal sealed partial class SqliteSourceCompatibilityStore
                     connection,
                     transaction,
                     rawRecordId,
-                    now))
+                    migrationNow))
             {
                 continue;
             }
             var traceId = row.TraceId;
+            rawPayloadMaterializationCheckpoint?.Invoke(rawRecordId);
             var payloadJson = ReadRawPayloadJson(
                 connection,
                 transaction,

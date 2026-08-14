@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
 
@@ -314,6 +316,163 @@ public sealed class TraceSourceAttributionMigrationTests
     }
 
     [Fact]
+    public void V10Migration_PinnedRawRowPastHistoricalExpiryStillAuthorizesAttribution()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        store.CreateSchema();
+        using (var connection = Open(temp.DatabasePath))
+        {
+            var rawRecordId = InsertRaw(
+                connection,
+                TraceId,
+                Payload(TraceId, "1111111111111111", "github-copilot"),
+                receivedAt: new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero));
+            InsertProjectedTrace(
+                connection,
+                rawRecordId,
+                TraceId,
+                "1111111111111111",
+                "legacy-family",
+                spanOrdinal: 0);
+            Execute(
+                connection,
+                $"""
+                UPDATE retention_items
+                SET state='retained_by_policy',
+                    revision=revision+1
+                WHERE store_kind='raw_record'
+                  AND source_item_id='{rawRecordId}';
+                """);
+            PrepareAsV9(connection);
+        }
+
+        store.CreateSchema();
+
+        using var verification = Open(temp.DatabasePath);
+        Assert.Equal("copilot-cli", Scalar<string>(
+            verification,
+            $"SELECT client_kind FROM monitor_traces WHERE trace_id='{TraceId}';"));
+        Assert.Equal(1L, Scalar<long>(
+            verification,
+            $"SELECT COUNT(*) FROM source_trace_attribution_observations WHERE trace_id='{TraceId}';"));
+    }
+
+    [Fact]
+    public void V10Migration_ExpiringRawRowPastExpiryRemainsUnauthorizedDuringMigration()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSourceCompatibilityStore(temp.DatabasePath);
+        store.CreateSchema();
+        using (var connection = Open(temp.DatabasePath))
+        {
+            var rawRecordId = InsertRaw(
+                connection,
+                TraceId,
+                Payload(TraceId, "1111111111111111", "github-copilot"),
+                receivedAt: new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero));
+            InsertProjectedTrace(
+                connection,
+                rawRecordId,
+                TraceId,
+                "1111111111111111",
+                "legacy-family",
+                spanOrdinal: 0);
+            PrepareAsV9(connection);
+        }
+
+        store.CreateSchema();
+
+        using var verification = Open(temp.DatabasePath);
+        Assert.Equal("legacy-family", Scalar<string>(
+            verification,
+            $"SELECT client_kind FROM monitor_traces WHERE trace_id='{TraceId}';"));
+        Assert.Equal(0L, Scalar<long>(
+            verification,
+            $"SELECT COUNT(*) FROM source_trace_attribution_observations WHERE trace_id='{TraceId}';"));
+    }
+
+    [Fact]
+    public void V10Migration_ExpiringRawRowAtExactMigrationNowIsNotMaterializedAndRemainsUnavailableAfterReopen()
+    {
+        var migrationNow = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        using var temp = new MonitorTempDirectory();
+        new SqliteSourceCompatibilityStore(temp.DatabasePath).CreateSchema();
+        long rawRecordId;
+        using (var connection = Open(temp.DatabasePath))
+        {
+            rawRecordId = InsertRaw(
+                connection,
+                TraceId,
+                Payload(TraceId, "1111111111111111", "github-copilot"),
+                receivedAt: migrationNow.AddDays(-90));
+            InsertProjectedTrace(
+                connection,
+                rawRecordId,
+                TraceId,
+                "1111111111111111",
+                "legacy-family",
+                spanOrdinal: 0);
+            Assert.Equal(
+                migrationNow.ToString("O"),
+                Scalar<string>(
+                    connection,
+                    $"SELECT expires_at FROM retention_items WHERE store_kind='raw_record' AND source_item_id='{rawRecordId}';"));
+            PrepareAsV9(connection);
+        }
+        var authorityBefore = ReadRawAndRetentionAuthoritySnapshot(temp.DatabasePath);
+
+        var payloadReadCount = 0;
+        using (var connection = Open(temp.DatabasePath))
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                SqliteSourceCompatibilityStore.EnsureTraceSourceAttributionSchema(
+                    connection,
+                    transaction);
+                SqliteSourceCompatibilityStore.TransitionRetainedTraceSourceAttribution(
+                    connection,
+                    transaction,
+                    new MutableTimeProvider(migrationNow),
+                    _ => payloadReadCount++);
+                Execute(
+                    connection,
+                    transaction,
+                    "UPDATE schema_version SET version=10 WHERE component='monitor';");
+                transaction.Commit();
+            }
+        }
+
+        Assert.Equal(0, payloadReadCount);
+        Assert.Equal(authorityBefore, ReadRawAndRetentionAuthoritySnapshot(temp.DatabasePath));
+        AssertUnavailableAttribution(temp.DatabasePath);
+        using (var verification = Open(temp.DatabasePath))
+        {
+            Assert.Equal(10L, Scalar<long>(
+                verification,
+                "SELECT version FROM schema_version WHERE component='monitor';"));
+        }
+
+        new SqliteSourceCompatibilityStore(temp.DatabasePath).CreateSchema();
+
+        Assert.Equal(authorityBefore, ReadRawAndRetentionAuthoritySnapshot(temp.DatabasePath));
+        AssertUnavailableAttribution(temp.DatabasePath);
+        using (var verification = Open(temp.DatabasePath))
+        {
+            Assert.Equal(11L, Scalar<long>(
+                verification,
+                "SELECT version FROM schema_version WHERE component='monitor';"));
+        }
+        var firstReopenHash = ReadCanonicalDatabaseHash(temp.DatabasePath);
+
+        new SqliteSourceCompatibilityStore(temp.DatabasePath).CreateSchema();
+
+        Assert.Equal(authorityBefore, ReadRawAndRetentionAuthoritySnapshot(temp.DatabasePath));
+        AssertUnavailableAttribution(temp.DatabasePath);
+        Assert.Equal(firstReopenHash, ReadCanonicalDatabaseHash(temp.DatabasePath));
+    }
+
+    [Fact]
     public void V10Migration_AuthorizesRawMetadataBeforeMaterializingPayload()
     {
         using var temp = new MonitorTempDirectory();
@@ -459,25 +618,33 @@ public sealed class TraceSourceAttributionMigrationTests
         SqliteConnection connection,
         string traceId,
         string payloadJson,
-        bool registerRetention = true)
+        bool registerRetention = true,
+        DateTimeOffset? receivedAt = null)
     {
+        var capturedAt = receivedAt
+            ?? new DateTimeOffset(2026, 7, 30, 0, 0, 0, TimeSpan.Zero);
         using var command = connection.CreateCommand();
         command.CommandText =
             """
             INSERT INTO raw_records(
                 source,trace_id,received_at,resource_attributes_json,payload_json,
                 schema_version,retention_owner_token)
-            VALUES('raw-otlp',$trace_id,'2026-07-30T00:00:00.0000000+00:00',
+            VALUES('raw-otlp',$trace_id,$received_at,
                 NULL,$payload_json,1,randomblob(32));
             SELECT last_insert_rowid();
             """;
         command.Parameters.AddWithValue("$trace_id", traceId);
+        command.Parameters.AddWithValue("$received_at", capturedAt.ToString("O"));
         command.Parameters.AddWithValue("$payload_json", payloadJson);
         var rawRecordId = (long)command.ExecuteScalar()!;
         if (registerRetention)
         {
-            new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(
-                connection.DataSource).CreateSchema();
+            var catalog = receivedAt is null
+                ? new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(connection.DataSource)
+                : new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCatalogStore(
+                    connection.DataSource,
+                    new MutableTimeProvider(capturedAt));
+            catalog.CreateSchema();
         }
         return rawRecordId;
     }
@@ -605,6 +772,101 @@ public sealed class TraceSourceAttributionMigrationTests
                 "SELECT trace_id,client_kind FROM monitor_traces ORDER BY trace_id;"));
     }
 
+    private static void AssertUnavailableAttribution(string path)
+    {
+        using var connection = Open(path);
+        Assert.Equal("legacy-family", Scalar<string>(
+            connection,
+            $"SELECT client_kind FROM monitor_traces WHERE trace_id='{TraceId}';"));
+        Assert.Equal("legacy-family", Scalar<string>(
+            connection,
+            $"SELECT client_kind FROM monitor_ingestions WHERE raw_record_id=(SELECT id FROM raw_records WHERE trace_id='{TraceId}');"));
+        Assert.Equal(0L, Scalar<long>(
+            connection,
+            $"SELECT COUNT(*) FROM source_trace_attribution_observations WHERE trace_id='{TraceId}';"));
+        Assert.Equal(0L, Scalar<long>(
+            connection,
+            "SELECT COUNT(*) FROM source_trace_attribution_reconciliation_queue;"));
+        Assert.Equal("expiring", Scalar<string>(
+            connection,
+            $"SELECT state FROM retention_items WHERE store_kind='raw_record' AND source_item_id=(SELECT id FROM raw_records WHERE trace_id='{TraceId}');"));
+    }
+
+    private static string ReadRawAndRetentionAuthoritySnapshot(string path)
+    {
+        using var connection = Open(path);
+        using var tableCommand = connection.CreateCommand();
+        tableCommand.CommandText =
+            """
+            SELECT name
+            FROM sqlite_schema
+            WHERE type='table'
+              AND (name='raw_records' OR name LIKE 'retention_%')
+            ORDER BY name;
+            """;
+        var tables = new List<string>();
+        using (var reader = tableCommand.ExecuteReader())
+        {
+            while (reader.Read())
+                tables.Add(reader.GetString(0));
+        }
+
+        var snapshots = new List<string>();
+        using (var schemaCommand = connection.CreateCommand())
+        {
+            schemaCommand.CommandText =
+                """
+                SELECT type,name,tbl_name,sql
+                FROM sqlite_schema
+                WHERE sql IS NOT NULL
+                  AND (
+                      name='raw_records'
+                      OR tbl_name='raw_records'
+                      OR name LIKE 'retention_%'
+                      OR tbl_name LIKE 'retention_%')
+                ORDER BY type,name;
+                """;
+            using var reader = schemaCommand.ExecuteReader();
+            var rows = new List<string>();
+            while (reader.Read())
+            {
+                rows.Add(string.Join(
+                    "|",
+                    Enumerable.Range(0, reader.FieldCount)
+                        .Select(index => SnapshotValue(reader.GetValue(index)))));
+            }
+            snapshots.Add($"sqlite_schema\n{string.Join("\n", rows)}");
+        }
+        foreach (var table in tables)
+        {
+            var quotedTable = $"\"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+            using var rowCommand = connection.CreateCommand();
+            rowCommand.CommandText = $"SELECT * FROM {quotedTable};";
+            using var reader = rowCommand.ExecuteReader();
+            var rows = new List<string>();
+            while (reader.Read())
+            {
+                rows.Add(string.Join(
+                    "|",
+                    Enumerable.Range(0, reader.FieldCount)
+                        .Select(index => SnapshotValue(reader.GetValue(index)))));
+            }
+            rows.Sort(StringComparer.Ordinal);
+            snapshots.Add($"{table}\n{string.Join("\n", rows)}");
+        }
+        return string.Join("\n", snapshots);
+    }
+
+    private static string SnapshotValue(object value) => value switch
+    {
+        DBNull => "null",
+        byte[] bytes => $"blob:{Convert.ToHexString(bytes)}",
+        string text => $"text:{Convert.ToHexString(Encoding.UTF8.GetBytes(text))}",
+        long integer => $"integer:{integer.ToString(CultureInfo.InvariantCulture)}",
+        double real => $"real:{BitConverter.DoubleToInt64Bits(real).ToString(CultureInfo.InvariantCulture)}",
+        _ => throw new InvalidOperationException($"Unexpected SQLite value type {value.GetType().FullName}."),
+    };
+
     private static string ReadSessionInvariantSnapshot(string path)
     {
         using var connection = Open(path);
@@ -660,6 +922,17 @@ public sealed class TraceSourceAttributionMigrationTests
     private static void Execute(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static void Execute(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = sql;
         command.ExecuteNonQuery();
     }

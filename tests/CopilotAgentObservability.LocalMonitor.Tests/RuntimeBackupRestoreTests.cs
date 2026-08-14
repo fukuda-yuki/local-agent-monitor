@@ -466,6 +466,100 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
+    public void Restore_staging_migrates_version13_pinned_content_and_preserves_retention_and_skill_descendants()
+    {
+        using var temp = new RestoreTemp();
+        var fixture = temp.CreatePinnedSessionVersion13Database(temp.Source, "restore-staging-v13");
+        var expectedDescendants = temp.SnapshotOwnedRows(
+            temp.Source,
+            "session_event_content",
+            "retention_",
+            "skill_projection_");
+        using (var source = temp.Open(temp.Source))
+            temp.AssertSessionBoundSkillDescendants(source, fixture.SessionId);
+        new SqliteSessionStore(temp.Source, temp.Clock).CreateSchema();
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        var currentBundle = Path.Combine(temp.Root, "session-v14-source.zip");
+        Assert.True(service.CreateAndPublish(temp.Source, currentBundle).Success);
+        var versionThirteenBundle = temp.CreateVersion13SessionArchive(
+            currentBundle,
+            "session-v13-restore.zip");
+
+        var inspection = service.Inspect(versionThirteenBundle);
+        var restored = service.Restore(
+            versionThirteenBundle,
+            temp.Target,
+            new RuntimeRestoreOptions());
+
+        Assert.True(inspection.Success, inspection.ErrorCode);
+        Assert.Equal(13, inspection.ComponentVersions!["session"]);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.False(restored.PreRestoreBackupCreated);
+        using var database = temp.Open(temp.Target);
+        Assert.Equal(14L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal("failed", temp.Scalar<string>(database, $"SELECT terminal_outcome FROM session_events WHERE event_id='{fixture.EventId}';"));
+        Assert.Equal("retained_by_policy", temp.Scalar<string>(database, $"SELECT state FROM retention_items WHERE item_id='{fixture.ItemId}';"));
+        temp.AssertSessionBoundSkillDescendants(database, fixture.SessionId);
+        Assert.Equal(
+            expectedDescendants,
+            temp.SnapshotOwnedRows(database, "session_event_content", "retention_", "skill_projection_"));
+        Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+    }
+
+    [Fact]
+    public void Post_gate_private_safety_copy_migrates_version13_without_mutating_the_live_target()
+    {
+        using var temp = new RestoreTemp();
+        temp.CreateDatabase(temp.Source, "incoming", includeRaw: false);
+        var incomingBundle = Path.Combine(temp.Root, "session-v14-incoming.zip");
+        Assert.True(new SqliteRuntimeBackupService(temp.Clock).CreateAndPublish(temp.Source, incomingBundle).Success);
+        var fixture = temp.CreatePinnedSessionVersion13Database(temp.Target, "safety-copy-v13");
+        var expectedDescendants = temp.SnapshotOwnedRows(
+            temp.Target,
+            "session_event_content",
+            "retention_",
+            "skill_projection_");
+        using (var source = temp.Open(temp.Target))
+            temp.AssertSessionBoundSkillDescendants(source, fixture.SessionId);
+        SqliteConnection.ClearAllPools();
+        var liveTargetBefore = CaptureDatabaseFiles(temp.Target);
+        var crashing = new SqliteRuntimeBackupService(temp.Clock, checkpoint =>
+        {
+            if (checkpoint == RuntimeBackupCheckpoints.BeforeSwap)
+                throw new SimulatedProcessCrashException();
+        });
+
+        Assert.Throws<SimulatedProcessCrashException>(() =>
+            crashing.Restore(incomingBundle, temp.Target, new RuntimeRestoreOptions()));
+
+        SqliteConnection.ClearAllPools();
+        AssertDatabaseFilesEqual(liveTargetBefore, CaptureDatabaseFiles(temp.Target));
+        using (var liveTarget = temp.Open(temp.Target))
+        {
+            Assert.Equal(13L, temp.Scalar<long>(liveTarget, "SELECT version FROM schema_version WHERE component='session';"));
+            Assert.Equal(0L, temp.Scalar<long>(liveTarget, "SELECT COUNT(*) FROM pragma_table_info('session_events') WHERE name='terminal_outcome';"));
+        }
+
+        var safetyDirectory = Path.Combine(temp.Root, "runtime-backups");
+        var safetyBundle = Assert.Single(Directory.EnumerateFiles(safetyDirectory, "*.zip", SearchOption.TopDirectoryOnly));
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+        var safetyInspection = service.Inspect(safetyBundle);
+        Assert.True(safetyInspection.Success, safetyInspection.ErrorCode);
+        Assert.Equal(14, safetyInspection.ComponentVersions!["session"]);
+        var safetyRestoreRoot = Path.Combine(temp.Root, "safety-restore");
+        Directory.CreateDirectory(safetyRestoreRoot);
+        var safetyTarget = Path.Combine(safetyRestoreRoot, "safety-restored.db");
+        var safetyRestore = service.Restore(safetyBundle, safetyTarget, new RuntimeRestoreOptions());
+        Assert.True(safetyRestore.Success, safetyRestore.ErrorCode);
+        using var safetyDatabase = temp.Open(safetyTarget);
+        Assert.Equal("failed", temp.Scalar<string>(safetyDatabase, $"SELECT terminal_outcome FROM session_events WHERE event_id='{fixture.EventId}';"));
+        temp.AssertSessionBoundSkillDescendants(safetyDatabase, fixture.SessionId);
+        Assert.Equal(
+            expectedDescendants,
+            temp.SnapshotOwnedRows(safetyDatabase, "session_event_content", "retention_", "skill_projection_"));
+    }
+
+    [Fact]
     public void Restore_reconciles_current_terminal_tombstone_and_never_restores_raw_bytes()
     {
         using var temp = new RestoreTemp();
@@ -2588,6 +2682,20 @@ public sealed class RuntimeBackupRestoreTests
             Assert.Empty(Directory.EnumerateFileSystemEntries(directory));
     }
 
+    private static IReadOnlyDictionary<string, byte[]> CaptureDatabaseFiles(string databasePath) =>
+        new[] { databasePath, databasePath + "-journal", databasePath + "-wal", databasePath + "-shm" }
+            .Where(File.Exists)
+            .ToDictionary(path => Path.GetFileName(path), File.ReadAllBytes, StringComparer.Ordinal);
+
+    private static void AssertDatabaseFilesEqual(
+        IReadOnlyDictionary<string, byte[]> expected,
+        IReadOnlyDictionary<string, byte[]> actual)
+    {
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), actual.Keys.Order(StringComparer.Ordinal));
+        foreach (var name in expected.Keys)
+            Assert.Equal(expected[name], actual[name]);
+    }
+
     private sealed class RestoreTemp : IDisposable
     {
         internal const string MarkerTraceId = "11111111111111111111111111111111";
@@ -2773,13 +2881,16 @@ public sealed class RuntimeBackupRestoreTests
                     Clock.GetUtcNow(),
                     PublishedSkillPayload));
             var retention = RetentionCatalogContext.AdoptExistingCatalogV1(path);
+            var operationAt = Clock.GetUtcNow().AddSeconds(1);
+            var operationClock = new FixedTimeProvider(operationAt);
             var worker = new SkillProjectionWorker(
                 new SqliteSkillProjectionStore(
                     path,
-                    new RawTelemetryStore(path, retention)));
+                    new RawTelemetryStore(path, retention, operationClock)),
+                timeProvider: operationClock);
             Assert.Equal(
                 SkillProjectionWorkOutcome.Published,
-                worker.RunNextAsync(Clock.GetUtcNow().AddSeconds(1)).GetAwaiter().GetResult());
+                worker.RunNextAsync(operationAt).GetAwaiter().GetResult());
             new SqliteIngestionCommitStore(path).Commit(
                 CreateResolvedSkillProjectionBatch(
                     "published-superseded-successor",
@@ -2788,6 +2899,151 @@ public sealed class RuntimeBackupRestoreTests
             SourceCompatibilitySchemaV11.Validate(validation, transaction: null);
             SkillProjectionSchemaV1.Validate(validation, transaction: null);
         }
+
+        internal SessionVersion13TestFixture.Version13RetentionBackedDiscriminator CreatePinnedSessionVersion13Database(
+            string path,
+            string identity)
+        {
+            CreatePublishedSupersededSkillProjectionDatabase(path);
+            return SessionVersion13TestFixture.CreateRetentionBackedDiscriminator(
+                path,
+                RetentionCatalogContext.AdoptExistingCatalogV1(path),
+                Clock.GetUtcNow().AddDays(-91),
+                retainedByPolicy: true,
+                includeInstalledSkillDescendants: true,
+                identity);
+        }
+
+        internal void AssertSessionBoundSkillDescendants(
+            SqliteConnection connection,
+            string sessionId)
+        {
+            Assert.Equal(1L, Scalar<long>(
+                connection,
+                $"SELECT COUNT(*) FROM skill_projection_invocations WHERE session_id='{sessionId}';"));
+            Assert.Equal(
+                "synthetic-skill|synthetic-source|synthetic-trigger|1.0.74",
+                Scalar<string>(
+                    connection,
+                    $"""
+                    SELECT skill_name || '|' || skill_source || '|' || invocation_trigger || '|' || source_application_version
+                    FROM skill_projection_invocations
+                    WHERE session_id='{sessionId}';
+                    """));
+            Assert.Equal(1L, Scalar<long>(
+                connection,
+                $"SELECT COUNT(*) FROM skill_projection_inventories WHERE session_id='{sessionId}';"));
+            Assert.Equal(
+                "1|1|0|synthetic-skill",
+                Scalar<string>(
+                    connection,
+                    $"""
+                    SELECT inventory.observed_name_count || '|' || inventory.retained_name_count || '|' ||
+                           inventory.names_truncated || '|' || name.skill_name
+                    FROM skill_projection_inventories AS inventory
+                    JOIN skill_projection_inventory_names AS name
+                      ON name.inventory_id=inventory.inventory_id
+                    WHERE inventory.session_id='{sessionId}';
+                    """));
+            Assert.Equal(0L, Scalar<long>(
+                connection,
+                $"SELECT COUNT(*) FROM skill_projection_sdk_claims WHERE session_id='{sessionId}';"));
+        }
+
+        internal string CreateVersion13SessionArchive(string currentArchive, string outputFileName)
+        {
+            var output = Path.Combine(Root, outputFileName);
+            byte[] manifest;
+            byte[] database;
+            using (var archive = ZipFile.OpenRead(currentArchive))
+            {
+                manifest = Read(archive.GetEntry("manifest.json")!);
+                database = Read(archive.GetEntry("database.sqlite")!);
+            }
+
+            var mutatedPath = Path.Combine(Root, $".session-v13-{Guid.NewGuid():N}.sqlite");
+            File.WriteAllBytes(mutatedPath, database);
+            using (var connection = Open(mutatedPath))
+            {
+                SessionVersion13TestFixture.DowngradeSessionEvents(connection);
+                Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            database = File.ReadAllBytes(mutatedPath);
+            File.Delete(mutatedPath);
+            File.Delete(mutatedPath + "-wal");
+            File.Delete(mutatedPath + "-shm");
+
+            var parsed = RuntimeBackupJson.ParseManifest(manifest);
+            var componentVersions = parsed.ComponentVersions.ToDictionary(
+                static item => item.Key,
+                static item => item.Value,
+                StringComparer.Ordinal);
+            componentVersions["session"] = 13;
+            var databaseHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
+            manifest = RuntimeBackupJson.WriteManifest(parsed with
+            {
+                DatabaseSha256 = databaseHash,
+                DatabaseSize = database.LongLength,
+                ComponentVersions = componentVersions,
+            });
+            using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+            Write(target, "manifest.json", manifest);
+            Write(target, "database.sqlite", database);
+            return output;
+        }
+
+        internal string SnapshotOwnedRows(string path, params string[] tablePrefixes)
+        {
+            using var connection = Open(path);
+            return SnapshotOwnedRows(connection, tablePrefixes);
+        }
+
+        internal string SnapshotOwnedRows(SqliteConnection connection, params string[] tablePrefixes)
+        {
+            var tables = new List<string>();
+            using (var list = connection.CreateCommand())
+            {
+                list.CommandText = "SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;";
+                using var reader = list.ExecuteReader();
+                while (reader.Read())
+                {
+                    var table = reader.GetString(0);
+                    if (tablePrefixes.Any(prefix => table.StartsWith(prefix, StringComparison.Ordinal)))
+                        tables.Add(table);
+                }
+            }
+
+            var lines = new List<string>();
+            foreach (var table in tables)
+            {
+                var columns = new List<string>();
+                using (var columnCommand = connection.CreateCommand())
+                {
+                    columnCommand.CommandText = "SELECT name FROM pragma_table_xinfo($table) WHERE hidden=0 ORDER BY cid;";
+                    columnCommand.Parameters.AddWithValue("$table", table);
+                    using var columnReader = columnCommand.ExecuteReader();
+                    while (columnReader.Read()) columns.Add(columnReader.GetString(0));
+                }
+                var projection = string.Join(',', columns.Select(QuoteIdentifier));
+                using var command = connection.CreateCommand();
+                command.CommandText = $"SELECT {projection} FROM {QuoteIdentifier(table)} ORDER BY {projection};";
+                using var reader = command.ExecuteReader();
+                lines.Add($"table|{table}|{string.Join('|', columns)}");
+                while (reader.Read())
+                {
+                    lines.Add($"row|{table}|{string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(index =>
+                        reader.IsDBNull(index)
+                            ? "<null>"
+                            : reader.GetValue(index) is byte[] bytes
+                                ? $"blob:{Convert.ToHexString(bytes)}"
+                                : $"{reader.GetFieldType(index).Name}:{Convert.ToString(reader.GetValue(index), System.Globalization.CultureInfo.InvariantCulture)}"))}");
+                }
+            }
+            return string.Join('\n', lines) + "\n";
+        }
+
+        private static string QuoteIdentifier(string identifier) =>
+            $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
         internal void CreateMarkerRegistrySupersessionDatabase(string path)
         {
@@ -2862,6 +3118,8 @@ public sealed class RuntimeBackupRestoreTests
         {
             CreateResolvedSkillProjectionDatabase(path);
             var at = Clock.GetUtcNow();
+            var operationAt = at.AddSeconds(2);
+            var operationClock = new FixedTimeProvider(operationAt);
             using (var connection = Open(path))
             using (var deny = connection.CreateCommand())
             {
@@ -2881,10 +3139,11 @@ public sealed class RuntimeBackupRestoreTests
             var worker = new SkillProjectionWorker(
                 new SqliteSkillProjectionStore(
                     path,
-                    new RawTelemetryStore(path, retention)));
+                    new RawTelemetryStore(path, retention, operationClock)),
+                timeProvider: operationClock);
             Assert.Equal(
                 SkillProjectionWorkOutcome.InputUnavailable,
-                worker.RunNextAsync(at.AddSeconds(2)).GetAwaiter().GetResult());
+                worker.RunNextAsync(operationAt).GetAwaiter().GetResult());
             if (withSuccessor)
             {
                 new SqliteIngestionCommitStore(path).Commit(

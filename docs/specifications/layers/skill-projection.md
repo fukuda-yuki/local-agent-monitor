@@ -333,12 +333,22 @@ transaction it:
    admission revision, current readability, exact source/receipt/coverage
    proof, and the exact lease owner/generation.
 
+After `BEGIN IMMEDIATE` succeeds, the heartbeat acquires every frontier grant
+publication scope in persisted canonical order, then takes one trusted raw-store
+clock sample before proof and update and uses it for both queue and Retention
+authority; the worker's caller timestamp is scheduling evidence only.
+Publication and owned retry/input-unavailable/terminal finalization likewise
+take one trusted sample after their own immediate transaction begins and use
+that instant for ownership fences and every persisted timestamp.
+
 Retention v1's operation-lease duration is two minutes and its renewal deadline
 is one minute. Renewal never changes the frontier or reacquires a different
-item. A due renewal that observes revision or readability drift fails the
-heartbeat without shortening the existing grant, which remains consumable to
-its published expiry. If a heartbeat is busy, rejected, or observes any
-lost/expired lease, the
+item. A due renewal that observes revision, readability, source, receipt, or
+coverage drift fails the heartbeat without shortening the existing grant,
+which remains consumable to its published
+expiry. A live frontier grant outside the renewal deadline remains unchanged
+without rereading those current proofs. If a
+heartbeat is busy, rejected, or observes any lost/expired lease, the
 worker cancels projection, discards all constructed rows, and must not publish.
 It may requeue the same generation as `retry_pending` only in a fresh
 transaction that proves the same queue owner/generation and unexpired queue

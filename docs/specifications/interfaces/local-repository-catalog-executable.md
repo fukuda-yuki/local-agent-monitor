@@ -412,26 +412,55 @@ A worker:
 5. acquires the existing Retention operation lease for the fixed raw record;
 6. verifies the raw payload digest;
 7. parses only that persisted raw-record frontier;
-8. resolves every exact Session context;
-9. applies observations, automatic Repository creation, assignment
-   revisions/history, and queue completion in one immediate transaction.
+8. performs one atomic queue-plus-Retention heartbeat immediately before
+   publication and adopts the renewed queue lease;
+9. resolves every exact Session context and applies observations, automatic
+   Repository creation, assignment revisions/history, and queue completion in
+   one final immediate transaction.
+
+Digest verification, persisted provenance capture, and payload-only parsing do
+not hold the final writer transaction, so the periodic heartbeat can extend
+long-running preparation. The periodic heartbeat owner serially performs the
+explicit pre-publication heartbeat with its latest queue lease and exits only
+after that handoff result. Finalization begins only after the worker adopts a
+successful handoff lease, and the final transaction re-reads the exact
+persisted provenance before using the prepared payload.
+Session lookup, DB-dependent planning, publication, and queue completion remain
+one atomic snapshot and must finish within the renewed 30-second queue fence.
+If the handoff heartbeat or the final exact queue/Retention fence fails, no
+Repository domain row is committed.
 
 Lease renewal is permitted only before expiry, only with an exact current token,
-and sets expiry to renewal time plus exactly 30 seconds. A token mismatch or
-expired token cannot renew, publish, or complete work. This 30-second queue
-lease renewal governs the catalog queue row only. It is distinct from the
-two-minute Retention operation-grant renewal defined by the shared read
-authority in
-[Raw Store And Normalization](../layers/raw-store-normalization.md); a queue
-row renewal never renews, shortens, or re-admits a Retention grant.
+and sets expiry to renewal time plus exactly 30 seconds. After its
+`BEGIN IMMEDIATE` succeeds, the heartbeat acquires the exact admitted Retention
+operation grant's publication scope, then owns one trusted clock sample before
+any queue or Retention proof or update. Caller timestamps cannot advance or
+backdate either queue or Retention authority. A token mismatch or expired token
+cannot renew, publish, or complete work. In the same transaction, the heartbeat
+renews every due admitted Retention operation
+grant through the strict current revision/readability/source/receipt/coverage
+predicate and to the separate two-minute duration defined by
+[Raw Store And Normalization](../layers/raw-store-normalization.md). A live
+operation grant outside the renewal deadline leaves Retention authority
+unchanged without rereading those current proofs. Queue and due Retention
+renewals commit all or none; neither renewal re-admits a different raw item.
 
 The worker never discovers another raw record at execution time. Terminal
 `input_unavailable`, no Repository or assignment claim, and no fabricated
-digest apply only when the worker cannot prove read access through the shared
-Retention read authority: a new admission fails, or a due renewal observes
-revision/readability drift. A still-live admitted grant remains consumable to
-its published expiry even if the original item expiry passes while the grant
-is active. A raw digest mismatch produces terminal
+digest apply when a new admission proves the fixed raw input authoritatively
+unavailable. A periodic heartbeat that is busy leaves both leases unchanged;
+the worker may continue only while its current queue lease remains live and
+may retry renewal on the next interval. Current revision/readability/source/
+receipt/coverage authority loss during a due Retention renewal cancels the
+current attempt and returns the still-owned queue row to retry. A busy
+pre-publication handoff likewise publishes nothing and returns the attempt to
+retry. The same current-proof drift while the operation grant is not due does
+not cancel the attempt: periodic and pre-publication heartbeats may extend only
+the queue lease, and finalization uses the latest adopted queue lease with the
+still-usable admitted grant. Neither failure case converts the
+admitted grant into terminal input evidence or shortens it: the grant remains
+consumable to its published expiry even if the original item expiry passes
+while the grant is active. A raw digest mismatch produces terminal
 `catalog_payload_digest_mismatch`.
 
 A missing exact Session Event produces `waiting_session`, no domain writes, no

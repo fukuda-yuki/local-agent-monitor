@@ -6,6 +6,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal enum SourceCompatibilityReconciliationCheckpoint
 {
+    AfterRetentionAdmission,
     BeforeCommit,
 }
 
@@ -120,6 +121,7 @@ internal sealed class SourceCompatibilityReconciler
         }
         try
         {
+            checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission);
             return Commit(request, fingerprint, registry, lease.Value, grant);
         }
         finally

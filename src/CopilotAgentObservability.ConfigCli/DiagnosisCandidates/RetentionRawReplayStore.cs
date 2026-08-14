@@ -112,21 +112,7 @@ internal sealed class RetentionRawReplayStore
         string replayId, string captureId)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT i.private_locator
-            FROM retention_items i
-            WHERE i.item_id=$retention_read_item_id AND i.revision=$retention_read_revision
-              AND i.store_instance_id=$store AND i.store_kind='sensitive_bundle' AND i.source_item_id=$capture
-              AND EXISTS (SELECT 1 FROM retention_file_capture_reservations r WHERE r.capture_id=$capture
-                AND r.store_instance_id=$store AND r.store_kind='sensitive_bundle' AND r.source_item_id=$capture
-                AND r.phase='complete' AND r.owner_token=$retention_read_source_token)
-              AND EXISTS (SELECT 1 FROM retention_leases l WHERE l.item_id=i.item_id AND l.lease_kind='operation'
-                AND l.owner=$retention_read_lease_owner AND l.generation=$retention_read_lease_generation AND l.expires_at=$retention_read_lease_expires_at);
-            """;
-        command.Parameters.AddWithValue("$store", catalog.StoreInstanceId);
-        command.Parameters.AddWithValue("$capture", captureId);
-        grant.BindSelectorCapability(command);
+        ConfigureReceiptMaterializationCommand(command, transaction, catalog.StoreInstanceId, captureId, grant);
         var locator = command.ExecuteScalar() as string;
         if (locator is null || !string.Equals(locator, Path.Combine(parent, captureId), StringComparison.Ordinal)) return null;
         try
@@ -161,6 +147,35 @@ internal sealed class RetentionRawReplayStore
         {
             return null;
         }
+    }
+
+    internal static void ConfigureReceiptMaterializationCommand(
+        SqliteCommand command,
+        SqliteTransaction transaction,
+        string storeInstanceId,
+        string captureId,
+        RetentionReadGrant grant)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentException.ThrowIfNullOrWhiteSpace(storeInstanceId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(captureId);
+        ArgumentNullException.ThrowIfNull(grant);
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT i.private_locator
+            FROM retention_items i
+            WHERE i.item_id=$retention_read_item_id AND i.revision=$retention_read_revision
+              AND i.store_instance_id=$store AND i.store_kind='sensitive_bundle' AND i.source_item_id=$capture
+              AND EXISTS (SELECT 1 FROM retention_file_capture_reservations r WHERE r.capture_id=$capture
+                AND r.store_instance_id=$store AND r.store_kind='sensitive_bundle' AND r.source_item_id=$capture
+                AND r.phase='complete' AND r.owner_token=$retention_read_source_token)
+              AND EXISTS (SELECT 1 FROM retention_leases l WHERE l.item_id=i.item_id AND l.lease_kind=$retention_read_lease_kind
+                AND l.owner=$retention_read_lease_owner AND l.generation=$retention_read_lease_generation AND l.expires_at=$retention_read_lease_expires_at);
+            """;
+        command.Parameters.AddWithValue("$store", storeInstanceId);
+        command.Parameters.AddWithValue("$capture", captureId);
+        grant.BindAdmissionSelectorCapability(command);
     }
 
     private static bool SafeFile(string path, long maximum, out byte[] bytes, bool exact = false)

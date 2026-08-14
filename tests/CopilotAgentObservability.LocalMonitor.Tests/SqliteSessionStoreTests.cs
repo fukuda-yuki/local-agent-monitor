@@ -1327,6 +1327,300 @@ public sealed class SqliteSessionStoreTests
     }
 
     [Fact]
+    public async Task ContentReadMaterialization_RejectsEveryPerturbedAdmissionParameter()
+    {
+        using var database = new SessionTestDatabase();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var batch = CreateBatch(now, "materialization-capability");
+        store.Write(batch);
+        var sessionId = batch.Detail.Session.SessionId;
+        var eventId = batch.Detail.Events[0].EventId;
+        var catalog = new RetentionCatalogStore(context, time);
+        var request = new RetentionReadRequest(
+            new(context.StoreInstanceId, RetentionStoreKind.SessionEventContent, eventId.ToString("D")),
+            RetentionReadKind.Access,
+            now,
+            ExpectedRevision: null);
+
+        var result = await catalog.ReadAsync<bool>(request, async (connection, transaction, grant, token) =>
+        {
+            using (var baseline = connection.CreateCommand())
+            {
+                SqliteSessionStore.ConfigureContentReadMaterializationCommand(
+                    baseline,
+                    transaction,
+                    grant,
+                    context.StoreInstanceId,
+                    sessionId,
+                    eventId);
+                Assert.Equal(1, await CountRowsAsync(baseline, token));
+            }
+
+            string[] capabilityParameters =
+            [
+                "$retention_read_source_token",
+                "$retention_read_item_id",
+                "$retention_read_revision",
+                "$retention_read_lease_kind",
+                "$retention_read_lease_owner",
+                "$retention_read_lease_generation",
+                "$retention_read_lease_expires_at",
+            ];
+            foreach (var parameterName in capabilityParameters)
+            {
+                using var perturbed = connection.CreateCommand();
+                SqliteSessionStore.ConfigureContentReadMaterializationCommand(
+                    perturbed,
+                    transaction,
+                    grant,
+                    context.StoreInstanceId,
+                    sessionId,
+                    eventId);
+                var parameter = perturbed.Parameters[parameterName];
+                parameter.Value = PerturbCapabilityParameter(parameterName, parameter.Value!);
+
+                Assert.Equal(0, await CountRowsAsync(perturbed, token));
+            }
+
+            return true;
+        }, CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        Assert.True(Assert.IsType<RetentionReadLease<bool>>(result.Lease).Value);
+        await result.Lease.DisposeAsync();
+
+        static async ValueTask<int> CountRowsAsync(SqliteCommand command, CancellationToken cancellationToken)
+        {
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var count = 0;
+            while (await reader.ReadAsync(cancellationToken)) count++;
+            return count;
+        }
+
+        static object PerturbCapabilityParameter(string parameterName, object value) => parameterName switch
+        {
+            "$retention_read_source_token" => MutateToken(Assert.IsType<byte[]>(value)),
+            "$retention_read_item_id" => MutateHexIdentifier(Assert.IsType<string>(value)),
+            "$retention_read_revision" => Assert.IsType<long>(value) + 1,
+            "$retention_read_lease_kind" => Assert.IsType<string>(value) == "access" ? "operation" : "access",
+            "$retention_read_lease_owner" => MutateHexIdentifier(Assert.IsType<string>(value)),
+            "$retention_read_lease_generation" => Assert.IsType<long>(value) + 1,
+            "$retention_read_lease_expires_at" => DateTimeOffset.ParseExact(
+                    Assert.IsType<string>(value),
+                    "O",
+                    System.Globalization.CultureInfo.InvariantCulture)
+                .AddTicks(1)
+                .ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            _ => throw new ArgumentOutOfRangeException(nameof(parameterName)),
+        };
+
+        static byte[] MutateToken(byte[] value)
+        {
+            var changed = value.ToArray();
+            changed[0] ^= 0xff;
+            return changed;
+        }
+
+        static string MutateHexIdentifier(string value) =>
+            (value[0] == '0' ? "1" : "0") + value[1..];
+    }
+
+    [Fact]
+    public async Task ReadContentAsync_PinnedPastHistoricalExpiryRemainsGrantedAndProjectsExpiringWithoutMutation()
+    {
+        using var database = new SessionTestDatabase();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var batch = CreateBatch(now, "pinned-past-expiry");
+        store.Write(batch);
+        var sessionId = batch.Detail.Session.SessionId;
+        var eventId = batch.Detail.Events[0].EventId;
+        IReadOnlyDictionary<string, byte[]> retentionItemBefore;
+        IReadOnlyDictionary<string, byte[]> contentBefore;
+        using (var connection = database.Open())
+        {
+            using var pin = connection.CreateCommand();
+            pin.CommandText = "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='session_event_content' AND source_item_id=$event_id;";
+            pin.Parameters.AddWithValue("$event_id", eventId.ToString("D"));
+            Assert.Equal(1, pin.ExecuteNonQuery());
+            retentionItemBefore = ReadCompleteSessionRowBytes(connection, "retention_items", eventId);
+            contentBefore = ReadCompleteSessionRowBytes(connection, "session_event_content", eventId);
+        }
+        time.Advance(TimeSpan.FromDays(91));
+
+        var result = await store.ReadContentAsync(sessionId, eventId, CancellationToken.None);
+
+        Assert.Equal(SessionContentReadDisposition.Granted, result.Disposition);
+        await using (var lease = Assert.IsType<SessionContentReadLease>(result.Lease))
+        {
+            Assert.Equal(batch.Content[0], lease.Content);
+            using var activeLeaseVerification = database.Open();
+            Assert.Equal(1L, CountSessionContentAccessLease(activeLeaseVerification, eventId));
+        }
+        Assert.Equal(SessionRawRetentionState.Expiring, store.GetRawRetentionState(sessionId));
+        using var verification = database.Open();
+        Assert.Equal(0L, CountSessionContentAccessLease(verification, eventId));
+        AssertCompleteRowBytesEqual(
+            retentionItemBefore,
+            ReadCompleteSessionRowBytes(verification, "retention_items", eventId));
+        AssertCompleteRowBytesEqual(
+            contentBefore,
+            ReadCompleteSessionRowBytes(verification, "session_event_content", eventId));
+    }
+
+    [Fact]
+    public void GetRawRetentionState_ExactExpiryBoundaryPrefersReadableSiblingUntilAllRepresentedItemsExpire()
+    {
+        using var database = new SessionTestDatabase();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var firstCapturedAt = now.AddMinutes(-1);
+        var siblingCapturedAt = now;
+        var firstExpiry = firstCapturedAt.AddDays(90);
+        var siblingExpiry = siblingCapturedAt.AddDays(90);
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var batch = CreateBatch(now, "raw-state-precedence");
+        var siblingEvent = batch.Detail.Events[0] with
+        {
+            EventId = Guid.CreateVersion7(),
+            SourceEventId = "event-raw-state-precedence-sibling",
+        };
+        var firstContent = batch.Content[0] with { CapturedAt = firstCapturedAt, ExpiresAt = firstExpiry };
+        var siblingContent = batch.Content[0] with
+        {
+            EventId = siblingEvent.EventId,
+            CapturedAt = siblingCapturedAt,
+            ExpiresAt = siblingExpiry,
+        };
+        store.Write(batch with
+        {
+            Detail = batch.Detail with { Events = [batch.Detail.Events[0], siblingEvent] },
+            Content = [firstContent, siblingContent],
+        });
+
+        time.Advance(firstExpiry - now);
+        Assert.Equal(firstExpiry, time.GetUtcNow());
+        using (var connection = database.Open())
+        {
+            Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content';"));
+            Assert.Equal("expiring", Scalar<string>(connection, $"SELECT state FROM retention_items WHERE source_item_id='{batch.Detail.Events[0].EventId:D}';"));
+            Assert.Equal(firstCapturedAt.ToString("O"), Scalar<string>(connection, $"SELECT captured_at FROM retention_items WHERE source_item_id='{batch.Detail.Events[0].EventId:D}';"));
+            Assert.Equal(firstExpiry.ToString("O"), Scalar<string>(connection, $"SELECT expires_at FROM retention_items WHERE source_item_id='{batch.Detail.Events[0].EventId:D}';"));
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT read_denied_at IS NULL FROM retention_items WHERE source_item_id='{batch.Detail.Events[0].EventId:D}';"));
+            Assert.Equal("expiring", Scalar<string>(connection, $"SELECT state FROM retention_items WHERE source_item_id='{siblingEvent.EventId:D}';"));
+            Assert.Equal(siblingCapturedAt.ToString("O"), Scalar<string>(connection, $"SELECT captured_at FROM retention_items WHERE source_item_id='{siblingEvent.EventId:D}';"));
+            Assert.Equal(siblingExpiry.ToString("O"), Scalar<string>(connection, $"SELECT expires_at FROM retention_items WHERE source_item_id='{siblingEvent.EventId:D}';"));
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT read_denied_at IS NULL FROM retention_items WHERE source_item_id='{siblingEvent.EventId:D}';"));
+            Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content' AND policy_id='raw-default-90d' AND policy_version=1;"));
+        }
+
+        Assert.Equal(SessionRawRetentionState.Expiring, store.GetRawRetentionState(batch.Detail.Session.SessionId));
+
+        time.Advance(siblingExpiry - firstExpiry);
+        Assert.Equal(siblingExpiry, time.GetUtcNow());
+        Assert.Equal(SessionRawRetentionState.ExpiredPendingDeletion, store.GetRawRetentionState(batch.Detail.Session.SessionId));
+        using (var connection = database.Open())
+        {
+            Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM retention_items WHERE store_kind='session_event_content' AND state='expiring' AND read_denied_at IS NULL;"));
+            Assert.Equal(firstExpiry.ToString("O"), Scalar<string>(connection, $"SELECT expires_at FROM retention_items WHERE source_item_id='{batch.Detail.Events[0].EventId:D}';"));
+            Assert.Equal(siblingExpiry.ToString("O"), Scalar<string>(connection, $"SELECT expires_at FROM retention_items WHERE source_item_id='{siblingEvent.EventId:D}';"));
+        }
+    }
+
+    [Fact]
+    public void GetRawRetentionState_DeletedCatalogItemRemainsRepresentedAfterContentRemoval()
+    {
+        using var database = new SessionTestDatabase();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var batch = CreateBatch(now, "raw-state-deleted");
+        store.Write(batch);
+        var eventId = batch.Detail.Events[0].EventId;
+        using (var connection = database.Open())
+        {
+            var itemId = Scalar<string>(connection, $"SELECT item_id FROM retention_items WHERE store_kind='session_event_content' AND source_item_id='{eventId:D}';");
+            using var transaction = connection.BeginTransaction();
+            using (var deleteContent = connection.CreateCommand())
+            {
+                deleteContent.Transaction = transaction;
+                deleteContent.CommandText = "DELETE FROM session_event_content WHERE event_id=$event_id;";
+                deleteContent.Parameters.AddWithValue("$event_id", eventId.ToString("D"));
+                Assert.Equal(1, deleteContent.ExecuteNonQuery());
+            }
+            using (var tombstone = connection.CreateCommand())
+            {
+                tombstone.Transaction = transaction;
+                tombstone.CommandText = "INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) VALUES($item_id,$now,$now);";
+                tombstone.Parameters.AddWithValue("$item_id", itemId);
+                tombstone.Parameters.AddWithValue("$now", now.ToString("O"));
+                Assert.Equal(1, tombstone.ExecuteNonQuery());
+            }
+            using (var complete = connection.CreateCommand())
+            {
+                complete.Transaction = transaction;
+                complete.CommandText = "UPDATE retention_items SET state='deleted',read_denied_at=$now,queued_at=$now,deleted_at=$now,revision=revision+1 WHERE item_id=$item_id;";
+                complete.Parameters.AddWithValue("$item_id", itemId);
+                complete.Parameters.AddWithValue("$now", now.ToString("O"));
+                Assert.Equal(1, complete.ExecuteNonQuery());
+            }
+            transaction.Commit();
+
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM session_events WHERE event_id='{eventId:D}';"));
+            Assert.Equal(0L, Scalar<long>(connection, $"SELECT COUNT(*) FROM session_event_content WHERE event_id='{eventId:D}';"));
+            Assert.Equal("deleted", Scalar<string>(connection, $"SELECT state FROM retention_items WHERE item_id='{itemId}';"));
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT read_denied_at IS NOT NULL AND deleted_at IS NOT NULL FROM retention_items WHERE item_id='{itemId}';"));
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM retention_tombstones WHERE item_id='{itemId}';"));
+        }
+
+        Assert.Equal(SessionRawRetentionState.ExpiredPendingDeletion, store.GetRawRetentionState(batch.Detail.Session.SessionId));
+    }
+
+    [Fact]
+    public void GetRawRetentionState_ExistingSessionWithoutRepresentedRetentionItemIsNotCaptured()
+    {
+        using var database = new SessionTestDatabase();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var uncaptured = CreateBatch(time.GetUtcNow(), "raw-state-absent");
+        store.Write(uncaptured with
+        {
+            Detail = uncaptured.Detail with
+            {
+                Events = [uncaptured.Detail.Events[0] with { ContentState = SessionContentState.NotCaptured }],
+            },
+            Content = [],
+        });
+        using (var connection = database.Open())
+        {
+            Assert.Equal(1L, Scalar<long>(connection, $"SELECT COUNT(*) FROM sessions WHERE session_id='{uncaptured.Detail.Session.SessionId:D}';"));
+            Assert.Equal(0L, Scalar<long>(connection, $"""
+                SELECT COUNT(*)
+                FROM retention_items AS i
+                JOIN session_events AS e ON e.event_id=i.source_item_id
+                WHERE i.store_kind='session_event_content'
+                  AND e.session_id='{uncaptured.Detail.Session.SessionId:D}';
+                """));
+        }
+
+        Assert.Equal(SessionRawRetentionState.NotCaptured, store.GetRawRetentionState(uncaptured.Detail.Session.SessionId));
+    }
+
+    [Fact]
     public async Task ReadContentAsync_WithoutRetentionContextFailsClosedBeforeDatabaseAccess()
     {
         using var database = new SessionTestDatabase();
@@ -1612,6 +1906,21 @@ public sealed class SqliteSessionStoreTests
         return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T));
     }
 
+    private static long CountSessionContentAccessLease(SqliteConnection connection, Guid eventId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*)
+            FROM retention_leases AS lease
+            JOIN retention_items AS item ON item.item_id=lease.item_id
+            WHERE item.store_kind='session_event_content'
+              AND item.source_item_id=$event_id
+              AND lease.lease_kind='access';
+            """;
+        command.Parameters.AddWithValue("$event_id", eventId.ToString("D"));
+        return (long)command.ExecuteScalar()!;
+    }
+
     private static void WriteClassified(
         SqliteSessionStore store,
         SessionWriteBatch batch,
@@ -1642,6 +1951,75 @@ public sealed class SqliteSessionStoreTests
         var columns = new List<string>();
         while (reader.Read()) columns.Add(reader.GetString(0));
         return columns;
+    }
+
+    private static IReadOnlyDictionary<string, byte[]> ReadCompleteSessionRowBytes(
+        SqliteConnection connection,
+        string tableName,
+        Guid eventId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = tableName switch
+        {
+            "retention_items" => "SELECT * FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$event_id;",
+            "session_event_content" => "SELECT * FROM session_event_content WHERE event_id=$event_id;",
+            _ => throw new ArgumentOutOfRangeException(nameof(tableName)),
+        };
+        command.Parameters.AddWithValue("$event_id", eventId.ToString("D"));
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        var value = Enumerable.Range(0, reader.FieldCount)
+            .ToDictionary(reader.GetName, index => EncodeSqliteValue(reader.GetValue(index)), StringComparer.Ordinal);
+        Assert.False(reader.Read());
+        return value;
+    }
+
+    private static void AssertCompleteRowBytesEqual(
+        IReadOnlyDictionary<string, byte[]> expected,
+        IReadOnlyDictionary<string, byte[]> actual)
+    {
+        Assert.Equal(expected.Keys, actual.Keys);
+        foreach (var column in expected.Keys)
+        {
+            Assert.Equal(expected[column], actual[column]);
+        }
+    }
+
+    private static byte[] EncodeSqliteValue(object value)
+    {
+        switch (value)
+        {
+            case DBNull:
+                return [0];
+            case long integer:
+                {
+                    var bytes = new byte[9];
+                    bytes[0] = 1;
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(1), integer);
+                    return bytes;
+                }
+            case double real:
+                {
+                    var bytes = new byte[9];
+                    bytes[0] = 2;
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(1), BitConverter.DoubleToInt64Bits(real));
+                    return bytes;
+                }
+            case string text:
+                return PrefixSqliteValue(3, System.Text.Encoding.UTF8.GetBytes(text));
+            case byte[] blob:
+                return PrefixSqliteValue(4, blob);
+            default:
+                throw new Xunit.Sdk.XunitException($"Unexpected SQLite value type '{value.GetType().FullName}'.");
+        }
+    }
+
+    private static byte[] PrefixSqliteValue(byte storageClass, byte[] value)
+    {
+        var bytes = new byte[value.Length + 1];
+        bytes[0] = storageClass;
+        value.CopyTo(bytes, 1);
+        return bytes;
     }
 
     private sealed class SessionTestDatabase : IDisposable

@@ -322,7 +322,7 @@ public sealed class LocalRepositoryReconciliationTests
     }
 
     [Fact]
-    public async Task FinalRetentionAndQueueFenceExpiryRollsBackThePublishedGraph()
+    public async Task FinalQueueFenceExpiryRollsBackThePublishedGraph()
     {
         LocalRepositoryAdmissionFixture? fixture = null;
         var checkpoint = new DelegatingAdmissionCheckpoint((stage) =>
@@ -343,16 +343,18 @@ public sealed class LocalRepositoryReconciliationTests
             Assert.Equal("leased", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
             Assert.Equal(string.Empty, fixture.ScalarText("SELECT terminal_reason FROM local_repository_reconciliation_queue;"));
             Assert.Equal(0, fixture.DomainRowCount());
-            Assert.IsAssignableFrom<OperationCanceledException>(fixture.LastProcessorException);
+            var exception = Assert.IsType<InvalidOperationException>(fixture.LastProcessorException);
+            Assert.Equal("local_repository_queue_authority_lost", exception.Message);
         }
     }
 
     [Fact]
     public async Task HeartbeatBusyBeforeLocalExpiryKeepsProductionPublicationAuthority()
     {
-        using var admission = new HoldingAdmissionCheckpoint();
+        using var admission = new HoldingPreparationCheckpoint();
         using var heartbeat = new HeartbeatOutcomeCheckpoint();
         using var fixture = new LocalRepositoryAdmissionFixture(admission, heartbeat);
+        heartbeat.DatabasePath = fixture.DatabasePath;
         var prepared = fixture.Prepare(
             LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
                 LocalRepositoryAdmissionFixture.Trace(1),
@@ -362,8 +364,12 @@ public sealed class LocalRepositoryReconciliationTests
 
         var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
         Assert.True(admission.Held.Wait(TimeSpan.FromSeconds(10)));
+        heartbeat.HoldWriterLock();
         fixture.Clock.Advance(TimeSpan.FromSeconds(10));
         Assert.True(heartbeat.Busy.Wait(TimeSpan.FromSeconds(10)));
+        heartbeat.ReleaseWriterLock();
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(heartbeat.Applied.Wait(TimeSpan.FromSeconds(10)));
         admission.Release.Set();
 
         var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
@@ -377,7 +383,7 @@ public sealed class LocalRepositoryReconciliationTests
     [Fact]
     public async Task HeartbeatAtExactLocalExpiryFencesProductionPublicationUntilRecovery()
     {
-        using var admission = new HoldingAdmissionCheckpoint();
+        using var admission = new HoldingPreparationCheckpoint();
         using var heartbeat = new HeartbeatOutcomeCheckpoint();
         using var fixture = new LocalRepositoryAdmissionFixture(admission, heartbeat);
         var prepared = fixture.Prepare(
@@ -391,12 +397,6 @@ public sealed class LocalRepositoryReconciliationTests
         Assert.True(admission.Held.Wait(TimeSpan.FromSeconds(10)));
         fixture.Clock.Advance(TimeSpan.FromSeconds(30));
         Assert.True(heartbeat.Expired.Wait(TimeSpan.FromSeconds(10)));
-
-        var competing = await fixture.RunExistingAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Busy, competing);
-        Assert.Equal("leased", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
-        Assert.Equal(0, fixture.DomainRowCount());
 
         admission.Release.Set();
         var expired = await firstWork.WaitAsync(TimeSpan.FromSeconds(10));
@@ -412,6 +412,415 @@ public sealed class LocalRepositoryReconciliationTests
         Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
         Assert.Equal(2, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
         AssertSinglePublishedGraph(fixture);
+    }
+
+    [Fact]
+    public async Task CallerCancellationAfterRejectedHandoffPropagatesWithoutPublication()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var checkpoint = new PreparationHandoffCheckpoint(
+            holdAfterRejection: true,
+            onHandoffRejected: cancellation.Cancel);
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/CancelledHandoff")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared, cancellation.Token));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Execute("""
+            CREATE TRIGGER reject_cancelled_repository_handoff
+            BEFORE UPDATE OF lease_expires_at ON local_repository_reconciliation_queue
+            WHEN OLD.state='leased' AND NEW.state='leased'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END;
+            """);
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.HandoffRejected.Wait(TimeSpan.FromSeconds(10)));
+        checkpoint.ReleaseRejection.Set();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => work);
+
+        Assert.Equal("leased", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+    }
+
+    [Fact]
+    public async Task PayloadParsingCompletesWithoutAWriterTransaction()
+    {
+        using var checkpoint = new TransactionFreePayloadParsingCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/TransactionFreeParse")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.BeforeParsingHeld.Wait(TimeSpan.FromSeconds(10)));
+        using var blockerConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        blockerConnection.Open();
+        using var blockerTransaction = blockerConnection.BeginTransaction(deferred: false);
+        checkpoint.ReleaseParsing.Set();
+
+        Assert.True(checkpoint.AfterPreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        blockerTransaction.Dispose();
+        blockerConnection.Dispose();
+        checkpoint.ReleasePreparation.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    [Fact]
+    public async Task UnexpectedPeriodicHeartbeatFaultReturnsTheLatestRenewedLeaseToRetry()
+    {
+        using var checkpoint = new FaultingPeriodicHeartbeatCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/HeartbeatFault")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(checkpoint.AppliedThenFaulted.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(
+            fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O"),
+            fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(21));
+        checkpoint.ReleasePreparation.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Retrying, outcome);
+        Assert.Equal("pending", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+    }
+
+    [Fact]
+    public async Task DuePeriodicRetentionAuthorityDenialCancelsPreparationAndReturnsTheQueueToRetry()
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/PeriodicRetentionDenial")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        var retentionExpiry = fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';");
+        for (var tick = 1; tick <= 5; tick++)
+        {
+            fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+            Assert.True(SpinWait.SpinUntil(
+                () => checkpoint.PeriodicHeartbeatCount + checkpoint.PeriodicHeartbeatRejectedCount >= tick,
+                TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+        }
+        fixture.Execute($"UPDATE retention_items SET revision=revision+1 WHERE store_kind='raw_record' AND source_item_id='{prepared.RawRecordId}';");
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(SpinWait.SpinUntil(
+            () => checkpoint.PeriodicHeartbeatRejectedCount == 1,
+            TimeSpan.FromSeconds(10)));
+        Assert.Equal(5, checkpoint.PeriodicHeartbeatCount);
+        Assert.Equal(retentionExpiry, fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        checkpoint.ReleasePreparation.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Retrying, outcome);
+        Assert.Equal("pending", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+    }
+
+    [Fact]
+    public async Task NonDueRetentionRevisionDriftKeepsPeriodicAndLatestHandoffAuthorityPublishable()
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/NonDueRetentionDrift")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        var retentionExpiry = fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';");
+        fixture.Execute($"UPDATE retention_items SET revision=revision+1 WHERE store_kind='raw_record' AND source_item_id='{prepared.RawRecordId}';");
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.True(SpinWait.SpinUntil(
+            () => checkpoint.PeriodicHeartbeatCount == 1,
+            TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+        Assert.Equal(
+            fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O"),
+            fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(retentionExpiry, fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(5));
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.AfterHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(
+            fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O"),
+            fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(retentionExpiry, fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+        Assert.Equal(0, fixture.DomainRowCount());
+        checkpoint.ReleaseFinalization.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    [Fact]
+    public async Task LongPayloadPreparationKeepsPeriodicAuthorityAndCompletesTheFirstAttempt()
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/LongPreparation")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        foreach (var seconds in Enumerable.Range(1, 17).Select(static tick => tick * 10))
+        {
+            fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+            Assert.True(SpinWait.SpinUntil(
+                () => checkpoint.PeriodicHeartbeatCount + checkpoint.PeriodicHeartbeatRejectedCount >= seconds / 10,
+                TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+            var expectedExpiry = fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O");
+            Assert.Equal(
+                expectedExpiry,
+                fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        }
+        Assert.Equal(
+            DateTimeOffset.UnixEpoch.AddSeconds(240).ToString("O"),
+            fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+
+        foreach (var tick in Enumerable.Range(18, 6))
+        {
+            fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+            Assert.True(SpinWait.SpinUntil(
+                () => checkpoint.PeriodicHeartbeatCount + checkpoint.PeriodicHeartbeatRejectedCount >= tick,
+                TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+            Assert.Equal(
+                fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O"),
+                fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        }
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.AfterHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(
+            fixture.Clock.GetUtcNow().AddSeconds(30).ToString("O"),
+            fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(
+            DateTimeOffset.UnixEpoch.AddSeconds(300).ToString("O"),
+            fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.Equal(23, checkpoint.PeriodicHeartbeatCount);
+        Assert.Equal(0, fixture.DomainRowCount());
+        checkpoint.ReleaseFinalization.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("retention")]
+    public async Task RejectedHandoffRollsBackBothRenewalsAndPublishesNothing(string rejectedCas)
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint(holdAfterRejection: true);
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/RejectedHandoff")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        for (var tick = 1; tick <= 4; tick++)
+        {
+            fixture.Clock.Advance(TimeSpan.FromSeconds(10));
+            Assert.True(SpinWait.SpinUntil(
+                () => checkpoint.PeriodicHeartbeatCount + checkpoint.PeriodicHeartbeatRejectedCount >= tick,
+                TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, checkpoint.PeriodicHeartbeatRejectedCount);
+        }
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        var queueExpiry = fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;");
+        fixture.Execute(rejectedCas == "queue"
+            ? """
+                CREATE TRIGGER reject_repository_queue_handoff
+                BEFORE UPDATE OF updated_at ON local_repository_reconciliation_queue
+                WHEN NEW.state='leased'
+                BEGIN
+                    SELECT RAISE(IGNORE);
+                END;
+                """
+            : """
+                CREATE TRIGGER reject_repository_retention_handoff
+                BEFORE UPDATE OF expires_at ON retention_leases
+                WHEN OLD.lease_kind='operation'
+                BEGIN
+                    SELECT RAISE(IGNORE);
+                END;
+                """);
+        var retentionExpiry = fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';");
+        using var blockerConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        blockerConnection.Open();
+        using var blockerTransaction = blockerConnection.BeginTransaction(deferred: false);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(20));
+        Assert.True(checkpoint.HeartbeatBusy.Wait(TimeSpan.FromSeconds(10)));
+        blockerTransaction.Dispose();
+        blockerConnection.Dispose();
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.HandoffRejected.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal(queueExpiry, fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(retentionExpiry, fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+        checkpoint.ReleaseRejection.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Retrying, outcome);
+        Assert.Equal("pending", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT attempt_count FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.DomainRowCount());
+    }
+
+    [Fact]
+    public async Task BusyHandoffPublishesNothingAndReturnsTheOwnedQueueToRetry()
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint(holdAfterRejection: true);
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/BusyHandoff")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        var queueExpiry = fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;");
+        var retentionExpiry = fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';");
+        using var blockerConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        blockerConnection.Open();
+        using var blockerTransaction = blockerConnection.BeginTransaction(deferred: false);
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.HandoffRejected.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(queueExpiry, fixture.ScalarText("SELECT lease_expires_at FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(retentionExpiry, fixture.ScalarText("SELECT expires_at FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+        blockerTransaction.Dispose();
+        blockerConnection.Dispose();
+        checkpoint.ReleaseRejection.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Retrying, outcome);
+        Assert.Equal("pending", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.ScalarLong("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+        Assert.Equal(0, fixture.DomainRowCount());
+    }
+
+    [Theory]
+    [InlineData("source_surface")]
+    [InlineData("source_application_version")]
+    [InlineData("observed_at")]
+    public async Task FinalTransactionRejectsAnyPreparedProvenanceDrift(string field)
+    {
+        using var checkpoint = new PreparationHandoffCheckpoint();
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint, checkpoint);
+        var prepared = fixture.Prepare(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/ProvenanceDrift")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var work = Task.Run(() => fixture.RunPreparedAsync(prepared));
+        Assert.True(checkpoint.PreparationHeld.Wait(TimeSpan.FromSeconds(10)));
+        fixture.Execute(field switch
+        {
+            "source_surface" => $"UPDATE source_schema_observations SET source_surface='github-copilot-vscode' WHERE raw_record_id={prepared.RawRecordId};",
+            "source_application_version" => $"UPDATE source_schema_observations SET source_application_version='2.0' WHERE raw_record_id={prepared.RawRecordId};",
+            "observed_at" => $"UPDATE source_schema_observations SET observed_at='2026-08-01T01:02:04.1234567+00:00' WHERE raw_record_id={prepared.RawRecordId};",
+            _ => throw new ArgumentOutOfRangeException(nameof(field)),
+        });
+        checkpoint.ReleasePreparation.Set();
+        Assert.True(checkpoint.BeforeHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        checkpoint.ReleaseHandoff.Set();
+        Assert.True(checkpoint.AfterHandoffHeld.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, fixture.DomainRowCount());
+        checkpoint.ReleaseFinalization.Set();
+
+        var outcome = await work.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("failed_terminal", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal("catalog_schema_violation", fixture.ScalarText("SELECT terminal_reason FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(0, fixture.DomainRowCount());
     }
 
     private static void AssertSinglePublishedGraph(LocalRepositoryAdmissionFixture fixture)
@@ -575,18 +984,18 @@ public sealed class LocalRepositoryReconciliationTests
         public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint) => action(checkpoint);
     }
 
-    private sealed class HoldingAdmissionCheckpoint : ILocalRepositoryAdmissionCheckpoint, IDisposable
+    private sealed class HoldingPreparationCheckpoint : ILocalRepositoryAdmissionCheckpoint, IDisposable
     {
         internal ManualResetEventSlim Held { get; } = new();
         internal ManualResetEventSlim Release { get; } = new();
 
         public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
         {
-            if (checkpoint != LocalRepositoryAdmissionCheckpoint.AfterContexts)
+            if (checkpoint != LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff)
                 return;
             Held.Set();
             if (!Release.Wait(TimeSpan.FromSeconds(10)))
-                throw new TimeoutException("Timed out waiting to release the production admission transaction.");
+                throw new TimeoutException("Timed out waiting to release repository preparation.");
         }
 
         public void Dispose()
@@ -597,22 +1006,198 @@ public sealed class LocalRepositoryReconciliationTests
         }
     }
 
+    private sealed class TransactionFreePayloadParsingCheckpoint : ILocalRepositoryAdmissionCheckpoint, IDisposable
+    {
+        internal ManualResetEventSlim BeforeParsingHeld { get; } = new();
+        internal ManualResetEventSlim ReleaseParsing { get; } = new();
+        internal ManualResetEventSlim AfterPreparationHeld { get; } = new();
+        internal ManualResetEventSlim ReleasePreparation { get; } = new();
+
+        public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
+        {
+            if (checkpoint == LocalRepositoryAdmissionCheckpoint.BeforePayloadParsing)
+            {
+                BeforeParsingHeld.Set();
+                if (!ReleaseParsing.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Timed out waiting to release repository payload parsing.");
+            }
+            else if (checkpoint == LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff)
+            {
+                AfterPreparationHeld.Set();
+                if (!ReleasePreparation.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Timed out waiting to release parsed repository input.");
+            }
+        }
+
+        public void Dispose()
+        {
+            ReleaseParsing.Set();
+            ReleasePreparation.Set();
+            BeforeParsingHeld.Dispose();
+            ReleaseParsing.Dispose();
+            AfterPreparationHeld.Dispose();
+            ReleasePreparation.Dispose();
+        }
+    }
+
+    private sealed class FaultingPeriodicHeartbeatCheckpoint :
+        ILocalRepositoryAdmissionCheckpoint,
+        ILocalRepositoryReconciliationCheckpoint,
+        IDisposable
+    {
+        internal ManualResetEventSlim PreparationHeld { get; } = new();
+        internal ManualResetEventSlim ReleasePreparation { get; } = new();
+        internal ManualResetEventSlim AppliedThenFaulted { get; } = new();
+
+        public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff)
+                return;
+            PreparationHeld.Set();
+            if (!ReleasePreparation.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("Timed out waiting to release repository preparation after heartbeat fault.");
+        }
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatApplied)
+                return;
+            AppliedThenFaulted.Set();
+            throw new InvalidOperationException("synthetic_periodic_heartbeat_fault");
+        }
+
+        public void Dispose()
+        {
+            ReleasePreparation.Set();
+            PreparationHeld.Dispose();
+            ReleasePreparation.Dispose();
+            AppliedThenFaulted.Dispose();
+        }
+    }
+
+    private sealed class PreparationHandoffCheckpoint(
+        bool holdAfterRejection = false,
+        Action? onHandoffRejected = null) :
+        ILocalRepositoryAdmissionCheckpoint,
+        ILocalRepositoryReconciliationCheckpoint,
+        IDisposable
+    {
+        private int periodicHeartbeatCount;
+        private int periodicHeartbeatRejectedCount;
+        internal ManualResetEventSlim PreparationHeld { get; } = new();
+        internal ManualResetEventSlim ReleasePreparation { get; } = new();
+        internal ManualResetEventSlim BeforeHandoffHeld { get; } = new();
+        internal ManualResetEventSlim ReleaseHandoff { get; } = new();
+        internal ManualResetEventSlim AfterHandoffHeld { get; } = new();
+        internal ManualResetEventSlim ReleaseFinalization { get; } = new();
+        internal ManualResetEventSlim HandoffRejected { get; } = new();
+        internal ManualResetEventSlim ReleaseRejection { get; } = new();
+        internal ManualResetEventSlim HeartbeatBusy { get; } = new();
+        internal int PeriodicHeartbeatCount => Volatile.Read(ref periodicHeartbeatCount);
+        internal int PeriodicHeartbeatRejectedCount => Volatile.Read(ref periodicHeartbeatRejectedCount);
+
+        public void Reached(LocalRepositoryAdmissionCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryAdmissionCheckpoint.AfterPreparationBeforeHandoff)
+                return;
+            PreparationHeld.Set();
+            if (!ReleasePreparation.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("Timed out waiting to release prepared repository input.");
+        }
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            switch (checkpoint)
+            {
+                case LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatApplied:
+                    Interlocked.Increment(ref periodicHeartbeatCount);
+                    break;
+                case LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatRejected:
+                    Interlocked.Increment(ref periodicHeartbeatRejectedCount);
+                    break;
+                case LocalRepositoryReconciliationCheckpoint.BeforeHandoffHeartbeat:
+                    BeforeHandoffHeld.Set();
+                    if (!ReleaseHandoff.Wait(TimeSpan.FromSeconds(10)))
+                        throw new TimeoutException("Timed out waiting to release repository handoff.");
+                    break;
+                case LocalRepositoryReconciliationCheckpoint.AfterHandoffHeartbeat:
+                    AfterHandoffHeld.Set();
+                    if (!ReleaseFinalization.Wait(TimeSpan.FromSeconds(10)))
+                        throw new TimeoutException("Timed out waiting to release repository finalization.");
+                    break;
+                case LocalRepositoryReconciliationCheckpoint.AfterHandoffRejected when holdAfterRejection:
+                    onHandoffRejected?.Invoke();
+                    HandoffRejected.Set();
+                    if (!ReleaseRejection.Wait(TimeSpan.FromSeconds(10)))
+                        throw new TimeoutException("Timed out waiting to release rejected repository handoff.");
+                    break;
+                case LocalRepositoryReconciliationCheckpoint.AfterHeartbeatBusy:
+                    HeartbeatBusy.Set();
+                    break;
+            }
+        }
+
+        public void Dispose()
+        {
+            ReleasePreparation.Set();
+            ReleaseHandoff.Set();
+            ReleaseFinalization.Set();
+            ReleaseRejection.Set();
+            PreparationHeld.Dispose();
+            ReleasePreparation.Dispose();
+            BeforeHandoffHeld.Dispose();
+            ReleaseHandoff.Dispose();
+            AfterHandoffHeld.Dispose();
+            ReleaseFinalization.Dispose();
+            HandoffRejected.Dispose();
+            ReleaseRejection.Dispose();
+            HeartbeatBusy.Dispose();
+        }
+    }
+
     private sealed class HeartbeatOutcomeCheckpoint : ILocalRepositoryReconciliationCheckpoint, IDisposable
     {
+        private SqliteConnection? connection;
+        private SqliteTransaction? transaction;
         internal ManualResetEventSlim Busy { get; } = new();
+        internal ManualResetEventSlim Applied { get; } = new();
         internal ManualResetEventSlim Expired { get; } = new();
+        internal string? DatabasePath { get; set; }
+
+        internal void HoldWriterLock()
+        {
+            connection = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = DatabasePath ?? throw new InvalidOperationException("Database path was not configured."),
+                Pooling = false,
+            }.ToString());
+            connection.Open();
+            transaction = connection.BeginTransaction(deferred: false);
+        }
+
+        internal void ReleaseWriterLock()
+        {
+            transaction?.Dispose();
+            connection?.Dispose();
+            transaction = null;
+            connection = null;
+        }
 
         public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
         {
             if (checkpoint == LocalRepositoryReconciliationCheckpoint.AfterHeartbeatBusy)
                 Busy.Set();
+            else if (checkpoint == LocalRepositoryReconciliationCheckpoint.AfterPeriodicHeartbeatApplied)
+                Applied.Set();
             else if (checkpoint == LocalRepositoryReconciliationCheckpoint.HeartbeatLeaseExpired)
                 Expired.Set();
         }
 
         public void Dispose()
         {
+            ReleaseWriterLock();
             Busy.Dispose();
+            Applied.Dispose();
             Expired.Dispose();
         }
     }

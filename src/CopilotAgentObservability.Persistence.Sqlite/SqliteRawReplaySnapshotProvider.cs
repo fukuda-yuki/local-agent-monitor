@@ -8,10 +8,28 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
+internal enum RawReplaySnapshotCheckpoint
+{
+    AfterNonNullMaterialization,
+}
+
+internal interface IRawReplaySnapshotCheckpoint
+{
+    void Reached(RawReplaySnapshotCheckpoint checkpoint);
+}
+
 public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
 {
+    internal enum SnapshotReadShape
+    {
+        RawRecordWithObservations,
+        RawRecordWithoutObservations,
+        SessionContent,
+    }
+
     private readonly RetentionCatalogContext context;
     private readonly TimeProvider timeProvider;
+    private readonly IRawReplaySnapshotCheckpoint? checkpoint;
 
     public SqliteRawReplaySnapshotProvider(string databasePath, TimeProvider? timeProvider = null)
         : this(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath), timeProvider)
@@ -19,6 +37,15 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
     }
 
     public SqliteRawReplaySnapshotProvider(string databasePath, RetentionCatalogContext context, TimeProvider? timeProvider = null)
+        : this(databasePath, context, timeProvider, checkpoint: null)
+    {
+    }
+
+    internal SqliteRawReplaySnapshotProvider(
+        string databasePath,
+        RetentionCatalogContext context,
+        TimeProvider? timeProvider,
+        IRawReplaySnapshotCheckpoint? checkpoint)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(context);
@@ -26,6 +53,7 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
             throw new ArgumentException("The retention catalog context belongs to a different database.", nameof(context));
         this.context = context;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.checkpoint = checkpoint;
     }
 
     public async ValueTask<RawReplaySnapshotCapture> CaptureAsync(
@@ -50,7 +78,13 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                         now,
                         ExpectedRevision: null)).ToArray());
                 },
-                (connection, transaction, grants, _) => ValueTask.FromResult(Materialize(connection, transaction, candidates!, grants, includeSessionContent)),
+                (connection, transaction, grants, _) =>
+                {
+                    var snapshot = Materialize(connection, transaction, candidates!, grants, includeSessionContent);
+                    if (snapshot is not null)
+                        checkpoint?.Reached(RawReplaySnapshotCheckpoint.AfterNonNullMaterialization);
+                    return ValueTask.FromResult(snapshot);
+                },
                 cancellationToken).ConfigureAwait(false);
 
             if (result.Disposition != RetentionReadDisposition.Granted || result.Lease is null)
@@ -205,31 +239,12 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         out bool provenanceMissing)
     {
         var hasObservations = TableExists(connection, transaction, "source_schema_observations");
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = hasObservations
-            ? """
-                SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version,
-                       o.source_surface,o.source_application_version,o.source_adapter,o.adapter_version,o.schema_fingerprint,
-                       o.inventory_hash,o.compatibility_state,o.capture_content_state
-                FROM raw_records r
-                LEFT JOIN source_schema_observations o ON o.raw_record_id=r.id
-                WHERE r.id=$id AND r.retention_owner_token=$retention_read_source_token
-                  AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
-                  AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind='operation'
-                    AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
-                """
-            : """
-                SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version,
-                       NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
-                FROM raw_records r
-                WHERE r.id=$id AND r.retention_owner_token=$retention_read_source_token
-                  AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
-                  AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind='operation'
-                    AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
-                """;
-        command.Parameters.AddWithValue("$id", long.Parse(sourceId, CultureInfo.InvariantCulture));
-        grant.BindSelectorCapability(command);
+        using var command = CreateSnapshotReadCommand(
+            connection,
+            transaction,
+            hasObservations ? SnapshotReadShape.RawRecordWithObservations : SnapshotReadShape.RawRecordWithoutObservations,
+            sourceId,
+            grant);
         using var reader = command.ExecuteReader();
         if (!reader.Read()) { provenanceMissing = false; return null; }
         provenanceMissing = reader.IsDBNull(13);
@@ -247,26 +262,81 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         string sourceId,
         RetentionReadGrant grant)
     {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT e.event_id,e.session_id,e.run_id,e.trace_id,e.source_adapter,e.source_event_id,e.occurred_at,e.content_state,
-                   e.source_application_version,e.adapter_version,e.schema_fingerprint,e.normalization_version,e.match_kind,
-                   c.content_kind,c.content_json,c.captured_at,c.expires_at
-            FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id
-            WHERE c.event_id=$event_id AND c.retention_owner_token=$retention_read_source_token
-              AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
-              AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind='operation'
-                AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
-            """;
-        command.Parameters.AddWithValue("$event_id", sourceId);
-        grant.BindSelectorCapability(command);
+        using var command = CreateSnapshotReadCommand(
+            connection,
+            transaction,
+            SnapshotReadShape.SessionContent,
+            sourceId,
+            grant);
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         return new(reader.GetString(0), reader.GetString(1), Nullable(reader, 2), Nullable(reader, 3), reader.GetString(4), reader.GetString(5),
             Timestamp(reader.GetString(6)), reader.GetString(7), Nullable(reader, 8), Nullable(reader, 9), Nullable(reader, 10), Nullable(reader, 11), Nullable(reader, 12),
             reader.GetString(13), reader.GetString(14), Timestamp(reader.GetString(15)), Timestamp(reader.GetString(16)),
             "session_secret_filter_applied", RawReplayContractVersions.CredentialScanner);
+    }
+
+    internal static SqliteCommand CreateSnapshotReadCommand(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SnapshotReadShape shape,
+        string sourceId,
+        RetentionReadGrant grant)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(sourceId);
+        ArgumentNullException.ThrowIfNull(grant);
+        var command = connection.CreateCommand();
+        try
+        {
+            command.Transaction = transaction;
+            command.CommandText = shape switch
+            {
+                SnapshotReadShape.RawRecordWithObservations => """
+                    SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version,
+                           o.source_surface,o.source_application_version,o.source_adapter,o.adapter_version,o.schema_fingerprint,
+                           o.inventory_hash,o.compatibility_state,o.capture_content_state
+                    FROM raw_records r
+                    LEFT JOIN source_schema_observations o ON o.raw_record_id=r.id
+                    WHERE r.id=$id AND r.retention_owner_token=$retention_read_source_token
+                      AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
+                      AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind=$retention_read_lease_kind
+                        AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
+                    """,
+                SnapshotReadShape.RawRecordWithoutObservations => """
+                    SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version,
+                           NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
+                    FROM raw_records r
+                    WHERE r.id=$id AND r.retention_owner_token=$retention_read_source_token
+                      AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
+                      AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind=$retention_read_lease_kind
+                        AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
+                    """,
+                SnapshotReadShape.SessionContent => """
+                    SELECT e.event_id,e.session_id,e.run_id,e.trace_id,e.source_adapter,e.source_event_id,e.occurred_at,e.content_state,
+                           e.source_application_version,e.adapter_version,e.schema_fingerprint,e.normalization_version,e.match_kind,
+                           c.content_kind,c.content_json,c.captured_at,c.expires_at
+                    FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id
+                    WHERE c.event_id=$event_id AND c.retention_owner_token=$retention_read_source_token
+                      AND EXISTS (SELECT 1 FROM retention_items WHERE item_id=$retention_read_item_id AND revision=$retention_read_revision)
+                      AND EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$retention_read_item_id AND lease_kind=$retention_read_lease_kind
+                        AND owner=$retention_read_lease_owner AND generation=$retention_read_lease_generation AND expires_at=$retention_read_lease_expires_at);
+                    """,
+                _ => throw new ArgumentOutOfRangeException(nameof(shape)),
+            };
+            if (shape == SnapshotReadShape.SessionContent)
+                command.Parameters.AddWithValue("$event_id", sourceId);
+            else
+                command.Parameters.AddWithValue("$id", long.Parse(sourceId, CultureInfo.InvariantCulture));
+            grant.BindAdmissionSelectorCapability(command);
+            return command;
+        }
+        catch
+        {
+            command.Dispose();
+            throw;
+        }
     }
 
     private static string BuildRawPredicate(RawReplaySelection selection, SqliteCommand command)

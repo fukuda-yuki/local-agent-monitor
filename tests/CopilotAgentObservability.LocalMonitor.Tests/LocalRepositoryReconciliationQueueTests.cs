@@ -199,6 +199,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         InsertQueue(
@@ -215,17 +216,302 @@ public sealed class LocalRepositoryReconciliationQueueTests
         await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
         var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
         var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var admittedRetentionExpiry = grant.LeaseExpiresAt;
         var dueRetentionExpiry = at.AddSeconds(20);
         SetRetentionLeaseExpiry(connection, grant, dueRetentionExpiry);
 
         var heartbeatAt = at.AddSeconds(10);
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
         var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
         Assert.Equal(heartbeatAt.AddSeconds(30), result.Lease!.LeaseExpiresAt);
         Assert.Equal(heartbeatAt.AddSeconds(30).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
-        Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration), grant.LeaseExpiresAt);
+        Assert.Equal(admittedRetentionExpiry, grant.LeaseExpiresAt);
+        using (var published = grant.EnterLeasePublication())
+            Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration), published.LeaseExpiresAt);
         Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("retention")]
+    public async Task Heartbeat_StaleCallerTimeCannotRenewAtTheExactTrustedExpiry(string expiredLease)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000092",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var store = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, clock, static () => new string('2', 64));
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var retentionExpiry = expiredLease == "queue" ? at.AddSeconds(45) : at.AddSeconds(20);
+        SetRetentionLeaseExpiry(connection, grant, retentionExpiry);
+        var heartbeatAt = at.AddSeconds(10);
+        var queueExpiryBefore = ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};");
+        var retentionExpiryBefore = ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+        DateTimeOffset publishedExpiryBefore;
+        using (var publication = grant.EnterLeasePublication())
+            publishedExpiryBefore = publication.LeaseExpiresAt;
+
+        clock.Advance((expiredLease == "queue" ? queueLease.LeaseExpiresAt : retentionExpiry) - clock.GetUtcNow());
+        var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+        Assert.Null(result.Lease);
+        Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+        Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+        using var afterPublication = grant.EnterLeasePublication();
+        Assert.Equal(publishedExpiryBefore, afterPublication.LeaseExpiresAt);
+    }
+
+    [Theory]
+    [InlineData("queue", "stale")]
+    [InlineData("queue", "future")]
+    [InlineData("retention", "stale")]
+    [InlineData("retention", "future")]
+    public async Task Heartbeat_PostBeginTrustedClockAtExactExpiryRejectsCallerTimeWithoutMutation(
+        string expiredLease,
+        string callerTime)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000095",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        using var checkpoint = new HeartbeatBeginClockGate();
+        var store = new SqliteLocalRepositoryReconciliationStore(
+            temp.DatabasePath,
+            clock,
+            static () => new string('5', 64),
+            checkpoint);
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var retentionExpiry = expiredLease == "queue" ? at.AddSeconds(45) : at.AddSeconds(20);
+        SetRetentionLeaseExpiry(connection, grant, retentionExpiry);
+        var exactExpiry = expiredLease == "queue" ? queueLease.LeaseExpiresAt : retentionExpiry;
+        var callerHeartbeatAt = callerTime == "stale" ? at.AddDays(-1) : at.AddDays(1);
+        var queueBefore = QueueStoredValues(connection);
+        var retentionBefore = ScalarText(connection, $"SELECT owner || ':' || generation || ':' || expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+        DateTimeOffset publishedExpiryBefore;
+        using (var publication = grant.EnterLeasePublication())
+            publishedExpiryBefore = publication.LeaseExpiresAt;
+
+        var heartbeat = Task.Run(() => store.Heartbeat(queueLease, retentionLease, callerHeartbeatAt));
+        try
+        {
+            await checkpoint.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(exactExpiry - clock.GetUtcNow());
+        }
+        finally
+        {
+            checkpoint.Resume();
+        }
+        var result = await heartbeat.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, checkpoint.Count);
+        Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+        Assert.Null(result.Lease);
+        Assert.Equal(queueBefore, QueueStoredValues(connection));
+        Assert.Equal(retentionBefore, ScalarText(connection, $"SELECT owner || ':' || generation || ':' || expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+        using var afterPublication = grant.EnterLeasePublication();
+        Assert.Equal(publishedExpiryBefore, afterPublication.LeaseExpiresAt);
+    }
+
+    [Theory]
+    [InlineData("queue")]
+    [InlineData("retention")]
+    public async Task Heartbeat_PublicationLockWaitSamplesTrustedClockAfterAcquisitionAndRejectsExactExpiry(
+        string expiredLease)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000096",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var checkpoint = new HeartbeatPublicationLockCheckpoint();
+        var store = new SqliteLocalRepositoryReconciliationStore(
+            temp.DatabasePath,
+            clock,
+            static () => new string('6', 64),
+            checkpoint);
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var retentionExpiry = expiredLease == "queue" ? at.AddSeconds(45) : at.AddSeconds(20);
+        SetRetentionLeaseExpiry(connection, grant, retentionExpiry);
+        var exactExpiry = expiredLease == "queue" ? queueLease.LeaseExpiresAt : retentionExpiry;
+        var authorityBefore = SnapshotRenewalAuthority(connection);
+        using var releasePublication = new ManualResetEventSlim();
+        var publicationAcquired = new TaskCompletionSource<DateTimeOffset>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publicationHolder = Task.Run(() =>
+        {
+            try
+            {
+                using var publication = grant.EnterLeasePublication();
+                publicationAcquired.TrySetResult(publication.LeaseExpiresAt);
+                if (!releasePublication.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("held Retention publication scope was not released");
+            }
+            catch (Exception exception)
+            {
+                publicationAcquired.TrySetException(exception);
+                throw;
+            }
+        });
+        var publishedExpiryBefore = await publicationAcquired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Task<LocalRepositoryQueueHeartbeatResult>? heartbeat = null;
+
+        try
+        {
+            heartbeat = Task.Run(() => store.Heartbeat(queueLease, retentionLease, at.AddDays(1)));
+            await checkpoint.TransactionBegun.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await checkpoint.BeforePublicationLock.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(
+                [
+                    LocalRepositoryReconciliationCheckpoint.AfterHeartbeatTransactionBegun,
+                    LocalRepositoryReconciliationCheckpoint.BeforeHeartbeatPublicationLock,
+                ],
+                checkpoint.Points);
+            Assert.False(heartbeat.IsCompleted);
+            clock.Advance(exactExpiry - clock.GetUtcNow());
+            Assert.False(heartbeat.IsCompleted);
+        }
+        finally
+        {
+            releasePublication.Set();
+            await publicationHolder.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        var result = await Assert.IsType<Task<LocalRepositoryQueueHeartbeatResult>>(heartbeat)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+        Assert.Null(result.Lease);
+        Assert.Equal(authorityBefore, SnapshotRenewalAuthority(connection));
+        using var afterPublication = grant.EnterLeasePublication();
+        Assert.Equal(publishedExpiryBefore, afterPublication.LeaseExpiresAt);
+    }
+
+    [Fact]
+    public async Task Heartbeat_TrustedClockBeforeExpiryAllowsRenewalDespiteStaleCallerTime()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000093",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var store = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, clock, static () => new string('3', 64));
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var retentionExpiry = at.AddSeconds(20);
+        SetRetentionLeaseExpiry(connection, grant, retentionExpiry);
+        var heartbeatAt = at.AddSeconds(10);
+
+        clock.Advance(retentionExpiry.AddTicks(-1) - clock.GetUtcNow());
+        var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
+        Assert.NotNull(result.Lease);
+    }
+
+    [Fact]
+    public async Task Heartbeat_FutureCallerTimeCannotAdvanceTheTrustedRenewalClock()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000094",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var store = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, clock, static () => new string('4', 64));
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        SetRetentionLeaseExpiry(connection, grant, at.AddSeconds(20));
+        var trustedHeartbeatAt = at.AddSeconds(10);
+        var callerHeartbeatAt = at.AddDays(1);
+
+        clock.Advance(trustedHeartbeatAt - clock.GetUtcNow());
+        var result = store.Heartbeat(queueLease, retentionLease, callerHeartbeatAt);
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
+        Assert.Equal(trustedHeartbeatAt.AddSeconds(30), result.Lease!.LeaseExpiresAt);
+        Assert.Equal(
+            trustedHeartbeatAt.AddSeconds(30).ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+        using (var publication = grant.EnterLeasePublication())
+            Assert.Equal(trustedHeartbeatAt.Add(RetentionV1Constants.LeaseDuration), publication.LeaseExpiresAt);
+        Assert.Equal(
+            trustedHeartbeatAt.Add(RetentionV1Constants.LeaseDuration).ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
     }
 
     [Fact]
@@ -236,6 +522,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         InsertQueue(
@@ -261,6 +548,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var heartbeatAt = at.AddSeconds(10);
         checkpoint.Configure(store, queueLease, grant, heartbeatAt);
 
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
         var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
@@ -269,7 +557,8 @@ public sealed class LocalRepositoryReconciliationQueueTests
             LocalRepositoryQueueTransitionResult.Applied,
             await Assert.IsType<Task<LocalRepositoryQueueTransitionResult>>(checkpoint.ConcurrentFinalizer).WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal("leased", ScalarText(connection, $"SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
-        Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration), grant.LeaseExpiresAt);
+        using (var published = grant.EnterLeasePublication())
+            Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration), published.LeaseExpiresAt);
     }
 
     [Theory]
@@ -284,6 +573,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         InsertQueue(
@@ -322,8 +612,10 @@ public sealed class LocalRepositoryReconciliationQueueTests
         }
         var queueExpiryBefore = ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};");
         var retentionExpiryBefore = ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+        var heartbeatAt = at.AddSeconds(10);
 
-        var result = store.Heartbeat(attemptedQueueLease, retentionLease, at.AddSeconds(10));
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
+        var result = store.Heartbeat(attemptedQueueLease, retentionLease, heartbeatAt);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
         Assert.Null(result.Lease);
@@ -332,13 +624,14 @@ public sealed class LocalRepositoryReconciliationQueueTests
     }
 
     [Fact]
-    public async Task Heartbeat_RetentionRenewalRejectionRollsBackTheEarlierQueueRenewal()
+    public async Task Heartbeat_RetentionRenewalRejectionLeavesQueueAndRetentionExpiriesUnchanged()
     {
         using var temp = new MonitorTempDirectory();
         var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         InsertQueue(
@@ -365,14 +658,335 @@ public sealed class LocalRepositoryReconciliationQueueTests
             """);
         var queueExpiryBefore = ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};");
         var retentionExpiryBefore = ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+        var heartbeatAt = at.AddSeconds(10);
 
-        var result = store.Heartbeat(queueLease, retentionLease, at.AddSeconds(10));
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
+        var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
         Assert.Null(result.Lease);
         Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
         Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
         Execute(connection, "DROP TRIGGER test_reject_repository_retention_renewal;");
+    }
+
+    [Theory]
+    [InlineData("baseline_due_renews")]
+    [InlineData("item_expiry_reached_denies")]
+    [InlineData("retained_by_policy_past_expiry_renews")]
+    [InlineData("revision_drift_denies_and_stays_denied")]
+    [InlineData("revision_drift_not_due_extends_queue_only")]
+    [InlineData("read_denied_not_due_extends_queue_only")]
+    [InlineData("successor_grant_renews_after_repair")]
+    [InlineData("lease_row_deleted_grant_lost")]
+    [InlineData("forged_owner_token_grant_lost")]
+    [InlineData("receipt_drift_denies_still_usable")]
+    [InlineData("receipt_drift_not_due_extends_queue_only")]
+    [InlineData("schema_version_drift_denies_still_usable")]
+    [InlineData("coverage_incomplete_denies_still_usable")]
+    [InlineData("coverage_incomplete_not_due_extends_queue_only")]
+    [InlineData("coverage_wrong_version_denies_still_usable")]
+    [InlineData("coverage_wrong_storage_class_denies_still_usable")]
+    [InlineData("coverage_duplicate_denies_still_usable")]
+    [InlineData("coverage_extra_denies_still_usable")]
+    [InlineData("access_grant_never_renews")]
+    [InlineData("not_due_extends_queue_only")]
+    public async Task Heartbeat_RenewalHonorsThePinnedAdmissionContract(string scenario)
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(connection, "01900000-0000-7000-8000-000000000032", rawId, "pending", "1970-01-01T00:00:00.0000000+00:00", rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var store = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, clock, static () => new string('b', 64));
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        var readKind = scenario == "access_grant_never_renews" ? RetentionReadKind.Access : RetentionReadKind.Operation;
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, readKind, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        var admittedRetentionExpiry = grant.LeaseExpiresAt;
+        var heartbeatAt = at.AddSeconds(10);
+        if (scenario is not (
+            "revision_drift_not_due_extends_queue_only"
+            or "read_denied_not_due_extends_queue_only"
+            or "receipt_drift_not_due_extends_queue_only"
+            or "coverage_incomplete_not_due_extends_queue_only"
+            or "not_due_extends_queue_only"
+            or "access_grant_never_renews"))
+            SetRetentionLeaseExpiry(connection, grant, at.AddSeconds(20));
+
+        var sourceOwnerTokenBefore = ScalarText(connection, $"SELECT hex(retention_owner_token) FROM raw_records WHERE id={rawId};");
+
+        switch (scenario)
+        {
+            case "baseline_due_renews":
+            case "not_due_extends_queue_only":
+                break;
+            case "access_grant_never_renews":
+                SetRetentionLeaseExpiry(connection, grant, at.AddSeconds(20));
+                Execute(connection, $"INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES('{grant.ItemId}','operation','{grant.LeaseOwner}','{at.AddSeconds(20).ToUniversalTime():O}',{grant.LeaseGeneration});");
+                Execute(connection, """
+                    CREATE TRIGGER test_access_grant_never_enters_retention_update
+                    BEFORE UPDATE OF expires_at ON retention_leases
+                    BEGIN
+                        SELECT RAISE(ABORT,'access_grant_entered_retention_update');
+                    END;
+                    """);
+                break;
+            case "item_expiry_reached_denies":
+                Execute(connection, $"UPDATE retention_items SET expires_at='{heartbeatAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture)}' WHERE item_id='{grant.ItemId}';");
+                break;
+            case "retained_by_policy_past_expiry_renews":
+                Execute(connection, $"UPDATE retention_items SET state='retained_by_policy',expires_at='{at.AddDays(-1).ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture)}' WHERE item_id='{grant.ItemId}';");
+                break;
+            case "revision_drift_denies_and_stays_denied":
+            case "revision_drift_not_due_extends_queue_only":
+            case "successor_grant_renews_after_repair":
+                Execute(connection, $"UPDATE retention_items SET revision=revision+1 WHERE item_id='{grant.ItemId}';");
+                break;
+            case "read_denied_not_due_extends_queue_only":
+                Execute(connection, $"UPDATE retention_items SET read_denied_at='{heartbeatAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture)}' WHERE item_id='{grant.ItemId}';");
+                break;
+            case "lease_row_deleted_grant_lost":
+                Execute(connection, $"DELETE FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+                break;
+            case "forged_owner_token_grant_lost":
+                Execute(connection, "DROP TRIGGER retention_raw_records_token_immutable;");
+                Execute(connection, $"UPDATE raw_records SET retention_owner_token=randomblob(32) WHERE id={rawId};");
+                break;
+            case "receipt_drift_denies_still_usable":
+            case "receipt_drift_not_due_extends_queue_only":
+                {
+                    var receivedAt = DateTimeOffset.Parse(
+                        ScalarText(connection, $"SELECT received_at FROM raw_records WHERE id={rawId};"),
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind).AddSeconds(1);
+                    Execute(connection, $"UPDATE raw_records SET received_at='{receivedAt.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture)}' WHERE id={rawId};");
+                    break;
+                }
+            case "schema_version_drift_denies_still_usable":
+                Execute(connection, $"PRAGMA ignore_check_constraints=ON; UPDATE raw_records SET schema_version=2 WHERE id={rawId}; PRAGMA ignore_check_constraints=OFF;");
+                break;
+            case "coverage_incomplete_denies_still_usable":
+            case "coverage_incomplete_not_due_extends_queue_only":
+                ReplaceAdapterCoverageWithMalformedCounterexample(connection, "missing");
+                break;
+            case "coverage_wrong_version_denies_still_usable":
+                ReplaceAdapterCoverageWithMalformedCounterexample(connection, "wrong_version");
+                break;
+            case "coverage_wrong_storage_class_denies_still_usable":
+                ReplaceAdapterCoverageWithMalformedCounterexample(connection, "wrong_storage_class");
+                break;
+            case "coverage_duplicate_denies_still_usable":
+                ReplaceAdapterCoverageWithMalformedCounterexample(connection, "duplicate");
+                break;
+            case "coverage_extra_denies_still_usable":
+                ReplaceAdapterCoverageWithMalformedCounterexample(connection, "extra");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+
+        var leaseKind = grant.LeaseKind.ToString().ToLowerInvariant();
+        var queueExpiryBefore = ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};");
+        var retentionExpiryBefore = ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='{leaseKind}';");
+        var catalogRowBefore = ScalarText(connection, $"SELECT state || '|' || revision || '|' || expires_at || '|' || IFNULL(read_denied_at,'') FROM retention_items WHERE item_id='{grant.ItemId}';");
+        DateTimeOffset publishedExpiryBefore;
+        using (var published = grant.EnterLeasePublication())
+            publishedExpiryBefore = published.LeaseExpiresAt;
+        var queueOnlyHeartbeat = scenario is (
+            "revision_drift_not_due_extends_queue_only"
+            or "read_denied_not_due_extends_queue_only"
+            or "receipt_drift_not_due_extends_queue_only"
+            or "coverage_incomplete_not_due_extends_queue_only"
+            or "not_due_extends_queue_only");
+        var authorityBefore = scenario is "baseline_due_renews" or "retained_by_policy_past_expiry_renews"
+            ? null
+            : SnapshotRenewalAuthority(connection, includeQueue: !queueOnlyHeartbeat);
+        var adapterCoverageBefore = SnapshotMalformedAdapterCoverage(connection);
+
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
+        var result = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
+
+        Assert.Equal(catalogRowBefore, ScalarText(connection, $"SELECT state || '|' || revision || '|' || expires_at || '|' || IFNULL(read_denied_at,'') FROM retention_items WHERE item_id='{grant.ItemId}';"));
+        if (scenario is not ("baseline_due_renews" or "retained_by_policy_past_expiry_renews"))
+        {
+            using var published = grant.EnterLeasePublication();
+            Assert.Equal(publishedExpiryBefore, published.LeaseExpiresAt);
+        }
+        if (authorityBefore is not null)
+            Assert.Equal(authorityBefore, SnapshotRenewalAuthority(connection, includeQueue: !queueOnlyHeartbeat));
+        Assert.Equal(adapterCoverageBefore, SnapshotMalformedAdapterCoverage(connection));
+
+        switch (scenario)
+        {
+            case "baseline_due_renews":
+            case "retained_by_policy_past_expiry_renews":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
+                Assert.Equal(heartbeatAt.AddSeconds(30), result.Lease!.LeaseExpiresAt);
+                Assert.Equal(heartbeatAt.AddSeconds(30).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(admittedRetentionExpiry, grant.LeaseExpiresAt);
+                using (var published = grant.EnterLeasePublication())
+                    Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration), published.LeaseExpiresAt);
+                Assert.Equal(heartbeatAt.Add(RetentionV1Constants.LeaseDuration).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                break;
+            case "item_expiry_reached_denies":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.True(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                Assert.False(GrantIsUsable(connection, grant, rawId, at.AddSeconds(20)));
+                break;
+            case "revision_drift_denies_and_stays_denied":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.True(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                clock.Advance(TimeSpan.FromSeconds(1));
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, store.Heartbeat(queueLease, retentionLease, heartbeatAt.AddSeconds(1)).Status);
+                break;
+            case "revision_drift_not_due_extends_queue_only":
+            case "read_denied_not_due_extends_queue_only":
+            case "receipt_drift_not_due_extends_queue_only":
+            case "coverage_incomplete_not_due_extends_queue_only":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
+                Assert.Equal(heartbeatAt.AddSeconds(30), result.Lease!.LeaseExpiresAt);
+                Assert.Equal(heartbeatAt.AddSeconds(30).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.Equal(sourceOwnerTokenBefore, ScalarText(connection, $"SELECT hex(retention_owner_token) FROM raw_records WHERE id={rawId};"));
+                Assert.True(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                break;
+            case "successor_grant_renews_after_repair":
+                {
+                    Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                    Assert.Null(result.Lease);
+                    Execute(connection, $"UPDATE retention_items SET state='retained_by_policy' WHERE item_id='{grant.ItemId}';");
+                    Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, store.Heartbeat(queueLease, retentionLease, heartbeatAt).Status);
+                    await raw.DisposeAsync();
+                    clock.Advance(TimeSpan.FromSeconds(1));
+                    await using var successorRaw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+                    var successorLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(successorRaw.Lease);
+                    var successorGrant = Assert.IsType<RetentionReadGrant>(successorLease.Grant);
+                    Assert.Equal(grant.AdmissionRevision + 1, successorGrant.AdmissionRevision);
+                    SetRetentionLeaseExpiry(connection, successorGrant, clock.GetUtcNow().AddSeconds(10));
+                    var renewedAt = clock.GetUtcNow();
+                    Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, store.Heartbeat(queueLease, successorLease, renewedAt).Status);
+                    using (var published = successorGrant.EnterLeasePublication())
+                        Assert.Equal(renewedAt.Add(RetentionV1Constants.LeaseDuration), published.LeaseExpiresAt);
+                    break;
+                }
+            case "lease_row_deleted_grant_lost":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.False(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                break;
+            case "forged_owner_token_grant_lost":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.False(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                break;
+            case "receipt_drift_denies_still_usable":
+            case "schema_version_drift_denies_still_usable":
+            case "coverage_incomplete_denies_still_usable":
+            case "coverage_wrong_version_denies_still_usable":
+            case "coverage_wrong_storage_class_denies_still_usable":
+            case "coverage_duplicate_denies_still_usable":
+            case "coverage_extra_denies_still_usable":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.Equal(sourceOwnerTokenBefore, ScalarText(connection, $"SELECT hex(retention_owner_token) FROM raw_records WHERE id={rawId};"));
+                Assert.True(GrantIsUsable(connection, grant, rawId, heartbeatAt));
+                break;
+            case "access_grant_never_renews":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, result.Status);
+                Assert.Null(result.Lease);
+                Assert.Equal(queueExpiryBefore, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='access';"));
+                Assert.True(GrantIsUsable(connection, grant, heartbeatAt));
+                break;
+            case "not_due_extends_queue_only":
+                Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, result.Status);
+                Assert.Equal(heartbeatAt.AddSeconds(30), result.Lease!.LeaseExpiresAt);
+                Assert.Equal(heartbeatAt.AddSeconds(30).ToString("O", System.Globalization.CultureInfo.InvariantCulture), ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+                Assert.Equal(retentionExpiryBefore, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
+                Assert.Equal(admittedRetentionExpiry, grant.LeaseExpiresAt);
+                using (var published = grant.EnterLeasePublication())
+                    Assert.Equal(publishedExpiryBefore, published.LeaseExpiresAt);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
+    }
+
+    [Fact]
+    public async Task DueHeartbeat_RevisionDriftAllowsConsumptionOnlyFinalizationBeforeOldExpiry()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = Assert.IsType<MutableTimeProvider>(temp.TimeProvider);
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(connection, "01900000-0000-7000-8000-000000000033", rawId, "pending", "1970-01-01T00:00:00.0000000+00:00", rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
+        var at = clock.GetUtcNow();
+        var store = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, clock, static () => new string('c', 64));
+        var queueLease = Assert.IsType<LocalRepositoryQueueLease>(store.TryClaimNext(at).Lease);
+        var availability = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        await using var raw = await availability.ReadAsync(rawId, queueLease.RawPayloadSha256, RetentionReadKind.Operation, CancellationToken.None);
+        var retentionLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(raw.Lease);
+        var grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
+        SetRetentionLeaseExpiry(connection, grant, at.AddSeconds(20));
+        Execute(connection, $"UPDATE retention_items SET revision=revision+1 WHERE item_id='{grant.ItemId}';");
+        var heartbeatAt = at.AddSeconds(10);
+
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
+        var heartbeat = store.Heartbeat(queueLease, retentionLease, heartbeatAt);
+
+        Assert.Equal(LocalRepositoryQueueTransitionResult.StaleOwner, heartbeat.Status);
+        Assert.Null(heartbeat.Lease);
+        LocalRepositoryQueueTransitionResult finalized;
+        using (var finalizerConnection = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = temp.DatabasePath,
+                Pooling = false,
+            }.ToString()))
+        {
+            finalizerConnection.Open();
+            using (var transaction = finalizerConnection.BeginTransaction(deferred: false))
+            {
+                finalized = RetentionCatalogStore.ValidateLocalRepositoryOperationLease(
+                    finalizerConnection,
+                    transaction,
+                    grant,
+                    rawId,
+                    heartbeatAt)
+                    ? store.TryComplete(finalizerConnection, transaction, queueLease, heartbeatAt)
+                    : LocalRepositoryQueueTransitionResult.StaleOwner;
+                if (finalized == LocalRepositoryQueueTransitionResult.Applied)
+                    transaction.Commit();
+                else
+                    transaction.Rollback();
+            }
+        }
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, finalized);
+        Assert.Equal("completed", ScalarText(connection, $"SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
     }
 
     [Fact]
@@ -383,6 +997,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         InsertQueue(connection, "01900000-0000-7000-8000-000000000027", rawId, "pending", "1970-01-01T00:00:00.0000000+00:00", rawPayloadSha256: SkillProjectionHashing.InputDigest(payload));
@@ -396,13 +1011,15 @@ public sealed class LocalRepositoryReconciliationQueueTests
         SetRetentionLeaseExpiry(connection, grant, at.AddSeconds(20));
         var queueExpiry = ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};");
         var retentionExpiry = ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';");
+        var heartbeatAt = at.AddSeconds(10);
 
+        clock.Advance(heartbeatAt - clock.GetUtcNow());
         using (HoldImmediateWriteLock(temp.DatabasePath))
-            Assert.Equal(LocalRepositoryQueueTransitionResult.Busy, store.Heartbeat(queueLease, retentionLease, at.AddSeconds(10)).Status);
+            Assert.Equal(LocalRepositoryQueueTransitionResult.Busy, store.Heartbeat(queueLease, retentionLease, heartbeatAt).Status);
 
         Assert.Equal(queueExpiry, ScalarText(connection, $"SELECT lease_expires_at FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
         Assert.Equal(retentionExpiry, ScalarText(connection, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}' AND lease_kind='operation';"));
-        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, store.Heartbeat(queueLease, retentionLease, at.AddSeconds(10)).Status);
+        Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, store.Heartbeat(queueLease, retentionLease, heartbeatAt).Status);
     }
 
     [Fact]
@@ -765,6 +1382,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temp.DatabasePath, Pooling = false }.ToString());
         connection.Open();
         LocalRepositoryCatalogSchemaV1.Ensure(connection);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         var unrelatedRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{}"));
@@ -852,6 +1470,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         var rawStore = temp.CreateRawStore();
         rawStore.CreateMonitorSchema();
         using var connection = OpenCatalog(temp.DatabasePath);
+        SeedExactAdapterCoverage(connection);
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
         var alternateRawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, "{}"));
@@ -869,6 +1488,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         switch (lostFence)
         {
             case "item_revision":
+                SetRetentionLeaseExpiry(connection, processor.Grant, clock.GetUtcNow().AddSeconds(20));
                 Execute(connection, $"UPDATE retention_items SET revision=revision+1 WHERE store_kind='raw_record' AND source_item_id='{rawId}';");
                 break;
             case "lease_generation":
@@ -1557,8 +2177,189 @@ public sealed class LocalRepositoryReconciliationQueueTests
 
     private static void SetRetentionLeaseExpiry(SqliteConnection connection, RetentionReadGrant grant, DateTimeOffset expiry)
     {
-        Execute(connection, $"UPDATE retention_leases SET expires_at='{expiry.ToUniversalTime():O}' WHERE item_id='{grant.ItemId}' AND lease_kind='operation' AND owner='{grant.LeaseOwner}' AND generation={grant.LeaseGeneration};");
+        var leaseKind = grant.LeaseKind.ToString().ToLowerInvariant();
+        Execute(connection, $"UPDATE retention_leases SET expires_at='{expiry.ToUniversalTime():O}' WHERE item_id='{grant.ItemId}' AND lease_kind='{leaseKind}' AND owner='{grant.LeaseOwner}' AND generation={grant.LeaseGeneration};");
         grant.AdvanceExpiry(expiry);
+    }
+
+    private static bool GrantIsUsable(SqliteConnection connection, RetentionReadGrant grant, long rawRecordId, DateTimeOffset at)
+    {
+        using var transaction = connection.BeginTransaction();
+        var usable = RetentionCatalogStore.IsGrantUsable(connection, transaction, grant, rawRecordId, at);
+        transaction.Rollback();
+        return usable;
+    }
+
+    private static bool GrantIsUsable(SqliteConnection connection, RetentionReadGrant grant, DateTimeOffset at)
+    {
+        using var transaction = connection.BeginTransaction();
+        var usable = RetentionCatalogStore.IsGrantUsable(connection, transaction, grant, at);
+        transaction.Rollback();
+        return usable;
+    }
+
+    private static void SeedExactAdapterCoverage(SqliteConnection connection) =>
+        Execute(
+            connection,
+            """
+            INSERT INTO retention_adapter_coverage(store_kind,coverage_version)
+            VALUES
+                ('session_event_content',1),
+                ('raw_record',1),
+                ('analysis_run_raw',1),
+                ('sensitive_bundle',1),
+                ('analysis_sdk_directory',1);
+            """);
+
+    private static void ReplaceAdapterCoverageWithMalformedCounterexample(
+        SqliteConnection connection,
+        string counterexample)
+    {
+        var otherAuthorityBefore = SnapshotRenewalAuthority(connection);
+        Execute(
+            connection,
+            """
+            DROP TABLE retention_adapter_coverage;
+            CREATE TABLE retention_adapter_coverage(store_kind TEXT, coverage_version INTEGER);
+            INSERT INTO retention_adapter_coverage(store_kind,coverage_version)
+            VALUES
+                ('session_event_content',1),
+                ('raw_record',1),
+                ('analysis_run_raw',1),
+                ('sensitive_bundle',1),
+                ('analysis_sdk_directory',1);
+            """);
+
+        switch (counterexample)
+        {
+            case "missing":
+                Execute(connection, "DELETE FROM retention_adapter_coverage WHERE store_kind='raw_record';");
+                break;
+            case "wrong_version":
+                Execute(connection, "UPDATE retention_adapter_coverage SET coverage_version=2 WHERE store_kind='raw_record';");
+                break;
+            case "wrong_storage_class":
+                Execute(connection, "UPDATE retention_adapter_coverage SET coverage_version=CAST(x'01' AS BLOB) WHERE store_kind='raw_record';");
+                break;
+            case "duplicate":
+                Execute(connection, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES('raw_record',1);");
+                break;
+            case "extra":
+                Execute(connection, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES('future_store',1);");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(counterexample));
+        }
+
+        Assert.Equal(otherAuthorityBefore, SnapshotRenewalAuthority(connection));
+    }
+
+    private static string SnapshotRenewalAuthority(
+        SqliteConnection connection,
+        bool includeQueue = true)
+    {
+        using var tables = connection.CreateCommand();
+        tables.CommandText = """
+            SELECT name
+            FROM sqlite_schema
+            WHERE type='table'
+              AND (name GLOB 'retention_*' OR name IN ('raw_records','local_repository_reconciliation_queue'))
+              AND name <> 'retention_adapter_coverage'
+            ORDER BY name COLLATE BINARY;
+            """;
+        using var tableReader = tables.ExecuteReader();
+        var tableNames = new List<string>();
+        while (tableReader.Read())
+        {
+            var tableName = tableReader.GetString(0);
+            if (includeQueue || tableName != "local_repository_reconciliation_queue")
+                tableNames.Add(tableName);
+        }
+        tableReader.Close();
+
+        var snapshot = new System.Text.StringBuilder();
+        foreach (var tableName in tableNames)
+        {
+            using var columns = connection.CreateCommand();
+            columns.CommandText = $"PRAGMA table_info(\"{tableName.Replace("\"", "\"\"", StringComparison.Ordinal)}\");";
+            using var columnReader = columns.ExecuteReader();
+            var columnCount = 0;
+            while (columnReader.Read())
+                columnCount++;
+            columnReader.Close();
+
+            snapshot.Append(tableName.Length).Append(':').Append(tableName).Append('{');
+            using var rows = connection.CreateCommand();
+            var quotedTable = $"\"{tableName.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+            rows.CommandText = $"SELECT * FROM {quotedTable} ORDER BY {string.Join(',', Enumerable.Range(1, columnCount))};";
+            using var rowReader = rows.ExecuteReader();
+            while (rowReader.Read())
+            {
+                snapshot.Append('[');
+                for (var index = 0; index < rowReader.FieldCount; index++)
+                {
+                    var value = rowReader.GetValue(index);
+                    switch (value)
+                    {
+                        case DBNull:
+                            snapshot.Append("null:");
+                            break;
+                        case byte[] bytes:
+                            snapshot.Append("blob:").Append(Convert.ToHexString(bytes));
+                            break;
+                        case string text:
+                            snapshot.Append("text:").Append(Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(text)));
+                            break;
+                        case long integer:
+                            snapshot.Append("integer:").Append(integer.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                            break;
+                        case double real:
+                            snapshot.Append("real:").Append(real.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+                            break;
+                        default:
+                            throw new InvalidOperationException($"Unexpected SQLite value type {value.GetType().FullName}.");
+                    }
+                    snapshot.Append(';');
+                }
+                snapshot.Append(']');
+            }
+            snapshot.Append('}');
+        }
+        return snapshot.ToString();
+    }
+
+    private static string SnapshotMalformedAdapterCoverage(SqliteConnection connection)
+    {
+        var schema = ScalarText(
+            connection,
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='retention_adapter_coverage';");
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT typeof(store_kind),CAST(store_kind AS BLOB),
+                   typeof(coverage_version),CAST(coverage_version AS BLOB)
+            FROM retention_adapter_coverage
+            ORDER BY rowid;
+            """;
+        using var reader = command.ExecuteReader();
+        var snapshot = new System.Text.StringBuilder()
+            .Append(schema.Length)
+            .Append(':')
+            .Append(schema)
+            .Append('{');
+        while (reader.Read())
+        {
+            for (var index = 0; index < reader.FieldCount; index += 2)
+            {
+                snapshot
+                    .Append(reader.GetString(index))
+                    .Append(':')
+                    .Append(reader.IsDBNull(index + 1)
+                        ? string.Empty
+                        : Convert.ToHexString(reader.GetFieldValue<byte[]>(index + 1)))
+                    .Append(';');
+            }
+        }
+        return snapshot.Append('}').ToString();
     }
 
     private static IDisposable HoldImmediateWriteLock(string path)
@@ -1625,7 +2426,7 @@ public sealed class LocalRepositoryReconciliationQueueTests
         public int CallCount { get; private set; }
         public List<long> RawRecordIds { get; } = [];
 
-        public async ValueTask ProcessAsync(
+        public async ValueTask<ILocalRepositoryPreparedRawRecord> PrepareAsync(
             LocalRepositoryQueueLease queueLease,
             RawTelemetryRecord rawRecord,
             RetentionReadLease<RawTelemetryRecord> retentionLease,
@@ -1635,7 +2436,14 @@ public sealed class LocalRepositoryReconciliationQueueTests
             RawRecordIds.Add(rawRecord.Id ?? throw new InvalidOperationException("expected persisted raw record id"));
             Entered.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new NoOpPreparedRawRecord();
         }
+
+        public ValueTask ProcessAsync(
+            LocalRepositoryQueueLease queueLease,
+            RawTelemetryRecord rawRecord,
+            RetentionReadLease<RawTelemetryRecord> retentionLease,
+            CancellationToken cancellationToken) => throw new InvalidOperationException("Preparation should own the cancellation hold.");
     }
 
     private sealed class FenceCancellationProcessor : ILocalRepositoryRawRecordProcessor
@@ -1645,16 +2453,23 @@ public sealed class LocalRepositoryReconciliationQueueTests
         public int CallCount { get; private set; }
         public List<long> RawRecordIds { get; } = [];
         public bool CompletedSuccessfully { get; private set; }
+        public RetentionReadGrant Grant { get; private set; } = null!;
 
-        public async ValueTask ProcessAsync(LocalRepositoryQueueLease queueLease, RawTelemetryRecord rawRecord, RetentionReadLease<RawTelemetryRecord> retentionLease, CancellationToken cancellationToken)
+        public async ValueTask<ILocalRepositoryPreparedRawRecord> PrepareAsync(
+            LocalRepositoryQueueLease queueLease,
+            RawTelemetryRecord rawRecord,
+            RetentionReadLease<RawTelemetryRecord> retentionLease,
+            CancellationToken cancellationToken)
         {
             CallCount++;
             RawRecordIds.Add(rawRecord.Id ?? throw new InvalidOperationException("expected persisted raw record id"));
+            Grant = Assert.IsType<RetentionReadGrant>(retentionLease.Grant);
             Entered.TrySetResult();
             try
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
                 CompletedSuccessfully = true;
+                return new NoOpPreparedRawRecord();
             }
             catch (OperationCanceledException)
             {
@@ -1662,6 +2477,18 @@ public sealed class LocalRepositoryReconciliationQueueTests
                 throw;
             }
         }
+
+        public ValueTask ProcessAsync(
+            LocalRepositoryQueueLease queueLease,
+            RawTelemetryRecord rawRecord,
+            RetentionReadLease<RawTelemetryRecord> retentionLease,
+            CancellationToken cancellationToken) => throw new InvalidOperationException("Preparation should own the retention-fence hold.");
+    }
+
+    private sealed class NoOpPreparedRawRecord : ILocalRepositoryPreparedRawRecord
+    {
+        public ValueTask FinalizeAsync(LocalRepositoryQueueLease queueLease, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
     }
 
     private sealed class TaskSixFinalizerHeartbeatCheckpoint(string databasePath) : ILocalRepositoryReconciliationCheckpoint
@@ -1712,7 +2539,20 @@ public sealed class LocalRepositoryReconciliationQueueTests
                     var configuredGrant = grant ?? throw new InvalidOperationException("heartbeat checkpoint was not configured");
                     using var bindingProbe = concurrentConnection.CreateCommand();
                     bindingProbe.Transaction = concurrentTransaction;
-                    if (configuredGrant.TryBindSelectorCapability(bindingProbe))
+                    bindingProbe.CommandText = """
+                        SELECT r.payload_json
+                        FROM retention_items i
+                        JOIN raw_records r ON r.id=CAST(i.source_item_id AS INTEGER)
+                          AND r.retention_owner_token=$retention_read_source_token
+                        JOIN retention_leases l ON i.item_id=$retention_read_item_id
+                          AND i.revision=$retention_read_revision
+                          AND l.item_id=i.item_id
+                          AND l.lease_kind=$retention_read_lease_kind
+                          AND l.owner=$retention_read_lease_owner
+                          AND l.generation=$retention_read_lease_generation
+                          AND l.expires_at=$retention_read_lease_expires_at;
+                        """;
+                    if (configuredGrant.TryBindAdmissionSelectorCapability(bindingProbe))
                         throw new InvalidOperationException("retention renewal publication was not protected after commit");
 
                     GrantBindingWasBlocked = true;
@@ -1767,6 +2607,65 @@ public sealed class LocalRepositoryReconciliationQueueTests
                     configuredQueueLease,
                     at)
                 : LocalRepositoryQueueTransitionResult.StaleOwner;
+        }
+    }
+
+    private sealed class HeartbeatBeginClockGate : ILocalRepositoryReconciliationCheckpoint, IDisposable
+    {
+        private readonly ManualResetEventSlim resumed = new();
+
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal int Count { get; private set; }
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            if (checkpoint != LocalRepositoryReconciliationCheckpoint.AfterHeartbeatTransactionBegun)
+                return;
+
+            Count++;
+            Entered.TrySetResult();
+            if (!resumed.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("heartbeat checkpoint was not resumed");
+        }
+
+        internal void Resume() => resumed.Set();
+
+        public void Dispose()
+        {
+            resumed.Set();
+            resumed.Dispose();
+        }
+    }
+
+    private sealed class HeartbeatPublicationLockCheckpoint : ILocalRepositoryReconciliationCheckpoint
+    {
+        private readonly object gate = new();
+        private readonly List<LocalRepositoryReconciliationCheckpoint> points = [];
+
+        internal TaskCompletionSource TransactionBegun { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource BeforePublicationLock { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal IReadOnlyList<LocalRepositoryReconciliationCheckpoint> Points
+        {
+            get
+            {
+                lock (gate)
+                    return points.ToArray();
+            }
+        }
+
+        public void Reached(LocalRepositoryReconciliationCheckpoint checkpoint)
+        {
+            if (checkpoint is not (
+                LocalRepositoryReconciliationCheckpoint.AfterHeartbeatTransactionBegun
+                or LocalRepositoryReconciliationCheckpoint.BeforeHeartbeatPublicationLock))
+                return;
+
+            lock (gate)
+                points.Add(checkpoint);
+            if (checkpoint == LocalRepositoryReconciliationCheckpoint.AfterHeartbeatTransactionBegun)
+                TransactionBegun.TrySetResult();
+            else
+                BeforePublicationLock.TrySetResult();
         }
     }
 

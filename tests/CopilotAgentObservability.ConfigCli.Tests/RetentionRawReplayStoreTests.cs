@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Reflection;
+using System.Text;
 using CopilotAgentObservability.ConfigCli;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.RawReplay;
@@ -33,6 +35,160 @@ public sealed class RetentionRawReplayStoreTests
         Assert.Equal(1, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
         await lease.DisposeAsync();
         Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+    }
+
+    [Fact]
+    public async Task ReadAsync_PinnedCapturePastHistoricalExpiryMaterializesExactReceiptWithinLeaseWithoutLeaksOrMutation()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-pinned-materializer";
+        const string rawValue = "raw-pinned-materializer-value";
+        var archive = Archive(1, rawValue);
+        var writer = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
+        var captured = await writer.ReplayAsync(replayId, archive, CancellationToken.None);
+        Assert.True(captured.Success, captured.ErrorCode);
+        var captureId = RetentionRawReplayStore.CaptureId(replayId);
+        Assert.Equal(1, fixture.Execute(
+            "UPDATE retention_items SET state='retained_by_policy',revision=revision+1 WHERE store_kind='sensitive_bundle' AND source_item_id=$capture AND state='expiring';",
+            ("$capture", captureId)));
+        Assert.Equal(Now.AddDays(7).ToString("O", CultureInfo.InvariantCulture), fixture.Scalar<string>(
+            "SELECT expires_at FROM retention_items WHERE store_kind='sensitive_bundle' AND source_item_id=$capture;",
+            ("$capture", captureId)));
+        var beforeCatalog = fixture.BundleCatalogState(captureId);
+        var beforeSource = fixture.BundleSourceState(captureId);
+        var privateLocator = fixture.Scalar<string>(
+            "SELECT private_locator FROM retention_items WHERE store_kind='sensitive_bundle' AND source_item_id=$capture;",
+            ("$capture", captureId));
+        var sourceToken = fixture.Scalar<byte[]>(
+            "SELECT owner_token FROM retention_file_capture_reservations WHERE capture_id=$capture;",
+            ("$capture", captureId));
+        var readTime = new FixedTimeProvider(Now.AddDays(8));
+        var reader = new RetentionRawReplayStore(
+            new RetentionCatalogStore(fixture.Context, readTime),
+            fixture.BundleParent,
+            readTime);
+
+        var retained = await reader.ReadAsync(replayId, CancellationToken.None);
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Granted, retained.Disposition);
+        var lease = Assert.IsType<RetainedRawReplayLease>(retained.Lease);
+        Assert.Equal(
+            RawReplayJson.SerializeCanonical(captured.Result!),
+            RawReplayJson.SerializeCanonical(lease.Receipt));
+        Assert.Equal(1, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+        AssertExactPinnedRawReplayReadPublicSurface();
+
+        const BindingFlags publicInstance = BindingFlags.Public | BindingFlags.Instance;
+        var surfaces = new List<string>
+        {
+            retained.ToString(),
+            lease.ToString() ?? string.Empty,
+            lease.Receipt.ToString(),
+            RawReplayJson.Text(lease.Receipt),
+        };
+        surfaces.AddRange(typeof(RetainedRawReplayReadResult).GetProperties(publicInstance)
+            .Select(property => property.GetValue(retained)?.ToString() ?? string.Empty));
+        surfaces.AddRange(typeof(RetainedRawReplayLease).GetProperties(publicInstance)
+            .Select(property => property.GetValue(lease)?.ToString() ?? string.Empty));
+        var forbidden = ForbiddenRepresentations(
+            sourceToken,
+            rawValue,
+            captureId,
+            fixture.Root,
+            fixture.BundleParent,
+            privateLocator,
+            Path.Combine(privateLocator, "manifest.json"),
+            Path.Combine(privateLocator, "input", "archive.zip"));
+        foreach (var surface in surfaces)
+            foreach (var value in forbidden)
+                Assert.DoesNotContain(value, surface, StringComparison.OrdinalIgnoreCase);
+
+        await lease.DisposeAsync();
+
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(beforeCatalog, fixture.BundleCatalogState(captureId));
+        var afterSource = fixture.BundleSourceState(captureId);
+        Assert.Equal(beforeSource.Keys.ToArray(), afterSource.Keys.ToArray());
+        foreach (var member in beforeSource)
+            Assert.Equal(member.Value, afterSource[member.Key]);
+    }
+
+    [Fact]
+    public async Task ReceiptMaterialization_EachAdmissionCapabilityParameterSemanticallyConstrainsTheRow()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-selector-capability";
+        var writer = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
+        var captured = await writer.ReplayAsync(replayId, Archive(1, "selector-capability"), CancellationToken.None);
+        Assert.True(captured.Success, captured.ErrorCode);
+        var captureId = RetentionRawReplayStore.CaptureId(replayId);
+        var key = new RetentionOwnershipKey(
+            fixture.Catalog.StoreInstanceId,
+            RetentionStoreKind.SensitiveBundle,
+            captureId);
+
+        var result = await fixture.Catalog.ReadAsync(
+            new RetentionReadRequest(key, RetentionReadKind.Operation, Now, ExpectedRevision: null),
+            (connection, transaction, grant, _) =>
+            {
+                using var baselineCommand = connection.CreateCommand();
+                RetentionRawReplayStore.ConfigureReceiptMaterializationCommand(
+                    baselineCommand,
+                    transaction,
+                    fixture.Catalog.StoreInstanceId,
+                    captureId,
+                    grant);
+                string baselineLocator;
+                using (var baselineReader = baselineCommand.ExecuteReader())
+                {
+                    Assert.True(baselineReader.Read());
+                    baselineLocator = baselineReader.GetString(0);
+                    Assert.False(baselineReader.Read());
+                }
+
+                var perturbations = new (string ParameterName, Func<object, object> Perturb)[]
+                {
+                    ("$retention_read_source_token", value =>
+                    {
+                        var token = Assert.IsType<byte[]>(value).ToArray();
+                        token[0] ^= byte.MaxValue;
+                        return token;
+                    }),
+                    ("$retention_read_item_id", value => Assert.IsType<string>(value) + "-other"),
+                    ("$retention_read_revision", value => Assert.IsType<long>(value) + 1L),
+                    ("$retention_read_lease_kind", _ => "access"),
+                    ("$retention_read_lease_owner", value => Assert.IsType<string>(value) + "-other"),
+                    ("$retention_read_lease_generation", value => Assert.IsType<long>(value) + 1L),
+                    ("$retention_read_lease_expires_at", value => DateTimeOffset.ParseExact(
+                        Assert.IsType<string>(value),
+                        "O",
+                        CultureInfo.InvariantCulture).AddTicks(1).ToString("O", CultureInfo.InvariantCulture)),
+                };
+
+                foreach (var (parameterName, perturb) in perturbations)
+                {
+                    using var perturbedCommand = connection.CreateCommand();
+                    RetentionRawReplayStore.ConfigureReceiptMaterializationCommand(
+                        perturbedCommand,
+                        transaction,
+                        fixture.Catalog.StoreInstanceId,
+                        captureId,
+                        grant);
+                    var parameter = Assert.IsType<SqliteParameter>(perturbedCommand.Parameters[parameterName]);
+                    Assert.NotNull(parameter.Value);
+                    parameter.Value = perturb(parameter.Value!);
+                    using var perturbedReader = perturbedCommand.ExecuteReader();
+                    Assert.False(perturbedReader.Read(), parameterName);
+                }
+
+                return ValueTask.FromResult<string?>(baselineLocator);
+            },
+            CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.Granted, result.Disposition);
+        await using (var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease))
+            Assert.Equal(Path.Combine(fixture.BundleParent, captureId), lease.Value);
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
     }
 
     [Fact]
@@ -132,6 +288,83 @@ public sealed class RetentionRawReplayStoreTests
         Assert.False(File.Exists(fixture.DatabasePath));
     }
 
+    private static void AssertExactPinnedRawReplayReadPublicSurface()
+    {
+        const BindingFlags publicInstance = BindingFlags.Public | BindingFlags.Instance;
+        const BindingFlags declaredPublicInstance = publicInstance | BindingFlags.DeclaredOnly;
+        var resultType = typeof(RetainedRawReplayReadResult);
+        var leaseType = typeof(RetainedRawReplayLease);
+
+        Assert.False(resultType.IsVisible);
+        Assert.True(resultType.IsSealed);
+        var resultProperties = resultType.GetProperties(publicInstance).OrderBy(property => property.Name, StringComparer.Ordinal).ToArray();
+        Assert.Collection(
+            resultProperties,
+            property =>
+            {
+                Assert.Equal("Disposition", property.Name);
+                Assert.Equal(typeof(RetainedRawReplayReadDisposition), property.PropertyType);
+                Assert.True(property.GetMethod!.IsPublic);
+                Assert.True(property.SetMethod!.IsPublic);
+            },
+            property =>
+            {
+                Assert.Equal("Lease", property.Name);
+                Assert.Equal(leaseType, property.PropertyType);
+                Assert.True(property.GetMethod!.IsPublic);
+                Assert.True(property.SetMethod!.IsPublic);
+            });
+        Assert.Empty(resultType.GetFields(publicInstance));
+        Assert.Empty(resultType.GetEvents(publicInstance));
+        Assert.Equal(
+            new[] { "<Clone>$", "Deconstruct", "Equals", "Equals", "GetHashCode", "ToString" },
+            resultType.GetMethods(declaredPublicInstance)
+                .Where(method => !method.IsSpecialName)
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
+        var resultConstructor = Assert.Single(resultType.GetConstructors(publicInstance));
+        Assert.Equal(
+            new[] { typeof(RetainedRawReplayReadDisposition), leaseType },
+            resultConstructor.GetParameters().Select(parameter => parameter.ParameterType));
+        Assert.Equal(
+            new[] { "Disposition", "Lease" },
+            resultConstructor.GetParameters().Select(parameter => parameter.Name));
+
+        Assert.False(leaseType.IsVisible);
+        Assert.True(leaseType.IsSealed);
+        Assert.Empty(leaseType.GetProperties(publicInstance));
+        Assert.Empty(leaseType.GetFields(publicInstance));
+        Assert.Empty(leaseType.GetEvents(publicInstance));
+        var leaseMethod = Assert.Single(
+            leaseType.GetMethods(declaredPublicInstance),
+            method => !method.IsSpecialName);
+        Assert.Equal(nameof(IAsyncDisposable.DisposeAsync), leaseMethod.Name);
+        Assert.Equal(typeof(ValueTask), leaseMethod.ReturnType);
+        Assert.Empty(leaseMethod.GetParameters());
+        Assert.Empty(leaseType.GetConstructors(publicInstance));
+    }
+
+    private static IReadOnlyCollection<string> ForbiddenRepresentations(byte[] sourceToken, params string[] sensitiveValues)
+    {
+        var forbidden = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddRepresentations(forbidden, sourceToken);
+        foreach (var sensitiveValue in sensitiveValues)
+        {
+            AddRepresentations(forbidden, Encoding.UTF8.GetBytes(sensitiveValue));
+            forbidden.Add(sensitiveValue);
+            forbidden.Add(sensitiveValue.Replace(Path.DirectorySeparatorChar, '/'));
+        }
+        return forbidden;
+    }
+
+    private static void AddRepresentations(ISet<string> forbidden, byte[] value)
+    {
+        forbidden.Add(Convert.ToHexString(value));
+        var base64 = Convert.ToBase64String(value);
+        forbidden.Add(base64);
+        forbidden.Add(base64.TrimEnd('=').Replace('+', '-').Replace('/', '_'));
+    }
+
     private static byte[] Archive(long id, string trace)
     {
         var service = new RawReplayArchiveService();
@@ -189,12 +422,69 @@ public sealed class RetentionRawReplayStoreTests
             return rows;
         }
 
-        public T Scalar<T>(string sql)
+        public IReadOnlyList<string> BundleCatalogState(string captureId)
+        {
+            var item = "(SELECT item_id FROM retention_items WHERE store_kind='sensitive_bundle' AND source_item_id=$capture)";
+            var queries = new[]
+            {
+                (Table: "retention_items", Sql: "SELECT * FROM retention_items WHERE store_kind='sensitive_bundle' AND source_item_id=$capture ORDER BY rowid;"),
+                (Table: "retention_file_capture_reservations", Sql: "SELECT * FROM retention_file_capture_reservations WHERE capture_id=$capture ORDER BY rowid;"),
+                (Table: "retention_file_capture_members", Sql: "SELECT * FROM retention_file_capture_members WHERE capture_id=$capture ORDER BY rowid;"),
+                (Table: "retention_capture_journal", Sql: $"SELECT * FROM retention_capture_journal WHERE item_id={item} ORDER BY rowid;"),
+                (Table: "retention_leases", Sql: $"SELECT * FROM retention_leases WHERE item_id={item} ORDER BY rowid;"),
+                (Table: "retention_delete_journal", Sql: $"SELECT * FROM retention_delete_journal WHERE item_id={item} ORDER BY rowid;"),
+                (Table: "retention_tombstones", Sql: $"SELECT * FROM retention_tombstones WHERE item_id={item} ORDER BY rowid;"),
+            };
+            var rows = new List<string>();
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
+            connection.Open();
+            foreach (var query in queries)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = query.Sql;
+                command.Parameters.AddWithValue("$capture", captureId);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    rows.Add(query.Table + "|" + string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(index => SnapshotCell(reader.GetValue(index)))));
+            }
+            return rows;
+        }
+
+        public IReadOnlyDictionary<string, byte[]> BundleSourceState(string captureId)
+        {
+            var root = Path.Combine(BundleParent, captureId);
+            return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Order(StringComparer.Ordinal)
+                .ToDictionary(
+                    path => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'),
+                    File.ReadAllBytes,
+                    StringComparer.Ordinal);
+        }
+
+        public int Execute(string sql, params (string Name, object? Value)[] parameters)
         {
             using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
             connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
-            return (T)Convert.ChangeType(command.ExecuteScalar()!, typeof(T), CultureInfo.InvariantCulture);
+            foreach (var parameter in parameters) command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
+            return command.ExecuteNonQuery();
         }
+
+        public T Scalar<T>(string sql, params (string Name, object? Value)[] parameters)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
+            connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql;
+            foreach (var parameter in parameters) command.Parameters.AddWithValue(parameter.Name, parameter.Value ?? DBNull.Value);
+            var value = command.ExecuteScalar()!;
+            return value is T exact ? exact : (T)Convert.ChangeType(value, typeof(T), CultureInfo.InvariantCulture);
+        }
+
+        private static string SnapshotCell(object value) => value switch
+        {
+            DBNull => "null",
+            byte[] bytes => "blob:" + Convert.ToHexString(bytes),
+            string text => "text:" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(text)),
+            _ => value.GetType().Name + ":" + Convert.ToString(value, CultureInfo.InvariantCulture),
+        };
 
         public void Dispose() => Directory.Delete(Root, recursive: true);
     }
