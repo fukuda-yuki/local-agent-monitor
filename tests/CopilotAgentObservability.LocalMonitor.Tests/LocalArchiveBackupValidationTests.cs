@@ -107,6 +107,54 @@ public sealed class LocalArchiveBackupValidationTests
         AssertInvalid(missingRepository, new RecordingRepositoryAuthority(returnNone: true));
     }
 
+    [Theory]
+    [InlineData("stamp")]
+    [InlineData("missing_object")]
+    [InlineData("extra_object")]
+    public void Validate_MapsDeclaredInvalidArchiveAuthorityToTheFixedInternalError(string invalidShape)
+    {
+        using var database = new BackupValidationDatabase();
+        database.ExecuteSchemaMutation(invalidShape switch
+        {
+            "stamp" => "UPDATE schema_version SET version=2 WHERE component='local_archive';",
+            "missing_object" => "DROP TRIGGER local_archive_events_delete_rejected;",
+            "extra_object" => "CREATE TABLE local_archive_extra(id INTEGER);",
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidShape)),
+        });
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        var error = Assert.Throws<InvalidOperationException>(() => LocalArchiveBackupValidation.Validate(
+            connection,
+            transaction,
+            LocalArchiveSessionTargetExistenceAuthority.Instance,
+            new UnexpectedRepositoryAuthority()));
+
+        Assert.Equal("local_archive_backup_invalid", error.Message);
+    }
+
+    [Theory]
+    [InlineData(HostileRepositoryResult.Substitution)]
+    [InlineData(HostileRepositoryResult.Reordered)]
+    [InlineData(HostileRepositoryResult.Duplicate)]
+    [InlineData(HostileRepositoryResult.Null)]
+    public void Validate_RejectsHostileRepositoryEqualityResults(HostileRepositoryResult hostileResult)
+    {
+        using var database = new BackupValidationDatabase();
+        database.InsertChain("repository", RepositoryId(1), revision: 1, Newer, Older);
+        database.InsertChain("repository", RepositoryId(2), revision: 1, Newer, Older);
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        var error = Assert.Throws<InvalidOperationException>(() => LocalArchiveBackupValidation.Validate(
+            connection,
+            transaction,
+            LocalArchiveSessionTargetExistenceAuthority.Instance,
+            new HostileRepositoryAuthority(hostileResult)));
+
+        Assert.Equal("local_archive_backup_invalid", error.Message);
+    }
+
     [Fact]
     public void Validate_RejectsAConnectionOrTransactionItDoesNotOwn()
     {
@@ -171,6 +219,30 @@ public sealed class LocalArchiveBackupValidationTests
             IReadOnlyList<string> canonicalRepositoryIds,
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Parent authority must not be called for an empty archive.");
+    }
+
+    public enum HostileRepositoryResult
+    {
+        Substitution,
+        Reordered,
+        Duplicate,
+        Null,
+    }
+
+    private sealed class HostileRepositoryAuthority(HostileRepositoryResult result) : ILocalRepositoryTargetExistenceAuthority
+    {
+        public IReadOnlyList<string> ReadExisting(
+            SqliteConnection openConnection,
+            SqliteTransaction exactTransaction,
+            IReadOnlyList<string> canonicalRepositoryIds,
+            CancellationToken cancellationToken) => result switch
+            {
+                HostileRepositoryResult.Substitution => [canonicalRepositoryIds[0], RepositoryId(999)],
+                HostileRepositoryResult.Reordered => [canonicalRepositoryIds[1], canonicalRepositoryIds[0]],
+                HostileRepositoryResult.Duplicate => [canonicalRepositoryIds[0], canonicalRepositoryIds[0]],
+                HostileRepositoryResult.Null => null!,
+                _ => throw new ArgumentOutOfRangeException(nameof(result)),
+            };
     }
 
     private sealed class BackupValidationDatabase : IDisposable
@@ -321,6 +393,14 @@ public sealed class LocalArchiveBackupValidationTests
             command.Transaction = transaction;
             command.CommandText = sql;
             return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        internal void ExecuteSchemaMutation(string sql)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
         }
 
         private static void Execute(
