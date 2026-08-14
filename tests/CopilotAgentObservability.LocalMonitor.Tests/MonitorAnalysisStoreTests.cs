@@ -894,12 +894,8 @@ public class MonitorAnalysisStoreTests
         Assert.Equal(typeof(RetentionReadLease<AnalysisRunRawSnapshot>), Assert.Single(resultProperties, property => property.Name == "Lease").PropertyType);
         Assert.Empty(resultType.GetFields(publicInstance));
         Assert.Empty(resultType.GetEvents(publicInstance));
-        Assert.Equal(
-            new[] { "<Clone>$", "Deconstruct", "Equals", "Equals", "GetHashCode", "ToString" },
-            resultType.GetMethods(declaredPublicInstance)
-                .Where(method => !method.IsSpecialName)
-                .Select(method => method.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+        Assert.DoesNotContain(resultType.GetMethods(declaredPublicInstance), method => !method.IsSpecialName);
+        Assert.Empty(resultType.GetConstructors(publicInstance));
 
         Assert.Empty(leaseType.GetProperties(publicInstance));
         Assert.Empty(leaseType.GetFields(publicInstance));

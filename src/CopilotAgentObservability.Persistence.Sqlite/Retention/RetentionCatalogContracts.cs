@@ -219,10 +219,17 @@ internal sealed record RetentionReadRequest(
     DateTimeOffset Now,
     long? ExpectedRevision);
 
-internal sealed record RetentionReadResult<T>(
-    RetentionReadDisposition? Disposition,
-    RetentionReadLease<T>? Lease)
+internal sealed class RetentionReadResult<T>
 {
+    private RetentionReadResult(RetentionReadDisposition? disposition, RetentionReadLease<T>? lease)
+    {
+        Disposition = disposition;
+        Lease = lease;
+    }
+
+    public RetentionReadDisposition? Disposition { get; }
+    public RetentionReadLease<T>? Lease { get; }
+
     internal static RetentionReadResult<T> FromHandle(RetentionReadLease<T> lease) =>
         new(null, lease ?? throw new ArgumentNullException(nameof(lease)));
 
@@ -234,11 +241,22 @@ internal sealed record RetentionReadResult<T>(
     }
 }
 
-internal sealed record RetentionBatchReadResult<T>(
-    RetentionReadDisposition? Disposition,
-    RetentionBatchReadLease<T>? Lease,
-    T? EmptyValue)
+internal sealed class RetentionBatchReadResult<T>
 {
+    private RetentionBatchReadResult(
+        RetentionReadDisposition? disposition,
+        RetentionBatchReadLease<T>? lease,
+        T? emptyValue)
+    {
+        Disposition = disposition;
+        Lease = lease;
+        EmptyValue = emptyValue;
+    }
+
+    public RetentionReadDisposition? Disposition { get; }
+    public RetentionBatchReadLease<T>? Lease { get; }
+    public T? EmptyValue { get; }
+
     internal static RetentionBatchReadResult<T> FromHandle(RetentionBatchReadLease<T> lease) =>
         new(null, lease ?? throw new ArgumentNullException(nameof(lease)), default);
 

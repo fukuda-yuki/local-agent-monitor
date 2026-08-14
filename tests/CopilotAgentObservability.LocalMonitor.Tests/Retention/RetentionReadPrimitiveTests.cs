@@ -37,6 +37,32 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public void ReadResults_ExposeOnlyFactoryConstructibleValidStates()
+    {
+        AssertResultConstructionIsPrivate(typeof(RetentionReadResult<string>));
+        AssertResultConstructionIsPrivate(typeof(RetentionBatchReadResult<string>));
+
+        var denied = RetentionReadResult<string>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
+        Assert.Equal(RetentionReadDisposition.LifecycleDenied, denied.Disposition);
+        Assert.Null(denied.Lease);
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RetentionReadResult<string>.FromDisposition(RetentionReadDisposition.Empty));
+
+        var emptyValue = new object();
+        var empty = RetentionBatchReadResult<object>.Empty(emptyValue);
+        Assert.Equal(RetentionReadDisposition.Empty, empty.Disposition);
+        Assert.Null(empty.Lease);
+        Assert.Same(emptyValue, empty.EmptyValue);
+
+        var failure = RetentionBatchReadResult<object>.FromDisposition(RetentionReadDisposition.SelectorUnavailable);
+        Assert.Equal(RetentionReadDisposition.SelectorUnavailable, failure.Disposition);
+        Assert.Null(failure.Lease);
+        Assert.Null(failure.EmptyValue);
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RetentionBatchReadResult<object>.FromDisposition(RetentionReadDisposition.Empty));
+    }
+
+    [Fact]
     public async Task ReadBatchAsync_ZeroRequests_ReturnsOwnerEmptyWithoutHandleOrRetentionResources()
     {
         var path = CopyFixture();
@@ -100,6 +126,59 @@ public sealed class RetentionReadPrimitiveTests
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ZeroMemberOwnerNull_ReturnsSelectorUnavailableWithoutHandleOrRetentionResources(bool selected)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var time = new SequencedTimeProvider(now);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RetentionCatalogStore(context, time);
+            time.ResetReadCount();
+
+            var result = selected
+                ? await store.ReadSelectedBatchAsync<string>(
+                    (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([]),
+                    (_, _, grants, _) =>
+                    {
+                        Assert.Empty(grants);
+                        return ValueTask.FromResult<string?>(null);
+                    },
+                    CancellationToken.None)
+                : await store.ReadBatchAsync<string>(
+                    [],
+                    (_, _, grants, _) =>
+                    {
+                        Assert.Empty(grants);
+                        return ValueTask.FromResult<string?>(null);
+                    },
+                    CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.SelectorUnavailable, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Null(result.EmptyValue);
+            Assert.Equal(0, time.ReadCount);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    private static void AssertResultConstructionIsPrivate(Type resultType)
+    {
+        const System.Reflection.BindingFlags constructors =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic;
+        Assert.All(resultType.GetConstructors(constructors), constructor => Assert.True(constructor.IsPrivate));
+        Assert.DoesNotContain(
+            resultType.GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public),
+            method => method.Name == "<Clone>$");
     }
 
     [Fact]

@@ -276,6 +276,51 @@ public sealed class RetentionRawReplayStoreTests
     }
 
     [Fact]
+    public async Task ReadAsync_ConcurrentDeletionTransitionUsesBusyThenLifecycleDeniedWithoutAuthority()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-delete-race";
+        var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
+        Assert.True((await store.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
+        using var deletion = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.DatabasePath,
+            Pooling = false,
+        }.ToString());
+        deletion.Open();
+        using var command = deletion.CreateCommand();
+        command.CommandText = "BEGIN IMMEDIATE;";
+        command.ExecuteNonQuery();
+        command.CommandText = """
+            UPDATE retention_items
+            SET state='deletion_queued',read_denied_at=$now,queued_at=$now,revision=revision+1
+            WHERE store_kind='sensitive_bundle' AND source_item_id=$capture;
+            """;
+        command.Parameters.AddWithValue("$now", Now.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$capture", RetentionRawReplayStore.CaptureId(replayId));
+        Assert.Equal(1, command.ExecuteNonQuery());
+
+        RetainedRawReplayReadResult racing;
+        try
+        {
+            racing = await store.ReadAsync(replayId, CancellationToken.None);
+        }
+        finally
+        {
+            command.CommandText = "COMMIT;";
+            command.Parameters.Clear();
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Busy, racing.Disposition);
+        Assert.Null(racing.Lease);
+        var afterCommit = await store.ReadAsync(replayId, CancellationToken.None);
+        Assert.Equal(RetainedRawReplayReadDisposition.Denied, afterCommit.Disposition);
+        Assert.Null(afterCommit.Lease);
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+    }
+
+    [Fact]
     public async Task ReadAsync_DoesNotRecreateAMissingCatalog()
     {
         using var fixture = new Fixture();

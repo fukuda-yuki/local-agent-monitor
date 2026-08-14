@@ -70,29 +70,32 @@ internal sealed class RetentionRawReplayStore
     {
         if (!ValidReplayId(replayId)) return new(RetainedRawReplayReadDisposition.NotFound, null);
         var captureId = CaptureId(replayId);
-        RetentionReadResult<RawReplayReceipt> result;
+        RetentionBatchReadResult<RetainedRawReplayValue> result;
         try
         {
             var ownershipKey = new RetentionOwnershipKey(
                 catalog.StoreInstanceId,
                 RetentionStoreKind.SensitiveBundle,
                 captureId);
-            var request = new RetentionReadRequest(
-                ownershipKey,
-                RetentionReadKind.Operation,
-                timeProvider.GetUtcNow(),
-                ExpectedRevision: null);
-            result = await catalog.ReadAsync(request, (connection, transaction, grant, _) =>
-                ValueTask.FromResult(ReadReceipt(connection, transaction, grant, replayId, captureId)), cancellationToken).ConfigureAwait(false);
+            result = await catalog.ReadSelectedBatchAsync(
+                (connection, transaction, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>(
+                    RetainedItemExists(connection, transaction, ownershipKey)
+                        ? [new(ownershipKey, RetentionReadKind.Operation, timeProvider.GetUtcNow(), ExpectedRevision: null)]
+                        : []),
+                (connection, transaction, grants, _) =>
+                {
+                    if (grants.Count == 0)
+                        return ValueTask.FromResult<RetainedRawReplayValue?>(RetainedRawReplayValue.Missing);
+                    var receipt = ReadReceipt(connection, transaction, AssertSingleGrant(grants), replayId, captureId);
+                    return ValueTask.FromResult(receipt is null ? null : RetainedRawReplayValue.FromReceipt(receipt));
+                },
+                cancellationToken).ConfigureAwait(false);
 
             if (result.Lease is null)
             {
-                var itemExists = result.Disposition == RetentionReadDisposition.LifecycleDenied
-                    && catalog.Find(ownershipKey) is not null;
                 return new(result.Disposition switch
                 {
-                    RetentionReadDisposition.LifecycleDenied when itemExists => RetainedRawReplayReadDisposition.Denied,
-                    RetentionReadDisposition.LifecycleDenied => RetainedRawReplayReadDisposition.NotFound,
+                    RetentionReadDisposition.Empty => RetainedRawReplayReadDisposition.NotFound,
                     RetentionReadDisposition.Busy => RetainedRawReplayReadDisposition.Busy,
                     _ => RetainedRawReplayReadDisposition.Denied,
                 }, null);
@@ -107,8 +110,31 @@ internal sealed class RetentionRawReplayStore
             return new(RetainedRawReplayReadDisposition.Busy, null);
         }
         var lease = result.Lease;
-        return new(RetainedRawReplayReadDisposition.Granted, new(lease.Value, lease.DisposeAsync));
+        return new(RetainedRawReplayReadDisposition.Granted, new(lease.Value.Receipt!, lease.DisposeAsync));
     }
+
+    private static bool RetainedItemExists(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionOwnershipKey ownershipKey)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT 1
+            FROM retention_items
+            WHERE store_instance_id=$store_instance_id
+              AND store_kind='sensitive_bundle'
+              AND source_item_id=$source_item_id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$store_instance_id", ownershipKey.StoreInstanceId);
+        command.Parameters.AddWithValue("$source_item_id", ownershipKey.SourceItemId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private static RetentionReadGrant AssertSingleGrant(IReadOnlyList<RetentionReadGrant> grants) =>
+        grants.Count == 1 ? grants[0] : throw new InvalidOperationException();
 
     internal static string CaptureId(string replayId)
     {
@@ -208,5 +234,14 @@ internal sealed class RetentionRawReplayStore
     {
         var bytes = Encoding.UTF8.GetBytes(value); Span<byte> length = stackalloc byte[4];
         BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length); hash.AppendData(length); hash.AppendData(bytes);
+    }
+
+    private sealed class RetainedRawReplayValue
+    {
+        private RetainedRawReplayValue(RawReplayReceipt? receipt) => Receipt = receipt;
+
+        internal RawReplayReceipt? Receipt { get; }
+        internal static RetainedRawReplayValue Missing { get; } = new(null);
+        internal static RetainedRawReplayValue FromReceipt(RawReplayReceipt receipt) => new(receipt);
     }
 }
