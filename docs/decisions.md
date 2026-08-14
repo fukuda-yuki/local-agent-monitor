@@ -3679,3 +3679,217 @@ backup changes remain serialized in the exact order Session -> catalog ->
 archive -> Retention -> Skill. #134 begins only after the D081 seam and D082
 contributor are integrated, consumes one completed #156 snapshot, and adds no
 placeholder fact, direct SQL, second reader or fallback projection.
+
+## D083: Skill invocation v2 uses one capability-bound transport and fresh semantic responses
+
+Status: Accepted (2026-08-11)
+
+Issues #119/#157/#158 adopt the complete contract in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+The former eight `BLOCKED_DECISION` groups are closed. This decision authorizes
+tracked canonical promotion and, after mandatory live-Issue reconciliation,
+the nonregistered #119 parser/handoff. It does not claim that #158 persistence,
+routes, platform readers, host activation, release, or any prerequisite
+implementation has landed.
+
+D083 selects the following eight decisions.
+
+1. The additive v2 request is one exact capability-bound normalized envelope.
+   Its payload is the SDK 1.0.4 nine-property surface: required `name`, `path`,
+   and `content`, plus optional `allowedTools`, `description`, `pluginName`,
+   `pluginVersion`, `source`, and `trigger`. There is no `model`, compatibility
+   alias, reflection-defined schema, or direct callback writer.
+2. Status, media, method, body-bound, error-byte, and precedence rules are
+   closed. The v2 route and current-file route own exact request limits;
+   response JSON is compact UTF-8/no-store, 204 is derived and empty, and each
+   matched wrong method including HEAD/OPTIONS uses the fixed 405 contract.
+3. One immutable checked-in payload schema and one contiguous complete
+   compatibility-registry history own producer admission. The greatest
+   mechanically valid complete revision is the only current authority. A
+   previous revision may prove the history of an explicit revoke but is never
+   an admission fallback.
+4. Exact `(source_adapter,source_event_id)` receipt lookup is first. The
+   29-field binary semantic fingerprint binds the selected native Session and
+   optional Run graph plus payload/classification/content facts. Equality
+   validates the current complete graph and freshly derives 204; no status,
+   headers, or response entity are stored or replayed.
+5. `payload_sha256` and `payload_bytes` cover the exact received payload-token
+   byte slice. The sole raw carrier is the canonical
+   `session-event-content.skill-invoked.v1` base64 document in
+   `session_event_content`. There is no second raw item, body/path copy,
+   normalized-JSON carrier, response cache, or sanitized carrier.
+6. Classification is total and independent of property encounter order:
+   malformed, then missing, then binary, then oversized, then
+   `available/none`, with the exact reason precedence and nullability matrix in
+   the owning specification. #154 alone supplies the point diagnostic
+   `current|stale|invalid|unavailable` and the separate opaque current-
+   authorization capability; #158 adds no claim/registry reader.
+7. Metadata, historical-content, and current-file documents use fixed schema
+   tokens/property order/explicit nulls and are freshly serialized from facts
+   validated for that request. Current-file `same|changed` is exact byte
+   equality, never digest equality. Ingest success remains an empty derived
+   204.
+8. Discovery authority is request-memory only and is configured solely by
+   repeatable `--skill-discovery-project-path` (0..16) and
+   `--skill-discovery-directory` (0..32) argv options. Zero roots means no
+   current-file service/POST. Windows and Linux have independent certified
+   retained-root/native no-follow gates; unsupported or uncertified platforms
+   receive no path fallback, and no root/discovery/path identity is persisted,
+   backed up, logged, measured, or returned.
+
+The immutable r0001 identities are binding:
+
+```text
+payload schema          980 bytes  8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c
+schema sidecar           65 bytes  3f6b076bb7329662088c0b055a81e5f3d9789cd654ddde27bf3b1877d32ba123
+registry                431 bytes  3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda
+snapshot SQL          9,213 bytes  502f787c28b13363826aeccde96979ed22dc89c8ee137593922b106528935d7c
+Session child registry 1,019 bytes 0b5f7782a9686791c2ce9bcff8638dccf1de44833303c0932f05e2ae57259c64
+receipt frame           726 bytes  5698c710512676dab263596e169be6e73746525a695f67b7929866fbc502cfb7
+generic denial           43 bytes  9efd316487e88e9c4ca2440f058d7097518cd01205e5ed1788bd37010f758855
+```
+
+The only r0001 producer composition is SDK package/assembly `1.0.4/1.0.4.0`,
+the application-bundled same-client Copilot CLI status `1.0.65`, protocol `3`,
+adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v1`. The application launches only
+its co-located, headless, non-updating bundle. An explicit path/URI, PATH,
+environment override, global CLI, compatible-higher protocol, runtime
+substitution, or later SDK/CLI does not satisfy r0001.
+
+Every SDK callback first acquires its exact immutable runtime-generation
+capability. `SkillRuntimeCapabilityBridgeV1` then binds one random 32-byte,
+43-character unpadded-base64url token to the complete body length/digest and
+that same capability for exactly 30 monotonic seconds, with at most 64 pending
+entries. The dedicated sender targets only the already-bound numeric loopback
+HTTP/1.1 listener and has no proxy, redirect, cookie, credentials, ambient
+trace headers, retry, or resend. The token is consumed once before body read;
+it and its digest/count/generation/expiry are never logged, measured,
+persisted, backed up, fingerprinted, or returned. Arbitrary loopback callers
+cannot borrow a current generation. The sole event topology is:
+
+```text
+SDK callback
+  -> normalized bounded body
+  -> single-use capability/body-binding token
+  -> loopback POST /api/session-ingest/v2/events
+  -> immutable #119 capability-bearing handoff
+  -> one #158 transaction participant
+```
+
+There is no direct callback-to-writer path, second HTTP transport, query/cookie
+token, previous-generation fallback, or v1 compatibility handoff.
+
+Session 14 retains one core fingerprint. Exact
+`skill_invocation_snapshot:1` activates one compile-time child-trigger registry
+entry; the exact two Session-target trigger tuples are proved and filtered
+before the unchanged parent fingerprint, then the complete two-table/eight-
+trigger child graph is validated independently. Install validates exact
+Session 14, Retention 1, and Skill Projection 1, creates the child objects,
+inserts the component stamp last, reruns both parent and child validation, and
+commits once. There is no object-only/stamp-only state, adoption, repair,
+pending-install bypass, or Session 13/14 dual validator.
+
+First write resolves the exact native Session binding with cardinality 0/1/>1.
+An existing `native`, `explicit_resume`, or `explicit_handoff` binding is
+preserved; `trace_context`, ambiguity, or orphan state fails closed. A nonnull
+Run natural key uses the same exact 0/1/>1 rule. The selected native Session ID
+is stored privately. Every v2 parent Event has `content_state=available`, even
+when payload classification is nonavailable, because the canonical raw Event
+document exists. One transaction clock sample supplies all first-write times
+and the checked 90-day expiry. A receipt hit creates no Session, Run, Event,
+Retention item, claim, snapshot, or ID.
+
+The generic Session content route treats every existing `skill.invoked` Event
+as missing and returns the exact 43-byte 404 before a Retention lease, content
+selection, base64 decode, or materialization. Missing/type policy and the
+existing non-Skill Retention admission/selector execute in one Session-owned
+`BEGIN IMMEDIATE` transaction with no nested transaction or intervening
+commit. The raw route buffers a non-Skill response and uses the shared
+store-backed terminal seal before response start; terminal loss/busy discards
+it and aborts without a status/header/entity.
+
+Raw HTTP authorization has two independent total orders. Retention owns the
+live-lease/clock-backed `TryCompleteWithoutRaw` and `TrySealRawResponse` result;
+runtime generation owns its terminal response/commit seals. A pre-runtime safe
+current-file result needs Retention completion only. A post-runtime safe error
+needs Retention completion followed by the runtime response seal. Raw current-
+file success wins the runtime response seal first and the Retention raw seal
+second. Retention `lost|busy` always discards buffers and aborts with no
+substitute response. Runtime invalidation can substitute only the fixed
+discovery-unavailable response where the Retention completion rule permits it.
+No SQLite/publication lock is held across HTTP I/O.
+
+The current-file consumer receives one fixed, nonrenewing two-minute Retention
+operation grant and one original expiry notification. It holds the exact root-
+set lease, #154 current-authorization capability, and runtime-generation
+capability through discovery, native walk/read/re-proof, fresh serialization,
+and terminal completion. Normal shutdown closes root/runtime admission and
+drains already admitted work; mismatch/reconnect invalidates unsealed runtime
+work without transferring it to a newer generation.
+
+Windows requires certified local NTFS/ReFS plus retained-root, every-segment
+`NtCreateFile` proof. Linux requires kernel 5.8+, certified local
+ext4/xfs/btrfs, `openat2` with the exact beneath/no-symlink/no-magic-link/no-xdev
+flags, and the complete required `statx` masks. macOS, BSD, other systems, and
+uncertified filesystems register no current-file POST. The SDK is called once
+with the complete role arrays; its materialized result is scanned fully and
+all eight documented facts participate in ambiguity. Missing/null/empty SDK
+`Skills` normalize to one successful empty inventory and return not-discovered;
+a top-level null or observable enumeration/DTO failure is unavailable.
+
+Raw-local replay retains its single explicit-consent authority. It validates
+the complete nonraw graph before selecting the canonical document, then
+validates base64/digests/classification and scans decoded tokens/names/string
+values with the existing credential matcher before any publication. It adds no
+snapshot/receipt/claim/native-selection/root/discovery carrier and never
+reconstructs a live graph. `--sanitized-only` rejects before lookup or grant.
+
+Receiver-only composition registers no live producer/forwarder/bridge, v2
+route, #158 writer, current-file service, or any of the three Skill raw routes.
+Existing OTel-only #154 claims remain `snapshot_id=null` /
+`snapshot_state=not_captured` and create no snapshot row. Sanitized evidence
+contains no snapshot namespace, empty marker, raw document, receipt, selected
+binding, runtime/root/discovery fact, or reconstruction path. Component
+installation/validation remains an independent database authority and must not
+be inferred from host posture.
+
+Canonical decision order is D079 -> D080 -> D081 -> D082 -> D083. The binding
+implementation DAG is:
+
+```text
+tracked D083 promotion
+  -> authorized #117/#119/#124/#156/#157/#158/#161 Issue reconciliation/readback
+  -> nonregistered #119 strict parser + immutable handoff
+
+#124 exact Session 14 implementation
+  -> #156 D081 carrier/composition implementation
+  -> #161 D082 local_archive:1 implementation/backup/restore
+
+#124 exact Session 14 implementation
+  -> Retention pinned-read/terminal/equality-replay implementation
+
+#119 + #124 + #156/#161 + Retention, all integrated and green
+  -> #158 child/schema/persistence/readers/routes/platform composition
+```
+
+The remote reconciliation is a dispatch gate, not implementation evidence. It
+must remove stale `model`, `SkillDiscovery.ProjectPaths`,
+`SkillDiscovery.SkillDirectories`, weaker Unix `openat`, and conflicting
+dependency text from the affected Issues, then read back all seven Issues and
+prove the exact DAG and absence of stale tokens. It requires separately
+authorized remote writes.
+
+Host activation and release remain gated by exact artifact/parser/transaction/
+route RED/GREEN evidence, Session/archive/Retention integration, Windows and
+Linux native matrices, signed-in same-bundled-client Version `1.0.65` /
+ProtocolVersion `3` live evidence, repository full validation, independent
+review, and the derived public workflow update only after the flags exist. The
+currently observed application/global CLI 1.0.75 is deliberately not admitted
+by r0001 and is a runtime NO-GO fact, not a product-decision contradiction.
+
+D083 adds no compatibility entry, adoption, backfill, dual reader/write,
+response-byte storage, runtime reflection, direct historical path read,
+inferred join, second Skill/#154/Retention authority, raw-content logging,
+repository-safe raw carrier, #152 resolution, or claim that any engineering or
+release gate is complete.

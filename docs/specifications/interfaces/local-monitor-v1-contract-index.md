@@ -13,7 +13,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Repository catalog/locator/assignment | [`local-repository-catalog.md`](local-repository-catalog.md), [DC156-12–19 executable closure](local-repository-catalog-executable.md), #155 | #156 |
 | Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
 | Skill projection validity/re-run | [`skill-projection.md`](../layers/skill-projection.md), [exact-v10 input evidence](../contracts/skill-projection-v1-deleted-before-digest.md), #154 | #154 |
-| Skill v1 correction/v2 transport/body/path snapshot/current file | [`skill-invocation-snapshot.md`](skill-invocation-snapshot.md), #119/#157/#158 | #158 after gate closure |
+| Skill v1 correction/v2 transport/body/path snapshot/current file | [`skill-invocation-snapshot.md`](skill-invocation-snapshot.md), #119/#157/#158, D083 | #158 after the prerequisite join and implementation/release gates |
 | Session terminal facts/outcome aggregation | [`canvas-session-workspace.md`](canvas-session-workspace.md), #124 | #124 |
 | Sanitized-only receiver posture | #159 | #168 |
 | Session/Repository archive | [`local-archive.md`](local-archive.md), #160, D082 | #161 |
@@ -145,11 +145,22 @@ is permitted.
 - OTel/SDK claims merge only on exact producer trace ID plus span ID. No
   trace-only, name/path/time/cardinality, Session or discovery heuristic is
   permitted.
-- #119 Skill v2 and #158 production remain `BLOCKED_DECISION` until every exact
-  wire/mapping, error/media/`405` byte, schema/fingerprint/registry, equality/
-  content byte-domain, classification/nullability/name/path, success/discovery
-  literal and historical-to-discovery identity-proof decision in the canonical
-  snapshot interface is closed.
+- D083 closes the remaining #119/#158 product decisions in the canonical
+  snapshot interface. That closure does not claim implementation or release:
+  the nonregistered #119 parser/handoff follows mandatory live-Issue
+  reconciliation, #158 runtime work waits for the exact prerequisite join, and
+  host activation, route registration and release remain gated by the focused,
+  platform, live, full-validation and review evidence in that interface.
+- After those gates pass, D083 adds to raw-default composition only the additive
+  `POST /api/session-ingest/v2/events` and the three exact Skill routes:
+  `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}`,
+  `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/content`,
+  and
+  `POST /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/current-file-read`.
+  Receiver-only/`--sanitized-only` composition registers none of them. The
+  current-file POST additionally requires a nonempty valid retained-root set
+  and an independently certified Windows or Linux platform; zero roots and
+  unsupported zero-root platforms leave only that POST absent.
 - The complete snapshot namespace is absent from sanitized export/import; no
   empty carrier, v1 fallback, compatibility writer or dual path is permitted.
 - Sentence-level wording may change under #169 without changing contracts, routes or structured selectors.

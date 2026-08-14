@@ -365,22 +365,24 @@ v10-to-v11 migration owns the source-compatibility change described above.
 
 ### Session 14 component compatibility
 
-The current runtime-backup component vector pins `session:14` and adds exactly
-`local_archive:1`; every other currently supported component entry is
-unchanged:
+The current runtime-backup component vector pins `session:14` and includes the
+newly promoted `local_archive:1` and `skill_invocation_snapshot:1`; every other
+currently supported component entry is unchanged:
 
 ```text
 alert_engine:2, alert_lifecycle:1, doctor:1, first_trace_navigation:1,
 historical_import:1, historical_instruction_analysis:1,
 local_archive:1, local_repository_catalog:1, monitor:11, pricing:1, retention:1,
-runtime_backup:1, sanitized_import:1, session:14, skill_projection:1
+runtime_backup:1, sanitized_import:1, session:14,
+skill_invocation_snapshot:1, skill_projection:1
 ```
 
 The registered migration order is now:
 
 ```text
 monitor -> session -> local_repository_catalog -> local_archive -> retention
--> skill_projection -> doctor -> alert_engine -> alert_lifecycle -> first_trace_navigation
+-> skill_projection -> skill_invocation_snapshot -> doctor -> alert_engine
+-> alert_lifecycle -> first_trace_navigation
 -> historical_instruction_analysis -> historical_import -> sanitized_import
 -> runtime_backup -> pricing
 ```
@@ -405,9 +407,8 @@ unchanged because v14 adds no table.
 
 `skill_projection:1` is an independent Local Monitor component, not a Retention
 kind and not part of `runtime_backup`'s historical Wave 3 tail. Its dependency
-position is after Monitor v11/source interpretation and Retention, and before the
-accepted future `skill_invocation_snapshot:1` and Workspace projection
-components:
+position is after Monitor v11/source interpretation and Retention, and before
+`skill_invocation_snapshot:1` and the future Workspace projection component:
 
 ```text
 monitor v11/source base observations
@@ -434,20 +435,193 @@ rules are
 [Source Compatibility Reconciliation](../layers/source-compatibility-reconciliation.md)
 and [Skill Projection](../layers/skill-projection.md).
 
-`skill_invocation_snapshot:1` is likewise independent, not a Retention kind,
-and remains unregistered while the #158 implementation gate is open. It owns
-only invocation index/metadata and equality receipts. Existing Session Event
-content owns and backs up historical body/path bytes exactly once; the snapshot
-component adds no raw-content copy or sanitized carrier. An older exact
-supported backup with no component initializes it empty; declared partial or
-newer-than-v1 state fails closed. Restore validation requires the exact
-`skill.invoked` parent Event/content/claim ownership, unique
-`(session_id,event_id)`, digest/size/state consistency, and insert-or-identical
-receipt behavior fixed by
-[Skill Invocation Snapshot](skill-invocation-snapshot.md). Those exact byte
-domains and collision semantics remain blocked, so migration/registration is
-not production-ready. OTel-only `not_captured` observations have no row to
-backup.
+`skill_invocation_snapshot:1` is likewise independent, is not a Retention kind,
+and is registered immediately after `skill_projection:1` and before the future
+`local_workspace_projection:1`. Its complete contract is owned by
+[Skill Invocation Snapshot](skill-invocation-snapshot.md). It owns invocation
+index/metadata and equality receipts only. Session Event content remains the
+sole raw owner and carries the historical payload document exactly once;
+snapshot backup adds no body/path copy, raw column, ZIP member, sanitized
+carrier, or empty sanitized marker. OTel-only `not_captured` observations have
+no snapshot row to back up.
+
+The canonical component DDL artifact is exact UTF-8 without BOM, LF only, one
+final LF, 9,213 bytes, and SHA-256
+`502f787c28b13363826aeccde96979ed22dc89c8ee137593922b106528935d7c`.
+It contains exactly these two tables and eight triggers, and no component-stamp
+statement:
+
+```text
+skill_invocation_snapshots
+skill_invocation_snapshot_receipts
+
+skill_invocation_snapshot_rows_update_rejected
+skill_invocation_snapshot_rows_delete_rejected
+skill_invocation_snapshot_rows_replacement_rejected
+skill_invocation_snapshot_receipts_update_rejected
+skill_invocation_snapshot_receipts_delete_rejected
+skill_invocation_snapshot_receipts_replacement_rejected
+skill_invocation_snapshot_session_event_update_rejected
+skill_invocation_snapshot_session_event_delete_rejected
+```
+
+The exact stamp is inserted separately and last:
+
+```sql
+INSERT INTO schema_version(component,version)
+VALUES('skill_invocation_snapshot',1);
+```
+
+Session 14 retains its one unchanged core fingerprint. The compile-time child
+registry activates only for BINARY-exact component text
+`skill_invocation_snapshot` with SQLite integer version `1`. When active, the
+Session validator requires both and only both registered child tuples: the two
+`skill_invocation_snapshot_session_event_*_rejected` names above,
+`type=trigger`, exact target `session_events`, and SQL equal under the existing
+Session canonical SQL tokenizer to the registry's delimiter-free installed
+`sqlite_schema.sql` values. The executable DDL ends `END;`, whereas each
+installed value ends `END`; a terminal-delimiter mismatch is incompatible.
+After proving the exact pair, Session filters only that pair before computing
+the unchanged Session-14 parent fingerprint. The Retention trigger exemption
+is unchanged. Parent success never substitutes for the mandatory complete
+child validator.
+
+The registry artifact
+`session-child-trigger-extensions-r0001.json` is exactly 1,019 bytes with
+SHA-256
+`0b5f7782a9686791c2ce9bcff8638dccf1de44833303c0932f05e2ae57259c64`.
+The installed-SQL golden is exactly 979 bytes with SHA-256
+`546fe44ec0cbdf21b7c55c99f35b1ce30f749ddae4e0e63e3fb02b3ffa9fb251`.
+Neither backup nor restore derives a registry entry from database objects or
+accepts an unregistered child trigger.
+
+Install is one transaction. Only after exact Session 14, Retention 1, and
+`skill_projection:1` validation, and after all earlier components in the fixed
+order above are current, it creates both tables and all eight triggers, inserts
+the exact stamp last, reruns Session validation with the active child registry,
+runs the complete child namespace and empty-graph validator, and commits once.
+Any failure rolls back every object and the stamp together. There is no
+`INSERT OR REPLACE`, adoption, repair, pending-install bypass, dual Session
+validator, or object-only/stamp-only committed state.
+
+Component absence means no stamp and no object whose name or target table is
+in the component's reserved namespace, including either Session-target child
+trigger, and zero `skill_projection_sdk_claims` rows. An exact supported older
+source or backup that is wholly absent installs the empty current component
+only after all parents have reached and passed their current validators, then
+restores no snapshot rows or SDK claims. A stamp-only,
+object-only, partial, extra, case-aliased, changed-SQL, wrong-target,
+wrong-storage-type, duplicate or non-integer stamp, current stamp with an
+invalid graph, future version, or reserved collision fails closed before
+mutation. None is adopted, cleaned, renamed, repaired, or treated as an older
+snapshot schema.
+
+Source backup preflight, source restore inspection before any carrier
+materialization, post-migration staging, the existing pre-swap staging fence,
+and installed validation all run the same complete validator. Besides exact
+schema, column, constraint, foreign-key,
+append-only trigger, namespace, component-vector, manifest-version, and exact
+two-table row-count checks, it proves every row as one closed graph:
+
+- the receipt uniquely selects its snapshot, and every snapshot has exactly
+  one receipt, one Session, and one exact `skill.invoked` Event with
+  `source_adapter=copilot-sdk-stream`, `source_surface=copilot-sdk`, receipt-
+  equal source Event identity, immutable provenance, null local parent/status/
+  match-kind and Session terminal outcome/version, and
+  `content_state=available`;
+- the stored `native_session_id` selects exactly one
+  `(session_id,'copilot-sdk',native_session_id)` binding whose unchanged kind is
+  `native`, `explicit_resume`, or `explicit_handoff`; `trace_context`, zero,
+  or more than one exact selection is invalid, while unrelated/mixed bindings
+  are neither enumerated nor reconstructed;
+- a null outer native Run has null Event `run_id`; a nonnull outer native Run
+  selects exactly one `copilot-sdk` natural-key Run inside the selected Session
+  and the Event links that Run. An available snapshot links the same Run; a
+  nonavailable snapshot keeps its derived `run_id`/trace/span null even when
+  the Event has valid outer identity. Zero or more than one row for a required
+  natural key, a cross-Session row, or any link contradiction is invalid;
+- every state has one exact Event-content/Retention owner and exact immutable
+  provenance, payload/document digests and lengths, capture/create times,
+  classification state/reason, snapshot, and receipt. Only
+  `available/none` has a #154 SDK claim plus name and body/path facts; every
+  nonavailable state has no claim and all mandated derived fields null. In the
+  reverse direction, every `skill_projection_sdk_claims` row is referenced by
+  exactly one available snapshot whose Session/Event/source/provenance/payload
+  tuple and receipt are equal; an orphan, duplicate reference, or claim beside
+  an absent/empty snapshot component is incompatible; and
+- a live graph has the exact canonical content row and readable Retention item.
+  An owner-valid expired/read-denied/cleanup transition may retain that row
+  only in the Retention-authorized transitional graph. Content absence is
+  valid only with the exact deleted Retention item and tombstone. Every other
+  content/Retention/claim combination is incompatible.
+
+The validator also proves that Event-content `captured_at`, Retention-item
+`captured_at`, snapshot `captured_at`/`created_at`, and receipt `created_at` are
+one exact `write_at`; Event-content and Retention `expires_at` are equal; an
+available #154 claim's `created_at` is the same `write_at`; and the Session
+creation/update and independent event-time relations remain valid. Restore
+never resamples, normalizes, or repairs any of these bytes.
+
+For each receipt, validation reconstructs the exact 29-field semantic frame in
+ascending field-ID order with the fixed `NULL`, `UTF8`, `BOOL`, `UINT64`,
+`UTC_TIME`, and `SHA256` encodings and compares its lowercase SHA-256 to
+`request_fingerprint_sha256`. The fields are, in order:
+
+```text
+UTF8("skill-invocation-snapshot-receipt") || 00 || UTF8("v1") || 00
+|| U16BE(29) || fields in ascending field ID
+
+field = U16BE(field_id) || kind u8 || U32BE(payload_length) || payload
+NULL=00/zero bytes; UTF8=01; BOOL=02/one byte 00|01;
+UINT64=03/eight-byte unsigned big-endian;
+UTC_TIME=04/33 canonical ASCII bytes; SHA256=05/32 raw digest bytes
+```
+
+```text
+source_adapter, source_event_id, source_surface, native_session_id,
+run_native_id, source_parent_event_id, source_ephemeral, producer trace_id,
+producer span_id, occurred_at, literal skill.invoked,
+source_application_version, adapter_version, normalization_version,
+payload_schema, schema_fingerprint, payload_sha256, payload_bytes, state,
+reason, name, source, trigger, body_sha256, body_utf8_bytes,
+definition_path_sha256, definition_path_utf8_bytes,
+literal application/json, content_document_sha256
+```
+
+The canonical golden frame is exactly 726 decoded bytes and hashes to
+`5698c710512676dab263596e169be6e73746525a695f67b7929866fbc502cfb7`.
+
+Nullable values use the frame's `NULL` kind, never an empty substitute. The
+reconstruction excludes server UUIDs, write/expiry times, Retention ownership,
+claim IDs, and response bytes. Validation requires receipt source identity to
+equal the Event, snapshot and graph; a stored fingerprint is never accepted as
+self-authenticating and no response status/header/entity is restored or
+replayed.
+
+Artifact and raw-content validation are byte exact. `payload_schema` is
+`github-copilot-sdk.skill-invoked.v1`; `schema_fingerprint` is the SHA-256 of
+the exact 980-byte canonical producer schema,
+`8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c`.
+The sole `session_event_content` value has exact `content_kind=application/json`
+and bytes:
+
+```text
+UTF8('{"schema_version":"session-event-content.skill-invoked.v1",'
+     '"payload_utf8_base64":"')
+|| strict RFC4648 base64 of the exact received payload-token bytes
+|| UTF8('"}')
+```
+
+The validator permits no BOM, LF, alternate alphabet, base64 whitespace, JSON
+property reordering, or reconstructed payload. It decodes once with strict
+bounds; proves exact decoded `payload_bytes` and `payload_sha256`, complete
+payload reclassification, the whole-document `content_document_sha256`,
+Event-content and Retention ownership/timestamp equalities, and for an
+available row the exact strict-UTF-8 body/path lengths and digests and #154
+claim equality. It proves the same closed nullability matrix for every
+nonavailable row. A raw-bearing runtime backup therefore carries the canonical
+document once through Session Event content and carries only links, metadata,
+classification, and the equality receipt in the snapshot tables.
 
 ### Local Repository catalog component
 
@@ -699,11 +873,13 @@ Writable-schema objects hidden under the SQLite-reserved `sqlite_*` namespace
 are accepted only for the exact built-in table and auto-index shapes. The
 `doctor_`, `alert_`, `historical_instruction_analysis_`,
 `historical_import_`, `sanitized_import_`, `runtime_backup_`, `pricing_`,
-`first_trace_`, `local_archive_`, and `IX_local_archive_` namespaces accept
-only exact objects owned by a declared component; absent or extra objects fail
-closed. Archive discovery also examines each object's target-table name, so a
-trigger or index cannot escape the reserved namespace by changing only its own
-name.
+`first_trace_`, `local_archive_`, `IX_local_archive_`, and
+`skill_invocation_snapshot` namespaces accept only exact objects owned by a
+declared component; absent or extra objects fail closed. Archive and snapshot
+discovery also examine each object's target-table name, so a trigger or index
+cannot escape a reserved namespace by changing only its own name. The snapshot
+allowlist includes the exact six component-table triggers and, only with the
+exact v1 stamp, the two Session-target child triggers fixed above.
 
 Schema metadata is guard-first for every table, index, and trigger before a
 component-specific validator runs: object/table/column identifiers are limited
@@ -725,8 +901,9 @@ namespace must also be absent. Case aliases such as an undeclared
 `RUNTIME_BACKUP_RECEIPTS`, doctor-prefixed objects, alert engine/lifecycle
 objects, historical-instruction/import/sanitized-import objects, pricing
 objects, first-trace navigation objects, or any archive table/index/trigger
-name or archive-targeting object are `restore_incompatible`; a production
-migrator never
+name or archive-targeting object, snapshot table/trigger name, or either
+snapshot child trigger targeting `session_events` are `restore_incompatible`;
+a production migrator never
 adopts or overwrites the collision.
 
 Restore preview additionally compares with the destination database and
@@ -745,12 +922,12 @@ returns:
 
 Preview is its own terminal branch. It performs immutable inspection and the
 existing bounded compatibility/migration preview. After ordered staging
-migration and complete Session, catalog, archive, Retention, and remaining
-component validation, it runs D079 `CompareRetention` against the unchanged
-destination and reports the terminal count/digest, non-terminal
-reintroduction count/confirmation digest, and whether resurrection
-confirmation is required. It then emits only the preview result, cleans its
-owned inspection artifacts, and stops. Preview never calls either Retention
+migration and complete Session, catalog, archive, Retention, Skill projection,
+snapshot, and remaining component validation, it runs D079 `CompareRetention`
+against the unchanged destination and reports the terminal count/digest,
+non-terminal reintroduction count/confirmation digest, and whether
+resurrection confirmation is required. It then emits only the preview result,
+cleans its owned inspection artifacts, and stops. Preview never calls either Retention
 reconciliation mutation, mutates the destination, creates a safety backup,
 appends a restore receipt, creates or prepares a swap journal, or swaps a
 database.
@@ -871,8 +1048,9 @@ The state machine is:
    then complete manifest/source-database preflight;
 5. apply supported staging migrations in fixed order: ordered Session
    `1..12 -> ... -> 13` and exact atomic `13 -> 14`, catalog ensure/validation,
-   archive validate-or-empty-v1 installation, Retention, then all later
-   components. Alert engine reaches v2 without reserializing a v1 row before
+   archive validate-or-empty-v1 installation, Retention, Skill projection,
+   snapshot validate-or-empty-v1 installation, then all later components.
+   Alert engine reaches v2 without reserializing a v1 row before
    lifecycle validation, and the fixed tail remains
    `historical_instruction_analysis -> historical_import -> sanitized_import
    -> runtime_backup -> pricing`;
@@ -920,9 +1098,10 @@ The private safety-backup step does not invoke the live-target mutation path of
 normal backup. It read-only preflights and online-copies the unchanged target
 into a private owned
 snapshot, then applies the same fixed migration order as restore staging,
-including Session, catalog, archive, Retention, and the remaining components.
-It runs the same current component/row validation after each dependency reaches
-current. A current destination archive is preserved byte-for-byte, including
+including Session, catalog, archive, Retention, Skill projection, snapshot, and
+the remaining components. It runs the same current component/row validation
+after each dependency reaches current. A current destination archive is
+preserved byte-for-byte, including
 current rows and complete history; a valid older destination with archive
 wholly absent receives empty archive v1 only in the migrated private copy. The
 safety-backup manifest, component vector, database hash, archive hashes, and
@@ -942,6 +1121,11 @@ item, synthesizes or copies raw bytes from incoming staging, or changes
 lifecycle, receipt, revision, timestamps, expiry, or TTL. Ordinary startup,
 adoption/backfill, normal backup, and ordinary reads retain their strict current
 validators.
+
+The snapshot component adds no writable-adoption, fixed-migration, or safety-
+archive exception to this D079 Retention subsequence. A private safety copy
+uses the same absent/current/future snapshot classification and the same
+stamp-last empty install or complete current validation described above.
 
 An extracted archive that declares the complete exact current component vector
 and passes current schema, row, object, integrity, and foreign-key validation

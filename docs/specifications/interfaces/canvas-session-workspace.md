@@ -380,6 +380,53 @@ mixed-batch rollback, the Claude OTel comparator, and the separate content
 no-backfill/conflict rule. Migration tests reopen the same valid v14 database
 and require byte-idempotent select-only validation.
 
+### Conditional #158 child-trigger validation
+
+Session `14` keeps one unchanged core fingerprint and owns no new core trigger
+for the Skill invocation snapshot component. The Session validator reads the
+actual `schema_version` table and activates one compile-time registry entry only
+for BINARY-exact text component `skill_invocation_snapshot` with SQLite integer
+version `1`. Absence activates nothing. Wrong case, text `"1"`, zero, two or a
+later version, duplicate or corrupt metadata, or manifest/database disagreement
+is incompatible.
+
+When and only when that exact stamp is present, the Session validator requires
+both and only both of these registered trigger tuples:
+
+- `skill_invocation_snapshot_session_event_update_rejected`, `type=trigger`,
+  exact target `session_events`, and exact registered SQL;
+- `skill_invocation_snapshot_session_event_delete_rejected`, `type=trigger`,
+  exact target `session_events`, and exact registered SQL.
+
+Installed SQL equality uses the existing Session canonical SQL tokenizer. Each
+registry `sql` value is the exact UTF-8 text returned by
+`sqlite_schema.sql` after canonical DDL installation: it retains the internal
+semicolon before `END` and ends in ASCII `END`, without the DDL source's terminal
+statement delimiter. The Session canonicalizer and the Session `14` core
+fingerprint do not change. Missing, partial, altered, wrong-target,
+case-aliased, additional registered-namespace, future-version, or
+terminal-delimiter-mismatched triggers fail closed. Only after proving the exact
+pair does the validator remove that pair from the Session profile before
+computing the unchanged parent fingerprint. The existing Retention trigger
+exemption remains unchanged and is not part of this registry.
+
+Passing the parent check is not child validation. A mandatory later
+`skill_invocation_snapshot:1` validator proves the exact two child tables,
+eight triggers, namespace, columns, constraints, foreign keys, graph
+invariants, receipt reconstruction, content/Retention/claim equality, and null
+Session `14` terminal outcome/version. Startup, ensure, online-backup creation,
+inspect/preview, staging restore, pre-swap, and installed validation all run the
+child validator after the parent validator.
+
+Installation uses one transaction: validate exact Session `14`, Retention `1`,
+and Skill Projection `1`; create both child tables and all eight triggers;
+insert the exact component stamp last; rerun Session validation through the now
+active conditional registry; run the complete child namespace and empty-graph
+validator; and commit once. Any failure rolls back objects and stamp together.
+Object-only or stamp-only committed states, `INSERT OR REPLACE`, adoption,
+repair, a pending-install bypass, and a Session `13`/`14` dual validator are
+forbidden.
+
 The public Session list/detail/status wire shape, property order, routes,
 headers, enum strings, status codes, fixed error representations, monitor
 health/SSE bytes, and content-state vocabulary remain frozen. The two private
@@ -632,6 +679,52 @@ Issue #51 does not change the Issue #45 `session.send()` execution behavior or
 transfer execution ownership to Local Monitor. Issue #49 Agent ownership
 semantics are also unchanged.
 
+### Issue #158 exact Session and Run selection
+
+This additive v2 writer does not change the frozen v1 ingest, workspace, or
+identity behavior. Receipt lookup by exact
+`(source_adapter, source_event_id)` is always first. Only a receipt miss enters
+one mutation `BEGIN IMMEDIATE` transaction and resolves the Session by
+BINARY-exact `('copilot-sdk', native_session_id)` with a `LIMIT 2` cardinality
+check:
+
+- zero rows creates one UUIDv7 Session and one exact `native` binding with
+  `observed_at=occurred_at`; the Session is initially `active` and `partial`,
+  has `last_seen_at=occurred_at`, null repository/workspace/start/end, and the
+  new Retention-owned content item's raw-retention projection is `expiring`;
+- one row is reusable only when its unchanged binding kind is `native`,
+  `explicit_resume`, or `explicit_handoff`; reuse preserves the binding kind,
+  identity, `observed_at`, and enrichment, updates last-seen by maximum, and
+  recomputes status/completeness through the Session `14` authority;
+- a selected `trace_context` or malformed/unknown binding kind, an orphaned
+  owner graph, or more than one exact row returns the exact sanitized
+  `503 local_monitor_ui_unavailable` result with zero writes.
+
+A binding under another surface counts as zero. Other or mixed bindings on the
+selected Session are legal but are neither selected nor enumerated. The Skill
+snapshot privately persists the exact selected `native_session_id`; full
+validation and replay require exactly one matching
+`session_native_ids(session_id, 'copilot-sdk', native_session_id)` row with its
+unchanged kind in the closed accepted set `native|explicit_resume|explicit_handoff`.
+Replay and backup never rewrite valid resume/handoff evidence into `native`.
+This #158 selection restriction does not remove `trace_context` from the frozen
+v1 workspace `native_ids` vocabulary or from unrelated existing Session
+linkage; it only makes such a row ineligible as the selected #158 native
+binding.
+
+When `run_native_id` is null, #158 creates no Run and the Event `run_id` remains
+null. Otherwise it resolves BINARY-exact
+`(session_id, 'copilot-sdk', native_run_id)` inside only the selected Session,
+again with `LIMIT 2`: zero creates one UUIDv7 Run with status `unknown` and null
+parent/trace/model/timing/token facts; one reuses the exact row without erasing
+enrichment; and more than one fails with the same sanitized 503 and zero
+writes. Event `run_id` retains this valid outer identity even when a classified
+snapshot fault requires null derived Run/trace/span fields. For this source,
+Event parent, status, match kind, and Session `14` terminal outcome/version stay
+null. Every admitted v2 Event has exact `content_state=available` because its
+canonical raw Event document exists, independently of whether the derived
+Skill snapshot is available.
+
 ## Sanitized Workspace Reads
 
 All endpoints in this section return sanitized metadata and never return event
@@ -757,7 +850,7 @@ metadata; event payloads and raw trace content remain outside this interface.
 The raw-bearing content route is:
 
 ```text
-GET /sessions/{id}/events/{eventId}/content
+GET /sessions/{sessionId}/events/{eventId}/content
 ```
 
 An available content response has this shape:
@@ -798,6 +891,63 @@ is a frozen lossy projection: `expiring` and `retained_by_policy` map to
 `expired_pending_deletion`; no captured item maps to `not_captured`. The route's
 existing enum, status codes, JSON property names, and exact UTF-8 404/410 bytes
 remain unchanged. Pin, unpin, and delete-now remain Issue #90 scope.
+
+In the registered raw-default route, `Cache-Control: no-store` is set before
+validation. After same-origin and UUID checks, the route calls the one
+Session-owned generic-route operation
+`ISessionStore.ReadGenericRouteContentAsync`. That operation opens one
+owner-coordinated `BEGIN IMMEDIATE` transaction and first performs, on the same
+connection and transaction, a scalar metadata-only lookup for the exact Event
+identity and `type`. It never calls the separately transactional
+`ReadContentAsync` path and never nests a Retention transaction.
+
+An absent Event or any existing Event whose exact type is `skill.invoked`,
+regardless of adapter or snapshot presence/health, ends the transaction and is
+indistinguishable from missing:
+
+```text
+status        = 404
+Content-Type  = application/json
+Cache-Control = no-store
+entity        = {"error":"session_event_content_not_found"}
+```
+
+The entity is exact UTF-8, 43 bytes, with no BOM, newline, charset, or `Allow`.
+This result occurs before any Retention lease, content-column selection, base64
+parsing, response materialization, or content-buffer allocation. Missing,
+`skill.invoked`, busy, and unavailable branches never call `ReadContentAsync`,
+select `content_json`, decode base64, or materialize raw content.
+
+Only an existing non-Skill Event may continue within the same SQLite snapshot.
+The Session owner invokes the existing Retention admission and content-selector
+logic through its transaction-aware internal arm on the same connection and
+transaction. No nested transaction, intervening commit, rollback/reopen gap, or
+split type-check/Retention admission is permitted. That arm is not a second raw
+authority: it reuses the existing Retention predicate, capability, lease,
+selector, commit, consumption, terminal seal, and release implementation. A
+busy or failure before commit rolls back every uncommitted non-Skill lease and
+discards content.
+
+SQLite busy/locked returns the existing exact
+`503 {"error":"session_store_busy"}` entity: 30 UTF-8 bytes with SHA-256
+`e95ded880eae255e934e1c7b71a51751a395ee6cdaea0d3d36a716154ec09f58`.
+Malformed schema/type/storage, multiple identity rows, or any other non-busy
+metadata-policy failure returns the new exact
+`503 {"error":"session_store_unavailable"}` entity: 37 UTF-8 bytes with
+SHA-256
+`10ea144d09df95f7af00604f9fb41a72c0cf0a2c10dc140eff017d250e27d383`.
+Both entities use exact `application/json`, no-store, no BOM, newline, charset,
+or `Allow`, and expose no raw detail. All other frozen v1 200/404/410 entities
+and bytes remain unchanged.
+
+For an admitted non-Skill 200, the route fully buffers the exact response only
+while retaining the access handle, then calls the store-backed
+`TrySealRawResponse()` strictly before response start. Only `sealed` sends the
+unchanged entity. `lost|busy`, expiry, cleanup, or caller abort discards the
+buffer and closes the transport with no status, header, or entity. There is no
+current-row reread. No implementation may rely on application-level Event
+immutability, test snapshot health or adapter identity, or add
+`type <> 'skill.invoked'` only to a later selector after a lease exists.
 
 For a granted non-Skill raw-content read, the Session owner retains the exact
 access handle and every content-buffer use reference through complete response

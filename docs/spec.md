@@ -90,12 +90,61 @@ The accepted #119/#157/#158 Skill foundation is canonical in
 Frozen Session ingest v1 supports `skill.started` and `skill.completed`;
 `skill.invoked` remains an unsupported v1 Event. That correction changes no
 v1 route, wire shape, enum, limit, status mapping, entity byte or response byte.
-The additive Skill-only v2 transport, snapshot component, raw-local reads,
-current-file discovery and backup/sanitized composition are accepted
-foundation only. Production v2 parsing, persistence, migration, routes and
-registration remain `BLOCKED_DECISION` until the interface's complete
-implementation gate is closed; no serializer default, heuristic, fallback,
-compatibility writer or dual path may fill a blocked value.
+D083 closes all eight Product Owner gates: the exact normalized v2 wire and SDK
+mapping; status/media/method/error bytes and precedence; payload schema,
+fingerprint, and registry; equality receipt, selected identity, and replay;
+exact payload/content byte domains and the sole raw owner; total fault
+classification, bounds, nullability, and claim validity; literal success
+documents with fresh semantic serialization; and historical-to-discovery proof
+with native current-file reads. The raw-default-only additive v2 path has no
+payload `model`, no inferred join, and no serializer-default authority.
+
+The exact checked-in byte authorities and their SHA-256 identities are:
+
+- `github-copilot-sdk.skill-invoked.v1.schema.json` = `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c`;
+- `github-copilot-sdk.skill-invoked.v1.schema.sha256` = `3f6b076bb7329662088c0b055a81e5f3d9789cd654ddde27bf3b1877d32ba123`;
+- `compatibility-registry-r0001.json` = `3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda`;
+- `skill-invocation-snapshot.schema.v1.sql` = `502f787c28b13363826aeccde96979ed22dc89c8ee137593922b106528935d7c`;
+- `session-child-trigger-extensions-r0001.json` = `0b5f7782a9686791c2ce9bcff8638dccf1de44833303c0932f05e2ae57259c64`;
+- `session-v14-child-trigger-installed-sql.golden.json` = `546fe44ec0cbdf21b7c55c99f35b1ce30f749ddae4e0e63e3fb02b3ffa9fb251`;
+- `discovery-revision-v1.golden.json` = `7d72e2b7213c04012f49dafc37f55a7573e59eab9c3be7e9c72fdc0778a82a28`;
+- `json-writer-v1.golden.json` = `9f95ad12d58be87869ced76fb995832e94a102c4ffb43588f8cd4f380200166e`;
+- `metadata-response-v1.golden.json` = `e3fe1403b13bebbc46856c2220828d333d7513fb398a8521c8dff8b9b5e0130f`;
+- `path-key-v1.golden.json` = `e397becf9711b6fe51bd1174cbca00a450b699a4fe941cc24c298d7739b1370e`;
+- `request-fingerprint-v1.golden.hex` = `fc0160e65a64e2dcb2154aeab515e4a0351783006a4d644e42ff0cec6354e606`, whose decoded 726-byte frame hashes to `5698c710512676dab263596e169be6e73746525a695f67b7929866fbc502cfb7`; and
+- `generic-route-not-found.body.hex` = `0366941f6a5b3316b1cf5fc2204a97eafe6ed133431d70bc7cb914602de57a75`, whose decoded 43-byte entity hashes to `9efd316487e88e9c4ca2440f058d7097518cd01205e5ed1788bd37010f758855`.
+
+Metadata, historical-content, and current-file success JSON documents are
+written fresh
+from the just-validated semantic facts in the fixed property order with
+explicit nulls; ingest success is the derived exact `204`. No response bytes,
+discovery inventory, absolute path, or request-memory discovery revision is
+persisted, backed up, restored, logged, or replayed. The sole public root
+carrier is repeatable CLI argv
+`--skill-discovery-project-path <absolute-path>` and
+`--skill-discovery-directory <absolute-path>`; Windows wrappers may encode the
+same repeated argv pairs in the Task Scheduler action. There is no environment,
+JSON, delimiter-list, CWD, inferred-root, absolute-path API, or .NET path
+fallback. Zero roots means no current-file service/POST. Windows local
+NTFS/ReFS retained-handle proof and Linux 5.8+ `openat2` retained-fd proof on
+local ext4/xfs/btrfs are independent certification/release gates; failure of
+one platform does not block the other or the historical routes. Explicit roots
+on an uncertified platform fail host startup rather than degrading to route
+absence.
+
+After tracked canonical closure and mandatory live reconciliation/readback of
+Issues #117/#119/#124/#156/#157/#158/#161, #119 may implement its strict
+bounded single-pass parser and immutable capability-bearing typed handoff as a
+nonregistered foundation independently of the other engineering lanes. #158
+runtime implementation remains gated by the integrated #124 Session 14
+authority, then D081's #156 carrier/composition closure and D082's #161 direct
+archive implementation/backup/restore, plus the separately landed Retention
+pinned-read implementation/tests and the nonregistered #119 handoff. Host
+activation, route registration, and release remain `NO-GO` until the focused,
+independent platform, signed-in live, full-validation, and review gates pass.
+No migration adoption/backfill, compatibility alias/writer, fallback, dual
+reader/path, historical-path direct read, or sanitized carrier is permitted;
+Issue #152 remains excluded.
 
 The complete DC156-01–19 Repository catalog contract is
 `READY_FOR_IMPLEMENTATION` under [Local Repository Catalog and Session
@@ -1062,8 +1111,9 @@ The arms merge only when producer trace ID and span ID both exactly match; an
 unlinked same-Session pair is not added and yields `null` count with
 `certification_pending`. The obsolete pre-release Skill rows are discarded
 without copy, backfill, dual readers or deletion of unrelated
-Session/raw/Retention data. #158 must still pin and implement its wire writer
-and accepted registry seed before SDK claim admission is available.
+Session/raw/Retention data. D083 pins the exact wire and complete r0001
+registry; #158 must still implement its atomic writer before SDK claim
+admission is available.
 Canonical details are
 [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
 and [Skill projection](specifications/layers/skill-projection.md). Issue #152
@@ -1074,11 +1124,13 @@ The SDK transport and retained raw snapshot are separately governed by
 That interface retains #154 as the sole current-valid claim authority and
 permits cross-arm composition only for exact producer trace ID plus span ID.
 Its v2 outer envelope/event inventory and mapping, complete error/status/media/
-`405` bytes, producer schema/fingerprint/registry seed, equality-receipt and
-content byte domains, multi-fault/nullability/name/path classification,
+`405` bytes, producer schema/fingerprint/registry, equality-receipt and content
+byte domains, multi-fault/nullability/name/path classification,
 success/discovery literals, and historical-to-discovery handle identity proof
-remain unsettled together. Consequently #119 v2 and #158 production are not
-implementation-ready. Raw-local registration is raw-default only; the complete
+are closed by D083. Consequently the nonregistered #119 parser/handoff is
+implementation-ready only after mandatory live-Issue reconciliation/readback;
+#158 production and route registration remain prerequisite-, implementation-,
+and release-gated. Raw-local registration is raw-default only; the complete
 snapshot namespace is excluded from sanitized export/import without an empty
 carrier or fallback.
 

@@ -71,17 +71,41 @@ The installed Session ingest v1 keeps its frozen wire and supports
 `skill.started | skill.completed`; `skill.invoked` is unsupported there. The
 accepted Skill-only v2 writer, `skill_invocation_snapshot:1`, historical
 body/path reader, discovery/current-file service and raw-local routes are
-additive raw-default-only components. Their production registration remains
-blocked by the complete decision gate in
-[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md);
-there is no v1 fallback, compatibility writer or dual path.
-Current-file discovery takes roots only from startup
-`SkillDiscovery.ProjectPaths` / `SkillDiscovery.SkillDirectories`, calls
-`ServerSkillsApi.DiscoverAsync` with those roots, and opens only an accepted
-discovery result through a platform no-follow handle walk. Historical
-path/CWD, Repository locator, prompt, workspace or time never creates a root,
-and the historical path is never opened directly. Exact name/path comparison
-and handle-identity proof remain part of the production gate.
+additive raw-default-only components. D083 closes the decision gate; production
+registration remains blocked by the prerequisite implementation, focused,
+platform, signed-in live, full-validation, and review gates in
+[Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
+There is no v1 fallback, compatibility writer or dual path.
+Current-file discovery takes roots only from the exact repeatable startup CLI
+options `--skill-discovery-project-path` and
+`--skill-discovery-directory`. Successful preflight creates one immutable
+retained-root generation; each request keeps its SDK discovery binding
+request-local and holds that root lease, the immutable same-client runtime-
+generation operation capability, #154's opaque current-generation capability,
+and its Retention lease through fresh response buffering. An accepted discovery
+result authorizes bytes only through the Windows or Linux native no-follow
+retained-handle/fd walk. Historical path/CWD, Repository locator, prompt,
+workspace or time never creates a root, and the historical path is never opened
+directly.
+The generic Session raw route performs its Event-type policy check and
+Retention admission/selection on the same connection and transaction before
+any raw materialization.
+
+The sole SDK event transport acquires the callback-owning runtime-generation
+capability, binds one bounded complete body to one single-use
+`SkillRuntimeCapabilityBridgeV1` token, crosses the exact loopback v2 HTTP
+route, and transfers only that capability through #119's immutable typed
+handoff. There is no direct writer or arbitrary-loopback admission, and no
+database or publication lock is held across the loopback HTTP I/O. Runtime
+invalidation and terminal sealing govern every commit and response publication:
+post-transfer v2 noncommit responses, commits, and equality-replay success use
+`TrySealV2NonCommitResponse`, `TrySealCommit`, and `TrySealReplaySuccess`,
+respectively. A pre-runtime current-file safe result uses Retention
+`TryCompleteWithoutRaw` alone; a post-runtime safe error uses that Retention
+completion and then runtime `TrySealResponse`; current-file raw success uses
+runtime `TrySealResponse` and then Retention `TrySealRawResponse`. Retention
+`lost|busy` aborts without a response, and every capability and lease is
+released on terminal completion, invalidation, or abort.
 
 Issue #79 adds a separate historical-observation path:
 
@@ -338,8 +362,9 @@ to Config CLI and no new Local Monitor route.
   publication rechecks all revision/frontier/projector/queue/Retention fences.
 - SDK current validity uses the complete exact
   source-application/adapter/normalization/payload-schema/fingerprint registry
-  tuple. Cross-arm merge requires exact producer trace and span IDs; #158 still
-  owns and must fix the SDK wire writer and accepted registry seed.
+  tuple. Cross-arm merge requires exact producer trace and span IDs. D083 fixes
+  the SDK wire and complete r0001 registry; #158 still owns their atomic writer
+  implementation.
 - The pre-release Skill tables are destructively retired without old-row
   backfill or deletion of unrelated Session/raw/Retention data.
 - Canonical details are

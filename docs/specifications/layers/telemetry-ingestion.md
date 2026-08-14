@@ -646,9 +646,9 @@ transaction. Ordinary OTel ingestion uses the same transaction-aware generation
 participant. OTel publication rechecks the current compatibility revision,
 resolved state, desired generation, exact frontier, projector version, queue
 lease and Retention operation leases. The independent SDK Session/Event arm is
-not trace-generation-bound and remains unavailable until #158 fixes and
-implements its exact wire writer and accepted registry seed. A raw snapshot
-cannot resurrect an invalid claim.
+not trace-generation-bound. D083 fixes its exact wire and complete r0001
+registry, but admission remains unavailable until #158 implements the atomic
+writer. A raw snapshot cannot resurrect an invalid claim.
 
 The old pre-release Skill rows and Skill-only completion marker are discarded;
 they are not copied, backfilled or served through a compatibility reader.
@@ -719,14 +719,119 @@ It is raw-default-only, JSON, header/body version 2, exactly one
 provenance defined by
 [Skill Invocation Snapshot](../interfaces/skill-invocation-snapshot.md).
 It has no retry, redirect, fallback, compatibility writer or dual transport.
-Production parser/writer and host registration remain `BLOCKED_DECISION`:
-the exact outer envelope/event inventory, nullability, order and SDK/local
-mapping; complete error/status/media/`405` bytes; repository schema,
-fingerprint and registry seed; equality receipt and storage byte domains;
-classification/nullability/name/path mapping; success/discovery literals; and
-historical-to-discovery identity proof are not yet fixed. Ingestion must not
-derive them from v1 DTOs, runtime reflection, serializer defaults or encounter
-order.
+The additive v2 wire is closed and does not reuse a v1 DTO. The request has
+exactly one `X-CAO-Session-Event-Version` field whose complete ASCII value is
+`2`, exactly one physical `X-CAO-Skill-Runtime-Capability` field carrying the
+consumed bridge token below, exactly one accepted JSON `Content-Type`, and one
+strict UTF-8 JSON object followed only by JSON whitespace. Object-property order
+is nonsemantic. The adapter emits, and the parser requires exactly once and
+nonnull, this outer order and r0001 value set:
+
+| Property | Exact r0001 rule |
+|---|---|
+| `schema_version` | JSON integer `2` |
+| `source_adapter` | `copilot-sdk-stream` |
+| `source_surface` | `copilot-sdk` |
+| `native_session_id` | exact `CopilotSession.sessionId`; 1..256 Unicode scalars, no U+0000, at most 1,024 strict UTF-8 bytes |
+| `source_application_version` | `1.0.65` from the admitted same-client runtime generation |
+| `adapter_version` | `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` |
+| `normalization_version` | `github-copilot-sdk.skill-invoked.normalize.v1` |
+| `payload_schema` | `github-copilot-sdk.skill-invoked.v1` |
+| `schema_fingerprint` | `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c` |
+| `events` | array containing exactly one Event |
+
+That Event has exactly nine required properties, emitted in this order:
+`source_event_id`, `source_parent_event_id`, `type`, `occurred_at`,
+`run_native_id`, `source_ephemeral`, `trace_id`, `span_id`, and `payload`.
+`source_event_id` is SDK `id` parsed as UUIDv4 and emitted as canonical
+lowercase `D`; `source_parent_event_id` is JSON null or SDK `parentId` in the
+same form and never supplies local `session_events.parent_event_id`; `type` is
+`skill.invoked`; and `occurred_at` is the SDK timestamp normalized to
+`yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. `run_native_id` is JSON null when SDK
+`agentId` is absent, otherwise it has the same scalar/U+0000/UTF-8 bounds as the
+native Session ID. `source_ephemeral` is true only for SDK semantic true;
+absent or false maps to false. `trace_id` and `span_id` are both required JSON
+null under r0001 because SDK 1.0.4 exposes no exact correlation source; no
+Session, Run, name, path, time, or proximity inference may populate them.
+
+`payload` is newly written from typed SDK `SkillInvokedData`, not copied from a
+raw SDK serializer buffer. It has exactly the required properties `name`,
+`path`, and `content`, followed when present by optional `allowedTools`,
+`description`, `pluginName`, `pluginVersion`, `source`, and `trigger`. Absent
+optionals are omitted and JSON null is never synthesized. Strings and allowed-
+tool order are preserved without trimming, case folding, normalization,
+filtering, path rewriting, or replacement repair. There is no `model`; it is an
+unknown payload property and follows the fixed
+`malformed/unknown_property` classification rather than being accepted or
+dropped.
+
+The receiver performs exactly one bounded raw `Utf8JsonReader` pass over the
+complete request, with ordinal property-name sets and
+`AllowTrailingCommas=false`,
+`CommentHandling=JsonCommentHandling.Disallow`, and `MaxDepth=64`, before it
+constructs the immutable #119 handoff. Depth 64 is accepted; depth 65, comments,
+trailing commas, any structural failure anywhere (including inside an unknown
+payload value), duplicate/unknown outer or Event properties, invalid outer
+UTF-8/JSON/type/nullability/value/count or provenance, and a trailing value are
+outer `400 invalid_request`. Only after that structurally complete pass do
+duplicate/unknown payload facts enter the fixed payload-fault order. The parser
+does not use runtime reflection, `JsonSerializer`, web serializer defaults,
+last-wins duplicate handling, encounter-order inference, or a second parse.
+
+The sole producer topology is SDK callback -> exact normalized body -> bounded
+process-local `SkillRuntimeCapabilityBridgeV1` entry -> one loopback
+`POST /api/session-ingest/v2/events` -> #119 immutable typed handoff -> the one
+#158 admission/writer path. The callback first acquires the non-mutating
+capability for its exact owning admitted `CopilotRuntimeGenerationV1`; it never
+borrows a newer current pointer. Under that capability it scans all producer
+.NET strings for well-formed UTF-16. A lone high or low surrogate discards every
+partial buffer, releases the capability, creates no token/send/handoff/write,
+and is never passed to `Utf8JsonWriter`. It then performs cancellation-aware
+serialization and hashing with an 8,388,609-byte stopping buffer; a complete
+body must be at most 8,388,608 bytes. After purging expired entries, it
+generates a cryptographically random 32-byte token, encodes it as exactly 43
+unpadded base64url ASCII characters in `[A-Za-z0-9_-]`, and registers one
+pending record containing only
+that token, the complete body length and SHA-256, monotonic creation/expiry, and
+the same capability. The registry holds at most 64 entries; lifetime is exactly
+30 seconds on the injected monotonic clock and validity is only
+`now < expires_at`, so equality is expired.
+Clock overflow, RNG failure, collision, capacity exhaustion, send failure, or
+expiry fails the callback with sanitized producer unavailability and no write;
+send completion or expiry cleanup removes/releases any still-unconsumed entry.
+The sole sender targets only the actual already-bound numeric loopback `http`
+listener, uses exact HTTP/1.1 with `RequestVersionExact`, and has no proxy,
+redirect, cookies, credentials, ambient headers/instrumentation, retry, resend,
+configuration
+override, DNS target, or alternate transport.
+
+On the exact route, wrong method and required route/store/bridge-service/max-
+body-feature failure precede capability-header parsing and do not consume an
+entry or read a body. Missing, malformed, duplicate/combined, unknown, expired,
+canceled, or already-consumed capability tokens are one indistinguishable
+stage-1 `503 local_monitor_ui_unavailable`, with zero body read and zero writes.
+A valid token is atomically consumed once and transfers that exact capability to
+the request before body read. The bounded body's complete length and SHA-256
+must equal the pending record before JSON parsing; mismatch is outer
+`400 invalid_request`. Every subsequent media, size, parse, replay, mutation,
+abort, and response path reaches exactly one runtime terminal arm and releases
+the transferred capability exactly once. Token, pending digest/count, runtime
+generation, and expiry are transport admission only: they are never logged,
+persisted, backed up, restored, fingerprinted, returned, measured, or mapped to
+normalized content.
+
+After tracked D083 promotion and the mandatory live-Issue reconciliation/
+readback, #119 lands the strict no-`model` `SkillInvocationV2Parser`, mapper,
+artifact/registry reader, normalized writer, and immutable
+`ParsedSkillInvocationV2Batch` / `SkillInvocationV2AcceptedEnvelope` handoff
+with its required opaque runtime-capability slot. That foundation remains
+nonregistered: it adds no route, host activation, database writer, storage
+mutation, or `204`. #158 may accept only that capability-bearing handoff through
+its single transaction-aware participant/writer, and must hold the transferred
+capability without a gap through every zero-write replay terminal or first-write
+commit fence. There is no direct callback-to-writer path, second Skill
+authority, v1 compatibility path, dual write, fallback, backfill, previous-
+generation borrow, or persisted bridge correlation.
 
 The installed Local Monitor also provides:
 

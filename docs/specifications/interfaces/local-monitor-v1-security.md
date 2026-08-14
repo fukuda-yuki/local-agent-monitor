@@ -3,6 +3,7 @@
 Status: **Accepted current authority**
 Route/transport amendment: PO136-A2b, 2026-08-09
 Archive amendment: D082, 2026-08-09
+Skill snapshot amendment: D083, 2026-08-11
 Product posture: loopback-only, single trusted local user
 
 ## Human UI posture
@@ -79,17 +80,92 @@ Retention operation leases through their publish fence; an unavailable input
 publishes no OTel claim.
 Cross-arm linkage requires exact producer trace ID and span ID together;
 name/path/time/cardinality and Session co-membership never link claims.
-Production v2 writer, snapshot migration, discovery/current-file service and
-raw-local routes remain unregistered until every decision gate in the snapshot
-interface is closed.
-Startup configuration is the sole current-file discovery-root authority:
-`SkillDiscovery.ProjectPaths` (at most 16) and
-`SkillDiscovery.SkillDirectories` (at most 32). `DiscoverAsync` receives only
-those validated roots. Historical path/CWD, Repository locator, prompt,
-workspace, time and out-of-root results never create a root, and the service
-never opens the historical path directly. Only an exact accepted discovery
-result proceeds through the platform no-follow handle walk; the final
-name/path comparison and filesystem-identity proof remain blocked decisions.
+D083 closes the remaining #119/#158 product decisions; it does not claim that
+the implementation or release gates have passed. The nonregistered #119
+parser/handoff follows mandatory live-Issue reconciliation. #158 runtime work
+waits for the exact prerequisite join, while host activation, route
+registration and release remain gated by the focused, platform, live,
+full-validation and review evidence in the snapshot contract.
+
+After those gates pass, D083 adds to raw-default composition only the additive
+`POST /api/session-ingest/v2/events` and these three Skill raw routes:
+
+- `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}`;
+- `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/content`; and
+- `POST /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/current-file-read`.
+
+Receiver-only/`--sanitized-only` composition registers none of the producer,
+bridge, #119 sink, #158 writer/service or four routes above; each endpoint is
+absent/nonmatching rather than remapped to a service error or frozen-v1
+handler. Frozen v1 keeps its exact unsupported-`skill.invoked` behavior.
+Once activated, raw-default keeps v2 mapped when the runtime generation is
+absent/mismatched and fails it at stage 1 with exact
+`503 local_monitor_ui_unavailable` before body read. Metadata and historical
+content remain mapped without a live-runtime dependency. A configured and
+platform-certified current-file POST likewise remains mapped across runtime
+loss and, after its fixed earlier authorization stages, forms exact
+`503 skill_current_file_discovery_unavailable` subject to the terminal
+Retention rule below; runtime loss never relabels or suppresses stored history.
+
+`SkillRuntimeCapabilityBridgeV1` is the sole SDK-event admission bridge to v2
+HTTP. It admits only the callback-owning immutable runtime generation, retains
+at most 64 pending process-memory entries after expiry purge, and gives each
+entry exactly 30 seconds under an injected monotonic clock with
+`now < expires_at`. Each cryptographically random 32-byte token is exact
+43-character unpadded base64url, is sent in one physical
+`X-CAO-Skill-Runtime-Capability` header and is atomically consumed once before
+body read. Missing, malformed, duplicate/combined, unknown, expired, canceled
+or already-consumed tokens return exact stage-1
+`503 local_monitor_ui_unavailable` before body read and writes; arbitrary
+loopback callers cannot acquire the current runtime generation. Token,
+capability, body length/digest, pending count, generation identity and expiry
+never enter logs or metrics and are never persisted, backed up, restored or
+returned.
+
+`SkillRuntimeBridgeHttpTransportV1` is the sole sender. It receives only the
+actual Kestrel listener's already-bound numeric loopback HTTP address and port
+(`127.0.0.1` or `[::1]`), uses exact HTTP/1.1 with one POST, and accepts no DNS,
+user URI, path, configuration or environment target. Its dedicated sender has
+`UseProxy=false`, `AllowAutoRedirect=false`, `UseCookies=false`, null
+credentials/default proxy credentials, no preauthentication,
+`ActivityHeadersPropagator=null`, no ambient/default/trace headers and no retry,
+resilience or automatic-resend handler. A redirect, authentication/proxy
+challenge, non-204 result or transport ambiguity is sanitized producer
+unavailability and cannot forward the header/body elsewhere or resend it. There
+is no direct callback-to-writer path, second Skill authority or previous-
+generation fallback.
+
+The public discovery-root carrier is only repeatable raw-default CLI options
+`--skill-discovery-project-path` (0..16) and
+`--skill-discovery-directory` (0..32). There is no environment, JSON,
+delimiter-list, CWD, Repository, historical-path or inferred-root fallback.
+Any explicit invalid root rejects startup without echoing its value. A zero-root
+host registers no current-file service/POST and never calls `DiscoverAsync`.
+Windows and Linux register independently only after their exact native
+filesystem/platform certification; an unsupported platform with explicit
+roots rejects startup, while an unsupported zero-root platform still serves
+the metadata and historical routes. macOS/BSD/other systems register no
+current-file POST. Historical paths are parsed only as request-local comparison
+keys and are never opened directly; current bytes come only from the selected
+platform's retained-root native no-follow handle/fd walk.
+
+Historical-content and current-file raw publication use the Retention handle's
+store-backed terminal operation. That operation opens its own
+`BEGIN IMMEDIATE`, acquires the Monitor publication scope, proves the exact live
+persisted lease/expiry and samples the Retention clock once; #158 supplies no
+timestamp and performs no validate-then-seal split. `lost|busy` discards all
+buffers, releases every capability and aborts the transport with no HTTP
+status, header or entity. Both database and publication scopes are released
+before any HTTP I/O.
+
+Current-file safe results determined before runtime-capability acquisition use
+Retention `TryCompleteWithoutRaw()` alone and fabricate no runtime capability.
+A safe error determined after runtime acquisition first completes Retention
+without raw and then wins runtime `TrySealResponse`. A raw success first wins
+runtime `TrySealResponse` and then Retention `TrySealRawResponse`; only both
+seals allow the single fully buffered entity. Loss at either required authority
+discards the candidate under the exact snapshot-contract mapping, never
+publishes partially authorized bytes and never reacquires another generation.
 
 ### Repository
 
@@ -172,7 +248,9 @@ later canonical #134 exact success-response contract.
 
 - every raw content read uses the existing Retention catalog access lease;
 - an active access/operation lease prevents physical deletion;
-- expiry/delete denial is rechecked at read time;
+- every new read admission rechecks expiry/delete denial; consumption of an
+  admitted grant uses its immutable capability and live lease without a current-
+  row lifecycle/revision reread;
 - derived raw instruction labels cannot outlive their source content;
 - Skill body/path index may outlive content only as digest/provenance/expired state;
 - sanitized Skill invocation/inventory rows are readable only through the

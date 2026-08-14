@@ -145,11 +145,89 @@ Frozen `POST /api/session-ingest/v1/events` supports `skill.started` and
 `skill.completed`; `skill.invoked` is unsupported and follows the existing
 unsupported-event behavior. This correction changes no other v1 route, wire,
 enum, limit, status mapping, error entity, success or Workspace response byte.
-The additive Skill v2 writer, snapshot component, raw-local routes and
-current-file discovery are raw-default-only and remain unregistered until the
-complete decision gate in
-[Skill Invocation Snapshot](interfaces/skill-invocation-snapshot.md)
-is closed. There is no v1 retry, compatibility writer, fallback or dual path.
+D083 closes the remaining product decisions in
+[Skill Invocation Snapshot](interfaces/skill-invocation-snapshot.md), but does
+not claim implementation or release. The nonregistered #119 parser/handoff
+follows mandatory live-Issue reconciliation. #158 runtime work waits for the
+exact prerequisite join; host activation, route registration and release remain
+gated by the focused, platform, live, full-validation and review evidence in
+that contract. There is no v1 retry, compatibility writer, fallback or dual
+path.
+
+After those gates pass, D083 adds to raw-default composition exactly the additive
+`POST /api/session-ingest/v2/events` plus:
+
+- `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}`;
+- `GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/content`; and
+- `POST /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/current-file-read`.
+
+The receiver-only/`--sanitized-only` host composes or registers none of that
+producer, bridge, #119 sink, #158 writer/service or route set. The paths are
+absent/nonmatching rather than delegated to a frozen-v1 handler or mapped to a
+metadata/service-unavailable fallback.
+Once activated, raw-default keeps v2 registered through an absent/mismatched
+runtime generation and fails it at stage 1 with exact
+`503 local_monitor_ui_unavailable` before body read. Metadata and historical
+content have no live-runtime dependency. A configured/platform-certified
+current-file POST also stays registered through runtime loss and, after its
+fixed earlier authorization stages, forms exact
+`503 skill_current_file_discovery_unavailable` subject to Retention terminal
+authorization; stored history is neither suppressed nor relabelled.
+
+The sole SDK-to-v2 admission path is
+`SkillRuntimeCapabilityBridgeV1`. It accepts only the callback-owning immutable
+runtime generation, holds at most 64 process-memory entries after purging
+expiry, and gives each entry exactly 30 seconds from its injected monotonic
+clock (`now < expires_at`). A cryptographically random 32-byte token is exact
+43-character unpadded base64url, travels in one physical
+`X-CAO-Skill-Runtime-Capability` header and is atomically consumed once before
+body read. Missing, malformed, duplicate/combined, unknown, expired, canceled
+or consumed tokens return exact stage-1 `503 local_monitor_ui_unavailable` with
+no body read or write; arbitrary loopback callers receive no runtime authority.
+Token, capability, bound body length/digest, pending count, generation identity
+and expiry never enter logs or metrics and are never persisted, backed up,
+restored or returned.
+
+`SkillRuntimeBridgeHttpTransportV1` sends exactly one HTTP/1.1 POST to the
+actual Kestrel listener's already-bound numeric loopback HTTP address/port
+(`127.0.0.1` or `[::1]`). It accepts no DNS name, user URI, path,
+configuration/environment override or alternate target. The dedicated sender
+has `UseProxy=false`, `AllowAutoRedirect=false`, `UseCookies=false`, null
+credentials/default proxy credentials, no preauthentication,
+`ActivityHeadersPropagator=null`, no ambient/default/trace headers and no retry,
+resilience or automatic-resend handler. Redirect/authentication/proxy challenge,
+non-204 result and transport ambiguity are sanitized producer unavailability;
+no second request or direct callback-to-writer path exists.
+
+The sole discovery-root carrier is the repeatable raw-default CLI pair
+`--skill-discovery-project-path` (0..16) and
+`--skill-discovery-directory` (0..32). Environment, JSON, delimiter lists, CWD,
+Repository, historical paths and inferred roots grant nothing. Any invalid
+explicit root rejects startup without path/native detail. Zero roots register
+no current-file service/POST and call no discovery. Windows/Linux registration
+is independent and requires the exact platform/native-filesystem gate;
+unsupported explicit roots reject startup, whereas an unsupported zero-root
+host continues to serve metadata/historical routes. macOS/BSD/other systems
+register no current-file POST. Historical paths are request-local comparison
+keys only; current bytes come solely from the certified retained-root native
+no-follow handle/fd walk, never a direct historical-path read.
+
+Historical-content/current-file raw publication is authorized only by the
+Retention handle's store-backed terminal operation. It enters its own
+`BEGIN IMMEDIATE` and Monitor publication scope, proves the exact live persisted
+lease/expiry and takes one Retention-owned clock sample; caller time and a
+validate-then-seal split are forbidden. `lost|busy` discards every buffer,
+releases all capabilities and aborts with zero HTTP status, header and entity.
+Database and publication scopes never cross `await` or HTTP I/O and are
+released before any HTTP I/O or response transmission.
+
+For current-file, a safe result determined before runtime-capability acquisition
+requires Retention `TryCompleteWithoutRaw()` alone. A post-runtime safe error
+requires Retention completion first and runtime `TrySealResponse` second. A raw
+success requires runtime `TrySealResponse` first and Retention
+`TrySealRawResponse` second; only both wins publish the single fully buffered
+entity. An authority loss discards the candidate under the fixed mapping, never
+reacquires a generation and never exposes partially authorized bytes.
 
 Repository catalog and assignment follow the closed
 [Local Repository Catalog and Session Assignment](interfaces/local-repository-catalog.md)

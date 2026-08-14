@@ -378,13 +378,36 @@ bytes or error details.
 
 ## Skill invocation snapshot exclusion
 
-The accepted future `skill_invocation_snapshot` namespace and Skill-only
-Session ingest v2 do not widen this bundle. Snapshot IDs, payload/body/path
-digests or sizes, path provenance, content availability, current-file results,
-bodies and definition paths are never export/import carriers. The provider
-does not inventory or read that namespace, and no empty Skill carrier is
-emitted. Any future inclusion requires a new carrier and version. This
-exclusion remains binding whether or not the blocked v2/snapshot production
-gate in
-[Skill Invocation Snapshot](skill-invocation-snapshot.md)
-is later closed.
+The D083 `skill_invocation_snapshot:1` component and Skill-only Session ingest
+v2 do not widen this bundle. Sanitized export/import has no snapshot component
+declaration, namespace or table inventory, row, raw carrier, equality receipt,
+selected binding, empty marker or carrier, count, processing-version entry,
+producer/discovery/root/runtime capability fact, route, or reconstruction path.
+Snapshot IDs, index/metadata rows, payload/body/path digests or sizes, path
+provenance, content availability, current-file results, bodies, and definition
+paths are never export/import carriers.
+
+The provider does not inventory or read the namespace, even to report its
+absence. `--sanitized-only` registers no live bundled-SDK v2 Skill producer or
+forwarder, runtime-capability bridge or pending registry, #119 handoff sink,
+#158 snapshot transaction participant or writer, discovery/current-file
+service, `POST /api/session-ingest/v2/events`, or any of the three exact Skill
+raw routes:
+
+```text
+GET  /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}
+GET  /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/content
+POST /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/current-file-read
+```
+
+Those endpoints are absent/nonmatching, not stage-1 service-unavailable
+responses. No omitted producer, sink, writer, service, or route is remapped,
+retried, or delegated to a frozen-v1 or generic Session handler.
+
+No sanitized export/import adapter reconstructs one. Installed table existence
+is component-lifecycle and backup state only; a test or caller must not infer
+live host posture, producer availability, route registration, or capability
+from it. There is no fallback, compatibility carrier, dual reader, or empty
+representation. Any future inclusion requires a new carrier and version. The
+complete exclusion is canonical in
+[Skill Invocation Snapshot](skill-invocation-snapshot.md).

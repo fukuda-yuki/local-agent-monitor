@@ -1,6 +1,6 @@
 # Skill Projection Specification
 
-Status: **Accepted for Issue #154 (DC154-01)**
+Status: **Accepted for Issue #154 (DC154-01), amended by D083**
 
 This specification is the single current-valid Skill claim authority. It owns
 projection generations, exact input frontiers, queue/retry state, publication
@@ -54,12 +54,24 @@ exact. There is no latest-version, application-family, missing-field, or
 partial-tuple fallback. A retained event or raw snapshot does not make an
 unsupported tuple current-valid.
 
-#157/#158 still own the SDK transport, atomic Session/Event/snapshot writer and
-the accepted registry seed. This specification pins the claim fields and
-predicate but does not make that writer implementation-ready: no SDK claim may
-be admitted until #158 fixes the remaining wire contract and accepted exact
-registry tuple. Adding it must use this component and read authority, not a
-second Skill projection or reader.
+#157/#158 own the SDK transport and atomic Session/Event/snapshot writer. D083
+fixes the initial compatibility registry as the exact complete immutable
+`skill-sdk-compatibility-registry.v1` revision 1. Its sole entry is the exact
+tuple:
+
+```text
+source_application_version = 1.0.65
+adapter_version = copilot-sdk-dotnet-1.0.4+cao-skill-v2.1
+normalization_version = github-copilot-sdk.skill-invoked.normalize.v1
+payload_schema = github-copilot-sdk.skill-invoked.v1
+schema_fingerprint = 8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c
+disposition = accepted
+```
+
+The checked-in 431-byte `compatibility-registry-r0001.json` is the complete
+registry, not a seed, delta or provisional fallback. Adding the #158 writer
+must use this component and read authority, not a second Skill projection,
+registry authority or reader.
 
 The single read authority merges one current OTel claim and one current SDK
 claim only when the SDK event explicitly carries both producer trace ID and
@@ -241,7 +253,7 @@ causes the worker to substitute a smaller frontier.
 
 SDK claims do not enter an OTel trace frontier. Their exact payload digest and
 complete identity/compatibility fields are persisted directly in
-`skill_projection_sdk_claims` by the future #158 atomic writer.
+`skill_projection_sdk_claims` by the #158 atomic writer.
 
 ## Exact claim idempotency
 
@@ -295,12 +307,12 @@ The queued generation is deterministically superseded without publishing
 claims. This preserves an auditable generation for the atomic state change
 without treating unresolved input as positive Skill evidence.
 
-The future #158 writer uses a separate transaction-aware SDK claim participant
+The #158 writer uses a separate transaction-aware SDK claim participant
 owned by this component. In the same SQLite transaction as the exact
 Session/Event/content/Retention writes, it inserts-or-verifies the complete SDK
 claim row. It does not create or depend on an OTel trace generation, head,
-frontier or queue. Until #158 pins and implements the wire parser and accepted
-registry seed, that participant has no production admission path.
+frontier or queue. Production admission exists only through #158's accepted
+typed handoff and atomic writer; there is no standalone claim admission path.
 
 ## OTel queue leases, retry and recovery
 
@@ -446,21 +458,96 @@ AND generation is the trace current pointer
 AND generation lifecycle == current
 ```
 
-For the `sdk_session_event` arm it returns a claim only when:
+For the `sdk_session_event` arm, this existing #154 read authority exposes one
+sanitized point-in-time SDK-claim diagnostic. A structurally valid available
+snapshot/claim graph must prove all of:
 
 ```text
 the local Event belongs to the exact local Session
 AND every stored source/provenance/digest field equals that Event
-AND the current registry exactly accepts the complete compatibility tuple
+AND the snapshot, content, Retention, claim and receipt graph is complete
+AND the exact claim tuple equals the snapshot and receipt tuple
 ```
 
 SDK validity does not require a trace, span, SourceCompatibility row, OTel
 generation, trace head, frontier or queue. If a producer trace/span pair exists,
 it participates only in the exact cross-arm merge rule above.
 
+Registry history is the contiguous checked-in immutable sequence
+`r0001..rNNNN`, with each file's internal revision equal to its filename and
+the greatest revision the sole current complete registry. Later files are full
+snapshots, not deltas. A `revoked` exact tuple in the current file is valid only
+when at least one lower mechanically valid revision contains that exact tuple
+as `accepted`; otherwise the history is unavailable. Missing, gapped,
+duplicate, hash-invalid, schema-invalid or internally mismatched history needed
+for a diagnostic is unavailable. Reading lower revisions solely to prove the
+historical accepted predecessor of a current explicit revoke is not admission
+fallback. Adding a different tuple does not implicitly supersede or stale an
+old tuple.
+
+The point diagnostic has exactly these values and meanings:
+
+```text
+current = structurally valid available snapshot/claim graph + the exact tuple
+          is present as accepted in the greatest complete registry revision
+stale   = structurally valid available snapshot/claim graph + the exact tuple
+          is present as revoked in the greatest complete registry revision +
+          at least one lower contiguous valid revision proves that same exact
+          tuple accepted
+invalid = every nonavailable snapshot without calling the SDK diagnostic; or a
+          structurally valid available snapshot/claim graph whose exact tuple
+          is absent from the greatest complete registry revision
+unavailable = any physical/FK/equality/Retention/receipt/claim contradiction;
+              current/history registry missing, gap, malformed, unknown,
+              hash/schema/revision invalid; non-busy diagnostic failure;
+              or a current revoked tuple without its valid prior acceptance
+```
+
+An exact SQLite busy/locked result while reading the snapshot, #154 diagnostic
+or registry history is the separate operational `busy` outcome; it is not a
+fifth diagnostic value. #158 maps it to exact `503 persistence_busy`.
+`unavailable` maps to exact `503 local_monitor_ui_unavailable`; no partial
+metadata is returned. A missing physical claim/FK parent, immutable
+snapshot/Event/claim/receipt mismatch, malformed Retention graph or other
+contradictory #154 invariant is never softened to `invalid`.
+
 These checks are not delegated to a screen, ad hoc SQL filter, Workspace
-composer, or raw snapshot service. A raw snapshot may be available while the
-claim is absent, stale or invalid.
+composer or raw snapshot service. The snapshot reader never reconstructs the
+diagnostic from direct registry, generation or claim-table SQL. A raw snapshot
+may be available while the claim is absent, stale or invalid, and it cannot
+create or resurrect a claim.
+
+Current-file authorization is a separate #154-owned use of the same registry
+provider; it does not reuse the ingest lease or the metadata point diagnostic.
+The read authority separately exposes
+`TryAcquireCurrentSdkClaimAuthorization`. It proves the complete available
+snapshot/claim equality and exact producer tuple, captures the greatest
+complete registry generation, acquires that exact generation's read lease, and
+re-proves pointer/revision/object identity plus `accepted` disposition before
+returning an opaque capability.
+
+If the pointer changed before lease acquisition, #154 releases the candidate
+and may recapture and recheck exactly once. A second mismatch or churn, lease
+failure, malformed or unavailable generation, or claim/graph contradiction is
+exact `unavailable`; SQLite busy while proving the claim is exact `busy`. A
+mechanically valid current generation in which the exact tuple is explicitly
+revoked with valid history or absent is exact `not_current` and never returns a
+capability. #158 maps `not_current` to exact
+`409 skill_projection_not_current`, `busy` to exact
+`503 persistence_busy`, and `unavailable` to exact
+`503 local_monitor_ui_unavailable`.
+
+The opaque capability owns the registry-generation read lease and only the
+sanitized exact current-claim facts needed by #158; it exposes no registry file,
+history, path, generation identity or direct table reader. #158 holds it without
+a gap from before SDK discovery through every root proof, native walk/read/
+re-proof, fresh response serialization and response completion, then releases
+it on success, every error, cancellation or abort. Registry publication or
+revocation waits for all such capabilities. A publication already completed
+before acquisition is observed by the bounded recheck and cannot fall back to
+the previous generation. Metadata keeps the point diagnostic and historical
+content acquires no current-generation capability. #158 must not query the
+registry, generation or claim tables directly or add a second reader.
 
 Projected values remain sanitized identifiers and contain no Skill body or
 absolute path. The raw body/path boundary is independently owned by #157/#158.
@@ -479,7 +566,7 @@ Runtime backup includes the complete `skill_projection:1` namespace:
   compatibility-tuple, payload-digest and nullable trace/span fields.
 
 The component restores after Monitor/source interpretation and Retention, and
-before the future `skill_invocation_snapshot` and Workspace components. A queue
+before the `skill_invocation_snapshot` and Workspace components. A queue
 row captured as `leased` restores as `pending` for the same generation with
 lease owner/expiry cleared; its attempt count is preserved.
 
@@ -527,6 +614,17 @@ Tests must prove at least:
   and rejects a differing collision atomically;
 - an unsupported SDK compatibility tuple is invalid even when its event and raw
   snapshot exist;
+- the SDK point diagnostic returns only exact
+  `current|stale|invalid|unavailable`, while SQLite busy/locked remains the
+  separate `busy` operational outcome;
+- an accepted current tuple is `current`, an explicit current revoke with a
+  valid lower accepted history is `stale`, current absence is `invalid`, and
+  every equality/corrupt-graph or registry-history contradiction is
+  `unavailable`;
+- current authorization returns no capability for exact
+  `not_current|busy|unavailable`, permits only one pre-lease recapture, and
+  blocks registry publication through response completion while its opaque
+  capability is held;
 - trace-only linkage does not merge arms, while an exact producer trace/span
   pair does; unlinked same-Session observations yield `null` count and
   `certification_pending`;

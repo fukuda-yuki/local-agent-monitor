@@ -6,6 +6,7 @@ Product design input: Issue #153
 Date: 2026-07-30
 Route/transport amendment: PO136-A2b, 2026-08-09
 Archive amendment: D082, 2026-08-09
+Skill snapshot amendment: D083, 2026-08-11
 
 ## 1. Product boundary
 
@@ -587,7 +588,7 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 |---|---|---|
 | Repository catalog/assignment | [catalog contract](local-repository-catalog.md) + #155 | #156 |
 | Skill projection validity | #154 | #154 |
-| Skill v1 correction/v2 transport/body/path snapshot/current file | [snapshot contract](skill-invocation-snapshot.md) + #119/#157/#158 | #158 after gate closure |
+| Skill v1 correction/v2 transport/body/path snapshot/current file | [snapshot contract](skill-invocation-snapshot.md) + #119/#157/#158/D083 | #158 after the prerequisite join and implementation/release gates |
 | Sanitized-only runtime | #159 | #168 |
 | Archive | [Local Archive v1](local-archive.md) + #160/D082 | #161 |
 | AI scope/history | #162 | #163/#164 |
@@ -608,7 +609,22 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 The frozen v1 correction is executable independently: `skill.started` and
 `skill.completed` are supported, while `skill.invoked` is unsupported on
 `POST /api/session-ingest/v1/events`; every other v1 route/wire/enum/limit/
-status/response byte remains frozen. The additive v2/snapshot/current-file UI
-and route work is not production-ready until the complete implementation gate
-in the snapshot contract closes. It remains raw-default-only, has no fallback
-or compatibility path, and cannot add a sanitized empty carrier.
+status/response byte remains frozen. D083 closes the additive #119/#158 product
+decisions but does not make the feature production-ready. The nonregistered
+#119 parser/handoff follows mandatory live-Issue reconciliation; #158 runtime
+work waits for its exact prerequisite join, and host activation, registration
+and release wait for the focused, platform, live, full-validation and review
+gates in the snapshot contract.
+
+Once those gates pass, D083 adds to raw-default composition only
+`POST /api/session-ingest/v2/events`,
+`GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}`,
+`GET /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/content`
+and
+`POST /api/local-monitor/v1/sessions/{sessionId}/skill-invocations/{snapshotId}/current-file-read`.
+The receiver-only/`--sanitized-only` host registers none of them. The
+current-file POST is additionally absent with zero configured roots. A
+nonempty valid root set registers it only on an independently certified
+Windows/Linux platform; explicit invalid roots or an unsupported platform fail
+startup instead of degrading to route absence. D083 adds no Razor page,
+navigation entry, compatibility path, v1 fallback or sanitized empty carrier.

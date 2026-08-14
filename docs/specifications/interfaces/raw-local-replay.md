@@ -161,6 +161,113 @@ value contributes no member, while every member that does resolve must pass the
 same all-or-none lease boundary. This distinction preserves the documented
 within-axis OR semantics without fabricating a source member.
 
+### Skill invocation Session-content carrier
+
+Issue #158 does not add a raw-replay profile or a second raw member. Under the
+existing #87 explicit-consent authority, `include_session_content=true` may
+select the sole `session_event_content` carrier of a `skill.invoked` Event as
+one existing `session-content/content-NNNNNN.json` member when the exact Session
+is selected. `payload_sha256` is SHA-256 over the exact received UTF-8 byte
+slice of the normalized `event.payload` JSON value token, including its object
+whitespace, property order, escapes, and duplicate spelling. `payload_bytes`
+is the byte length of that same slice. Neither value covers the full request,
+upstream SDK `data` buffer, decoded value graph, content document, body, or
+path.
+
+The sole `session_event_content` raw carrier is exactly these bytes, with no
+BOM or LF and with this property order:
+
+```text
+UTF8('{"schema_version":"session-event-content.skill-invoked.v1",'
+     '"payload_utf8_base64":"')
+|| strict RFC4648 base64 of the exact payload-token bytes
+|| UTF8('"}')
+```
+
+Base64 has no whitespace and uses no alternate alphabet. `content_kind` is
+exact `application/json`; `content_document_sha256` is SHA-256 over the complete
+canonical document bytes. The canonical document byte length is exactly
+`84 + 4 * ceil(payload_bytes / 3)`. No secret filter, body/path copy, second
+Retention item, snapshot raw column, normalized JSON, or direct Skill/generic
+JSON HTTP exposure of the base64 exists. The raw-replay archive remains the
+sole deliberate HTTP archive carrier and is not a Skill read-route exception.
+
+Body/path digests and byte counts are over exact strict UTF-8 bytes after JSON
+unescape. Validation does not strip BOM, normalize Unicode or line endings,
+trim, change path case, or repair invalid scalars. Available snapshot rows have
+the exact body/path facts. A nonavailable snapshot row still has its raw payload
+slice/document, payload digest/length, Event, one Retention item, state/reason,
+snapshot, and receipt, but no fabricated body/path/claim facts.
+
+`RawReplaySessionContent.ContentJson` is the exact canonical document string;
+the existing canonical archive JSON writer may escape that string only as
+required by its enclosing record. Its enclosing facts are exact
+`SourceAdapter=copilot-sdk-stream`, `ContentKind=application/json`,
+`ContentState=available`, `MatchKind=null`, the Event's exact application,
+adapter, schema-fingerprint, and normalization evidence,
+`SecretFilterState=not_applied_raw_capture`, and
+`SecretFilterVersion=raw-replay-credential-scan.v1`. It never claims
+`session_secret_filter_applied`. The archive adds no snapshot, receipt, claim,
+selected native Session ID, configured root, or discovery fact.
+
+The existing same-snapshot length preflight applies before raw materialization
+or operation-lease insertion. A canonical Skill document above the existing
+8 MiB Session-content member limit is exact `entry_too_large` and is never
+truncated. Only after every size, count, and aggregate preflight and one
+all-or-none Retention operation-grant admission may the provider enter one
+authorized raw-replay read transaction/snapshot. In that snapshot, before
+selecting `session_event_content.content_json`, it validates every nonraw
+Session/snapshot/Event/receipt/claim/Retention ownership, identity, link,
+classification-state, and stored digest/length fact. Failure exits without
+selecting or materializing raw.
+
+Only after that complete graph proof may the provider select and materialize
+the canonical document under the still-usable exact grant. Before private
+staging or publication it proves the raw-dependent document grammar and strict
+base64, decoded payload length and digest, complete document digest, artifact
+fingerprint, reclassification, and credential-scan facts. There is no nested
+or second snapshot and no validation-after-publication arm. The existing
+128 MiB archive limit, error precedence, and fixed tokens remain unchanged.
+`--sanitized-only` rejects at the raw-replay control boundary before Session
+content lookup or Retention lease admission.
+
+`raw-replay-credential-scan.v1` has one schema-specific input arm for this
+canonical carrier; its pattern set, matching rules, timeout-means-match rule,
+public token, and version literal do not change. After the bounds, grant,
+nonraw-graph, and document proofs, the strict bounded payload parser decodes
+`payload_utf8_base64` once. The existing v1 matcher scans both the exact decoded
+UTF-8 payload-token text and every decoded JSON property name and string value
+at every depth, including required, optional, array, and unknown-member strings,
+so JSON escapes cannot hide a match. A match or matcher timeout returns only
+`credential_material_detected`, publishes or stages nothing, and emits or logs
+no payload, string, path, match, or exception detail. This scan is not a secret
+filter and does not make the archive safe.
+
+Strict archive inspection repeats the bounds, document/schema, decoded-domain
+credential, and source-evidence checks for each externally supplied canonical
+Skill member before replay-preview publication, import, or durable staging.
+Isolated replay preserves the exact Session-content record only as raw source
+evidence. It never reconstructs or writes a live Session/Event,
+`skill_invocation_snapshot`, receipt, #154 claim, Retention item, producer,
+discovery service, or Skill route, and it never treats an archived registry
+label as current admission. Equal source identity with different canonical
+document bytes remains `source_id_conflict`; an identical retry remains the
+existing idempotent result. Sanitized evidence export/import carries no such
+member or placeholder.
+
+This carrier leaves all four existing Retention terminal modes unchanged:
+
+- preview uses safe completion through the same handle's
+  `TryCompleteWithoutRaw()`;
+- retained GET/POST result publication uses the same safe completion;
+- memory-only transient publication uses
+  `PreparePut` -> `TrySealRawReplayTransientPublication()` -> `CommitPut`;
+- Config CLI staged nonoverwrite file publication uses
+  `TrySealRawReplayFilePublication()` -> the exact non-overwrite move.
+
+Their existing fixed tokens, DTO/serialization order, lost/busy behavior,
+resource cleanup, and exact terminal-release rules continue to apply.
+
 ## Archive and manifest
 
 The archive reuses #85's frozen generic framing without reusing its sanitized
