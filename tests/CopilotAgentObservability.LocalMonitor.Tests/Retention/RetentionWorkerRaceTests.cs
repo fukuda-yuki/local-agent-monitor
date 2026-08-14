@@ -8,6 +8,34 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
+    public async Task MandatoryHiddenLeaseCleanup_RetriesTheCompleteOwnedFrontierAfterInitialContention()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        var grants = new[]
+        {
+            CreateGrant("first", 0x11, now.AddMinutes(2)),
+            CreateGrant("second", 0x22, now.AddMinutes(2)),
+        };
+        var attempts = new List<string[]>();
+        var handle = new RetentionCommittedReadHandle(
+            grants,
+            time,
+            frontier =>
+            {
+                attempts.Add(frontier.Select(grant => grant.ItemId).ToArray());
+                return attempts.Count > 1;
+            });
+
+        await handle.DisposeAsync();
+
+        Assert.Equal(["first", "second"], Assert.Single(attempts));
+        time.Advance(TimeSpan.FromMilliseconds(10));
+        Assert.Equal(2, attempts.Count);
+        Assert.All(attempts, attempt => Assert.Equal(["first", "second"], attempt));
+    }
+
+    [Fact]
     public async Task CoalescedWakeAndStopDuringQuiescence_DoNotReclaimOrInvokeAdapter()
     {
         using var fixture = CreateFixture();
@@ -182,6 +210,16 @@ public sealed class RetentionWorkerRaceTests
     });
     private static void SeedCoverage(string path) => Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
     private static void InsertOperationLease(string path, string item, DateTimeOffset expiry) => Execute(path, "INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) VALUES($item,'operation','reader',$expiry,1)", ("$item", item), ("$expiry", expiry.ToString("O")));
+    private static RetentionReadGrant CreateGrant(string itemId, byte tokenByte, DateTimeOffset expiry) =>
+        new(
+            new("store", RetentionStoreKind.RawRecord, itemId == "first" ? "1" : "2"),
+            itemId,
+            1,
+            RetentionLeaseKind.Operation,
+            "owner",
+            1,
+            expiry,
+            Enumerable.Repeat(tokenByte, 32).ToArray());
     private static string Snapshot(string path, string item) => Text(path, "SELECT state || ':' || revision || ':' || attempt_count || ':' || COALESCE(read_denied_at,'') || ':' || COALESCE(queued_at,'') FROM retention_items WHERE item_id=$item", item);
     private static long Number(string path, string sql, string item) { using var c = Open(path); using var q = c.CreateCommand(); q.CommandText = sql; q.Parameters.AddWithValue("$item", item); return Convert.ToInt64(q.ExecuteScalar()); }
     private static long ScalarNumber(string path, string sql) { using var c = Open(path); using var q = c.CreateCommand(); q.CommandText = sql; return Convert.ToInt64(q.ExecuteScalar()); }

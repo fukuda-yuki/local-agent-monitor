@@ -126,6 +126,52 @@ public sealed class RetentionNoLeakTests
     }
 
     [Fact]
+    public async Task HiddenHandleAndMandatoryCleanupSurface_DoNotExposeCompositeOwnershipMaterial()
+    {
+        var sourceToken = Enumerable.Repeat((byte)0xce, 32).ToArray();
+        var expiry = new DateTimeOffset(2026, 8, 1, 0, 2, 0, TimeSpan.Zero);
+        var grants = new[]
+        {
+            new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionReadGrant(
+                new("private-store-marker", CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionStoreKind.RawRecord, "private-source-marker"),
+                "private-item-marker",
+                7,
+                CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionLeaseKind.Operation,
+                "private-owner-marker",
+                3,
+                expiry,
+                sourceToken),
+        };
+        var time = new MutableTimeProvider(expiry.AddMinutes(-2));
+        var handle = new CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionCommittedReadHandle(
+            grants,
+            time,
+            static _ => true);
+        try
+        {
+            var surfaces = new List<string>();
+            AddPublicReflectionSurface(handle, surfaces);
+            var forbidden = new[]
+            {
+                "private-store-marker",
+                "private-source-marker",
+                "private-item-marker",
+                "private-owner-marker",
+                Convert.ToHexString(sourceToken),
+                Convert.ToBase64String(sourceToken),
+            };
+
+            foreach (var surface in surfaces)
+                foreach (var marker in forbidden)
+                    Assert.DoesNotContain(marker, surface, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await handle.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public void AnalysisSdkDirectoryLeaseActivationAndRenewalCarriers_DoNotExposeCapabilityMaterial()
     {
         const string storeInstanceId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

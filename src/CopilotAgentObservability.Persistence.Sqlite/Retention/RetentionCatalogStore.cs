@@ -490,57 +490,28 @@ public sealed partial class RetentionCatalogStore
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(selector);
-        var gate = context?.Gate;
-        if (gate is not null) await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var admission = await AdmitReadAsync(request, cancellationToken).ConfigureAwait(false);
+        if (admission.Handle is null)
+            return RetentionReadResult<T>.FromDisposition(admission.Disposition!.Value);
+        var handle = admission.Handle;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = OpenExisting();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var transactionNow = timeProvider.GetUtcNow();
-            var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-            if (item is null) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-            if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-            var readability = ClassifyRowReadability(item, transactionNow);
-            if (readability != RetentionRowReadability.Readable)
-            {
-                if (readability == RetentionRowReadability.ExpiredExpiring) DenyAndQueue(connection, transaction, item, transactionNow);
-                transaction.Commit();
-                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-            }
-            var proof = SourceProof(connection, transaction, request.OwnershipKey);
-            if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
-            if (proof != SourceReceiptProof.Match)
-            {
-                if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
-                else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
-                transaction.Commit();
-                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-            }
-            var owner = Guid.NewGuid().ToString("N");
-            var leaseKind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-            var generation = AcquireLease(connection, transaction, item.ItemId, leaseKind, owner, transactionNow);
-            if (generation is null) { transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
-            var leaseExpiry = transactionNow.Add(RetentionV1Constants.LeaseDuration);
-            var token = SourceToken(connection, transaction, request.OwnershipKey);
-            if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-            var grant = new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, leaseKind, owner, generation.Value, leaseExpiry, token);
+            var grant = handle.Grants[0];
             var value = await selector(connection, transaction, grant, cancellationToken).ConfigureAwait(false);
+            if (!handle.IsPublished)
+            {
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
+                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
+            }
             if (value is null)
             {
-                ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value);
-                transaction.Commit();
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
-            }
-            var boundaryNow = timeProvider.GetUtcNow();
-            var boundaryReadability = ClassifyRowReadability(item, boundaryNow);
-            if (boundaryReadability == RetentionRowReadability.ExpiredExpiring || boundaryNow >= grant.LeaseExpiresAt)
-            {
-                ReleaseWithinTransaction(connection, transaction, item.ItemId, leaseKind, owner, generation.Value);
-                if (boundaryReadability == RetentionRowReadability.ExpiredExpiring)
-                    DenyAndQueue(connection, transaction, item, boundaryNow);
-                transaction.Commit();
-                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
             return RetentionReadResult<T>.FromHandle(
@@ -548,19 +519,17 @@ public sealed partial class RetentionCatalogStore
                     value,
                     RetentionRevisionFence.Create(),
                     grant,
-                    admittedGrant => ReleaseAsync(
-                        admittedGrant.ItemId,
-                        admittedGrant.LeaseKind,
-                        admittedGrant.LeaseOwner,
-                        admittedGrant.LeaseGeneration)));
+                    _ => handle.DisposeAsync()));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
+            await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
-        finally
+        catch
         {
-            gate?.Release();
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -582,103 +551,46 @@ public sealed partial class RetentionCatalogStore
                 : RetentionBatchReadResult<T>.Empty(emptyValue);
         }
 
-        var gate = context?.Gate;
-        if (gate is not null) await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var admission = await AdmitFixedReadBatchAsync(requests, cancellationToken).ConfigureAwait(false);
+        if (admission.Handle is null)
+            return RetentionBatchReadResult<T>.FromDisposition(admission.Disposition!.Value);
+        var handle = admission.Handle;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = OpenExisting();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var transactionNow = timeProvider.GetUtcNow();
-            var items = new List<RetentionCatalogItem>(requests.Count);
-            foreach (var request in requests)
+            var value = await selector(connection, transaction, handle.Grants, cancellationToken).ConfigureAwait(false);
+            if (!handle.IsPublished)
             {
-                var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-                if (item is null) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                items.Add(item);
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
             }
-
-            for (var index = 0; index < requests.Count; index++)
-            {
-                var request = requests[index];
-                var item = items[index];
-                var readability = ClassifyRowReadability(item, transactionNow);
-                if (readability != RetentionRowReadability.Readable)
-                {
-                    if (readability == RetentionRowReadability.ExpiredExpiring)
-                    {
-                        foreach (var expiredItem in items.Where(candidate => ClassifyRowReadability(candidate, transactionNow) == RetentionRowReadability.ExpiredExpiring))
-                            DenyAndQueue(connection, transaction, expiredItem, transactionNow);
-                    }
-                    transaction.Commit();
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-                }
-                var proof = SourceProof(connection, transaction, request.OwnershipKey);
-                if (proof == SourceReceiptProof.CatalogBusy)
-                {
-                    transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
-                }
-                if (proof != SourceReceiptProof.Match)
-                {
-                    if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
-                    else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
-                    transaction.Commit();
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-                }
-            }
-
-            var owner = Guid.NewGuid().ToString("N");
-            var leaseExpiry = transactionNow.Add(RetentionV1Constants.LeaseDuration);
-            var grants = new List<RetentionReadGrant>(requests.Count);
-            for (var index = 0; index < requests.Count; index++)
-            {
-                var request = requests[index];
-                var item = items[index];
-                var kind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, transactionNow);
-                if (generation is null)
-                {
-                    transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
-                }
-                var token = SourceToken(connection, transaction, request.OwnershipKey);
-                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                grants.Add(new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, kind, owner, generation.Value, leaseExpiry, token));
-            }
-
-            var value = await selector(connection, transaction, grants, cancellationToken).ConfigureAwait(false);
             if (value is null)
             {
-                ReleaseWithinTransaction(connection, transaction, grants);
-                transaction.Commit();
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
-            }
-            var boundaryNow = timeProvider.GetUtcNow();
-            var expiredMembers = items.Where(item => ClassifyRowReadability(item, boundaryNow) == RetentionRowReadability.ExpiredExpiring).ToList();
-            if (expiredMembers.Count > 0 || boundaryNow >= leaseExpiry)
-            {
-                ReleaseWithinTransaction(connection, transaction, grants);
-                foreach (var item in expiredMembers) DenyAndQueue(connection, transaction, item, boundaryNow);
-                transaction.Commit();
-                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
             return RetentionBatchReadResult<T>.FromHandle(
                 new RetentionBatchReadLease<T>(
                     value,
                     RetentionRevisionFence.Create(),
-                    grants,
-                    admittedGrant => ReleaseAsync(
-                        admittedGrant.ItemId,
-                        admittedGrant.LeaseKind,
-                        admittedGrant.LeaseOwner,
-                        admittedGrant.LeaseGeneration)));
+                    handle.Grants,
+                    _ => handle.DisposeAsync()));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
+            await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
-        finally { gate?.Release(); }
+        catch
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     internal async ValueTask<RetentionBatchReadResult<T>> ReadSelectedBatchAsync<T>(
@@ -689,110 +601,48 @@ public sealed partial class RetentionCatalogStore
         ArgumentNullException.ThrowIfNull(candidateSelector);
         ArgumentNullException.ThrowIfNull(selector);
 
-        var gate = context?.Gate;
-        if (gate is not null) await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var selected = await AdmitSelectedReadBatchAsync(candidateSelector, selector, cancellationToken).ConfigureAwait(false);
+        if (selected.Admission is null)
+            return RetentionBatchReadResult<T>.Empty(selected.EmptyValue!);
+        if (selected.Admission.Handle is null)
+            return RetentionBatchReadResult<T>.FromDisposition(selected.Admission.Disposition!.Value);
+        var handle = selected.Admission.Handle;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = OpenExisting();
             using var transaction = connection.BeginTransaction(deferred: false);
-            var requests = await candidateSelector(connection, transaction, cancellationToken).ConfigureAwait(false);
-            if (requests.Count == 0)
+            var value = await selector(connection, transaction, handle.Grants, cancellationToken).ConfigureAwait(false);
+            if (!handle.IsPublished)
             {
-                var emptyValue = await selector(connection, transaction, Array.Empty<RetentionReadGrant>(), cancellationToken).ConfigureAwait(false);
-                if (emptyValue is null)
-                {
-                    transaction.Rollback();
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.SelectorUnavailable);
-                }
-                transaction.Commit();
-                return RetentionBatchReadResult<T>.Empty(emptyValue);
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
+                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
             }
-
-            var transactionNow = timeProvider.GetUtcNow();
-            var items = new List<RetentionCatalogItem>(requests.Count);
-            foreach (var request in requests)
-            {
-                var item = FindForUpdate(connection, transaction, request.OwnershipKey);
-                if (item is null) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision) { transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                items.Add(item);
-            }
-
-            for (var index = 0; index < requests.Count; index++)
-            {
-                var request = requests[index];
-                var item = items[index];
-                var readability = ClassifyRowReadability(item, transactionNow);
-                if (readability != RetentionRowReadability.Readable)
-                {
-                    if (readability == RetentionRowReadability.ExpiredExpiring)
-                    {
-                        foreach (var expiredItem in items.Where(candidate => ClassifyRowReadability(candidate, transactionNow) == RetentionRowReadability.ExpiredExpiring))
-                            DenyAndQueue(connection, transaction, expiredItem, transactionNow);
-                    }
-                    transaction.Commit();
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-                }
-                var proof = SourceProof(connection, transaction, request.OwnershipKey);
-                if (proof == SourceReceiptProof.CatalogBusy) { transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
-                if (proof != SourceReceiptProof.Match)
-                {
-                    if (proof == SourceReceiptProof.Missing) DenyMissingSource(connection, transaction, item, transactionNow);
-                    else DenyInvalidSource(connection, transaction, item, transactionNow, proof);
-                    transaction.Commit();
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
-                }
-            }
-
-            var owner = Guid.NewGuid().ToString("N");
-            var leaseExpiry = transactionNow.Add(RetentionV1Constants.LeaseDuration);
-            var grants = new List<RetentionReadGrant>(requests.Count);
-            for (var index = 0; index < requests.Count; index++)
-            {
-                var request = requests[index];
-                var item = items[index];
-                var kind = request.LeaseKind == RetentionReadKind.Access ? RetentionLeaseKind.Access : RetentionLeaseKind.Operation;
-                var generation = AcquireLease(connection, transaction, item.ItemId, kind, owner, transactionNow);
-                if (generation is null) { transaction.Rollback(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy); }
-                var token = SourceToken(connection, transaction, request.OwnershipKey);
-                if (token is null) { ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value); ReleaseWithinTransaction(connection, transaction, grants); DenyInvalidSource(connection, transaction, item, transactionNow, SourceReceiptProof.InvalidIdentity); transaction.Commit(); return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied); }
-                grants.Add(new RetentionReadGrant(request.OwnershipKey, item.ItemId, item.Revision, kind, owner, generation.Value, leaseExpiry, token));
-            }
-
-            var value = await selector(connection, transaction, grants, cancellationToken).ConfigureAwait(false);
             if (value is null)
             {
-                ReleaseWithinTransaction(connection, transaction, grants);
-                transaction.Commit();
+                transaction.Rollback();
+                await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
-            }
-            var boundaryNow = timeProvider.GetUtcNow();
-            var expiredMembers = items.Where(item => ClassifyRowReadability(item, boundaryNow) == RetentionRowReadability.ExpiredExpiring).ToList();
-            if (expiredMembers.Count > 0 || boundaryNow >= leaseExpiry)
-            {
-                ReleaseWithinTransaction(connection, transaction, grants);
-                foreach (var item in expiredMembers) DenyAndQueue(connection, transaction, item, boundaryNow);
-                transaction.Commit();
-                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LifecycleDenied);
             }
             transaction.Commit();
             return RetentionBatchReadResult<T>.FromHandle(
                 new RetentionBatchReadLease<T>(
                     value,
                     RetentionRevisionFence.Create(),
-                    grants,
-                    admittedGrant => ReleaseAsync(
-                        admittedGrant.ItemId,
-                        admittedGrant.LeaseKind,
-                        admittedGrant.LeaseOwner,
-                        admittedGrant.LeaseGeneration)));
+                    handle.Grants,
+                    _ => handle.DisposeAsync()));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
+            await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
-        finally { gate?.Release(); }
+        catch
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private void Backfill(SqliteConnection c, SqliteTransaction t, DateTimeOffset now)
@@ -1141,7 +991,9 @@ public sealed partial class RetentionCatalogStore
     private static bool HasMatchingDeleteIntent(SqliteConnection c, SqliteTransaction t, RetentionCatalogItem item) { using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "SELECT EXISTS(SELECT 1 FROM retention_delete_journal WHERE item_id=$id AND expected_revision=$revision);"; q.Parameters.AddWithValue("$id", item.ItemId); q.Parameters.AddWithValue("$revision", item.Revision); return Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) == 1; }
     private enum SourceReceiptProof { Match, Missing, InvalidIdentity, InvalidOrMismatched, CatalogBusy }
     private static bool TrySourceId(string sourceItemId, out long id) => long.TryParse(sourceItemId, CultureInfo.InvariantCulture, out id);
-    private static long? AcquireLease(SqliteConnection c, SqliteTransaction t, string itemId, RetentionLeaseKind kind, string owner, DateTimeOffset now) { var wireKind = kind.ToString().ToLowerInvariant(); using (var expired = c.CreateCommand()) { expired.Transaction = t; expired.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND lease_kind <> $kind AND expires_at <= $now;"; expired.Parameters.AddWithValue("$id", itemId); expired.Parameters.AddWithValue("$kind", wireKind); expired.Parameters.AddWithValue("$now", Timestamp(now)); expired.ExecuteNonQuery(); } using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) SELECT $id,$kind,$owner,$expires,1 WHERE NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) AND NOT EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$id AND (($kind='deletion' AND lease_kind IN ('access','operation')) OR ($kind IN ('access','operation') AND lease_kind='deletion'))) ON CONFLICT(item_id,lease_kind) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,generation=retention_leases.generation+1 WHERE retention_leases.expires_at <= $now AND NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) RETURNING generation;"; q.Parameters.AddWithValue("$id", itemId); q.Parameters.AddWithValue("$kind", wireKind); q.Parameters.AddWithValue("$owner", owner); q.Parameters.AddWithValue("$expires", Timestamp(now + RetentionV1Constants.LeaseDuration)); q.Parameters.AddWithValue("$now", Timestamp(now)); var value = q.ExecuteScalar(); return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture); }
+    private static long? AcquireLease(SqliteConnection c, SqliteTransaction t, string itemId, RetentionLeaseKind kind, string owner, DateTimeOffset now) =>
+        AcquireLease(c, t, itemId, kind, owner, now, now.Add(RetentionV1Constants.LeaseDuration));
+    private static long? AcquireLease(SqliteConnection c, SqliteTransaction t, string itemId, RetentionLeaseKind kind, string owner, DateTimeOffset now, DateTimeOffset expiresAt) { var wireKind = kind.ToString().ToLowerInvariant(); using (var expired = c.CreateCommand()) { expired.Transaction = t; expired.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND lease_kind <> $kind AND expires_at <= $now;"; expired.Parameters.AddWithValue("$id", itemId); expired.Parameters.AddWithValue("$kind", wireKind); expired.Parameters.AddWithValue("$now", Timestamp(now)); expired.ExecuteNonQuery(); } using var q = c.CreateCommand(); q.Transaction = t; q.CommandText = "INSERT INTO retention_leases(item_id,lease_kind,owner,expires_at,generation) SELECT $id,$kind,$owner,$expires,1 WHERE NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) AND NOT EXISTS (SELECT 1 FROM retention_leases WHERE item_id=$id AND (($kind='deletion' AND lease_kind IN ('access','operation')) OR ($kind IN ('access','operation') AND lease_kind='deletion'))) ON CONFLICT(item_id,lease_kind) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,generation=retention_leases.generation+1 WHERE retention_leases.expires_at <= $now AND NOT EXISTS (SELECT 1 FROM retention_worker_state WHERE id=1 AND maintenance_owner IS NOT NULL AND maintenance_lease_expires_at>$now) RETURNING generation;"; q.Parameters.AddWithValue("$id", itemId); q.Parameters.AddWithValue("$kind", wireKind); q.Parameters.AddWithValue("$owner", owner); q.Parameters.AddWithValue("$expires", Timestamp(expiresAt)); q.Parameters.AddWithValue("$now", Timestamp(now)); var value = q.ExecuteScalar(); return value is null ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture); }
     private void Release(string id, RetentionLeaseKind kind, string owner, long generation) { using var c = OpenExisting(); using var q = c.CreateCommand(); q.CommandText = "DELETE FROM retention_leases WHERE item_id=$id AND lease_kind=$kind AND owner=$owner AND generation=$generation;"; q.Parameters.AddWithValue("$id", id); q.Parameters.AddWithValue("$kind", kind.ToString().ToLowerInvariant()); q.Parameters.AddWithValue("$owner", owner); q.Parameters.AddWithValue("$generation", generation); q.ExecuteNonQuery(); }
     private ValueTask ReleaseAsync(string id, RetentionLeaseKind kind, string owner, long generation) { try { Release(id, kind, owner, generation); } catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { } return ValueTask.CompletedTask; }
     private SqliteConnection Open(bool enforceForeignKeys = true) => RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadWriteCreate, enforceForeignKeys);

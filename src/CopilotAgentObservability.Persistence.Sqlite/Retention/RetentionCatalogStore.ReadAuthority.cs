@@ -13,6 +13,51 @@ internal enum RetentionRowReadability
 
 public sealed partial class RetentionCatalogStore
 {
+    private RetentionHandlePublicationDisposition TryPublishCommittedHandle(
+        RetentionCommittedReadHandle handle,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (cancellationToken.IsCancellationRequested)
+            return RetentionHandlePublicationDisposition.LeaseLost;
+        try
+        {
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            using var publications = RetentionGrantPublicationSet.EnterInOrder(
+                handle.Grants
+                    .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
+                    .ToArray());
+            if (cancellationToken.IsCancellationRequested)
+            {
+                transaction.Rollback();
+                return RetentionHandlePublicationDisposition.LeaseLost;
+            }
+            var publicationAt = timeProvider.GetUtcNow();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                transaction.Rollback();
+                return RetentionHandlePublicationDisposition.LeaseLost;
+            }
+            foreach (var grant in handle.Grants)
+            {
+                if (!IsGrantUsable(connection, transaction, grant, publicationAt))
+                {
+                    transaction.Rollback();
+                    return RetentionHandlePublicationDisposition.LeaseLost;
+                }
+            }
+            transaction.Commit();
+            return handle.Publish()
+                ? RetentionHandlePublicationDisposition.Published
+                : RetentionHandlePublicationDisposition.LeaseLost;
+        }
+        catch (SqliteException)
+        {
+            return RetentionHandlePublicationDisposition.Busy;
+        }
+    }
+
     internal static RetentionRowReadability ClassifyRowReadability(RetentionCatalogItem item, DateTimeOffset at)
     {
         ArgumentNullException.ThrowIfNull(item);

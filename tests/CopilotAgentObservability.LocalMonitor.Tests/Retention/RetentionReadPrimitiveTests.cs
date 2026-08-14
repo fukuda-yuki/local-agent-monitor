@@ -120,6 +120,102 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public async Task ReadAsync_SelectorRunsOnlyAfterTheCommittedHandlePublicationFence()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, new MutableTimeProvider(now));
+            var store = new RetentionCatalogStore(context, new MutableTimeProvider(now));
+            var sourceId = ReadIds(path)[0];
+            var key = new RetentionOwnershipKey(context.StoreInstanceId, RetentionStoreKind.RawRecord, sourceId.ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision),
+                (_, _, _, _) =>
+                {
+                    Assert.Equal(
+                        1L,
+                        Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{item.ItemId}';"));
+                    return ValueTask.FromResult<string?>("materialized-after-publication");
+                },
+                CancellationToken.None);
+
+            Assert.Null(result.Disposition);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
+            Assert.Equal("materialized-after-publication", lease.Value);
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadAsync_HiddenResourcePreparationFailureRollsBackWithoutSelectingOrLeasing()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var time = new AdmissionTimerTimeProvider(ReadCapturedAt(path), AdmissionTimerBehavior.ThrowOnPreparation);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RetentionCatalogStore(context, time);
+            var sourceId = ReadIds(path)[0];
+            var key = new RetentionOwnershipKey(context.StoreInstanceId, RetentionStoreKind.RawRecord, sourceId.ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var selectorCalls = 0;
+
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Access, time.GetUtcNow(), item.Revision),
+                (_, _, _, _) =>
+                {
+                    Interlocked.Increment(ref selectorCalls);
+                    return ValueTask.FromResult<string?>("must-not-materialize");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.SelectorUnavailable, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Equal(0, selectorCalls);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(AdmissionTimerBehavior.RejectActivation)]
+    [InlineData(AdmissionTimerBehavior.ExpireDuringActivation)]
+    public async Task ReadAsync_PostCommitNotificationLossReleasesWithoutSelectingOrPartialAuthority(
+        AdmissionTimerBehavior behavior)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var time = new AdmissionTimerTimeProvider(ReadCapturedAt(path), behavior);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
+            var store = new RetentionCatalogStore(context, time);
+            var sourceId = ReadIds(path)[0];
+            var key = new RetentionOwnershipKey(context.StoreInstanceId, RetentionStoreKind.RawRecord, sourceId.ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var selectorCalls = 0;
+
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, time.GetUtcNow(), item.Revision),
+                (_, _, _, _) =>
+                {
+                    Interlocked.Increment(ref selectorCalls);
+                    return ValueTask.FromResult<string?>("must-not-materialize");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.LeaseLost, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Equal(0, selectorCalls);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
     public async Task ReadSelectedBatchAsync_ZeroCandidates_ReturnsOwnerEmptyWithoutHandleOrRetentionResources()
     {
         var path = CopyFixture();
@@ -147,6 +243,34 @@ public sealed class RetentionReadPrimitiveTests
             Assert.Null(result.Lease);
             Assert.Equal(1, ownerEmptyCalls);
             Assert.Equal(0, time.ReadCount);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadSelectedBatchAsync_NullCandidateShapeIsSelectorUnavailableWithoutRawSelection()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, new MutableTimeProvider(now));
+            var store = new RetentionCatalogStore(context, new MutableTimeProvider(now));
+            var selectorCalls = 0;
+
+            var result = await store.ReadSelectedBatchAsync<string>(
+                static (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>(null!),
+                (_, _, _, _) =>
+                {
+                    Interlocked.Increment(ref selectorCalls);
+                    return ValueTask.FromResult<string?>("must-not-select");
+                },
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.SelectorUnavailable, result.Disposition);
+            Assert.Null(result.Lease);
+            Assert.Equal(0, selectorCalls);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
@@ -839,11 +963,15 @@ public sealed class RetentionReadPrimitiveTests
                 },
                 CancellationToken.None);
 
-            Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
+            Assert.Equal(RetentionReadDisposition.LeaseLost, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
             var queued = Assert.IsType<RetentionCatalogItem>(store.Find(key));
-            Execute(path, "UPDATE retention_items SET state='deletion_queued', revision=revision+1 WHERE item_id=$item_id;", ("$item_id", queued.ItemId));
+            Execute(
+                path,
+                "UPDATE retention_items SET state='deletion_queued', read_denied_at=$now, queued_at=$now, revision=revision+1 WHERE item_id=$item_id;",
+                ("$now", time.GetUtcNow().ToString("O")),
+                ("$item_id", queued.ItemId));
             var deletionQueued = Assert.IsType<RetentionCatalogItem>(store.Find(key));
             using var deletion = Assert.IsType<RetentionReadLeaseHandle>(await store.TryAcquireAsync(key, deletionQueued.Revision, RetentionLeaseKind.Deletion, time.GetUtcNow(), CancellationToken.None));
         }
@@ -1114,8 +1242,9 @@ public sealed class RetentionReadPrimitiveTests
         try
         {
             var capturedAt = ReadCapturedAt(path);
-            var admissionAt = capturedAt.AddHours(1);
-            var boundaryAt = admissionAt.AddSeconds(1);
+            var initialAt = capturedAt.AddHours(1);
+            var finalAt = initialAt.AddSeconds(1);
+            var publicationAt = finalAt.AddSeconds(1);
             var time = new SequencedTimeProvider(capturedAt);
             var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
             var store = new RetentionCatalogStore(context, time);
@@ -1124,24 +1253,24 @@ public sealed class RetentionReadPrimitiveTests
             var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
             var itemBefore = FullRowDump(path, "retention_items", "item_id", item.ItemId);
             var futureRequestAt = item.ExpiresAt.AddYears(1);
-            time.Schedule(admissionAt, boundaryAt);
+            time.Schedule(initialAt, finalAt, finalAt, publicationAt);
             time.ResetReadCount();
 
             var result = await store.ReadAsync(
                 new RetentionReadRequest(key, RetentionReadKind.Operation, futureRequestAt, item.Revision),
                 (_, _, _, _) =>
                 {
-                    Assert.Equal(1, time.ReadCount);
+                    Assert.Equal(4, time.ReadCount);
                     return ValueTask.FromResult<string?>("materialized");
                 },
                 CancellationToken.None);
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
-            Assert.Equal(2, time.ReadCount);
+            Assert.Equal(4, time.ReadCount);
             Assert.Equal(itemBefore, FullRowDump(path, "retention_items", "item_id", item.ItemId));
             Assert.Equal(
-                admissionAt.AddMinutes(2).ToString("O"),
+                finalAt.AddMinutes(2).ToString("O"),
                 Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{item.ItemId}';"));
         }
         finally { Delete(path); }
@@ -1158,8 +1287,9 @@ public sealed class RetentionReadPrimitiveTests
         {
             InsertLegacyRawRows(path, 601, 602, 603);
             var capturedAt = ReadCapturedAt(path);
-            var admissionAt = capturedAt.AddHours(1);
-            var boundaryAt = admissionAt.AddSeconds(1);
+            var initialAt = capturedAt.AddHours(1);
+            var finalAt = initialAt.AddSeconds(1);
+            var publicationAt = finalAt.AddSeconds(1);
             var time = new SequencedTimeProvider(capturedAt);
             var context = RetentionCatalogContext.InitializeNewOwnedDatabase(path, time);
             var store = new RetentionCatalogStore(context, time);
@@ -1181,7 +1311,7 @@ public sealed class RetentionReadPrimitiveTests
                     futureRequestAt,
                     items[index].Revision))
                 .ToArray();
-            time.Schedule(admissionAt, boundaryAt);
+            time.Schedule(initialAt, finalAt, finalAt, publicationAt);
             time.ResetReadCount();
 
             ValueTask<string?> Materialize(
@@ -1190,7 +1320,7 @@ public sealed class RetentionReadPrimitiveTests
                 IReadOnlyList<RetentionReadGrant> grants,
                 CancellationToken ___)
             {
-                Assert.Equal(1, time.ReadCount);
+                Assert.Equal(4, time.ReadCount);
                 Assert.Equal(requests.Length, grants.Count);
                 return ValueTask.FromResult<string?>("materialized");
             }
@@ -1214,7 +1344,7 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
-            Assert.Equal(2, time.ReadCount);
+            Assert.Equal(4, time.ReadCount);
             Assert.Equal(
                 items.Length,
                 Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
@@ -1222,7 +1352,7 @@ public sealed class RetentionReadPrimitiveTests
                 1L,
                 Scalar<long>(path, "SELECT COUNT(DISTINCT expires_at) FROM retention_leases;"));
             Assert.Equal(
-                admissionAt.AddMinutes(2).ToString("O"),
+                finalAt.AddMinutes(2).ToString("O"),
                 Scalar<string>(path, "SELECT MIN(expires_at) FROM retention_leases;"));
             Assert.Equal(
                 itemRowsBefore,
@@ -1246,7 +1376,7 @@ public sealed class RetentionReadPrimitiveTests
             primitivePath,
             pinned,
             TimeSpan.FromMinutes(2),
-            RetentionReadDisposition.LifecycleDenied);
+            RetentionReadDisposition.LeaseLost);
     }
 
     [Theory]
@@ -1574,14 +1704,15 @@ public sealed class RetentionReadPrimitiveTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task BatchRead_DisposeAttemptsEveryAdmittedTupleWhenAnEarlierReleaseFails(bool selectedBatch)
+    public async Task BatchRead_DisposeTransfersTheWholeFrontierToMandatoryCleanupWhenReleaseFails(bool selectedBatch)
     {
         var path = CopyFixture();
         try
         {
             InsertLegacyRawRows(path, 601, 602);
             var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
-            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            var time = new MutableTimeProvider(now);
+            var store = new RetentionCatalogStore(path, time);
             store.CreateSchema();
             var firstKey = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, "601");
             var secondKey = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, "602");
@@ -1608,10 +1739,12 @@ public sealed class RetentionReadPrimitiveTests
 
             var exception = await Record.ExceptionAsync(async () => await lease.DisposeAsync());
 
-            var sqliteException = Assert.IsType<SqliteException>(exception);
-            Assert.Contains("reject_first_release", sqliteException.Message, StringComparison.Ordinal);
+            Assert.Null(exception);
             Assert.Equal(1L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{firstItem.ItemId}';"));
-            Assert.Equal(0L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{secondItem.ItemId}';"));
+            Assert.Equal(1L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{secondItem.ItemId}';"));
+            Execute(path, "DROP TRIGGER reject_first_release;");
+            time.Advance(TimeSpan.FromMilliseconds(10));
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
     }
@@ -1889,7 +2022,7 @@ public sealed class RetentionReadPrimitiveTests
                 sourceIds.Select(sourceId => FullRowDump(path, "raw_records", "id", sourceId)).ToArray());
             Assert.Equal(sentinelBefore, FullRowDump(path, "retention_leases", "item_id", sentinelItem.ItemId));
 
-            if (expectedDisposition == RetentionReadDisposition.LifecycleDenied)
+            if (expectedDisposition is RetentionReadDisposition.LifecycleDenied or RetentionReadDisposition.LeaseLost)
             {
                 Assert.Null(result.Lease);
                 Assert.All(admittedGrants, grant => Assert.Equal(0L, LeaseTupleCount(path, grant)));
@@ -2177,6 +2310,65 @@ public sealed class RetentionReadPrimitiveTests
         }
 
         internal void ResetReadCount() => ReadCount = 0;
+    }
+
+    public enum AdmissionTimerBehavior
+    {
+        Normal,
+        ThrowOnPreparation,
+        RejectActivation,
+        ExpireDuringActivation,
+    }
+
+    private sealed class AdmissionTimerTimeProvider(
+        DateTimeOffset start,
+        AdmissionTimerBehavior behavior) : TimeProvider
+    {
+        private DateTimeOffset now = start;
+        private int timersCreated;
+
+        public override DateTimeOffset GetUtcNow() => now;
+
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period)
+        {
+            var ordinal = Interlocked.Increment(ref timersCreated);
+            if (ordinal == 1 && behavior == AdmissionTimerBehavior.ThrowOnPreparation)
+                throw new InvalidOperationException("synthetic_notification_preparation_failure");
+            return new AdmissionTimer(this, callback, state, ordinal == 1 ? behavior : AdmissionTimerBehavior.Normal);
+        }
+
+        private sealed class AdmissionTimer(
+            AdmissionTimerTimeProvider provider,
+            TimerCallback callback,
+            object? state,
+            AdmissionTimerBehavior behavior) : ITimer
+        {
+            private int disposed;
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                if (Volatile.Read(ref disposed) != 0) return false;
+                if (behavior == AdmissionTimerBehavior.RejectActivation) return false;
+                if (behavior == AdmissionTimerBehavior.ExpireDuringActivation)
+                {
+                    provider.now += dueTime;
+                    callback(state);
+                }
+                return true;
+            }
+
+            public void Dispose() => Interlocked.Exchange(ref disposed, 1);
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
     }
 
     public enum ReadPrimitivePath
