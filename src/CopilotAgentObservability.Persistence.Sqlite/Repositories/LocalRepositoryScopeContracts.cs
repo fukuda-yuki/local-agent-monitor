@@ -9,6 +9,15 @@ internal interface ILocalRepositoryReadTransaction
         CancellationToken cancellationToken);
 }
 
+internal interface ILocalRepositoryTargetExistenceAuthority
+{
+    IReadOnlyList<string> ReadExisting(
+        SqliteConnection openConnection,
+        SqliteTransaction exactTransaction,
+        IReadOnlyList<string> canonicalRepositoryIds,
+        CancellationToken cancellationToken);
+}
+
 internal interface ILocalRepositorySessionSnapshotContributor
 {
     ValueTask<LocalRepositorySessionContribution> ReadAsync(
