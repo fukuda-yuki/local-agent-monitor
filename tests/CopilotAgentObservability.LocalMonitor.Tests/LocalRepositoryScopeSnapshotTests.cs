@@ -881,6 +881,41 @@ public sealed class LocalRepositoryScopeSnapshotTests
                 .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("session")]
+    [InlineData("repository")]
+    public async Task ReadAsync_RejectsInvalidArchiveFactsBeforeTheyCanFailOpenEligibility(string invalidFact)
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 1);
+        var sessionId = SessionId(1);
+        database.AddCandidate(sessionId, RepositoryA);
+        database.SetRevision(sessionId, 1);
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
+            capability,
+            [new FakeSessionRow(sessionId, invalidFact)],
+            token));
+        var archive = new FakeArchiveContributor(async (capability, input, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            return new(
+                [new LocalArchiveSessionFact(
+                    sessionId,
+                    invalidFact == "session" ? (LocalArchiveState)2 : LocalArchiveState.Active,
+                    0)],
+                [new LocalArchiveRepositoryFact(
+                    RepositoryA,
+                    LocalArchiveState.Active,
+                    invalidFact == "repository" ? 1 : 0)]);
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
+                .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
+
+        Assert.Equal("local_archive_fact_contribution_invalid", exception.Message);
+    }
+
     [Fact]
     public async Task ReadAsync_ObservesCancellationDuringArchiveValidation()
     {

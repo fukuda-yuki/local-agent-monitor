@@ -240,6 +240,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             cancellationToken.ThrowIfCancellationRequested();
             if (item is null
                 || !expectedSessions.Contains(item.SessionId)
+                || !IsValidArchiveFact(item.State, item.Revision)
                 || !sessions.TryAdd(item.SessionId, new(item.SessionId, item.State, item.Revision)))
             {
                 throw new InvalidOperationException("local_archive_fact_contribution_invalid");
@@ -251,6 +252,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             cancellationToken.ThrowIfCancellationRequested();
             if (item is null
                 || !catalog.RepositoryById.ContainsKey(item.RepositoryId)
+                || !IsValidArchiveFact(item.State, item.Revision)
                 || !repositories.TryAdd(item.RepositoryId, new(item.RepositoryId, item.State, item.Revision)))
             {
                 throw new InvalidOperationException("local_archive_fact_contribution_invalid");
@@ -259,6 +261,14 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         cancellationToken.ThrowIfCancellationRequested();
         return new(sessions, repositories);
     }
+
+    private static bool IsValidArchiveFact(LocalArchiveState state, long revision) =>
+        state switch
+        {
+            LocalArchiveState.Active => revision >= 0 && revision % 2 == 0,
+            LocalArchiveState.Archived => revision > 0 && revision % 2 == 1,
+            _ => false,
+        };
 
     private static async ValueTask<CatalogContribution> ReadCatalogAsync(
         SqliteConnection connection,
