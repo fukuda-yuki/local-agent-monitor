@@ -89,8 +89,9 @@ public sealed class SkillInvocationV2ArtifactRegistry
             throw InvalidArtifact();
         }
 
+        ValidateArtifactStructureForTesting(schemaBytes, sidecarBytes, registryHistory);
         AssertExactTextArtifact(registryR0001, RegistryR0001ByteLength, RegistryR0001Fingerprint);
-        var parsedEntries = ParseRegistry(registryR0001, expectedRevision: 1);
+        var parsedEntries = ParseRegistry(registryR0001, expectedRevision: 1, SchemaFingerprintValue);
         if (parsedEntries.Count != 1
             || parsedEntries[0].Disposition != SkillInvocationV2CompatibilityDisposition.Accepted
             || parsedEntries[0].Tuple != new SkillInvocationV2CompatibilityTuple(
@@ -106,7 +107,59 @@ public sealed class SkillInvocationV2ArtifactRegistry
         return new SkillInvocationV2ArtifactRegistry(1, parsedEntries);
     }
 
-    private static IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> ParseRegistry(byte[] registryBytes, int expectedRevision)
+    internal static void ValidateArtifactStructureForTesting(
+        byte[] schemaBytes,
+        byte[] sidecarBytes,
+        IReadOnlyDictionary<int, byte[]> registryHistory)
+    {
+        ArgumentNullException.ThrowIfNull(schemaBytes);
+        ArgumentNullException.ThrowIfNull(sidecarBytes);
+        ArgumentNullException.ThrowIfNull(registryHistory);
+
+        AssertCanonicalText(schemaBytes);
+        var schemaFingerprint = Sha256(schemaBytes);
+        if (!sidecarBytes.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes(schemaFingerprint + "\n")))
+        {
+            throw InvalidArtifact();
+        }
+
+        if (registryHistory.Count == 0)
+        {
+            throw InvalidArtifact();
+        }
+
+        var revisions = registryHistory.Keys.OrderBy(revision => revision).ToArray();
+        var parsedHistory = new List<(int Revision, IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries)>();
+        for (var index = 0; index < revisions.Length; index++)
+        {
+            var revision = revisions[index];
+            if (revision != index + 1 || !registryHistory.TryGetValue(revision, out var registryBytes) || registryBytes is null)
+            {
+                throw InvalidArtifact();
+            }
+
+            parsedHistory.Add((revision, ParseRegistry(registryBytes, revision, schemaFingerprint)));
+        }
+
+        foreach (var current in parsedHistory)
+        {
+            foreach (var entry in current.Entries.Where(entry => entry.Disposition == SkillInvocationV2CompatibilityDisposition.Revoked))
+            {
+                if (!parsedHistory
+                    .Where(previous => previous.Revision < current.Revision)
+                    .SelectMany(previous => previous.Entries)
+                    .Any(previous => previous.Disposition == SkillInvocationV2CompatibilityDisposition.Accepted && previous.Tuple == entry.Tuple))
+                {
+                    throw InvalidArtifact();
+                }
+            }
+        }
+    }
+
+    private static IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> ParseRegistry(
+        byte[] registryBytes,
+        int expectedRevision,
+        string expectedSchemaFingerprint)
     {
         try
         {
@@ -153,7 +206,7 @@ public sealed class SkillInvocationV2ArtifactRegistry
                     ReadRequiredString(entryElement, "normalization_version"),
                     ReadRequiredString(entryElement, "payload_schema"),
                     ReadRequiredString(entryElement, "schema_fingerprint"));
-                if (!IsLowercaseSha256(tuple.SchemaFingerprint) || tuple.SchemaFingerprint != SchemaFingerprintValue || !tuples.Add(tuple))
+                if (!IsLowercaseSha256(tuple.SchemaFingerprint) || tuple.SchemaFingerprint != expectedSchemaFingerprint || !tuples.Add(tuple))
                 {
                     throw InvalidArtifact();
                 }
