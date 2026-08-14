@@ -7,6 +7,8 @@ internal sealed partial class SqliteLocalArchiveStore
     private readonly string databasePath;
     private readonly ILocalRepositoryTargetExistenceAuthority repositoryExistence;
     private readonly LocalArchiveSessionTargetExistenceAuthority sessionExistence;
+    private readonly TimeProvider timeProvider;
+    private readonly Func<DateTimeOffset, string> eventIdFactory;
     private readonly Func<SqliteConnection>? connectionFactory;
 
     internal SqliteLocalArchiveStore(
@@ -14,13 +16,34 @@ internal sealed partial class SqliteLocalArchiveStore
         ILocalRepositoryTargetExistenceAuthority repositoryExistence,
         LocalArchiveSessionTargetExistenceAuthority sessionExistence,
         Func<SqliteConnection>? connectionFactory = null)
+        : this(
+            databasePath,
+            repositoryExistence,
+            sessionExistence,
+            TimeProvider.System,
+            value => Guid.CreateVersion7(value).ToString("D"),
+            connectionFactory)
+    {
+    }
+
+    internal SqliteLocalArchiveStore(
+        string databasePath,
+        ILocalRepositoryTargetExistenceAuthority repositoryExistence,
+        LocalArchiveSessionTargetExistenceAuthority sessionExistence,
+        TimeProvider timeProvider,
+        Func<DateTimeOffset, string> eventIdFactory,
+        Func<SqliteConnection>? connectionFactory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(repositoryExistence);
         ArgumentNullException.ThrowIfNull(sessionExistence);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        ArgumentNullException.ThrowIfNull(eventIdFactory);
         this.databasePath = Path.GetFullPath(databasePath);
         this.repositoryExistence = repositoryExistence;
         this.sessionExistence = sessionExistence;
+        this.timeProvider = timeProvider;
+        this.eventIdFactory = eventIdFactory;
         this.connectionFactory = connectionFactory;
     }
 
@@ -54,6 +77,9 @@ internal sealed partial class SqliteLocalArchiveStore
         new(Success: null, error);
 
     private static LocalArchiveListResult ListError(LocalArchiveStoreError error) =>
+        new(Success: null, error);
+
+    private static LocalArchiveMutationResult MutationError(LocalArchiveStoreError error) =>
         new(Success: null, error);
 
     private static bool IsDefined(LocalArchiveTargetKind targetKind) =>

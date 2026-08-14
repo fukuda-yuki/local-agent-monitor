@@ -30,6 +30,10 @@ internal sealed record LocalArchiveMutationSuccess(
 internal sealed record LocalArchiveMutationSucceeded(
     ReadOnlyMemory<byte> Entity);
 
+internal sealed record LocalArchiveMutationTarget(
+    string TargetId,
+    long ExpectedRevision);
+
 internal enum LocalArchiveStoreError
 {
     TargetNotFound,
