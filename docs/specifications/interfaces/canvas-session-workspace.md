@@ -808,10 +808,14 @@ its use references, and calls `TryCompleteWithoutRaw()`; only
 `completed_without_raw` may send the exact
 `503 {"error":"session_store_unavailable"}` entity. A terminal `lost|busy` or
 caller abort discards the buffered entity, closes every use reference, starts no
-status, header, or entity, and closes the transport. Exact Event missing,
-`skill.invoked`, and lifecycle-denied 404/410 remain entirely before lease/
-content selection with their existing bytes. Pre-grant SQLite `Busy` keeps the
-exact `503 {"error":"session_store_busy"}` entity; pre-grant
+status, header, or entity, and closes the transport. Exact Event missing and
+`skill.invoked` remain entirely before lease/content selection. An initial
+lifecycle-denied check likewise keeps its existing 404/410 bytes before
+selection. Under the sole non-Skill Session exception, a failed final Retention
+clock/item/source/type recheck rolls back the uncommitted lease and discards its
+inaccessible buffer before sending the same existing lifecycle-denied 404/410
+bytes. Pre-grant SQLite `Busy` keeps the exact
+`503 {"error":"session_store_busy"}` entity; pre-grant
 `SelectorUnavailable` uses the exact
 `503 {"error":"session_store_unavailable"}` entity without a terminal call.
 Committed hidden-handle or value-publication `LeaseLost|Busy` is post-admission
