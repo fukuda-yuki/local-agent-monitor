@@ -403,6 +403,7 @@ internal static class MonitorHost
             builder.Services.AddSingleton(localRepositoryStore);
             builder.Services.AddSingleton(localRepositoryWorker);
             builder.Services.AddSingleton(localRepositoryApplication);
+            builder.Services.AddSingleton<ILocalRepositoryTargetExistenceAuthority>(SqliteLocalRepositoryTargetExistenceAuthority.Instance);
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
                 new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
