@@ -235,7 +235,12 @@ internal sealed class RetentionReadResult<T>
 
     internal static RetentionReadResult<T> FromDisposition(RetentionReadDisposition disposition)
     {
-        if (disposition == RetentionReadDisposition.Empty)
+        if (disposition is not (
+            RetentionReadDisposition.LifecycleDenied or
+            RetentionReadDisposition.SelectorUnavailable or
+            RetentionReadDisposition.ConsumptionUnavailable or
+            RetentionReadDisposition.LeaseLost or
+            RetentionReadDisposition.Busy))
             throw new ArgumentOutOfRangeException(nameof(disposition));
         return new(disposition, null);
     }
@@ -260,12 +265,20 @@ internal sealed class RetentionBatchReadResult<T>
     internal static RetentionBatchReadResult<T> FromHandle(RetentionBatchReadLease<T> lease) =>
         new(null, lease ?? throw new ArgumentNullException(nameof(lease)), default);
 
-    internal static RetentionBatchReadResult<T> Empty(T value) =>
-        new(RetentionReadDisposition.Empty, null, value);
+    internal static RetentionBatchReadResult<T> Empty(T value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return new(RetentionReadDisposition.Empty, null, value);
+    }
 
     internal static RetentionBatchReadResult<T> FromDisposition(RetentionReadDisposition disposition)
     {
-        if (disposition == RetentionReadDisposition.Empty)
+        if (disposition is not (
+            RetentionReadDisposition.LifecycleDenied or
+            RetentionReadDisposition.SelectorUnavailable or
+            RetentionReadDisposition.ConsumptionUnavailable or
+            RetentionReadDisposition.LeaseLost or
+            RetentionReadDisposition.Busy))
             throw new ArgumentOutOfRangeException(nameof(disposition));
         return new(disposition, null, default);
     }

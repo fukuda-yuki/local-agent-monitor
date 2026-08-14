@@ -63,6 +63,30 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public void ReadResultFactories_RejectNullEmptyAndAllowOnlyDefinedFailureDispositions()
+    {
+        Assert.Throws<ArgumentNullException>(() => RetentionBatchReadResult<string>.Empty(null!));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RetentionReadResult<string>.FromDisposition((RetentionReadDisposition)int.MaxValue));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RetentionBatchReadResult<string>.FromDisposition((RetentionReadDisposition)int.MaxValue));
+
+        var failures = new[]
+        {
+            RetentionReadDisposition.LifecycleDenied,
+            RetentionReadDisposition.SelectorUnavailable,
+            RetentionReadDisposition.ConsumptionUnavailable,
+            RetentionReadDisposition.LeaseLost,
+            RetentionReadDisposition.Busy,
+        };
+        foreach (var disposition in failures)
+        {
+            Assert.Equal(disposition, RetentionReadResult<string>.FromDisposition(disposition).Disposition);
+            Assert.Equal(disposition, RetentionBatchReadResult<string>.FromDisposition(disposition).Disposition);
+        }
+    }
+
+    [Fact]
     public async Task ReadBatchAsync_ZeroRequests_ReturnsOwnerEmptyWithoutHandleOrRetentionResources()
     {
         var path = CopyFixture();
