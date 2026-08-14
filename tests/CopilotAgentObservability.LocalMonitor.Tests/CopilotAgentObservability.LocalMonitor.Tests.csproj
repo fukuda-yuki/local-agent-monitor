@@ -64,6 +64,15 @@
     <None Include="..\..\docs\specifications\contracts\historical-efficiency\v1\historical-efficiency-receipt.schema.json"
           Link="TestData\HistoricalEfficiency\historical-efficiency-receipt.schema.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\github-copilot-sdk.skill-invoked.v1.schema.json"
+          Link="TestData\SkillInvocationV2\github-copilot-sdk.skill-invoked.v1.schema.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\github-copilot-sdk.skill-invoked.v1.schema.sha256"
+          Link="TestData\SkillInvocationV2\github-copilot-sdk.skill-invoked.v1.schema.sha256"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0001.json"
+          Link="TestData\SkillInvocationV2\compatibility-registry-r0001.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

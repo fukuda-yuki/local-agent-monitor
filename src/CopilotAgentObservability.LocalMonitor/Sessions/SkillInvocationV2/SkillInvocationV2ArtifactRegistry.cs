@@ -1,0 +1,277 @@
+using System.Collections.ObjectModel;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+
+public enum SkillInvocationV2CompatibilityDisposition
+{
+    Accepted,
+    Revoked
+}
+
+public sealed record SkillInvocationV2CompatibilityTuple(
+    string SourceApplicationVersion,
+    string AdapterVersion,
+    string NormalizationVersion,
+    string PayloadSchema,
+    string SchemaFingerprint);
+
+public sealed record SkillInvocationV2CompatibilityRegistryEntry(
+    SkillInvocationV2CompatibilityTuple Tuple,
+    SkillInvocationV2CompatibilityDisposition Disposition);
+
+public sealed class SkillInvocationV2ArtifactRegistry
+{
+    private const string SchemaResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
+    private const string SidecarResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
+    private const string RegistryR0001ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0001.json";
+    private const string SchemaFingerprintValue = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
+    private const string RegistryR0001Fingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
+    private const int SchemaByteLength = 980;
+    private const int SidecarByteLength = 65;
+    private const int RegistryR0001ByteLength = 431;
+    private static readonly Lazy<SkillInvocationV2ArtifactRegistry> Current = new(LoadEmbedded);
+
+    private readonly ReadOnlyCollection<SkillInvocationV2CompatibilityRegistryEntry> entries;
+
+    private SkillInvocationV2ArtifactRegistry(
+        int currentRevision,
+        IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries)
+    {
+        CurrentRevision = currentRevision;
+        this.entries = Array.AsReadOnly(entries.ToArray());
+    }
+
+    public int CurrentRevision { get; }
+
+    public string SchemaFingerprint => SchemaFingerprintValue;
+
+    public IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries => entries;
+
+    public static SkillInvocationV2ArtifactRegistry Load() => Current.Value;
+
+    public bool IsAccepted(SkillInvocationV2CompatibilityTuple tuple)
+    {
+        ArgumentNullException.ThrowIfNull(tuple);
+        return entries.Any(entry => entry.Disposition == SkillInvocationV2CompatibilityDisposition.Accepted && entry.Tuple == tuple);
+    }
+
+    private static SkillInvocationV2ArtifactRegistry LoadEmbedded()
+    {
+        var assembly = typeof(SkillInvocationV2ArtifactRegistry).Assembly;
+        return LoadForArtifactValidation(
+            ReadResource(assembly, SchemaResourceName),
+            ReadResource(assembly, SidecarResourceName),
+            new Dictionary<int, byte[]> { [1] = ReadResource(assembly, RegistryR0001ResourceName) });
+    }
+
+    private static SkillInvocationV2ArtifactRegistry LoadForArtifactValidation(
+        byte[] schemaBytes,
+        byte[] sidecarBytes,
+        IReadOnlyDictionary<int, byte[]> registryHistory)
+    {
+        ArgumentNullException.ThrowIfNull(schemaBytes);
+        ArgumentNullException.ThrowIfNull(sidecarBytes);
+        ArgumentNullException.ThrowIfNull(registryHistory);
+
+        AssertExactTextArtifact(schemaBytes, SchemaByteLength, SchemaFingerprintValue);
+        if (!sidecarBytes.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes(SchemaFingerprintValue + "\n"))
+            || sidecarBytes.Length != SidecarByteLength)
+        {
+            throw InvalidArtifact();
+        }
+
+        if (registryHistory.Count != 1 || !registryHistory.TryGetValue(1, out var registryR0001))
+        {
+            throw InvalidArtifact();
+        }
+
+        AssertExactTextArtifact(registryR0001, RegistryR0001ByteLength, RegistryR0001Fingerprint);
+        var parsedEntries = ParseRegistry(registryR0001, expectedRevision: 1);
+        if (parsedEntries.Count != 1
+            || parsedEntries[0].Disposition != SkillInvocationV2CompatibilityDisposition.Accepted
+            || parsedEntries[0].Tuple != new SkillInvocationV2CompatibilityTuple(
+                "1.0.65",
+                "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
+                "github-copilot-sdk.skill-invoked.normalize.v1",
+                "github-copilot-sdk.skill-invoked.v1",
+                SchemaFingerprintValue))
+        {
+            throw InvalidArtifact();
+        }
+
+        return new SkillInvocationV2ArtifactRegistry(1, parsedEntries);
+    }
+
+    private static IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> ParseRegistry(byte[] registryBytes, int expectedRevision)
+    {
+        try
+        {
+            AssertCanonicalText(registryBytes);
+            AssertNoDuplicateProperties(registryBytes);
+            using var document = JsonDocument.Parse(registryBytes, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 16
+            });
+
+            var root = document.RootElement;
+            AssertObjectProperties(root, "schema_version", "registry_revision", "entries");
+            if (ReadRequiredString(root, "schema_version") != "skill-sdk-compatibility-registry.v1"
+                || !root.GetProperty("registry_revision").TryGetInt32(out var revision)
+                || revision != expectedRevision)
+            {
+                throw InvalidArtifact();
+            }
+
+            var entriesElement = root.GetProperty("entries");
+            if (entriesElement.ValueKind != JsonValueKind.Array || entriesElement.GetArrayLength() == 0)
+            {
+                throw InvalidArtifact();
+            }
+
+            var entries = new List<SkillInvocationV2CompatibilityRegistryEntry>();
+            var tuples = new HashSet<SkillInvocationV2CompatibilityTuple>();
+            foreach (var entryElement in entriesElement.EnumerateArray())
+            {
+                AssertObjectProperties(
+                    entryElement,
+                    "source_application_version",
+                    "adapter_version",
+                    "normalization_version",
+                    "payload_schema",
+                    "schema_fingerprint",
+                    "disposition");
+
+                var tuple = new SkillInvocationV2CompatibilityTuple(
+                    ReadRequiredString(entryElement, "source_application_version"),
+                    ReadRequiredString(entryElement, "adapter_version"),
+                    ReadRequiredString(entryElement, "normalization_version"),
+                    ReadRequiredString(entryElement, "payload_schema"),
+                    ReadRequiredString(entryElement, "schema_fingerprint"));
+                if (!IsLowercaseSha256(tuple.SchemaFingerprint) || tuple.SchemaFingerprint != SchemaFingerprintValue || !tuples.Add(tuple))
+                {
+                    throw InvalidArtifact();
+                }
+
+                var disposition = ReadRequiredString(entryElement, "disposition") switch
+                {
+                    "accepted" => SkillInvocationV2CompatibilityDisposition.Accepted,
+                    "revoked" => SkillInvocationV2CompatibilityDisposition.Revoked,
+                    _ => throw InvalidArtifact()
+                };
+                entries.Add(new SkillInvocationV2CompatibilityRegistryEntry(tuple, disposition));
+            }
+
+            return entries;
+        }
+        catch (JsonException)
+        {
+            throw InvalidArtifact();
+        }
+    }
+
+    private static void AssertExactTextArtifact(byte[] bytes, int expectedLength, string expectedHash)
+    {
+        AssertCanonicalText(bytes);
+        if (bytes.Length != expectedLength || !string.Equals(Sha256(bytes), expectedHash, StringComparison.Ordinal))
+        {
+            throw InvalidArtifact();
+        }
+    }
+
+    private static void AssertCanonicalText(byte[] bytes)
+    {
+        if (bytes.Length == 0
+            || bytes[0] == 0xef && bytes.Length >= 3 && bytes[1] == 0xbb && bytes[2] == 0xbf
+            || bytes[^1] != (byte)'\n'
+            || bytes.Contains((byte)'\r'))
+        {
+            throw InvalidArtifact();
+        }
+    }
+
+    private static void AssertNoDuplicateProperties(ReadOnlySpan<byte> bytes)
+    {
+        var reader = new Utf8JsonReader(bytes, new JsonReaderOptions
+        {
+            AllowTrailingCommas = false,
+            CommentHandling = JsonCommentHandling.Disallow,
+            MaxDepth = 16
+        });
+        var propertyNames = new Stack<HashSet<string>>();
+        while (reader.Read())
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.StartObject:
+                    propertyNames.Push(new HashSet<string>(StringComparer.Ordinal));
+                    break;
+                case JsonTokenType.PropertyName:
+                    if (propertyNames.Count == 0 || !propertyNames.Peek().Add(reader.GetString()!))
+                    {
+                        throw InvalidArtifact();
+                    }
+
+                    break;
+                case JsonTokenType.EndObject:
+                    if (propertyNames.Count == 0)
+                    {
+                        throw InvalidArtifact();
+                    }
+
+                    propertyNames.Pop();
+                    break;
+            }
+        }
+
+        if (propertyNames.Count != 0)
+        {
+            throw InvalidArtifact();
+        }
+    }
+
+    private static void AssertObjectProperties(JsonElement element, params string[] expectedProperties)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw InvalidArtifact();
+        }
+
+        var actualProperties = element.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
+        if (!actualProperties.SetEquals(expectedProperties))
+        {
+            throw InvalidArtifact();
+        }
+    }
+
+    private static string ReadRequiredString(JsonElement element, string propertyName)
+    {
+        var value = element.GetProperty(propertyName);
+        if (value.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(value.GetString()))
+        {
+            throw InvalidArtifact();
+        }
+
+        return value.GetString()!;
+    }
+
+    private static bool IsLowercaseSha256(string value) =>
+        value.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static string Sha256(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+    private static byte[] ReadResource(Assembly assembly, string resourceName)
+    {
+        using var stream = assembly.GetManifestResourceStream(resourceName) ?? throw InvalidArtifact();
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
+    }
+
+    private static InvalidOperationException InvalidArtifact() => new("Skill invocation v2 artifacts are unavailable.");
+}
