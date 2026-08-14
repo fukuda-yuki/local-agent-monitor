@@ -2965,26 +2965,35 @@ public sealed class RuntimeBackupRestoreTests
             File.WriteAllBytes(mutatedPath, database);
             using (var connection = Open(mutatedPath))
             {
+                Execute(connection, "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
                 Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            var parsed = RuntimeBackupJson.ParseManifest(manifest);
+            var rowCounts = new Dictionary<string, long>(StringComparer.Ordinal);
+            using (var connection = Open(mutatedPath))
+            {
+                foreach (var table in parsed.RowCounts.Keys.Where(static table => table is not ("local_archive_current" or "local_archive_events")))
+                    rowCounts[table] = Scalar<long>(connection, $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";");
             }
             database = File.ReadAllBytes(mutatedPath);
             File.Delete(mutatedPath);
             File.Delete(mutatedPath + "-wal");
             File.Delete(mutatedPath + "-shm");
 
-            var parsed = RuntimeBackupJson.ParseManifest(manifest);
             var componentVersions = parsed.ComponentVersions.ToDictionary(
                 static item => item.Key,
                 static item => item.Value,
                 StringComparer.Ordinal);
             componentVersions["session"] = 13;
+            componentVersions.Remove("local_archive");
             var databaseHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
             manifest = RuntimeBackupJson.WriteManifest(parsed with
             {
                 DatabaseSha256 = databaseHash,
                 DatabaseSize = database.LongLength,
                 ComponentVersions = componentVersions,
+                RowCounts = rowCounts,
             });
             using var target = ZipFile.Open(output, ZipArchiveMode.Create);
             Write(target, "manifest.json", manifest);

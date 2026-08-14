@@ -83,14 +83,25 @@ public sealed class LocalRepositoryRuntimeBackupTests
             path =>
             {
                 using var connection = OpenWritable(path);
+                using (var removeArchive = connection.CreateCommand())
+                {
+                    removeArchive.CommandText = "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;";
+                    removeArchive.ExecuteNonQuery();
+                }
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
             },
             manifest => manifest with
             {
-                ComponentVersions = new SortedDictionary<string, int>(manifest.ComponentVersions.ToDictionary(), StringComparer.Ordinal)
-                {
-                    ["session"] = 13,
-                },
+                ComponentVersions = new SortedDictionary<string, int>(
+                    manifest.ComponentVersions
+                        .Where(static item => item.Key != "local_archive")
+                        .ToDictionary(static item => item.Key, static item => item.Value),
+                    StringComparer.Ordinal) { ["session"] = 13 },
+                RowCounts = new SortedDictionary<string, long>(
+                    manifest.RowCounts
+                        .Where(static item => item.Key is not ("local_archive_current" or "local_archive_events"))
+                        .ToDictionary(static item => item.Key, static item => item.Value),
+                    StringComparer.Ordinal),
             });
 
         var inspected = service.Inspect(legacyBundle);

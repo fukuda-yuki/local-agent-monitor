@@ -25,8 +25,18 @@ internal static class LocalArchiveSchemaV1
         "local_archive_events_delete_rejected",
         "local_archive_events_insert_replacement_rejected",
     ];
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
+        BuildDefinitions();
     private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
-        ExpectedObjects = BuildExpectedObjects();
+        ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(Definitions);
+
+    internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects =>
+        ExpectedObjects.Values;
+    internal static IReadOnlyList<(string Name, string Table, string Sql)> TriggerDefinitions { get; } =
+        Definitions
+            .Where(static item => item.Type == "trigger")
+            .Select(static item => (item.Name, item.Table, item.Sql))
+            .ToArray();
 
     internal static void Ensure(SqliteConnection connection)
     {
@@ -167,8 +177,7 @@ internal static class LocalArchiveSchemaV1
         command.ExecuteNonQuery();
     }
 
-    private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject>
-        BuildExpectedObjects()
+    private static IReadOnlyList<SqliteOwnedSchemaDefinition> BuildDefinitions()
     {
         var statements = CanonicalSql.Split("\n\n", StringSplitOptions.RemoveEmptyEntries);
         if (statements.Length != 10)
@@ -186,7 +195,7 @@ internal static class LocalArchiveSchemaV1
                 index < 3 ? TableNames[0] : TableNames[1],
                 statements[index + 4]));
         }
-        return SqliteOwnedSchemaAuthority.Compile(definitions);
+        return definitions;
     }
 
     private static string ReadCanonicalSql()
