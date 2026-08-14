@@ -993,6 +993,48 @@ public sealed class LocalRepositoryScopeSnapshotTests
             snapshot.Repositories.Select(item => (item.RepositoryId, item.ArchiveState, item.ArchiveRevision)));
     }
 
+    [Fact]
+    public async Task ReadAsync_RetainsCopiedFactFieldsWhenTheNextIndexedReadMutatesThePreviousOwnerItem()
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 1);
+        database.AddRepository(RepositoryB, LocatorB, revision: 1);
+        var sessionIds = new[] { SessionId(1), SessionId(2) };
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
+            capability,
+            sessionIds.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, "mutating-item")).ToArray(),
+            token));
+        var firstSessionFact = new LocalArchiveSessionFact(sessionIds[0], LocalArchiveState.Active, 0);
+        var firstRepositoryFact = new LocalArchiveRepositoryFact(RepositoryA, LocalArchiveState.Active, 0);
+        var archive = new FakeArchiveContributor(async (capability, _, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            return new(
+                new NextReadMutatingList<LocalArchiveSessionFact>(
+                    [firstSessionFact, new(sessionIds[1], LocalArchiveState.Active, 2)],
+                    previous => MutateFact(previous, SessionId(99), LocalArchiveState.Archived, 1)),
+                new NextReadMutatingList<LocalArchiveRepositoryFact>(
+                    [firstRepositoryFact, new(RepositoryB, LocalArchiveState.Active, 2)],
+                    previous => MutateFact(previous, RepositoryC, LocalArchiveState.Archived, 1)));
+        });
+
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
+            .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+
+        Assert.Equal(SessionId(99), firstSessionFact.SessionId);
+        Assert.Equal(LocalArchiveState.Archived, firstSessionFact.State);
+        Assert.Equal(1, firstSessionFact.Revision);
+        Assert.Equal(RepositoryC, firstRepositoryFact.RepositoryId);
+        Assert.Equal(LocalArchiveState.Archived, firstRepositoryFact.State);
+        Assert.Equal(1, firstRepositoryFact.Revision);
+        var firstSession = snapshot.Sessions.Single(item => item.SessionId == sessionIds[0]);
+        Assert.Equal(LocalArchiveState.Active, firstSession.ArchiveState);
+        Assert.Equal(0, firstSession.ArchiveRevision);
+        var firstRepository = snapshot.Repositories.Single(item => item.RepositoryId == RepositoryA);
+        Assert.Equal(LocalArchiveState.Active, firstRepository.ArchiveState);
+        Assert.Equal(0, firstRepository.ArchiveRevision);
+    }
+
     [Theory]
     [InlineData("session")]
     [InlineData("repository")]
@@ -1326,6 +1368,28 @@ public sealed class LocalRepositoryScopeSnapshotTests
         return new(sessions, repositories);
     }
 
+    private static void MutateFact(
+        LocalArchiveSessionFact fact,
+        string sessionId,
+        LocalArchiveState state,
+        long revision)
+    {
+        typeof(LocalArchiveSessionFact).GetProperty(nameof(LocalArchiveSessionFact.SessionId))!.SetValue(fact, sessionId);
+        typeof(LocalArchiveSessionFact).GetProperty(nameof(LocalArchiveSessionFact.State))!.SetValue(fact, state);
+        typeof(LocalArchiveSessionFact).GetProperty(nameof(LocalArchiveSessionFact.Revision))!.SetValue(fact, revision);
+    }
+
+    private static void MutateFact(
+        LocalArchiveRepositoryFact fact,
+        string repositoryId,
+        LocalArchiveState state,
+        long revision)
+    {
+        typeof(LocalArchiveRepositoryFact).GetProperty(nameof(LocalArchiveRepositoryFact.RepositoryId))!.SetValue(fact, repositoryId);
+        typeof(LocalArchiveRepositoryFact).GetProperty(nameof(LocalArchiveRepositoryFact.State))!.SetValue(fact, state);
+        typeof(LocalArchiveRepositoryFact).GetProperty(nameof(LocalArchiveRepositoryFact.Revision))!.SetValue(fact, revision);
+    }
+
     private sealed record FakeSessionRow(string SessionId, string OpaqueValue) : ILocalRepositorySessionSnapshotRow;
 
     private sealed class MutableSessionRow(string first, string later) : ILocalRepositorySessionSnapshotRow
@@ -1368,6 +1432,27 @@ public sealed class LocalRepositoryScopeSnapshotTests
             EnumerationAttempts++;
             throw new InvalidOperationException("Enumeration is not allowed");
         }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private sealed class NextReadMutatingList<T>(
+        IReadOnlyList<T> items,
+        Action<T> mutatePrevious) : IReadOnlyList<T>
+    {
+        public int Count => items.Count;
+        public T this[int index]
+        {
+            get
+            {
+                if (index > 0)
+                    mutatePrevious(items[index - 1]);
+                return items[index];
+            }
+        }
+
+        public IEnumerator<T> GetEnumerator() =>
+            throw new InvalidOperationException("Enumeration is not allowed");
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
