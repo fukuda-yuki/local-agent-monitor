@@ -776,10 +776,13 @@ request time. Missing or invalid legacy authority is blocked and read denied;
 it is never replaced with current, import, restore, file, or reconciliation
 time.
 
-Reads require a matching readable catalog revision, exact source item, and an
-active read lease. Expiry first commits irreversible `read_denied_at`, then
-queues cleanup. A failed retry, restart, clock change, repair, or source absence
-never restores readability. Queueing is idempotent by `item_id`; scan/claim
+New-read admission requires a matching readable catalog revision and exact
+source item. Post-commit consumption instead requires the immutable admitted
+capability plus its exact active read lease and never rereads the current
+catalog revision or lifecycle. Expiry first commits irreversible
+`read_denied_at`, then queues cleanup. A failed retry, restart, clock change,
+repair, or source absence never restores new-read eligibility. Queueing is
+idempotent by `item_id`; scan/claim
 order is `expires_at ASC, item_id ASC`, with finite v1 limits (100 items, 30 s
 scan, 2 workers, 5 attempts). Deletion requires an exact source identity,
 adapter-owned ownership receipt, expected revision, and deletion lease. No
@@ -800,28 +803,34 @@ The shared read foundation is initialized explicitly for a newly owned database
 or adopted explicitly from an existing v1 catalog; ordinary reads never create
 or migrate a database. Adoption validates the catalog component version and
 database identity and reports only `retention_catalog_unavailable` on a missing
-or invalid catalog. A read holds one `BEGIN IMMEDIATE` SQLite transaction while
-it validates catalog state and receipt, creates its bounded access/operation
-lease, and fully materializes the selector result. Retention owns the
-authoritative clock: single and fixed-batch admission take their initial sample
-immediately after that transaction begins; selected-batch admission takes its
-initial sample after candidate selection while the transaction remains held.
-Every mode samples again after selector materialization and before commit so an
-expiry boundary crossed during selection is denied. Caller timestamps are
+or invalid catalog. Admission holds one `BEGIN IMMEDIATE` SQLite transaction
+while it validates catalog state and receipt, enumerates metadata-only
+candidates, prepares the hidden handle/notification/cleanup resources, and
+creates the bounded access/operation lease. Except for the fixed generic Session
+adapter below, it never selects a raw content column or publishes a value.
+Retention owns the authoritative clock: single and fixed-batch admission take
+their initial sample immediately after that
+transaction begins; selected-batch admission takes its initial sample after
+metadata candidate selection while the transaction remains held. Every ordinary
+mode samples again immediately before the all-or-none lease insert and commit so
+an expiry boundary crossed during admission is denied. The generic Session
+adapter instead performs its inaccessible content selection before the final
+clock/item/source/type recheck described below. Caller timestamps are
 scheduling evidence only and cannot advance or backdate admission, denial, or
-the full two-minute lease expiry. The selector receives only
-an opaque capability that binds the exact ownership token, catalog item/revision,
-and lease owner/generation predicates. The transaction commits before a value
-is returned; a null selector result, expiry boundary, stale revision, or failed
-commit returns no value. SQLite busy/locked returns `busy` without changing
-lifecycle or error state.
+the full two-minute lease expiry. A committed lease remains hidden until its
+store-backed handle-publication fence wins; except for the generic Session
+adapter's inaccessible precommit buffer, raw materialization then occurs only in
+the separate fixed consumption operation described below. An empty,
+metadata/shape, expiry-boundary, stale-revision, preparation, publication, or
+failed-commit result returns no raw value. SQLite busy/locked returns `Busy`
+without an unauthorized publication.
 
 All production reads of `raw_records` that materialize `payload_json` or
 `resource_attributes_json` use this boundary. Multi-record raw reads acquire
 one composite lease inside that same transaction: a denied, stale, missing, or
-busy member returns no partial value and no synthetic marker. Callers keep the
-returned lease until their actual raw use completes, then dispose it exactly
-once.
+busy member returns no partial handle/value and no synthetic marker. Callers
+keep the published composite handle and its use references through the actual
+raw use and one terminal arm; disposal alone is not publication authority.
 
 Issue #154 Skill reprojection is one such composite operation. Its generation
 persists the exact ordered raw identity/digest frontier before a worker runs.
@@ -852,8 +861,11 @@ An access or operation lease whose shared-read transaction commits before the
 item expiry boundary keeps its bounded lease duration across that boundary.
 Expiry still denies every new read and queues cleanup at the exact policy
 timestamp, but deletion claim remains quiescent until the admitted lease is
-released or expires. A selector that reaches expiry before commit remains
-denied and receives no lease.
+released or expires. An admission that reaches item expiry at its final sample
+inserts no lease; ordinary admission has selected no raw. The generic Session
+adapter may hold only its inaccessible internal buffer at that point; a failed
+final clock/item/source/type recheck rolls back its uncommitted lease and
+discards that buffer.
 
 ### Read admission, grant consumption, renewal, and release
 
@@ -937,6 +949,11 @@ commits exactly `renewal_at + 2 minutes` with no item-expiry cap.
 `renewal_at` is the one trusted catalog/queue-owner clock sample taken after the
 caller's `BEGIN IMMEDIATE` succeeds; a caller-supplied timestamp cannot override
 it or resurrect authority that expired while waiting for the transaction.
+An expiring renewal may commit only when its state remains `expiring`, denial is
+null, and that authoritative commit sample is strictly before item `expires_at`;
+at or after item expiry it returns `not_renewed` without changing the old grant.
+A pinned renewal ignores historical item expiry while its exact current
+admission proofs hold.
 Acquisition and successful renewal always receive the full two-minute
 duration, even when it crosses an expiring item's policy expiry. A failed due
 proof or renewal never shortens the existing grant: the admitted lease
@@ -944,6 +961,33 @@ remains consumable to its published expiry. Pin/unpin/delete/cleanup revision
 changes make an admitted grant nonrenewable but do not revoke it. Release
 matches only item/kind/owner/generation and never current item revision,
 state, or expiry.
+
+Renewal prebuilds and synchronously arms one dormant, monotonically numbered
+next expiry-notification generation while holding the transaction and grant
+publication scope, then compare-and-swap updates the exact persisted lease
+expiry. Construction, arming, checked-add, update, or commit failure publishes
+no new expiry/generation, rolls back with exact `not_renewed` and no exception,
+disposes the dormant resource, and leaves the old row, published expiry, and
+armed notification unchanged. A dormant callback may
+record `due` but cannot touch the handle before activation. After commit, still
+under the publication scope, one infallible compare-and-swap publishes the new
+expiry/generation, activates the replacement, and invalidates/disposes the old
+notification. If the replacement was already due, activation loses the whole
+handle and exact-releases the renewed lease or transfers it to mandatory cleanup
+instead of publishing an unguarded generation. A callback may mark a handle lost
+only when its generation is still current and its time is at or after the
+published expiry; every old or racing callback is a stale no-op. Composite
+renewal prebuilds/arms, commits, publishes, activates, and swaps every member in
+canonical frontier order all-or-none; an already-due member loses and releases
+the complete composite.
+
+The #158 current-file consumer never renews its operation lease. Its one
+notification remains bound to the original admitted two-minute expiry and is
+never rescheduled. A terminal result won strictly before expiry disposes that
+notification; a racing or later callback is a stale no-op and cannot tag loss,
+cancel work, retract the terminal result, or prevent the already-authorized
+runtime seal/send. A notification or terminal sample at or after expiry wins
+`lost` and cancels only that Retention-tagged current-file work.
 
 SQLite transaction order is always `BEGIN IMMEDIATE` first, then grant
 publication locks acquired in persisted canonical frontier order; release
@@ -960,6 +1004,207 @@ succeeds despite the current state/revision/denial while the deletion claim
 stays quiescent; consumption at the exact lease expiry fails; the claim then
 becomes eligible and `deleting` advances the original item revision total to
 +3.
+
+### Raw-read publication and terminal authority
+
+Every nonempty access/operation raw read separates admission, consumption, and
+caller-visible publication. Candidate enumeration is metadata-only. A valid
+zero-member request returns the owner's exact empty value with disposition
+`Empty`; it creates no lease, hidden handle, expiry notification, source token,
+use reference, or terminal operation. `Empty` is not a granted or lifecycle-
+denied read.
+
+After metadata candidate selection and exact source/owner/receipt/revision
+proofs, every ordinary admission takes one final clock sample for the complete
+frontier and derives the common checked `sample + 2 minutes` lease expiry before
+insertion. The generic Session adapter takes the same final sample and proofs
+after its inaccessible content selection but before commit. If any expiring
+member crossed its item expiry, no member lease commits: only those crossed
+expiring members take their exact `DenyAndQueue` transition at that sample,
+pinned or unexpired siblings remain unchanged, and the Session exception also
+discards its buffer. Checked-add overflow rolls the whole transaction back as
+`SelectorUnavailable` with no denial mutation. Before any lease may commit,
+Retention constructs every hidden handle, dormant expiry notification, and
+mandatory cleanup-ownership record. Preparation failure is
+`SelectorUnavailable` and rolls back without a lease or raw value. Otherwise
+the complete frontier commits all-or-none at the common derived expiry.
+
+After the all-or-none lease insert commits, the handle remains hidden; except
+for the generic Session adapter's inaccessible internal buffer, no raw selector
+has run and no selected value exists. Retention activates/arms every prebuilt
+expiry notification. Any activation/arm failure marks every hidden member lost,
+disposes every prepared notification, and synchronously exact-releases the
+complete committed frontier in one transaction; release contention transfers
+the exact tuples to mandatory hidden-lease cleanup. It exposes no exception,
+handle, value, or partial authority.
+
+After successful activation, Retention runs one store-backed publication fence:
+`BEGIN IMMEDIATE`, then the Monitor publication scope, then—while both are
+held—a fresh Retention-owned clock sample, proof of the exact live lease item/
+kind/owner/generation and persisted expiry, and proof of the immutable admitted
+store/source/owner-token capability. The notification and fence atomically
+compete on the hidden handle state. Only a strictly pre-expiry equal proof
+publishes the handle. Missing/mismatched facts, equal/after expiry,
+cancellation, notification loss, or SQLite begin/query/commit contention or
+failure publish no handle or value, return `Busy` for the store failure arm, and
+synchronously exact-release the committed lease or transfer it to the mandatory
+hidden-lease cleanup record. A batch publishes, loses, and cleans every member
+together.
+
+After any such transfer, no caller owns or may use the hidden handle, lease, or
+notification. The prebuilt mandatory cleanup owner disposes remaining
+notification resources and retries every exact lease tuple until deletion or a
+cleanup-produced stale no-op; it never returns authority to the caller.
+
+Raw selection is a separate consumption transaction under that published
+handle. It proves `grant_usable`, binds the selected source row to the immutable
+admitted capability before reading raw columns, buffers the complete owner-
+bounded value, and proves `grant_usable` again before publishing the value to a
+fixed mapper. The mapper must hold a committed-handle use reference across
+every buffer access. Expiry, cancellation, or release closes new references and
+drains existing references before the buffer is zeroed. A post-grant query,
+content, mapper, or type contradiction is `ConsumptionUnavailable`, discards
+the value, and retains the same handle for terminal completion.
+
+The generic Session raw-content path is the sole stronger pre-publication
+adapter. Inside one Session-owned `BEGIN IMMEDIATE`, it proves the exact Event
+identity/type before lease or content access; missing or `skill.invoked` exits
+before either operation. Only a non-Skill Event may insert its exact access
+lease and select content in that same transaction. No value escapes until the
+Session owner takes its final Retention clock sample, rechecks the exact item,
+source, and Event type, commits the transaction, and both the hidden-handle and
+value-publication fences win. A concurrent type change cannot commit between
+policy admission and selection. This is not a general selector/delegate or
+Skill-content authority.
+
+The complete internal read taxonomy is closed:
+
+- `Empty`: valid zero-member result; no handle or terminal call;
+- `LifecycleDenied`: only admission lifecycle/source/ownership denial;
+- `SelectorUnavailable`: pre-grant metadata, shape, checked-time, or hidden-
+  resource preparation failure;
+- `ConsumptionUnavailable`: post-grant query/content/mapper contradiction;
+- `LeaseLost`: committed authority lost at handle/value publication; and
+- `Busy`: SQLite contention.
+
+Historical, generic Session, raw trace/detail/page, and analysis-run HTTP reads
+use access handles. #158 current-file and every existing operation-scoped raw
+HTTP read use operation handles; current-file keeps the fixed nonrenewing arm
+above. Every caller-visible raw HTTP owner fully buffers its exact entity without
+starting the response, then calls exactly one terminal operation on the same
+handle:
+
+- `TrySealRawResponse()` for a raw-derived entity; or
+- `TryCompleteWithoutRaw()` after discarding all raw buffers and closing every
+  use reference for an already-determined safe/nonraw entity.
+
+The only successful internal results are `sealed` and
+`completed_without_raw`. Missing/mismatched lease facts, cancellation, or a
+Retention-owned sample at or after the published expiry returns `lost`;
+SQLite begin/query/commit contention or failure returns `busy`. `lost|busy`
+authorizes no substitute status, header, or entity: the HTTP owner discards the
+already-buffered entity, closes every use reference, and aborts the transport
+with zero response. Ordinary disposal/release is never publication authority.
+
+Response-free Skill Projection, Local Repository, analysis-result publication,
+migration, and diagnostic consumers retain their existing atomic publication or
+commit fence and prove the exact live grant at that fence. They never substitute
+disposal lifetime for publication authority; a lost grant publishes nothing and
+the nonpublishing consumer completes/releases the same handle fail closed.
+
+Both terminal methods first perform one lock-free per-handle
+`open -> terminal_attempt_in_progress` compare-and-swap while holding neither
+SQLite nor a Monitor publication scope. Only that winner may synchronously
+enter `BEGIN IMMEDIATE`, then acquire the existing Monitor publication scope,
+prove the exact live lease and persisted expiry equal to the published expiry,
+recheck the claimed terminal state, and sample the Retention clock exactly
+once. No caller time or validate-then-seal split is accepted. A renewal
+committed before the claim is observed remains visible to the terminal proof;
+renewal after observing the claimed state is denied without publication.
+Cancellation, release, or expiry may win `lost`. No path acquires the Monitor
+scope without the transaction first, and neither scope crosses `await` or HTTP
+I/O.
+
+`TrySealRawResponse()` sets an irreversible sealed-pending terminal/refcount
+state only while the complete `grant_usable` proof remains true strictly before
+expiry, commits the transaction, and then publishes `sealed`. It drops the
+database and publication scopes before permitting one already-buffered send or
+discard. It extends no lease and permits no later raw read, renewal, or reuse.
+Final release runs exactly once after send/discard and deletes the exact lease
+or accepts cleanup's stale no-op.
+
+`TryCompleteWithoutRaw()` applies the same proof and clock sample, marks the
+handle completed-pending, deletes the exact lease in that transaction, commits,
+publishes `completed_without_raw`, and only then permits the fixed safe result.
+A transaction that cannot begin or complete rolls back its database changes,
+makes any pending or claimed terminal attempt irreversibly `failed`, and returns
+`busy`; it cannot be retried, reopened, renewed, or reused. Its idempotent final
+release still runs exactly once.
+
+`RetentionBatchReadLease<T>` owns one composite terminal state over the complete
+canonical member frontier. A terminal call wins the composite CAS, opens one
+transaction, acquires every member publication scope in canonical order, proves
+every exact live lease against one clock sample, and moves the composite plus
+all members to sealed-pending or completed-pending atomically. The commit then
+publishes every final result all-or-none. Completion deletes all member leases
+in that transaction; sealing retains them only for exact final release. Any
+member loss or mismatch loses the whole entity; any transaction failure rolls
+back the partial rows, leaves the claimed composite irreversibly failed, and is
+`busy`. Loss or failure discards the complete buffered entity and final release
+deletes every exact member lease, or accepts cleanup's stale no-op, exactly once
+in canonical frontier order. Renewal, cleanup, and expiry race the same
+composite CAS and ordered scopes. Partial or first-member-only terminal
+authority does not exist.
+
+Raw-local replay exposes two additional one-shot terminal operations over this
+same state machine:
+
+- `TrySealRawReplayTransientPublication()` permits exactly one memory-only
+  transient-store commit after a successful capacity reservation; and
+- `TrySealRawReplayFilePublication()` returns a single-use ticket for exactly
+  one same-directory non-overwrite move of an already validated staged file.
+
+Preview and retained-result safe outputs use `TryCompleteWithoutRaw`. Every
+post-grant branch that cannot reach its named seal first discards raw/staging
+state and completes without raw. A transient reservation is prepared before
+the seal and committed infallibly after it; no transient-store lock crosses the
+Retention terminal scope. A CLI file is completely written, flushed, and
+inspected before the seal; only the sealed ticket may perform the final move.
+All losing arms cancel/delete their private staging and publish no raw/staged
+path or byte and no reusable authority. Prescribed fixed safe CLI failure bytes
+remain gated by successful completion or the exact terminal-loss mapping.
+
+### Snapshot equality-replay validation exception
+
+The validation-only `SkillInvocationSnapshotReplayValidator` is the sole
+exception to ordinary lease-backed raw consumption. It is reachable only after
+an exact #158 equality-receipt fingerprint hit and returns only `valid`,
+`fingerprint_mismatch`, `invalid`, or `busy` to the replay coordinator.
+
+`ValidateAsync` opens one validation-only `BEGIN IMMEDIATE`, rechecks the
+receipt, samples one nonpersisted Retention-owned `validation_at` only for an
+equal fingerprint, and evaluates `row_readable(validation_at)` inside that same
+snapshot. Its reserved lock serializes cleanup, and the validation-only
+transaction ends without committing a mutation. A readable exact owner graph
+may select and fully reclassify/digest-check the canonical Session content
+document without inserting a lease. An owner-valid expired/read-denied/cleanup
+row that still retains raw selects no raw and is `invalid`. An exact deleted
+item selects no raw and may be `valid` only after proving the absent content row
+and exact tombstone graph. Source, owner, receipt, or graph contradiction is
+`invalid`; SQLite contention is `busy`. The validator performs zero writes and
+exposes no raw value.
+
+`ValidateInTransactionAsync` is the sole race-entry variant. It receives #158's
+already-open exact connection and `BEGIN IMMEDIATE` transaction, rechecks the
+receipt/fingerprint, and invokes the same validation core. It opens no
+connection or nested transaction and never commits or rolls back; #158 owns the
+enclosing zero-write rollback for every 204/409/503 mapping, and that existing
+reserved lock supplies the same cleanup serialization. A different
+fingerprint returns `fingerprint_mismatch` without a clock sample. Raw values
+remain stack-confined, are never returned/cached/logged/measured, and are
+released before the transaction ends. Receipt miss/difference and normal reads
+cannot call either entry point, and this exception cannot serve first writes,
+routes, projection, analysis, migration, backup export, or another component.
 
 The immutable Issue #89 kickoff and inventory base are both
 `11d6c587903f6ea97026d815f608231efea08d65`. The checked-in current-callsite

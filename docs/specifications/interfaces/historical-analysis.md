@@ -43,6 +43,30 @@ reselected. GET operations are reads. The POST operations require same-origin
 and `x-monitor-csrf: local-monitor`; cross-origin is `403 cross_origin_forbidden`
 and a missing token is `403 csrf_required`.
 
+Any historical-analysis operation that actually acquires Retention-authorized
+raw input keeps the exact access handle and all mapper/use references through
+complete owner input/derived-result construction and safe result buffering.
+Public historical-analysis responses remain repository-safe and never contain
+that raw input. A response-producing owner therefore discards every raw buffer,
+closes/drains all mapper/use references, and calls the same handle's
+`TryCompleteWithoutRaw()` before publishing any post-grant success or fixed safe
+failure. Only `completed_without_raw` may send the existing entity; terminal
+`lost|busy` aborts that request's HTTP transport with zero status/header/entity
+and cannot be remapped to `evidence_expired`, `provider_unavailable`, or store
+unavailable. Pre-admission empty/denied/unavailable outcomes keep their existing
+mappings and make no terminal call.
+
+The existing raw-analysis
+`GET /traces/{traceId}/analysis/runs/{runId}` remains outside this repository-
+safe API family and keeps its existing owner/schema. Its route/application owner
+fully buffers an exact raw-derived entity under its access handle and calls
+`TrySealRawResponse()` before response start; only `sealed` sends. A post-grant
+safe result first discards raw, closes/drains references, and requires
+`completed_without_raw`. Terminal `lost|busy` discards the buffered entity and
+aborts with zero response. Caller abort also discards the entity/references and
+closes the transport with zero status/header/entity. Disposal lifetime alone is
+not publication authority.
+
 ## HTTP v1 DTOs
 
 All objects below have exactly the listed properties in the listed order.

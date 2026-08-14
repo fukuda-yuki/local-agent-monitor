@@ -799,6 +799,28 @@ is a frozen lossy projection: `expiring` and `retained_by_policy` map to
 existing enum, status codes, JSON property names, and exact UTF-8 404/410 bytes
 remain unchanged. Pin, unpin, and delete-now remain Issue #90 scope.
 
+For a granted non-Skill raw-content read, the Session owner retains the exact
+access handle and every content-buffer use reference through complete response
+serialization. It calls the shared Retention `TrySealRawResponse()` strictly
+before response start; only `sealed` may send the unchanged 200 entity.
+A post-grant content/query/mapper contradiction first discards content, closes
+its use references, and calls `TryCompleteWithoutRaw()`; only
+`completed_without_raw` may send the exact
+`503 {"error":"session_store_unavailable"}` entity. A terminal `lost|busy` or
+caller abort discards the buffered entity, closes every use reference, starts no
+status, header, or entity, and closes the transport. Exact Event missing,
+`skill.invoked`, and lifecycle-denied 404/410 remain entirely before lease/
+content selection with their existing bytes. Pre-grant SQLite `Busy` keeps the
+exact `503 {"error":"session_store_busy"}` entity; pre-grant
+`SelectorUnavailable` uses the exact
+`503 {"error":"session_store_unavailable"}` entity without a terminal call.
+Committed hidden-handle or value-publication `LeaseLost|Busy` is post-admission
+and takes only the zero-response discard/close branch. The allowed non-Skill
+branch is the sole metadata-only-admission exception: its uncommitted lease and
+inaccessible content selection precede the final Retention clock/item/source/
+type recheck; failure rolls back that lease and discards the buffer. No
+disposal-only or current-row recheck is response authority.
+
 ## Issue #90 Compatibility Note
 
 Issue #90 adds no field, enum, status code, or route change to workspace v1.

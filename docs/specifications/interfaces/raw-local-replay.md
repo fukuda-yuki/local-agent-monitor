@@ -111,16 +111,40 @@ an exact `session_runs.trace_id` to `monitor_spans.trace_id` relationship for
 the named Session. Repository, workspace, path, time proximity, prompt text,
 generic adapter label, and similarity never select or merge data.
 
-The provider resolves the whole selected ID set and materializes raw records
-under one Retention catalog v1 composite `operation` lease. Any missing, denied,
-expired, stale, busy, or changed member fails the whole snapshot. No partial
-bundle is success. When `include_session_content` is true, Session IDs are
-required and exact Session Event content is materialized in the same all-or-none
-operation boundary; otherwise the manifest records it as known missing. Export
+The provider first resolves the whole selected ID set and projects its length
+preflight from metadata only, then acquires one Retention catalog v1 composite
+`operation` handle. Only after that hidden handle is published does its fixed
+consumption operation materialize raw records. Any missing, denied, expired,
+stale, busy, or changed member fails the whole snapshot. No partial bundle is
+success. When `include_session_content` is true, Session IDs are required and
+exact Session Event content is materialized under that same all-or-none
+operation handle; otherwise the manifest records it as known missing. Export
 preserves original raw IDs, receive timestamps, Session event IDs/timestamps,
 and observed source/adapter/schema/content provenance. It never exports catalog
 tokens, leases, private locators, unrelated runtime state, or external provider
 configuration.
+
+A valid zero-member selection is the explicit Retention `Empty` result and may
+build only the unchanged empty preview/archive bytes. It creates no lease,
+Retention authority, hidden handle, expiry notification, source token,
+mapper/use reference, or terminal call; it is never a vacuous grant. Every
+nonempty selection retains its one composite operation handle through its named
+terminal result. Member use references remain open
+through every raw access, graph/credential validation, archive/preview
+construction, and private staging that needs them. A seal arm keeps them through
+its candidate construction; a completion-without-raw arm first discards raw and
+closes every use reference. No representative member, disposal lifetime, or
+current-row recheck authorizes publication.
+
+Every post-grant branch that cannot reach its named seal—including raw-derived
+archive, credential, post-materialization bounds/inspection, reservation, and
+file-publication failures—discards raw/private staging, closes use references,
+and calls the same handle's `TryCompleteWithoutRaw()`. Only
+`completed_without_raw` may publish the original fixed safe result. HTTP
+terminal `lost|busy` aborts with zero response; direct CLI terminal `lost|busy`
+instead serializes that mode's unchanged complete failure DTO (`RawReplayPreview`
+or `RawReplayResultView`), emits `snapshot_read_denied|snapshot_store_busy`, and
+returns nonzero.
 
 The same SQLite snapshot must project the UTF-8 byte length of every selected
 raw payload and Session-content value before payload materialization or any
@@ -149,6 +173,28 @@ Cleanup may remove only that invocation-owned partial; a pre-existing or
 concurrent sibling partial is never removed or replaced. A failure leaves no
 successful artifact from that invocation; a losing concurrent invocation does
 not remove the independently published artifact of the winner.
+
+For a nonempty granted selection, Config CLI publication fully writes, flushes,
+and inspects that hidden same-directory file before calling
+`TrySealRawReplayFilePublication()`. Only `sealed` returns the single-use ticket
+that permits the exact non-overwrite move to the already validated destination.
+Pre-capture commit-control and `output_name_invalid` failures have no handle and
+make no terminal call. After a nonempty grant, every raw-derived archive,
+credential, post-materialization bound/inspection, `output_exists`, parent,
+temporary-name, create, write, or flush failure discards the raw buffers, deletes
+the invocation-owned partial, closes use references, and calls
+`TryCompleteWithoutRaw()`. Only `completed_without_raw` may preserve that
+pending failure DTO/token. Parent/temporary-name/create/write/flush failure is
+exact `publish_failed`; staged-file inspection failure is exact
+`publish_validation_failed`. Completion or seal `lost|busy` instead deletes
+staging and replaces the pending error with the unchanged complete failure
+`RawReplayResultView` plus `snapshot_read_denied|snapshot_store_busy`; no file or
+replacement is published. After `sealed`, the single-use non-overwrite move is
+the publication point; a move failure deletes the partial, exact-releases the
+ticket/terminal reference, and is exact `publish_failed`. Move success also
+exact-releases once. Every `CreateAndPublishAsync` failure serializes the
+unchanged complete `RawReplayResultView` with its failure Preview and null
+archive hash to stdout before its error token and nonzero exit.
 
 Closed payload paths are `records/record-NNNNNN.json` and
 `session-content/content-NNNNNN.json`; filenames never contain source IDs,
@@ -216,6 +262,15 @@ duplicate source IDs with different bytes/provenance are
 `source_id_conflict`. Any conflict or staging failure publishes no readable
 namespace and never partially overwrites an existing one.
 
+A handle-derived retained-result read keeps its operation handle/use reference
+through complete result validation and safe serialization, then discards raw
+state, closes the use reference, and calls `TryCompleteWithoutRaw()`. Only
+`completed_without_raw` may return the unchanged GET result or idempotent/racing-
+existing POST result. Pre-admission denied/busy keeps the exact
+`replay_store_denied|replay_store_busy` 503 mapping; post-admission `lost|busy`
+aborts with zero response. Caller-supplied bundle-only Config CLI result reads
+that acquire no Retention handle remain outside this rule.
+
 Session-content source identity is the ordinal tuple (`source_adapter`,
 `source_event_id`), not the local Session `event_id`. Equal source identity with
 different canonical bytes is `source_id_conflict`; equal local event IDs with
@@ -259,6 +314,34 @@ creation, and are swept at least once per minute even while no request arrives.
 Insertion evicts expired entries and then the oldest entries deterministically
 until both limits hold. A missing or evicted export is 404; an expired or evicted
 replay preview is `preview_expired`. Process shutdown clears the store.
+
+For a nonempty grant, Preview buffers only the existing preview DTO/digest; it
+creates no raw archive, content artifact, or transient entry. After discarding
+its raw snapshot buffers and closing every use reference, it calls
+`TryCompleteWithoutRaw()`; only
+`completed_without_raw` may return the unchanged preview to Local Monitor or
+direct CLI stdout. HTTP preview terminal `lost|busy` aborts with zero response.
+Direct CLI `PreviewAsync` instead serializes its unchanged complete failure
+`RawReplayPreview` to stdout, including the fixed warning/classification/profile/
+zero/null fields, then emits `snapshot_read_denied|snapshot_store_busy` and
+returns nonzero.
+
+For a nonempty granted transient archive publication, the store first performs
+`PreparePut` under its own lock. It validates complete buffers/bounds, disposed
+state and existing expiry rules, then reserves capacity plus the deterministic
+eviction plan without exposing an entry. Reservation accounting prevents a
+competing insert from consuming that capacity; shutdown/dispose drains or
+rejects reservations. After releasing the lock, the owner calls
+`TrySealRawReplayTransientPublication()`. `lost|busy` discards the buffers,
+closes use references, cancels the reservation, and aborts with zero response.
+`sealed` permits exactly one infallible `CommitPut` that applies the reserved
+evictions, samples the ten-minute entry expiry, and atomically inserts the sole
+memory-only entry; no store lock is held across the Retention terminal
+transaction. A `PreparePut` refusal creates no reservation and first requires
+`completed_without_raw` before returning the unchanged `archive_too_large`;
+terminal loss/busy aborts. For every successfully created reservation exactly
+one cancel or commit and one terminal release occurs. Process termination before
+commit publishes no response or entry.
 
 Errors are fixed `{"error":"<code>"}` bodies. Invalid request/profile/schema is
 400; a body with an unsupported media type is 415; cross-origin/CSRF/consent/
