@@ -12,7 +12,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     private const int DefaultBusyTimeoutMilliseconds = 5_000;
     private readonly string databasePath;
     private readonly ILocalRepositorySessionSnapshotContributor sessionContributor;
-    private readonly ILocalArchiveEligibilitySnapshotContributor archiveContributor;
+    private readonly ILocalArchiveFactSnapshotContributor archiveContributor;
     private readonly int busyTimeoutMilliseconds;
     private readonly Action<int>? compositionObserver;
     private readonly Func<ValueTask>? capabilityEntryObserver;
@@ -25,7 +25,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     internal SqliteLocalRepositoryScopeSnapshotService(
         string databasePath,
         ILocalRepositorySessionSnapshotContributor sessionContributor,
-        ILocalArchiveEligibilitySnapshotContributor archiveContributor,
+        ILocalArchiveFactSnapshotContributor archiveContributor,
         int busyTimeoutMilliseconds = DefaultBusyTimeoutMilliseconds,
         Action<int>? compositionObserver = null,
         Func<ValueTask>? capabilityEntryObserver = null,
@@ -79,14 +79,15 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 cancellationToken.ThrowIfCancellationRequested();
                 var sessionRows = ValidateAndFreezeSessionRows(sessionContribution, cancellationToken);
 
-                var catalog = await capability.RunCatalogAsync(
+                var catalogRead = await capability.RunCatalogAsync(
                     (currentConnection, currentTransaction, token) =>
                         ReadCatalogAsync(currentConnection, currentTransaction, sessionRows, catalogRowObserver, token),
                     cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
+                var catalog = ValidateAndFreezeCatalog(catalogRead, cancellationToken);
 
                 if (request.ScopeKind == LocalRepositoryScopeKind.Repository
-                    && !catalog.Repositories.Any(item => item.RepositoryId == request.RepositoryId))
+                    && !catalog.RepositoryById.ContainsKey(request.RepositoryId!))
                 {
                     throw new InvalidOperationException("local_repository_scope_repository_not_found");
                 }
@@ -102,6 +103,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 var archive = ValidateAndFreezeArchive(
                     archiveContribution,
                     archiveInput.SessionIds,
+                    catalog,
                     cancellationToken);
 
                 var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
@@ -189,27 +191,73 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         return frozen.OrderBy(item => item.SessionId, StringComparer.Ordinal).ToArray();
     }
 
-    private static IReadOnlyDictionary<string, LocalArchiveSessionEligibility> ValidateAndFreezeArchive(
-        LocalArchiveEligibilityContribution contribution,
-        IReadOnlyList<string> exactSessionIds,
+    private static FrozenCatalog ValidateAndFreezeCatalog(
+        CatalogContribution contribution,
         CancellationToken cancellationToken)
     {
-        if (contribution?.Sessions is null || contribution.Sessions.Count != exactSessionIds.Count)
-            throw new InvalidOperationException("local_archive_eligibility_contribution_invalid");
-        var expected = exactSessionIds.ToHashSet(StringComparer.Ordinal);
-        var result = new Dictionary<string, LocalArchiveSessionEligibility>(StringComparer.Ordinal);
+        var repositories = new FrozenRepository[contribution.Repositories.Count];
+        var repositoryById = new Dictionary<string, FrozenRepository>(contribution.Repositories.Count, StringComparer.Ordinal);
+        string? previousRepositoryId = null;
+        for (var index = 0; index < contribution.Repositories.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var item = contribution.Repositories[index];
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(item.RepositoryId)
+                || (previousRepositoryId is not null
+                    && StringComparer.Ordinal.Compare(previousRepositoryId, item.RepositoryId) >= 0))
+            {
+                throw new InvalidOperationException("local_repository_catalog_snapshot_invalid");
+            }
+            var frozen = new FrozenRepository(item.RepositoryId, item.DisplayName, item.Revision, item.CurrentLocatorId);
+            repositories[index] = frozen;
+            repositoryById.Add(frozen.RepositoryId, frozen);
+            previousRepositoryId = frozen.RepositoryId;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(
+            contribution.Assignments,
+            Array.AsReadOnly(repositories),
+            repositoryById);
+    }
+
+    private static FrozenArchive ValidateAndFreezeArchive(
+        LocalArchiveFactContribution contribution,
+        IReadOnlyList<string> exactSessionIds,
+        FrozenCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        if (contribution?.Sessions is null
+            || contribution.Repositories is null
+            || contribution.Sessions.Count != exactSessionIds.Count
+            || contribution.Repositories.Count != catalog.Repositories.Count)
+        {
+            throw new InvalidOperationException("local_archive_fact_contribution_invalid");
+        }
+        var expectedSessions = exactSessionIds.ToHashSet(StringComparer.Ordinal);
+        var sessions = new Dictionary<string, LocalArchiveSessionFact>(StringComparer.Ordinal);
         foreach (var item in contribution.Sessions)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (item is null || !expected.Contains(item.SessionId) || !result.TryAdd(item.SessionId, item)
-                || (item.IsEligible && item.ExclusionReason is not null)
-                || (!item.IsEligible && string.IsNullOrWhiteSpace(item.ExclusionReason)))
+            if (item is null
+                || !expectedSessions.Contains(item.SessionId)
+                || !sessions.TryAdd(item.SessionId, new(item.SessionId, item.State, item.Revision)))
             {
-                throw new InvalidOperationException("local_archive_eligibility_contribution_invalid");
+                throw new InvalidOperationException("local_archive_fact_contribution_invalid");
+            }
+        }
+        var repositories = new Dictionary<string, LocalArchiveRepositoryFact>(StringComparer.Ordinal);
+        foreach (var item in contribution.Repositories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (item is null
+                || !catalog.RepositoryById.ContainsKey(item.RepositoryId)
+                || !repositories.TryAdd(item.RepositoryId, new(item.RepositoryId, item.State, item.Revision)))
+            {
+                throw new InvalidOperationException("local_archive_fact_contribution_invalid");
             }
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return result;
+        return new(sessions, repositories);
     }
 
     private static async ValueTask<CatalogContribution> ReadCatalogAsync(
@@ -331,14 +379,11 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     private static LocalRepositoryScopeSnapshot Compose(
         LocalRepositoryScopeRequest request,
         IReadOnlyList<FrozenSession> sessionRows,
-        CatalogContribution catalog,
-        IReadOnlyDictionary<string, LocalArchiveSessionEligibility> archive,
+        FrozenCatalog catalog,
+        FrozenArchive archive,
         Action<int>? compositionObserver,
         CancellationToken cancellationToken)
     {
-        var repositoryIds = catalog.Repositories.Select(item => item.RepositoryId).ToHashSet(StringComparer.Ordinal);
-        if (repositoryIds.Count != catalog.Repositories.Count)
-            throw new InvalidOperationException("local_repository_catalog_snapshot_invalid");
         var conflictCounts = catalog.Repositories.ToDictionary(item => item.RepositoryId, _ => 0L, StringComparer.Ordinal);
         var sessions = new List<LocalRepositoryScopeSessionSnapshot>(sessionRows.Count);
         for (var index = 0; index < sessionRows.Count; index++)
@@ -349,7 +394,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             if (!catalog.Assignments.TryGetValue(row.SessionId, out var assignment)
                 || assignment.AuthoritativeRevision is < 0
                 || assignment.Candidates.Any(candidate => !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(candidate)
-                    || !repositoryIds.Contains(candidate)))
+                    || !catalog.RepositoryById.ContainsKey(candidate)))
             {
                 throw new InvalidOperationException("local_repository_catalog_snapshot_invalid");
             }
@@ -366,7 +411,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     || assignment.AuthoritativeRevision != assignment.OverrideRevision
                     || assignment.AuthoritativeRevision < 1
                     || assignment.OverrideRepositoryId is null
-                    || !repositoryIds.Contains(assignment.OverrideRepositoryId))
+                    || !catalog.RepositoryById.ContainsKey(assignment.OverrideRepositoryId))
                     throw new InvalidOperationException("local_repository_catalog_snapshot_invalid");
                 revision = assignment.AuthoritativeRevision.Value;
                 state = LocalRepositoryScopeAssignmentState.Assigned;
@@ -432,7 +477,16 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 LocalRepositoryScopeKind.Unassigned => isUnassigned,
                 _ => false,
             };
-            var archiveFact = archive[row.SessionId];
+            var sessionArchiveFact = archive.Sessions[row.SessionId];
+            var repositoryArchived = repositoryId is not null
+                && archive.Repositories[repositoryId].State == LocalArchiveState.Archived;
+            var isEffectivelyEligible = sessionArchiveFact.State != LocalArchiveState.Archived
+                && !repositoryArchived;
+            var exclusionReason = sessionArchiveFact.State == LocalArchiveState.Archived
+                ? "session_archived"
+                : repositoryArchived
+                    ? "repository_archived"
+                    : null;
             sessions.Add(new(
                 row.SessionId,
                 row.Row,
@@ -444,8 +498,10 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 IsAllScopeMember: true,
                 IsUnassignedScopeMember: isUnassigned,
                 IsRequestedScopeMember: isRequested,
-                IsEffectivelyEligible: isRequested && archiveFact.IsEligible,
-                ArchiveExclusionReason: archiveFact.ExclusionReason));
+                ArchiveState: sessionArchiveFact.State,
+                ArchiveRevision: sessionArchiveFact.Revision,
+                IsEffectivelyEligible: isEffectivelyEligible,
+                ArchiveExclusionReason: exclusionReason));
         }
 
         var repositories = new LocalRepositoryCatalogSnapshot[catalog.Repositories.Count];
@@ -454,12 +510,15 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             compositionObserver?.Invoke(sessionRows.Count + index);
             cancellationToken.ThrowIfCancellationRequested();
             var item = catalog.Repositories[index];
+            var archiveFact = archive.Repositories[item.RepositoryId];
             repositories[index] = new(
                 item.RepositoryId,
                 item.DisplayName,
                 item.Revision,
                 item.CurrentLocatorId,
-                conflictCounts[item.RepositoryId]);
+                conflictCounts[item.RepositoryId],
+                archiveFact.State,
+                archiveFact.Revision);
         }
         cancellationToken.ThrowIfCancellationRequested();
         return new(request, Array.AsReadOnly(repositories), sessions.AsReadOnly());
@@ -716,7 +775,22 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         long Revision,
         string? CurrentLocatorId);
 
+    private sealed record FrozenRepository(
+        string RepositoryId,
+        string DisplayName,
+        long Revision,
+        string? CurrentLocatorId);
+
     private sealed record CatalogContribution(
         IReadOnlyDictionary<string, MutableAssignment> Assignments,
         IReadOnlyList<MutableRepository> Repositories);
+
+    private sealed record FrozenCatalog(
+        IReadOnlyDictionary<string, MutableAssignment> Assignments,
+        IReadOnlyList<FrozenRepository> Repositories,
+        IReadOnlyDictionary<string, FrozenRepository> RepositoryById);
+
+    private sealed record FrozenArchive(
+        IReadOnlyDictionary<string, LocalArchiveSessionFact> Sessions,
+        IReadOnlyDictionary<string, LocalArchiveRepositoryFact> Repositories);
 }

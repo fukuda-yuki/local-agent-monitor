@@ -15,16 +15,19 @@ public sealed class LocalRepositoryScopeSnapshotTests
     {
         using var database = new ScopeDatabase();
         database.AddRepository(RepositoryA, LocatorA, revision: 3);
-        var sessionId = SessionId(1);
-        database.SetRevision(sessionId, 4);
-        database.AddCandidate(sessionId, RepositoryA);
+        database.AddRepository(RepositoryB, LocatorB, revision: 5);
+        var assignedSessionId = SessionId(1);
+        var unassignedSessionId = SessionId(2);
+        database.SetRevision(assignedSessionId, 4);
+        database.AddCandidate(assignedSessionId, RepositoryA);
         var calls = new List<string>();
         SqliteConnection? sessionConnection = null;
         SqliteTransaction? sessionTransaction = null;
         SqliteConnection? archiveConnection = null;
         SqliteTransaction? archiveTransaction = null;
         LocalRepositoryArchiveInput? observedArchiveInput = null;
-        var row = new FakeSessionRow(sessionId, "opaque-session-row");
+        var assignedRow = new FakeSessionRow(assignedSessionId, "opaque-assigned-row");
+        var unassignedRow = new FakeSessionRow(unassignedSessionId, "opaque-unassigned-row");
         var session = new FakeSessionContributor(async (capability, _, cancellationToken) =>
         {
             calls.Add("session");
@@ -35,14 +38,14 @@ public sealed class LocalRepositoryScopeSnapshotTests
                 await ScalarAsync(connection, transaction, "SELECT value FROM session_snapshot_source;", token);
                 return true;
             }, cancellationToken);
-            return new([row]);
+            return new([unassignedRow, assignedRow]);
         });
         var archive = new FakeArchiveContributor(async (capability, input, cancellationToken) =>
         {
             calls.Add("archive");
             observedArchiveInput = input;
-            Assert.Equal([sessionId], input.SessionIds);
-            Assert.Equal([RepositoryA], input.RepositoryIds);
+            Assert.Equal([assignedSessionId, unassignedSessionId], input.SessionIds);
+            Assert.Equal([RepositoryA, RepositoryB], input.RepositoryIds);
             await capability.ReadAsync(async (connection, transaction, token) =>
             {
                 archiveConnection = connection;
@@ -50,7 +53,15 @@ public sealed class LocalRepositoryScopeSnapshotTests
                 await ScalarAsync(connection, transaction, "SELECT value FROM archive_snapshot_source;", token);
                 return true;
             }, cancellationToken);
-            return new([new(sessionId, true, null)]);
+            return new(
+                [
+                    new(unassignedSessionId, LocalArchiveState.Active, 2),
+                    new(assignedSessionId, LocalArchiveState.Archived, 3),
+                ],
+                [
+                    new(RepositoryB, LocalArchiveState.Archived, 1),
+                    new(RepositoryA, LocalArchiveState.Active, 2),
+                ]);
         });
         var openCount = 0;
         SqliteConnection? openedByService = null;
@@ -74,15 +85,26 @@ public sealed class LocalRepositoryScopeSnapshotTests
         Assert.Equal(1, openCount);
         Assert.False(observedArchiveInput!.SessionIds is string[]);
         Assert.False(observedArchiveInput.RepositoryIds is string[]);
-        Assert.Same(row, Assert.Single(snapshot.Sessions).Session);
+        Assert.Same(assignedRow, snapshot.Sessions[0].Session);
+        Assert.Same(unassignedRow, snapshot.Sessions[1].Session);
         Assert.Equal(4, snapshot.Sessions[0].AssignmentRevision);
         Assert.Equal(RepositoryA, snapshot.Sessions[0].RepositoryId);
         Assert.True(snapshot.Sessions[0].IsRequestedScopeMember);
-        Assert.True(snapshot.Sessions[0].IsEffectivelyEligible);
-        var repository = Assert.Single(snapshot.Repositories);
+        Assert.Equal(LocalArchiveState.Archived, snapshot.Sessions[0].ArchiveState);
+        Assert.Equal(3, snapshot.Sessions[0].ArchiveRevision);
+        Assert.False(snapshot.Sessions[0].IsEffectivelyEligible);
+        Assert.Equal("session_archived", snapshot.Sessions[0].ArchiveExclusionReason);
+        Assert.Equal(LocalArchiveState.Active, snapshot.Sessions[1].ArchiveState);
+        Assert.Equal(2, snapshot.Sessions[1].ArchiveRevision);
+        Assert.True(snapshot.Sessions[1].IsEffectivelyEligible);
+        var repository = snapshot.Repositories[0];
         Assert.Equal(3, repository.Revision);
         Assert.Equal(LocatorA, repository.CurrentLocatorId);
         Assert.Equal(0, repository.AssignmentConflictCount);
+        Assert.Equal(LocalArchiveState.Active, repository.ArchiveState);
+        Assert.Equal(2, repository.ArchiveRevision);
+        Assert.Equal(LocalArchiveState.Archived, snapshot.Repositories[1].ArchiveState);
+        Assert.Equal(1, snapshot.Repositories[1].ArchiveRevision);
         Assert.False(snapshot.Repositories is LocalRepositoryCatalogSnapshot[]);
         Assert.False(snapshot.Sessions is List<LocalRepositoryScopeSessionSnapshot>);
         Assert.False(snapshot.Sessions[0].CandidateRepositoryIds is string[]);
@@ -156,8 +178,12 @@ public sealed class LocalRepositoryScopeSnapshotTests
         var archive = new FakeArchiveContributor(async (capability, input, token) =>
         {
             await ReadArchiveTable(capability, token);
-            return new(input.SessionIds.Select(id =>
-                new LocalArchiveSessionEligibility(id, id != automatic, id == automatic ? "session_archived" : null)).ToArray());
+            return new(
+                input.SessionIds.Select(id => new LocalArchiveSessionFact(
+                    id,
+                    id == automatic ? LocalArchiveState.Archived : LocalArchiveState.Active,
+                    id == automatic ? 1 : 0)).ToArray(),
+                input.RepositoryIds.Select(id => new LocalArchiveRepositoryFact(id, LocalArchiveState.Active, 0)).ToArray());
         });
 
         var all = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, Sessions(rows), archive)
@@ -192,6 +218,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
 
         Assert.True(repositoryA.Sessions.Single(item => item.SessionId == automatic).IsRequestedScopeMember);
         Assert.False(repositoryA.Sessions.Single(item => item.SessionId == manual).IsRequestedScopeMember);
+        Assert.True(repositoryA.Sessions.Single(item => item.SessionId == manual).IsEffectivelyEligible);
         Assert.False(repositoryA.Sessions.Single(item => item.SessionId == conflict).IsRequestedScopeMember);
         Assert.Equal([unassigned, explicitlyUnassigned, conflict],
             unassignedScope.Sessions.Where(item => item.IsRequestedScopeMember).Select(item => item.SessionId));
@@ -392,7 +419,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
         {
             archiveValue = await capability.ReadAsync((connection, transaction, innerToken) =>
                 ScalarAsync(connection, transaction, "SELECT value FROM session_snapshot_source;", innerToken), token);
-            return new(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray());
+            return ActiveArchiveFacts(input);
         });
 
         var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
@@ -556,7 +583,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
                 archiveCatalogDenied = true;
                 return await ScalarAsync(connection, transaction, "SELECT value FROM archive_snapshot_source;", innerToken);
             }, token);
-            return new(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray());
+            return ActiveArchiveFacts(input);
         });
 
         var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
@@ -573,7 +600,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
         using var database = new ScopeDatabase();
         var sessionId = SessionId(1);
         var archive = new FakeArchiveContributor((_, input, _) => ValueTask.FromResult(
-            new LocalArchiveEligibilityContribution(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray())));
+            ActiveArchiveFacts(input)));
         var zeroRead = new SqliteLocalRepositoryScopeSnapshotService(
             database.Path,
             new FakeSessionContributor((_, _, _) => ValueTask.FromResult(
@@ -605,7 +632,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
             await Assert.ThrowsAsync<InvalidOperationException>(async () => await delayed);
             await capability.ReadAsync((connection, transaction, innerToken) =>
                 ScalarAsync(connection, transaction, "SELECT value FROM archive_snapshot_source;", innerToken), token);
-            return new(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray());
+            return ActiveArchiveFacts(input);
         });
         var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, phaseArchive)
             .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
@@ -827,9 +854,6 @@ public sealed class LocalRepositoryScopeSnapshotTests
     [InlineData("extra")]
     [InlineData("duplicate")]
     [InlineData("unknown")]
-    [InlineData("eligible_reason")]
-    [InlineData("ineligible_without_reason")]
-    [InlineData("ineligible_blank_reason")]
     public async Task ReadAsync_RejectsCorruptArchiveContribution(string corruption)
     {
         using var database = new ScopeDatabase();
@@ -841,18 +865,15 @@ public sealed class LocalRepositoryScopeSnapshotTests
         var archive = new FakeArchiveContributor(async (capability, input, token) =>
         {
             await ReadArchiveTable(capability, token);
-            IReadOnlyList<LocalArchiveSessionEligibility> facts = corruption switch
+            IReadOnlyList<LocalArchiveSessionFact> facts = corruption switch
             {
-                "missing" => [new(rows[0], true, null)],
-                "extra" => [new(rows[0], true, null), new(rows[1], true, null), new(SessionId(3), true, null)],
-                "duplicate" => [new(rows[0], true, null), new(rows[0], true, null)],
-                "unknown" => [new(rows[0], true, null), new(SessionId(3), true, null)],
-                "eligible_reason" => [new(rows[0], true, "unexpected"), new(rows[1], true, null)],
-                "ineligible_without_reason" => [new(rows[0], false, null), new(rows[1], true, null)],
-                "ineligible_blank_reason" => [new(rows[0], false, " "), new(rows[1], true, null)],
+                "missing" => [new(rows[0], LocalArchiveState.Active, 0)],
+                "extra" => [new(rows[0], LocalArchiveState.Active, 0), new(rows[1], LocalArchiveState.Active, 0), new(SessionId(3), LocalArchiveState.Active, 0)],
+                "duplicate" => [new(rows[0], LocalArchiveState.Active, 0), new(rows[0], LocalArchiveState.Active, 0)],
+                "unknown" => [new(rows[0], LocalArchiveState.Active, 0), new(SessionId(3), LocalArchiveState.Active, 0)],
                 _ => throw new InvalidOperationException(),
             };
-            return new(facts);
+            return new(facts, []);
         });
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -872,7 +893,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
         var archive = new FakeArchiveContributor(async (capability, input, token) =>
         {
             await ReadArchiveTable(capability, token);
-            return new(new CancelingEligibilityList(input.SessionIds, cancellation));
+            return new(new CancelingSessionFactList(input.SessionIds, cancellation), []);
         });
         var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive);
 
@@ -934,7 +955,7 @@ public sealed class LocalRepositoryScopeSnapshotTests
         {
             await ReadArchiveTable(capability, token);
             cancellation.Cancel();
-            return new(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray());
+            return ActiveArchiveFacts(input);
         });
         var composeCalls = 0;
         var service = new SqliteLocalRepositoryScopeSnapshotService(
@@ -1079,14 +1100,19 @@ public sealed class LocalRepositoryScopeSnapshotTests
         await capability.ReadAsync((connection, transaction, innerToken) =>
             ScalarAsync(connection, transaction, "SELECT value FROM archive_snapshot_source;", innerToken), token);
 
-    private static async ValueTask<LocalArchiveEligibilityContribution> ReadArchiveContribution(
+    private static async ValueTask<LocalArchiveFactContribution> ReadArchiveContribution(
         ILocalRepositoryReadTransaction capability,
         LocalRepositoryArchiveInput input,
         CancellationToken token)
     {
         await ReadArchiveTable(capability, token);
-        return new(input.SessionIds.Select(id => new LocalArchiveSessionEligibility(id, true, null)).ToArray());
+        return ActiveArchiveFacts(input);
     }
+
+    private static LocalArchiveFactContribution ActiveArchiveFacts(LocalRepositoryArchiveInput input) =>
+        new(
+            input.SessionIds.Select(id => new LocalArchiveSessionFact(id, LocalArchiveState.Active, 0)).ToArray(),
+            input.RepositoryIds.Select(id => new LocalArchiveRepositoryFact(id, LocalArchiveState.Active, 0)).ToArray());
 
     private sealed record FakeSessionRow(string SessionId, string OpaqueValue) : ILocalRepositorySessionSnapshotRow;
 
@@ -1096,14 +1122,14 @@ public sealed class LocalRepositoryScopeSnapshotTests
         public string SessionId => ++GetterCount == 1 ? first : later;
     }
 
-    private sealed class CancelingEligibilityList(
+    private sealed class CancelingSessionFactList(
         IReadOnlyList<string> sessionIds,
-        CancellationTokenSource cancellation) : IReadOnlyList<LocalArchiveSessionEligibility>
+        CancellationTokenSource cancellation) : IReadOnlyList<LocalArchiveSessionFact>
     {
         public int Count => sessionIds.Count;
-        public LocalArchiveSessionEligibility this[int index] =>
-            new(sessionIds[index], true, null);
-        public IEnumerator<LocalArchiveSessionEligibility> GetEnumerator()
+        public LocalArchiveSessionFact this[int index] =>
+            new(sessionIds[index], LocalArchiveState.Active, 0);
+        public IEnumerator<LocalArchiveSessionFact> GetEnumerator()
         {
             for (var index = 0; index < sessionIds.Count; index++)
             {
@@ -1136,13 +1162,13 @@ public sealed class LocalRepositoryScopeSnapshotTests
     }
 
     private sealed class FakeArchiveContributor(
-        Func<ILocalRepositoryReadTransaction, LocalRepositoryArchiveInput, CancellationToken, ValueTask<LocalArchiveEligibilityContribution>> read)
-        : ILocalArchiveEligibilitySnapshotContributor
+        Func<ILocalRepositoryReadTransaction, LocalRepositoryArchiveInput, CancellationToken, ValueTask<LocalArchiveFactContribution>> read)
+        : ILocalArchiveFactSnapshotContributor
     {
         public int CallCount { get; private set; }
         public ILocalRepositoryReadTransaction? LastCapability { get; private set; }
 
-        public ValueTask<LocalArchiveEligibilityContribution> ReadAsync(
+        public ValueTask<LocalArchiveFactContribution> ReadAsync(
             ILocalRepositoryReadTransaction transaction,
             LocalRepositoryArchiveInput input,
             CancellationToken cancellationToken)

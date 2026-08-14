@@ -407,7 +407,7 @@ internal static class MonitorHost
                 new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
-                    services.GetRequiredService<ILocalArchiveEligibilitySnapshotContributor>()));
+                    services.GetRequiredService<ILocalArchiveFactSnapshotContributor>()));
             if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
             {
                 builder.Services.AddHostedService(_ => localRepositoryHostedService);

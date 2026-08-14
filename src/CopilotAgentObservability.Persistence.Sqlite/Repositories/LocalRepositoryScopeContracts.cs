@@ -26,9 +26,9 @@ internal interface ILocalRepositorySessionSnapshotContributor
         CancellationToken cancellationToken);
 }
 
-internal interface ILocalArchiveEligibilitySnapshotContributor
+internal interface ILocalArchiveFactSnapshotContributor
 {
-    ValueTask<LocalArchiveEligibilityContribution> ReadAsync(
+    ValueTask<LocalArchiveFactContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
         LocalRepositoryArchiveInput input,
         CancellationToken cancellationToken);
@@ -84,20 +84,34 @@ internal sealed record LocalRepositoryArchiveInput(
     IReadOnlyList<string> SessionIds,
     IReadOnlyList<string> RepositoryIds);
 
-internal sealed record LocalArchiveSessionEligibility(
-    string SessionId,
-    bool IsEligible,
-    string? ExclusionReason);
+internal enum LocalArchiveState
+{
+    Active,
+    Archived,
+}
 
-internal sealed record LocalArchiveEligibilityContribution(
-    IReadOnlyList<LocalArchiveSessionEligibility> Sessions);
+internal sealed record LocalArchiveSessionFact(
+    string SessionId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveRepositoryFact(
+    string RepositoryId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveFactContribution(
+    IReadOnlyList<LocalArchiveSessionFact> Sessions,
+    IReadOnlyList<LocalArchiveRepositoryFact> Repositories);
 
 internal sealed record LocalRepositoryCatalogSnapshot(
     string RepositoryId,
     string DisplayName,
     long Revision,
     string? CurrentLocatorId,
-    long AssignmentConflictCount);
+    long AssignmentConflictCount,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision);
 
 internal sealed record LocalRepositoryScopeSessionSnapshot(
     string SessionId,
@@ -110,6 +124,8 @@ internal sealed record LocalRepositoryScopeSessionSnapshot(
     bool IsAllScopeMember,
     bool IsUnassignedScopeMember,
     bool IsRequestedScopeMember,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision,
     bool IsEffectivelyEligible,
     string? ArchiveExclusionReason);
 
