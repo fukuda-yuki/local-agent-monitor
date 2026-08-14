@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.Data.Sqlite;
 
@@ -73,6 +74,39 @@ public sealed class LocalArchiveAtomicityTests
         Assert.Equal(0, calls);
         Assert.Equal(1, authority.Calls);
         Assert.Equal(0, database.EventCount());
+    }
+
+    [Fact]
+    public async Task Mutate_RealWriterContentionReturnsBusyWithinBoundWithoutWriting()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(Target);
+        using var blocker = database.Open(sharedCache: true);
+        using var writeTransaction = blocker.BeginTransaction(deferred: false);
+        var writerCalls = 0;
+        var stopwatch = Stopwatch.StartNew();
+
+        var attempt = Task.Run(() => database.CreateStore().Mutate(
+            LocalArchiveAction.Archive,
+            LocalArchiveTargetKind.Session,
+            [new(Target, 0)],
+            _ =>
+            {
+                writerCalls++;
+                return "unused"u8.ToArray();
+            },
+            CancellationToken.None));
+        var completed = await Task.WhenAny(attempt, Task.Delay(TimeSpan.FromSeconds(2)));
+        stopwatch.Stop();
+        writeTransaction.Dispose();
+        var result = await attempt.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Same(attempt, completed);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"writer contention exceeded the 2 second bound ({stopwatch.Elapsed})");
+        Assert.Equal(LocalArchiveStoreError.PersistenceBusy, result.Error);
+        Assert.Equal(0, writerCalls);
+        Assert.Equal(0, database.EventCount());
+        Assert.Null(database.Current(Target));
     }
 
     private sealed class BusyRepositoryAuthority : ILocalRepositoryTargetExistenceAuthority

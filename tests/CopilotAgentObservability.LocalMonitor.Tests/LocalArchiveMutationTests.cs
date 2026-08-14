@@ -181,12 +181,13 @@ internal sealed class LocalArchiveMutationDatabase : IDisposable
             value => Guid.CreateVersion7(value).ToString("D"),
             connectionFactory);
 
-    internal SqliteConnection Open()
+    internal SqliteConnection Open(bool sharedCache = false)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = Path,
             Pooling = false,
+            Cache = sharedCache ? SqliteCacheMode.Shared : SqliteCacheMode.Private,
             DefaultTimeout = 0,
         }.ToString());
         connection.Open();

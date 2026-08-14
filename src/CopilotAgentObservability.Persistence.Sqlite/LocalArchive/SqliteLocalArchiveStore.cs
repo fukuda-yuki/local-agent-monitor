@@ -56,13 +56,13 @@ internal sealed partial class SqliteLocalArchiveStore
                 Mode = SqliteOpenMode.ReadWrite,
                 Cache = SqliteCacheMode.Private,
                 Pooling = false,
-                DefaultTimeout = 0,
+                DefaultTimeout = 1,
             }.ToString());
         try
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;";
+            command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1;";
             command.ExecuteNonQuery();
             return connection;
         }
