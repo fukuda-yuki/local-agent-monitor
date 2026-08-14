@@ -149,6 +149,27 @@ public sealed class SanitizedOnlyHostCompositionTests
     }
 
     [Theory]
+    [InlineData("GET", "/api/local-monitor/v1/archive?target_kind=session&target_id=01890f65-4c31-7f42-8a7d-111111111111")]
+    [InlineData("HEAD", "/api/local-monitor/v1/archive")]
+    [InlineData("POST", "/api/local-monitor/v1/archive-actions")]
+    [InlineData("OPTIONS", "/api/local-monitor/v1/archived-items")]
+    public async Task ArchiveNamespace_HasNoHumanServicesOrDispatcherInSanitizedOnly(string method, string path)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, sanitizedOnly: true, testOptions: QuietHost());
+
+        using var response = await host.Client.SendAsync(new HttpRequestMessage(new HttpMethod(method), path));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.DoesNotContain(host.RouteMethods,
+            item => item.Pattern is "/api/local-monitor/v1/archive"
+                or "/api/local-monitor/v1/archive-actions"
+                or "/api/local-monitor/v1/archived-items");
+    }
+
+    [Theory]
     [InlineData("/api/local-monitor/v1/repositories")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001/locators")]

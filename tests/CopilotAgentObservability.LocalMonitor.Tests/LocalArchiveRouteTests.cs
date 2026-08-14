@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Archive;
 using CopilotAgentObservability.Persistence.Sqlite;
@@ -17,6 +18,41 @@ public sealed class LocalArchiveRouteTests
     private const string First = "01890f65-4c31-7f42-8a7d-111111111111";
     private const string Second = "01890f65-4c31-7f42-8a7d-222222222222";
     private const string Now = "2026-08-09T12:34:56.1234567+00:00";
+
+    [Fact]
+    public async Task RawDefaultHostDispatchesArchiveBeforeFallbackWithExactHostErrors()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
+
+        using var missing = await host.Client.GetAsync(
+            $"/api/local-monitor/v1/archive?target_kind=session&target_id={First}");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.Equal("{\"error\":\"target_not_found\"}", await missing.Content.ReadAsStringAsync());
+        Assert.Equal("application/json; charset=utf-8", missing.Content.Headers.ContentType?.ToString());
+        Assert.True(missing.Headers.CacheControl?.NoStore);
+
+        using var invalidGetRequest = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"/api/local-monitor/v1/archive?target_kind=session&target_id={First}");
+        invalidGetRequest.Headers.Host = "remote.example";
+        using var invalidGet = await host.Client.SendAsync(invalidGetRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidGet.StatusCode);
+        Assert.Equal("{\"error\":\"invalid_host\"}", await invalidGet.Content.ReadAsStringAsync());
+        Assert.Equal("application/json; charset=utf-8", invalidGet.Content.Headers.ContentType?.ToString());
+        Assert.True(invalidGet.Headers.CacheControl?.NoStore);
+        Assert.Empty(invalidGet.Content.Headers.Allow);
+
+        using var invalidHeadRequest = new HttpRequestMessage(HttpMethod.Head, "/api/local-monitor/v1/archive");
+        invalidHeadRequest.Headers.Host = "remote.example";
+        using var invalidHead = await host.Client.SendAsync(invalidHeadRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidHead.StatusCode);
+        Assert.Empty(await invalidHead.Content.ReadAsByteArrayAsync());
+        Assert.Equal(24, invalidHead.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", invalidHead.Content.Headers.ContentType?.ToString());
+        Assert.True(invalidHead.Headers.CacheControl?.NoStore);
+        Assert.Empty(invalidHead.Content.Headers.Allow);
+    }
 
     [Theory]
     [InlineData("/api/local-monitor/v1/Archive")]
@@ -431,4 +467,15 @@ public sealed class LocalArchiveRouteTests
     {
         public override DateTimeOffset GetUtcNow() => value;
     }
+
+    private static MonitorHostTestOptions QuietHost() => new()
+    {
+        StartWriter = false,
+        StartProjectionWorker = false,
+        StartRetentionCleanupWorker = false,
+        StartSessionWriter = false,
+        StartSessionOtelEnrichment = false,
+        StartLocalRepositoryCatalogHostedService = false,
+        UseUserSecrets = false,
+    };
 }

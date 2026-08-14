@@ -20,16 +20,7 @@ internal static class LocalArchiveRoutes
         ArgumentNullException.ThrowIfNull(next);
         ArgumentNullException.ThrowIfNull(store);
 
-        var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
-        var querySeparator = rawTarget?.IndexOf('?') ?? -1;
-        var path = querySeparator < 0 ? rawTarget : rawTarget![..querySeparator];
-        var owned = path switch
-        {
-            DirectPath => OwnedRoute.Direct,
-            ActionPath => OwnedRoute.Action,
-            ListPath => OwnedRoute.List,
-            _ => OwnedRoute.None,
-        };
+        var owned = Owned(context);
         if (owned == OwnedRoute.None)
         {
             await next(context);
@@ -67,6 +58,41 @@ internal static class LocalArchiveRoutes
             default:
                 throw new InvalidOperationException("local_archive_route_invalid");
         }
+    }
+
+    internal static bool IsPath(HttpContext context) => Owned(context) != OwnedRoute.None;
+
+    internal static Task WriteInvalidHostAsync(HttpContext context)
+    {
+        var bytes = LocalArchiveWire.ErrorBytes(LocalArchiveWireError.InvalidHost);
+        SetHeaders(context.Response);
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        if (context.Request.Method == HttpMethods.Head)
+        {
+            context.Response.ContentLength = bytes.Length;
+            return Task.CompletedTask;
+        }
+        return context.Response.Body.WriteAsync(bytes, context.RequestAborted).AsTask();
+    }
+
+    internal static Task WriteExceptionAsync(HttpContext context, bool requestTooLarge) =>
+        WriteErrorAsync(
+            context,
+            requestTooLarge ? StatusCodes.Status413PayloadTooLarge : StatusCodes.Status503ServiceUnavailable,
+            requestTooLarge ? LocalArchiveWireError.RequestTooLarge : LocalArchiveWireError.ArchiveStoreUnavailable);
+
+    private static OwnedRoute Owned(HttpContext context)
+    {
+        var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
+        var querySeparator = rawTarget?.IndexOf('?') ?? -1;
+        var path = querySeparator < 0 ? rawTarget : rawTarget![..querySeparator];
+        return path switch
+        {
+            DirectPath => OwnedRoute.Direct,
+            ActionPath => OwnedRoute.Action,
+            ListPath => OwnedRoute.List,
+            _ => OwnedRoute.None,
+        };
     }
 
     private static async Task DirectAsync(HttpContext context, SqliteLocalArchiveStore store)

@@ -4,6 +4,7 @@ using CopilotAgentObservability.ConfigCli;
 using CopilotAgentObservability.ConfigCli.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Alerts;
 using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.LocalMonitor.Archive;
 using CopilotAgentObservability.LocalMonitor.Doctor.ClaudeCode;
 using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
@@ -367,6 +368,13 @@ internal static class MonitorHost
         if (!initialized.Success) throw new InvalidOperationException(initialized.ErrorCode);
         if (!options.SanitizedOnly)
         {
+            var repositoryExistenceAuthority = SqliteLocalRepositoryTargetExistenceAuthority.Instance;
+            var localArchiveStore = new SqliteLocalArchiveStore(
+                options.DatabasePath,
+                repositoryExistenceAuthority,
+                LocalArchiveSessionTargetExistenceAuthority.Instance,
+                timeProvider,
+                static instant => Guid.CreateVersion7(instant).ToString("D"));
             var localRepositoryRawAvailability = new LocalRepositoryRawAvailabilityReader(projectionRawStore, retentionContext);
             var localRepositoryQueue = new SqliteLocalRepositoryReconciliationStore(options.DatabasePath, timeProvider);
             var localRepositoryResolver = new LocalRepositoryAssignmentResolver();
@@ -403,7 +411,9 @@ internal static class MonitorHost
             builder.Services.AddSingleton(localRepositoryStore);
             builder.Services.AddSingleton(localRepositoryWorker);
             builder.Services.AddSingleton(localRepositoryApplication);
-            builder.Services.AddSingleton<ILocalRepositoryTargetExistenceAuthority>(SqliteLocalRepositoryTargetExistenceAuthority.Instance);
+            builder.Services.AddSingleton<ILocalRepositoryTargetExistenceAuthority>(repositoryExistenceAuthority);
+            builder.Services.AddSingleton(localArchiveStore);
+            builder.Services.AddSingleton<ILocalArchiveFactSnapshotContributor>(SqliteLocalArchiveFactSnapshotContributor.Instance);
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
                 new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
@@ -467,6 +477,13 @@ internal static class MonitorHost
                 {
                     var mapped = SanitizedImportRoutes.MapUnhandledException(exception);
                     await SanitizedImportRoutes.ErrorAsync(context, mapped.Status, mapped.Error);
+                    return;
+                }
+                if (!options.SanitizedOnly && LocalArchiveRoutes.IsPath(context))
+                {
+                    var tooLarge = exception is BadHttpRequestException archiveBodyException
+                        && archiveBodyException.StatusCode == StatusCodes.Status413PayloadTooLarge;
+                    await LocalArchiveRoutes.WriteExceptionAsync(context, tooLarge);
                     return;
                 }
                 if (CostRoutes.IsPath(context.Request.Path))
@@ -578,9 +595,10 @@ internal static class MonitorHost
             var historicalAnalysisPath = HistoricalAnalysisRoutes.IsPath(context.Request.Path);
             var runtimeBackupPath = RuntimeBackupRoutes.IsPath(context.Request.Path);
             var localRepositoryPath = LocalRepositoryRoutes.IsNamespacePath(context.Request.Path);
+            var localArchivePath = LocalArchiveRoutes.IsPath(context);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath)
+                || localRepositoryPath || localArchivePath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -614,6 +632,10 @@ internal static class MonitorHost
                 {
                     await RuntimeBackupRoutes.ErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
+                else if (!options.SanitizedOnly && localArchivePath)
+                {
+                    await LocalArchiveRoutes.WriteInvalidHostAsync(context);
+                }
                 else if (alertPath)
                 {
                     await AlertLifecycleRoutes.WriteErrorAsync(context, StatusCodes.Status400BadRequest, "invalid_host");
@@ -646,6 +668,7 @@ internal static class MonitorHost
 
             if (options.SanitizedOnly
                 && (localRepositoryPath
+                    || localArchivePath
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
@@ -658,6 +681,8 @@ internal static class MonitorHost
         });
         if (!options.SanitizedOnly)
         {
+            var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
+            app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
                 context,
                 next,

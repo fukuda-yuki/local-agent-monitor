@@ -222,7 +222,10 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         Assert.Same(SqliteLocalRepositoryTargetExistenceAuthority.Instance, targetExistenceAuthority);
         Assert.Same(targetExistenceAuthority, rawDefault.Services.GetRequiredService<ILocalRepositoryTargetExistenceAuthority>());
         Assert.Empty(rawDefault.Services.GetServices<ILocalRepositorySessionSnapshotContributor>());
-        Assert.Empty(rawDefault.Services.GetServices<ILocalArchiveFactSnapshotContributor>());
+        var archiveStore = Assert.Single(rawDefault.Services.GetServices<SqliteLocalArchiveStore>());
+        var archiveContributor = Assert.Single(rawDefault.Services.GetServices<ILocalArchiveFactSnapshotContributor>());
+        Assert.Same(SqliteLocalArchiveFactSnapshotContributor.Instance, archiveContributor);
+        Assert.Same(archiveStore, rawDefault.Services.GetRequiredService<SqliteLocalArchiveStore>());
         Assert.Throws<InvalidOperationException>(() =>
             rawDefault.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>());
         Assert.Empty(sanitizedOnly.Services.GetServices<IHostedService>()
@@ -234,6 +237,8 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         Assert.Empty(sanitizedOnly.Services.GetServices<LocalRepositoryReconciliationWorker>());
         Assert.Empty(sanitizedOnly.Services.GetServices<LocalRepositoryCatalogApplication>());
         Assert.Empty(sanitizedOnly.Services.GetServices<ILocalRepositoryTargetExistenceAuthority>());
+        Assert.Empty(sanitizedOnly.Services.GetServices<SqliteLocalArchiveStore>());
+        Assert.Empty(sanitizedOnly.Services.GetServices<ILocalArchiveFactSnapshotContributor>());
         Assert.Null(sanitizedOnly.Services.GetService<ILocalRepositoryScopeSnapshotService>());
     }
 
