@@ -40,8 +40,11 @@ internal sealed class SqliteLocalRepositoryTargetExistenceAuthority : ILocalRepo
 
         var frozenRepositoryIds = new string[count];
         for (var index = 0; index < count; index++)
+            frozenRepositoryIds[index] = canonicalRepositoryIds[index];
+
+        for (var index = 0; index < count; index++)
         {
-            var repositoryId = canonicalRepositoryIds[index];
+            var repositoryId = frozenRepositoryIds[index];
             if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId)
                 || index > 0
                 && StringComparer.Ordinal.Compare(frozenRepositoryIds[index - 1], repositoryId) >= 0)
@@ -50,7 +53,6 @@ internal sealed class SqliteLocalRepositoryTargetExistenceAuthority : ILocalRepo
                     "local_repository_target_ids_invalid",
                     nameof(canonicalRepositoryIds));
             }
-            frozenRepositoryIds[index] = repositoryId;
         }
 
         cancellationToken.ThrowIfCancellationRequested();

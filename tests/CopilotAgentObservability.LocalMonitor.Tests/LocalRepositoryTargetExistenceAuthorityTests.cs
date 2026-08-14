@@ -79,6 +79,28 @@ public sealed class LocalRepositoryTargetExistenceAuthorityTests
     }
 
     [Fact]
+    public void ReadExisting_CopiesEveryHostileInputItemOnceBeforeRejectingAnEarlyInvalidValue()
+    {
+        using var database = new TargetDatabase();
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction();
+        var repositoryIds = new OneReadRepositoryIds(
+            ["not-a-repository-id", RepositoryTwo, RepositoryThree]);
+
+        var error = Assert.Throws<ArgumentException>(() =>
+            SqliteLocalRepositoryTargetExistenceAuthority.Instance.ReadExisting(
+                connection,
+                transaction,
+                repositoryIds,
+                CancellationToken.None));
+
+        Assert.Equal("canonicalRepositoryIds", error.ParamName);
+        Assert.StartsWith("local_repository_target_ids_invalid", error.Message, StringComparison.Ordinal);
+        Assert.Equal(1, repositoryIds.CountReads);
+        Assert.Equal([1, 1, 1], repositoryIds.ItemReads);
+    }
+
+    [Fact]
     public void ReadExisting_AcceptsTheExactTwoHundredIdFrontier()
     {
         using var database = new TargetDatabase();
