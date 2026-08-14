@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Net.Http.Headers;
 
 namespace CopilotAgentObservability.LocalMonitor.Archive;
@@ -19,7 +20,9 @@ internal static class LocalArchiveRoutes
         ArgumentNullException.ThrowIfNull(next);
         ArgumentNullException.ThrowIfNull(store);
 
-        var path = context.Request.Path.Value;
+        var rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
+        var querySeparator = rawTarget?.IndexOf('?') ?? -1;
+        var path = querySeparator < 0 ? rawTarget : rawTarget![..querySeparator];
         var owned = path switch
         {
             DirectPath => OwnedRoute.Direct,
@@ -37,9 +40,9 @@ internal static class LocalArchiveRoutes
         var expectedMethod = owned == OwnedRoute.Action ? HttpMethods.Post : HttpMethods.Get;
         if (!string.Equals(context.Request.Method, expectedMethod, StringComparison.Ordinal))
         {
-            context.Response.Headers.Allow = expectedMethod;
             await WriteErrorAsync(context, StatusCodes.Status405MethodNotAllowed,
                 LocalArchiveWireError.MethodNotAllowed, head: context.Request.Method == HttpMethods.Head);
+            context.Response.Headers.Allow = expectedMethod;
             return;
         }
 
@@ -267,6 +270,7 @@ internal static class LocalArchiveRoutes
         response.Headers.Remove(HeaderNames.Location);
         response.Headers.Remove(HeaderNames.ETag);
         response.Headers.Remove(HeaderNames.SetCookie);
+        response.Headers.Remove(HeaderNames.Allow);
         foreach (var header in response.Headers.Keys
             .Where(static name => name.StartsWith("Access-Control-Allow-", StringComparison.OrdinalIgnoreCase))
             .ToArray())

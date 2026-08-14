@@ -2,6 +2,7 @@ using System.Text;
 using CopilotAgentObservability.LocalMonitor.Archive;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Net.Http.Headers;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -31,6 +32,26 @@ public sealed class LocalArchiveRouteTests
         Assert.Equal(1, nextCalls);
         Assert.Null(context.Response.ContentType);
         Assert.False(context.Response.Headers.ContainsKey(HeaderNames.CacheControl));
+    }
+
+    [Theory]
+    [InlineData("/api/local-monitor/v1/%61rchive?target_kind=session&target_id=01890f65-4c31-7f42-8a7d-111111111111")]
+    [InlineData("/api/local-monitor/v1/archive%2F?target_kind=session&target_id=01890f65-4c31-7f42-8a7d-111111111111")]
+    [InlineData("/api/local-monitor/v1/archive%?target_kind=session&target_id=01890f65-4c31-7f42-8a7d-111111111111")]
+    public async Task RawPercentEncodedAndMalformedPathsNeverAliasOwnedRoutes(string rawTarget)
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        var context = Context("GET", $"/api/local-monitor/v1/archive?target_kind=session&target_id={First}");
+        context.Features.Get<IHttpRequestFeature>()!.RawTarget = rawTarget;
+        var nextCalls = 0;
+
+        await LocalArchiveRoutes.AdaptAsync(
+            context,
+            _ => { nextCalls++; return Task.CompletedTask; },
+            database.CreateStore());
+
+        Assert.Equal(1, nextCalls);
+        Assert.Equal(0, context.Response.Body.Length);
     }
 
     [Theory]
@@ -133,6 +154,31 @@ public sealed class LocalArchiveRouteTests
     }
 
     [Fact]
+    public async Task ExactBodyLimitIsAcceptedAndOneByteMoreIsRejectedForDeclaredAndStreamedBodies()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(First);
+        var compact = $"{{\"schema_version\":\"local-archive-action.v1\",\"action\":\"archive\",\"target_kind\":\"session\",\"targets\":[{{\"target_id\":\"{First}\",\"expected_revision\":0}}]}}";
+        var acceptedBody = compact + new string(' ', 65_536 - Encoding.UTF8.GetByteCount(compact));
+        var accepted = Post("/api/local-monitor/v1/archive-actions?", "application/json", acceptedBody);
+        accepted.Request.Headers["x-monitor-csrf"] = "local-monitor";
+        await InvokeAsync(accepted, database.CreateStore());
+        Assert.Equal(200, accepted.Response.StatusCode);
+
+        var declared = Post("/api/local-monitor/v1/archive-actions", "application/json", acceptedBody);
+        declared.Request.Headers["x-monitor-csrf"] = "local-monitor";
+        declared.Request.ContentLength = 65_537;
+        await InvokeAsync(declared, database.CreateStore());
+        await AssertResponseAsync(declared, 413, "{\"error\":\"request_too_large\"}");
+
+        var streamed = Post("/api/local-monitor/v1/archive-actions", "application/json", acceptedBody + " ");
+        streamed.Request.Headers["x-monitor-csrf"] = "local-monitor";
+        streamed.Request.ContentLength = null;
+        await InvokeAsync(streamed, database.CreateStore());
+        await AssertResponseAsync(streamed, 413, "{\"error\":\"request_too_large\"}");
+    }
+
+    [Fact]
     public async Task PostCommitsAndEmitsThePrecommitExactEntity()
     {
         using var database = new LocalArchiveMutationDatabase();
@@ -189,6 +235,62 @@ public sealed class LocalArchiveRouteTests
         await AssertResponseAsync(conflict, 409, "{\"error\":\"revision_conflict\"}");
     }
 
+    [Fact]
+    public async Task PersistenceBusyMapsToClosedErrorAndCancellationEscapesWithoutEntity()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(First);
+        using (var blocker = database.Open())
+        {
+            using var command = blocker.CreateCommand();
+            command.CommandText = "BEGIN EXCLUSIVE;";
+            command.ExecuteNonQuery();
+            var body = $"{{\"schema_version\":\"local-archive-action.v1\",\"action\":\"archive\",\"target_kind\":\"session\",\"targets\":[{{\"target_id\":\"{First}\",\"expected_revision\":0}}]}}";
+            var busy = Post("/api/local-monitor/v1/archive-actions", "application/json", body);
+            busy.Request.Headers["x-monitor-csrf"] = "local-monitor";
+
+            await InvokeAsync(busy, database.CreateStore());
+
+            await AssertResponseAsync(busy, 503, "{\"error\":\"persistence_busy\"}");
+            using var rollback = blocker.CreateCommand();
+            rollback.CommandText = "ROLLBACK;";
+            rollback.ExecuteNonQuery();
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var canceled = Context("GET", $"/api/local-monitor/v1/archive?target_kind=session&target_id={First}");
+        canceled.RequestAborted = cancellation.Token;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => InvokeAsync(canceled, database.CreateStore()));
+
+        Assert.Equal(0, canceled.Response.Body.Length);
+    }
+
+    [Fact]
+    public async Task OwnedNon405ResponsesRemoveEveryForbiddenAndAllowHeader()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(First);
+        var context = Context("GET", $"/api/local-monitor/v1/archive?target_kind=session&target_id={First}");
+        context.Response.Headers.Location = "/forbidden";
+        context.Response.Headers.ETag = "\"forbidden\"";
+        context.Response.Headers.SetCookie = "forbidden=1";
+        context.Response.Headers.Allow = "DELETE";
+        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+        context.Response.Headers["Access-Control-Allow-Headers"] = "*";
+
+        await InvokeAsync(context, database.CreateStore());
+
+        Assert.Equal(200, context.Response.StatusCode);
+        Assert.False(context.Response.Headers.ContainsKey(HeaderNames.Location));
+        Assert.False(context.Response.Headers.ContainsKey(HeaderNames.ETag));
+        Assert.False(context.Response.Headers.ContainsKey(HeaderNames.SetCookie));
+        Assert.False(context.Response.Headers.ContainsKey(HeaderNames.Allow));
+        Assert.DoesNotContain(context.Response.Headers.Keys,
+            key => key.StartsWith("Access-Control-Allow-", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static DefaultHttpContext Context(string method, string pathAndQuery)
     {
         var separator = pathAndQuery.IndexOf('?');
@@ -198,6 +300,7 @@ public sealed class LocalArchiveRouteTests
         context.Request.Host = new HostString("127.0.0.1:43199");
         context.Request.Path = separator < 0 ? pathAndQuery : pathAndQuery[..separator];
         context.Request.QueryString = separator < 0 ? QueryString.Empty : new QueryString(pathAndQuery[separator..]);
+        context.Features.Get<IHttpRequestFeature>()!.RawTarget = pathAndQuery;
         context.Response.Body = new MemoryStream();
         return context;
     }
