@@ -3,30 +3,31 @@
 ## Status and authority
 
 This specification pins the accepted Local Monitor v1 Repository catalog,
-locator, provenance, Session-assignment, scope, mutation, and backup contracts
-from design decisions DC156-01 through DC156-11.
+locator, provenance, Session-assignment, scope, mutation, and backup base from
+design decisions DC156-01 through DC156-11. The exact current DC156-12 through
+DC156-19 authority is the
+[executable closure](local-repository-catalog-executable.md); where an earlier
+gap statement below differs, that closure controls.
 
 Issue ownership is split as follows:
 
 - Issue #155 owns the Repository identity and assignment contract.
 - Issue #156 owns the catalog, locator parser, provenance admission, assignment
-  resolver, catalog mutations, and the internal scope snapshot authority.
+  resolver, catalog mutations, internal scope snapshot, direct archive-fact
+  validation/composition, and Repository target-existence authorities.
 - Issue #133 specifies the composite Workspace read.
 - Issue #134 is the sole implementation owner of
   `GET /api/local-monitor/v1/repositories`.
-- Issue #160/#161 owns archive meaning and composes archive eligibility into
-  the scope authority supplied by #156.
+- Issue #160 owns archive meaning.
+- Issue #161 owns archive storage, schema validation, archive queries,
+  state-machine validation, mutation, public archive routes, and archive backup
+  validation. It supplies complete direct Session/Repository archive facts to
+  #156 and does not compose assignment-dependent eligibility.
 
-The accepted contract is not yet fully executable. Only the isolated locator
-parser and locator fingerprint in [Locator grammar and
-fingerprint](#locator-grammar-and-fingerprint) are `READY`. Production schema,
-automatic admission/reconciliation, assignment mutation, HTTP routes, scope
-composition, and backup registration remain `BLOCKED_DECISION` until every gap
-in [Required decisions before production
-implementation](#required-decisions-before-production-implementation) is
-resolved in a current canonical contract.
-
-Implementations MUST NOT fill those gaps with inferred behavior.
+The combined DC156-01 through DC156-19 contract is
+`READY_FOR_IMPLEMENTATION`. The executable closure fixes the former production
+gaps without authorizing inferred behavior, compatibility paths, fallback
+readers, or permissive parsers.
 
 Related canonical contracts:
 
@@ -168,9 +169,10 @@ literal UTF-8 bytes:
 There is no BOM, trailing LF, Unicode normalization, implicit length prefix, or
 other byte transformation.
 
-The locator parser and fingerprint are the only currently `READY` production
-slice of this specification. They can be implemented and tested without
-creating catalog tables or routes.
+The locator parser and fingerprint remain an independently implementable pure
+slice. The complete combined DC156-01 through DC156-19 contract is
+`READY_FOR_IMPLEMENTATION`; implementing this slice alone creates no catalog
+table or route.
 
 ## Storage component
 
@@ -197,8 +199,8 @@ local_repository_catalog:1
 ### Logical tables
 
 The accepted logical component contains the following tables. This section
-pins their required data and invariants; it does not authorize production DDL
-until the unresolved lifecycle and referential-shape decisions are closed.
+pins their required data and invariants; the executable closure fixes the exact
+production lifecycle and referential shape.
 
 #### `local_repositories`
 
@@ -263,11 +265,11 @@ duplicate_key
 Only `admitted` requires both `repository_id` and `locator_id`. Other states do
 not make an assignment claim.
 
-The accepted contract does not yet pin an observed-label source, scope,
-precedence, deduplication rule, deterministic order, or collection cardinality.
-The catalog MUST NOT infer those decisions or derive a label from a locator
-segment, display name, filesystem path, Repository name, workspace label, or
-adjacent metadata.
+V1 has no accepted observed-label source. Responses always carry the exact
+`"observed_label_candidates":[]`; no candidate is stored or inferred from a
+locator segment, display name, filesystem path, Repository name, workspace
+label, or adjacent metadata. DC156-17 in the executable closure owns that
+invariant.
 
 #### `session_repository_manual_overrides`
 
@@ -356,9 +358,8 @@ local_repository_operation_receipts
 ```
 
 The `raw_record_id` spelling in the required observation index represents the
-accepted need to index the raw provenance reference. Its nullable/non-nullable
-shape and referential lifetime remain blocked by
-[Raw-reference durability](#raw-reference-durability).
+accepted need to index the raw provenance reference. DC156-18 in the executable
+closure fixes its opaque nullable shape and referential lifetime.
 
 ## Observation admission
 
@@ -419,15 +420,9 @@ ASCII("local-repository-observation\0v1\0")
 
 The resulting SHA-256 is stored as `source_identity_sha256`.
 
-The exact length-prefix width, raw-record identity byte encoding, and scope
-discriminator byte values have not been pinned. Production admission MUST NOT
-choose those encodings until [Identity byte
-framing](#identity-byte-framing) is resolved.
-
-The accepted rows also do not yet explain how one resource-level source
-observation that applies to more than one span or Session context is represented
-while `source_identity_sha256` is unique and each row has one `session_id`.
-Production schema MUST NOT assume that source identity and context identity are
+The exact length-prefix width, raw-record identity byte encoding, scope
+discriminator, and physical-source/context split are fixed by DC156-13 in the
+executable closure. Source identity and context identity are not
 interchangeable.
 
 If a source identity already exists and every persisted field is identical,
@@ -441,8 +436,8 @@ when it can bind to one exact, already-existing Session identity. It does not
 create a Session and does not join by Repository locator, name, label, path,
 source, or time.
 
-The exact evidence and database constraint that prove this join remain
-unresolved; see [Exact Session join](#exact-session-join).
+The exact evidence, lookup, and database constraint that prove this join are
+fixed by DC156-14 in the executable closure.
 
 Before parsing a raw record, admission obtains a Retention operation lease for
 that record. If the record is already read-denied or deleted, no new admission
@@ -479,11 +474,8 @@ of:
 `session_repository_assignment_revisions`. Calling it when the Session is
 already automatic is a no-op and leaves the revision unchanged.
 
-The accepted assignment history action set currently records only the three
-manual actions while automatic observation changes also increment the
-authoritative revision. The required append-only representation of those
-automatic transitions is unresolved; see [Automatic assignment revision
-history](#automatic-assignment-revision-history).
+The append-only representation of automatic transitions and the three manual
+actions is fixed by DC156-15 in the executable closure.
 
 ### Mutation evaluation order
 
@@ -533,8 +525,7 @@ counts, last-observed time, and pagination. Issue #156 supplies internal
 catalog and scope services only. It MUST NOT register, serialize, or shadow the
 composite route.
 
-Issue #156 owns these routes once their remaining exact wire decisions are
-accepted:
+Issue #156 owns these routes under the exact DC156-17 wire contract:
 
 ```text
 POST  /api/local-monitor/v1/repositories
@@ -640,8 +631,8 @@ provenance
 This raw-local management route is the only route in this contract that returns
 the canonical locator.
 
-The exact `provenance` JSON shape, ordering constraints within the locator
-array, pagination/truncation behavior, and cardinality limit remain unresolved.
+The exact `provenance` JSON shape, locator ordering, pagination/truncation
+behavior, and cardinality limit are fixed by DC156-17 in the executable closure.
 
 ### Session action
 
@@ -680,8 +671,8 @@ updated_at
 ```
 
 Conflict candidate membership is evidence, not assignment.
-The ordering, duplicate policy, and maximum cardinality of
-`observed_label_candidates` remain unresolved.
+`observed_label_candidates` is always present and exactly empty under DC156-17;
+there is no positive-item ordering, duplicate, or cardinality branch in v1.
 
 ### Body limits
 
@@ -709,10 +700,8 @@ persistence_busy
 local_monitor_ui_unavailable
 ```
 
-Production routes remain blocked because the accepted contract does not yet pin
-all successful response entities/statuses, all fixed headers, the complete
-error-to-status mapping, or the bounded provenance and collection bytes. See
-[Complete management wire bytes](#complete-management-wire-bytes).
+DC156-17 in the executable closure fixes every success entity/status, fixed
+header, error mapping, and bounded provenance/collection byte contract.
 
 ## Durable idempotency
 
@@ -743,7 +732,8 @@ Repository ID
 ```
 
 The exact length-prefix width, null representation, integer representation, and
-field discriminator bytes remain unresolved and MUST NOT be invented.
+field discriminator bytes are fixed by DC156-13 in the executable closure and
+MUST NOT be replaced with inferred framing.
 
 For the same operation key and same fingerprint, retry exactly replays:
 
@@ -776,8 +766,9 @@ removes that authority and re-evaluates exact admitted observations.
 
 ### Virtual scope membership
 
-`all` initially includes every Session. Final archive eligibility is applied by
-#161.
+`all` initially includes every Session. #161 supplies direct archive facts;
+#156 alone validates them and composes effective eligibility/reason. Requested
+scope membership and effective eligibility remain independent facts.
 
 `repository` includes only Sessions whose current resolver result is exactly
 one Repository. A conflict Session belongs to none of its candidate Repository
@@ -805,19 +796,25 @@ There is one service boundary:
 ILocalRepositoryScopeSnapshotService
 ```
 
-- #156 implements the catalog and assignment core.
-- #161 composes archive eligibility into that same service.
+- #156 implements the catalog and assignment core, validates direct archive
+  facts, and composes effective eligibility/reason.
+- #161 supplies complete direct Session/Repository archive facts to that same
+  service.
 - #134 consumes only the completed service.
 - #134 and #161 MUST NOT issue direct SQL against catalog tables or create
   another Repository projection reader.
 
 List membership, aggregates, and archive filtering are read from one SQLite
-read transaction. The cross-Issue transaction-sharing seam is not yet pinned;
-see [Single-read-transaction composition
-seam](#single-read-transaction-composition-seam).
+read transaction. DC156-19 in the executable closure fixes the complete
+cross-Issue transaction, validation, and composition seam.
 
 Archive meaning remains solely owned by #160/#161. This component has no
 archive column.
+
+#156 also owns the stateless `ILocalRepositoryTargetExistenceAuthority`.
+DC156-19 in the executable closure alone fixes its synchronous caller-
+transaction signature, bounds, one-query behavior, fail-closed validation, and
+registration boundaries; #161 issues no catalog SQL.
 
 ## Raw expiry and provenance
 
@@ -855,10 +852,9 @@ source_content_availability
 
 It does not expose a raw database key or raw-record ID.
 
-The durable internal raw reference must allow restored catalog metadata to
-survive when the source raw component is absent. Its exact foreign-key and
-nullable shape is unresolved; see [Raw-reference
-durability](#raw-reference-durability).
+The durable internal raw reference allows restored catalog metadata to survive
+when the source raw component is absent. DC156-18 in the executable closure
+fixes its exact opaque shape and availability rules.
 
 ## Runtime backup and restore
 
@@ -920,8 +916,9 @@ authorities; raw content is not reconstructed.
 The catalog is excluded from sanitized evidence export and import. No empty
 carrier is emitted.
 
-Production backup registration remains blocked until the schema/history and
-raw-reference gaps are resolved.
+Production backup registration follows the exact schema/history/raw-reference
+and component-order contract fixed by DC156-12 through DC156-18 in the
+executable closure.
 
 ## Display and provenance bounds
 
@@ -942,8 +939,7 @@ A manual display name:
 
 An automatic display name uses the validated Repository segment's original
 casing. It follows the same safety rules and is at most 100 ASCII characters.
-The unresolved automatic Repository creation lifecycle determines whether and
-when such a name is materialized.
+DC156-12 in the executable closure fixes when it is materialized.
 
 ### Observed label candidate
 
@@ -1008,136 +1004,20 @@ No raw prompt, response, tool payload, credential, PII, absolute local path, or
 runtime database may be committed as fixture or evidence. Tests use small
 synthetic identifiers and locators.
 
-## Required decisions before production implementation
+## Historical decision inventory
 
-The following gaps are normative blockers. An implementation MUST preserve
-them as unknown rather than selecting a convenient answer.
+The former production gaps for automatic creation, identity framing, exact
+Session joining, automatic revision history, reconciliation, management wire,
+raw-reference durability, and one-transaction composition are all closed by
+DC156-12 through DC156-19 in the executable closure. That exact current
+authority replaces this historical inventory; implementations do not recreate
+or infer any omitted alternative.
 
-### Automatic Repository creation and binding lifecycle
-
-The accepted admission contract does not say what happens when an admitted,
-valid locator has no existing catalog owner. It does not pin whether admission
-creates a Repository, requires prior catalog creation, or records an unbound
-observation.
-
-If automatic creation is accepted, the contract must also pin:
-
-- the exact transaction boundary;
-- Repository/locator ID generation;
-- automatic display-name materialization;
-- Repository revision/history entries and operation-key authority;
-- races between manual create and observation admission;
-- how an observation is bound when its locator already has an owner.
-
-No production catalog row or automatic binding may be created until this is
-specified.
-
-### Identity byte framing
-
-`source_identity_sha256` names length-prefixed fields but does not define the
-prefix width or raw-record identity encoding. `context_identity_sha256` is
-required by the logical schema but has no accepted byte-domain, ordered fields,
-or framing.
-
-A resource-level observation may contribute to more than one effective
-span/Session context. The contract must decide whether source and context use
-separate rows/tables or a revised uniqueness key; one unique source row with one
-`session_id` cannot be assumed to represent every such context.
-
-The durable idempotency fingerprint likewise lacks exact scalar, null, and
-length framing. Those byte contracts must be pinned before persisted identities
-or receipts are written.
-
-### Exact Session join
-
-The contract requires a unique existing exact Session but does not identify:
-
-- which retained source identity proves the Session link;
-- the exact lookup/index used;
-- how multiple or absent exact matches are represented;
-- the transaction snapshot that prevents the Session relationship from
-  changing between proof and admission.
-
-No Session binding may be inferred from trace time, source label, Repository
-locator, name, or path.
-
-### Automatic assignment revision history
-
-Exact observation changes increment the Session assignment revision. The
-accepted append-only history action set contains only `assign`,
-`explicitly_unassign`, and `resume_automatic`.
-
-The contract must decide how automatic assignment transitions are represented
-so backup restore can validate a contiguous revision chain. A new action,
-second history, or omission from history MUST NOT be invented locally.
-
-### Reconciliation cursor and queue
-
-No accepted contract currently pins:
-
-- what durable frontier proves which raw records have been evaluated;
-- the reconciliation trigger;
-- queue/cursor storage and uniqueness;
-- retry, crash recovery, and corruption behavior;
-- whether replay uses a fixed input frontier;
-- how assignment-revision changes are committed relative to admission.
-
-Production background reconciliation or scan-on-read behavior is prohibited
-until this lifecycle is specified.
-
-### Complete management wire bytes
-
-The current contract does not yet completely pin:
-
-- request `schema_version` values other than the accepted create example;
-- response `schema_version` values, including create, locator read, Session
-  action, and assignment read;
-- the exact response content type and complete fixed headers for every success;
-- locator-read success status;
-- PATCH success status, response entity, and schema version;
-- Session action success status, response entity, and schema version;
-- assignment GET success status and exact schema-version value;
-- fixed `Location`, `ETag`, or other success headers;
-- the complete error-code-to-HTTP-status map;
-- action-specific null/presence rules for `repository_id` in `assign`,
-  `explicitly_unassign`, and `resume_automatic`;
-- assignment `state` and `authority` wire vocabularies;
-- ordering, deduplication, and bounds for `conflicting_repository_ids`;
-- ordering, duplicate policy, and maximum cardinality for
-  `observed_label_candidates`;
-- locator `provenance` nullability, item shape, property order, ordering, and
-  bounds.
-
-These are exact-byte routes. They cannot be implemented with framework-default
-serialization choices and frozen later.
-
-### Raw-reference durability
-
-The logical observation requires a raw-record reference and an index beginning
-with `raw_record_id`, while admitted catalog metadata must survive raw expiry
-and restore without the raw component.
-
-The contract must pin whether the reference is an opaque value, nullable
-foreign key, retained tombstone identity, or another exact shape, including how
-availability is derived after restore. A restrictive foreign key to a
-physically deletable raw row cannot be assumed.
-
-### Single-read-transaction composition seam
-
-`ILocalRepositoryScopeSnapshotService` must combine #156 catalog assignment,
-#161 archive eligibility, and #134 aggregates in one SQLite read transaction
-without direct catalog SQL in #161/#134.
-
-The contract has not pinned the transaction/context abstraction, ownership of
-opening and disposing the snapshot, or the exact archive-composition call
-boundary. Implementations MUST NOT create a second DB reader or use
-independently timed snapshots.
-
-## Minimum validation once each gate is released
+## Minimum validation for the released contract
 
 ### Locator parser/fingerprint slice
 
-The currently ready slice requires fixed fixtures for:
+The locator slice requires fixed fixtures for:
 
 - all six accepted forms;
 - ASCII case-insensitive scheme and host;

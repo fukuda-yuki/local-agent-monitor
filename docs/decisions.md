@@ -2891,6 +2891,14 @@ archive eligibility and #134 consumes the result through the same
 `ILocalRepositoryScopeSnapshotService`; neither adds direct catalog SQL or a
 second reader. Archive meaning remains #160/#161-owned.
 
+D081 clarifies and supersedes only D077's statement that #161 composes
+archive eligibility. #161 supplies direct Session and full-catalog Repository
+archive state/revision facts; #156 validates both complete exact sets and alone
+composes effective archive eligibility and its scalar reason from those facts
+plus exact current assignment. #134 continues to consume the one completed
+`ILocalRepositoryScopeSnapshotService` result; #161 and #134 add no catalog SQL
+or second reader. Archive meaning remains #160/#161-owned.
+
 The complete DC156-01–19 contract is `READY_FOR_IMPLEMENTATION` under
 [Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)
 and its [DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
@@ -3108,3 +3116,295 @@ D080 refines D075's route/browser boundary without changing the primary IA,
 raw-default-only posture, frozen `/api/monitor/*`,
 `/api/session-workspace/*` v1, SSE, Canvas, exact identity/provenance,
 missing-to-zero prohibition or Issue #152 scope.
+
+## D081: Repository scope composes direct archive facts and owns exact target existence
+
+Status: Accepted (2026-08-09)
+
+Issue #156 adopts PO156-A for DC156-19. #160 owns archive meaning. #161 owns
+`local_archive:1` storage and schema validation, archive queries and
+state-machine validation, mutation, public archive routes and archive backup
+validation. #156 owns catalog SQL, exact current assignment, virtual-scope
+composition, the complete Repository catalog read, direct-fact boundary
+validation, effective archive eligibility/reason composition and Repository
+target existence. #134 consumes one completed
+`ILocalRepositoryScopeSnapshotService` result and issues no catalog or archive
+SQL. #161 issues no catalog SQL and opens no second connection inside either
+handoff.
+
+The precomposed `LocalArchiveEligibilityContribution` is replaced by these
+internal direct-fact types:
+
+```csharp
+internal interface ILocalArchiveFactSnapshotContributor
+{
+    ValueTask<LocalArchiveFactContribution> ReadAsync(
+        ILocalRepositoryReadTransaction transaction,
+        LocalRepositoryArchiveInput input,
+        CancellationToken cancellationToken);
+}
+
+internal enum LocalArchiveState
+{
+    Active,
+    Archived,
+}
+
+internal sealed record LocalArchiveSessionFact(
+    string SessionId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveRepositoryFact(
+    string RepositoryId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveFactContribution(
+    IReadOnlyList<LocalArchiveSessionFact> Sessions,
+    IReadOnlyList<LocalArchiveRepositoryFact> Repositories);
+```
+
+`LocalRepositoryArchiveInput(SessionIds, RepositoryIds)` remains. Before the
+archive phase, #156 freezes the complete canonical ordinally sorted Session ID
+set returned by #134, within the existing 10,000-Session bound, and the complete
+canonical ordinally sorted full Repository catalog, not merely assigned or
+candidate IDs. Immediately after the catalog phase and before the requested-
+Repository check, archive input construction or #161 call, #156 validates and
+freezes the complete Repository sequence. IDs must be canonical and strictly
+increasing under `StringComparer.Ordinal`. A noncanonical, duplicate or
+non-strictly ordered catalog row fails with
+`InvalidOperationException("local_repository_catalog_snapshot_invalid")` and
+the contributor is not called. The one frozen Repository sequence is reused
+for input, exact-set validation, assignment composition and projection.
+
+#161 returns exactly one Session fact and one full-catalog Repository fact for
+every corresponding input ID. A missing `local_archive_current` row
+materializes as `Active, revision 0`. Output order is not semantic: reversed or
+independently shuffled collections remain valid. #156 joins by exact canonical
+ID and never zips facts positionally.
+
+#156 copies and validates both collections independently before composition.
+The contribution, lists and items must be non-null; cardinality and exact-set
+identity must match the inputs; every ID must be a canonical lowercase UUIDv7
+present exactly once; and `State` must be defined. The only valid state/revision
+pairs are:
+
+```text
+Active, 0
+Active, positive even revision
+Archived, positive odd revision
+```
+
+`Archived,0`, archived/even, active/positive-odd, negative revision and an
+undefined state are invalid. Missing, extra, duplicate and same-count-
+substituted IDs are invalid. Any invalid contribution throws the fixed internal
+`InvalidOperationException("local_archive_fact_contribution_invalid")` without
+target or row data and returns no partial snapshot. Cancellation is checked
+while freezing each collection and before composition.
+
+Contributor-owned `IReadOnlyList` instances are hostile mutable carriers. For
+each list, #156 captures `Count` exactly once, requires the expected count and
+reads each indexed item exactly once into a new #156-owned fact record.
+Validation, lookup, reason selection and snapshot construction then use only
+the owned copies, closing validation/reread time-of-check/time-of-use behavior.
+
+The completed internal snapshot records are:
+
+```csharp
+internal sealed record LocalRepositoryCatalogSnapshot(
+    string RepositoryId,
+    string DisplayName,
+    long Revision,
+    string? CurrentLocatorId,
+    long AssignmentConflictCount,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision);
+
+internal sealed record LocalRepositoryScopeSessionSnapshot(
+    string SessionId,
+    ILocalRepositorySessionSnapshotRow Session,
+    long AssignmentRevision,
+    LocalRepositoryScopeAssignmentState AssignmentState,
+    LocalRepositoryScopeAssignmentAuthority AssignmentAuthority,
+    string? RepositoryId,
+    IReadOnlyList<string> CandidateRepositoryIds,
+    bool IsAllScopeMember,
+    bool IsUnassignedScopeMember,
+    bool IsRequestedScopeMember,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision,
+    bool IsEffectivelyEligible,
+    string? ArchiveExclusionReason);
+```
+
+Repository and Session rows receive their own direct state/revision facts; this
+bounded seam adds no timestamps. After exact assignment resolution, #156 alone
+computes:
+
+```text
+session_archived = session_fact.state == Archived
+
+assigned_repository_archived =
+    exact current RepositoryId is non-null
+    AND repository_fact[RepositoryId].state == Archived
+
+IsEffectivelyEligible =
+    NOT session_archived AND NOT assigned_repository_archived
+
+ArchiveExclusionReason =
+    session_archived              ? "session_archived" :
+    assigned_repository_archived ? "repository_archived" :
+                                   null
+```
+
+When both direct facts are archived, the Session is ineligible and the scalar
+reason is `session_archived` while both facts/revisions remain visible.
+Restoring only one side leaves the other side's reason on a fresh snapshot.
+Manual and automatic exact assignments use the same predicate. Conflict,
+unassigned and explicitly-unassigned Sessions have no exact current Repository
+and ignore all candidate Repository archive facts. `IsRequestedScopeMember` is
+solely scope membership; `IsEffectivelyEligible` is solely archive eligibility
+and is never ANDed with membership. `active_only` consumers require both
+membership and effective eligibility; `include_archived` retains membership
+and exposes direct facts and reason.
+
+#156 also owns one stateless synchronous target-existence authority:
+
+```csharp
+internal interface ILocalRepositoryTargetExistenceAuthority
+{
+    IReadOnlyList<string> ReadExisting(
+        SqliteConnection openConnection,
+        SqliteTransaction exactTransaction,
+        IReadOnlyList<string> canonicalRepositoryIds,
+        CancellationToken cancellationToken);
+}
+```
+
+The synchronous signature supersedes only the
+`ReadExistingAsync -> ValueTask` signature in the noncanonical repaired PO161-A
+packet. D082 must promote this signature and must not retain dual synchronous
+and asynchronous authorities. The concrete Repository-persistence
+implementation applies this exact precedence:
+
+1. reject null arguments with normal BCL guards;
+2. require an open connection, a non-null active transaction connection and
+   `ReferenceEquals(exactTransaction.Connection, openConnection)`, otherwise
+   throw
+   `InvalidOperationException("local_repository_target_existence_transaction_invalid")`;
+3. require 1..200 IDs, copy each once, and require canonical lowercase UUIDv7
+   values strictly increasing under `StringComparer.Ordinal`, otherwise throw
+   `ArgumentException("local_repository_target_ids_invalid", nameof(canonicalRepositoryIds))`;
+4. check cancellation;
+5. execute exactly one query on the supplied transaction; and
+6. validate and freeze the complete result before returning.
+
+The single dynamically parameterized statement is equivalent to:
+
+```sql
+SELECT repository_id, typeof(repository_id)
+FROM local_repositories
+WHERE repository_id IN ($repository_id_000, ..., $repository_id_NNN)
+ORDER BY repository_id COLLATE BINARY;
+```
+
+All 1..200 placeholders bind exact text; values are never interpolated. The
+authority performs no schema probe, PRAGMA, second query, N+1 read, retry,
+alternate lookup or connection replacement, and does not open, begin, commit,
+roll back or dispose caller resources. SQLite exclusive-lock contention is
+attempted once. The original `SqliteException` with primary code 5
+(`SQLITE_BUSY`) or 6 (`SQLITE_LOCKED`) propagates unchanged without wrapping,
+mapping, sleeping or retrying, and the caller's connection and transaction
+remain open, reference-equal and caller-owned.
+
+The result is a new frozen, canonical, distinct, strictly ordinally increasing
+exact subset of the frozen input and contains only `repository_id`. A non-text,
+noncanonical, duplicate, out-of-input or out-of-order row throws
+`InvalidOperationException("local_repository_target_existence_result_invalid")`.
+Cancellation or failure returns no partial result. #161 public callers map only
+busy/locked to `persistence_busy`; every other non-cancellation authority
+exception maps to no-detail `archive_store_unavailable`. An empty valid subset
+is `target_not_found`. Runtime-backup source/staging validation maps any
+non-cancellation exception or returned-set inequality to `restore_incompatible`.
+
+Exact `GET /api/local-monitor/v1/archive?target_kind=repository&target_id=...`
+and Repository mutation each supply one ID on their exact transaction and
+require set equality before archive-current or revision/state evaluation.
+Runtime-backup validation keyset-pages distinct Repository target
+IDs in nonempty ordinal pages of at most 200, requires equality for each page,
+has no overall target-count cap and makes no empty call. The private dynamic
+catalog-mutation `TargetExists` helper is not this authority and is not exposed.
+
+The composite snapshot retains one connection, one deferred read transaction,
+first-read snapshot pin, sequential phases, no overlapping reader, revocable
+contributor capability, catalog-table denial for contributors, cancellation
+disposal and one `persistence_busy` mapping:
+
+```text
+#134 Session contributor
+  -> #156 catalog reads
+  -> #161 direct archive fact contributor
+  -> #156 validation/composition
+  -> return one complete snapshot
+```
+
+There is no fallback or second snapshot. The raw-default host dependency is
+`ILocalArchiveFactSnapshotContributor`; no fake/default #134 or #161
+contributor is registered. Exactly one stateless
+`ILocalRepositoryTargetExistenceAuthority` singleton is registered in the
+raw-default Repository composition block and no sanitized-only human
+composition. Runtime backup explicitly uses the same concrete implementation
+outside human-host DI, including sanitized receiver/runtime-backup posture.
+
+D081 selects two typed direct-fact collections with Session-first scalar
+precedence over precomposed #161 eligibility, Repository-first precedence,
+multi-reason/combined-enum expansion, or treating simultaneous archive as
+invalid. It selects the #156-owned caller-connection/caller-transaction bounded
+existence authority over #161 catalog SQL, a path-bound store, widening
+`ILocalRepositoryReadTransaction`, or cross-component foreign keys/copied
+parents. These alternatives either retain two composition authorities, alter
+accepted v1 consumers, lose transaction coherence, duplicate schema authority
+or broaden SQL capability.
+
+The strongest objection to Session-first precedence is that its scalar can hide
+the Repository cause when both predicates are true. The scalar is only the
+deterministic primary explanation: both direct facts and revisions remain
+mandatory, so a multi-reason carrier would only expand frozen accepted
+contracts. The strongest objection to exposing
+`SqliteConnection`/`SqliteTransaction` is SQLite coupling. Both components
+already share the SQLite persistence boundary, while mutation atomicity and
+restore staging require the caller's exact transaction; a generic abstraction
+would conceal that proof or expose broader query authority.
+
+The fail-closed counterexamples are binding. An archived candidate never
+excludes a conflict/unassigned Session; simultaneous archive retains both facts
+and selects `session_archived`; impossible `Active,1` is rejected; a staging
+transaction cannot accidentally prove existence in the live database;
+membership cannot suppress independent archive truth; shuffled or mutating
+carriers cannot cause positional/second-read misbinding; and lock contention
+cannot trigger retry or transaction replacement.
+
+D081 adds no `local_archive` tables, schema, routes, public DTO/SSE bytes,
+archive timestamps, Repository archive columns, #161 catalog SQL, generic SQL
+capability, candidate archive filtering, dual reason, cascade/ingest restore,
+Retention/pin/delete-now change, compatibility carrier, permissive parser,
+fallback, retry, sanitized-only human registration or Issue #152 resolution.
+
+Canonical promotion follows D079 -> D080 -> D081. D080/#136 is only the
+specification/history integration base and is not a #156 runtime, type, schema
+or test dependency. The binding runtime rollout is:
+
+```text
+#124 PO124-A specification + Session 14 migration/validation
+  -> #156 D081 direct-fact and Repository-existence seam
+  -> #161 D082 local_archive:1 storage/mutation/routes/backup
+  -> #158 D083 Skill snapshot/current-file authority
+  -> #134 D084 Workspace projection/read serialization
+```
+
+#124 establishes exact current Session 14 with no Session 13/14 dual branch.
+#156 lands no archive storage. #161 consumes D081 and inserts
+`local_archive:1` after catalog and before Retention; `local_archive:1` plus
+`session:13` is incompatible. #134 starts only after #156/#161/#158 and creates
+no placeholder facts, direct SQL, second reader or fallback projection.

@@ -181,7 +181,10 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   #160/#161 archive,
   #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
-  `ILocalRepositoryScopeSnapshotService` and do not duplicate catalog readers.
+  `ILocalRepositoryScopeSnapshotService`. #161 supplies direct Session and
+  Repository archive facts, #156 validates those facts and alone composes
+  assignment-dependent effective eligibility/reason, and #161/#134 do not add
+  catalog SQL, a second connection, or a parallel reader.
   The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
   accepted Session collection request transport; q/model search values remain
   transient and it has no GET or saved-search fallback. #133 does not yet fix

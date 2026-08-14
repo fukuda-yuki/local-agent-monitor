@@ -2,18 +2,16 @@
 
 Status: **Accepted current authority — DC156-12 through DC156-19**
 
-This specification closes the eight production blockers retained by
-[Local Repository Catalog and Session Assignment](local-repository-catalog.md).
-The base contract remains authoritative for DC156-01 through DC156-11. This
-file supersedes only:
+This specification provides the accepted closure for the eight former
+production blockers summarized by the
+[Local Repository Catalog and Session Assignment](local-repository-catalog.md)
+historical decision inventory. The base contract remains authoritative for
+DC156-01 through DC156-11. This file supersedes its former locator-parser-only
+readiness statement and older Issue comments that describe the eight groups
+below as unresolved.
 
-- the base document's temporary statement that only the locator parser is
-  executable;
-- its `Required decisions before production implementation` section; and
-- older Issue comments that describe the eight groups below as unresolved.
-
-After registration in the Local Monitor v1 Contract Index, the complete
-`local_repository_catalog:1` implementation is `READY`.
+The Local Monitor v1 Contract Index registers this authority; the complete
+`local_repository_catalog:1` contract is `READY_FOR_IMPLEMENTATION`.
 
 This is one pre-release path. No old catalog schema, compatibility reader, dual
 writer, alternate queue trigger, fallback parser, heuristic binding, migration
@@ -700,45 +698,364 @@ export/import, or repository-safe artifacts.
 ## DC156-19 — one coherent Repository/Session/archive read snapshot
 
 `ILocalRepositoryScopeSnapshotService` is #156-owned and is the only public read
-composition entry used by #134. It opens one SQLite connection and one read
-transaction for the complete operation.
+composition entry used by #134. It opens one SQLite connection and one deferred
+read transaction for the complete operation.
 
-The service accepts two internal contributors:
+### Ownership and direct-fact carrier
 
-```text
-ILocalRepositorySessionSnapshotContributor   (#134-owned)
-ILocalArchiveEligibilitySnapshotContributor  (#161-owned)
+- #160 owns archive meaning.
+- #161 owns `local_archive:1` storage, schema validation, archive queries,
+  state-machine validation, mutation, public archive routes, and archive backup
+  validation.
+- #156 owns catalog SQL, exact current assignment, virtual-scope composition,
+  the complete Repository catalog read, direct-fact boundary validation,
+  effective archive eligibility/reason composition, and Repository target
+  existence.
+- #134 consumes one completed `ILocalRepositoryScopeSnapshotService` result and
+  issues no catalog or archive SQL.
+- #161 issues no catalog SQL and opens no second connection inside either
+  handoff.
+
+The service accepts the #134-owned
+`ILocalRepositorySessionSnapshotContributor` and this #161-owned direct-fact
+contributor:
+
+```csharp
+internal interface ILocalArchiveFactSnapshotContributor
+{
+    ValueTask<LocalArchiveFactContribution> ReadAsync(
+        ILocalRepositoryReadTransaction transaction,
+        LocalRepositoryArchiveInput input,
+        CancellationToken cancellationToken);
+}
+
+internal enum LocalArchiveState
+{
+    Active,
+    Archived,
+}
+
+internal sealed record LocalArchiveSessionFact(
+    string SessionId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveRepositoryFact(
+    string RepositoryId,
+    LocalArchiveState State,
+    long Revision);
+
+internal sealed record LocalArchiveFactContribution(
+    IReadOnlyList<LocalArchiveSessionFact> Sessions,
+    IReadOnlyList<LocalArchiveRepositoryFact> Repositories);
 ```
 
-It creates one internal `ILocalRepositoryReadTransaction` capability containing
-the already-open connection and transaction. Contributors may execute only
-their owning queries through that capability. They cannot open another
-connection, begin/commit/rollback/dispose the transaction, or query catalog
-tables outside #156.
+Retain `LocalRepositoryArchiveInput(SessionIds, RepositoryIds)`. #156 freezes
+both input collections before the archive phase:
+
+- `SessionIds` is the complete, canonical, ordinally sorted exact set returned
+  by the #134 contributor, maximum 10,000 under the existing bound;
+- `RepositoryIds` is the complete, canonical, ordinally sorted full catalog,
+  not merely assigned or candidate Repository IDs.
+
+Immediately after the catalog phase, and before the requested-Repository check,
+archive input construction, or #161 contributor call, #156 validates and
+freezes the complete Repository row sequence. Repository IDs must be canonical
+and strictly increasing under `StringComparer.Ordinal`; this proves uniqueness
+as well as the SQL ordering contract. A noncanonical, duplicate, or
+non-strictly ordered catalog row fails with the existing fixed
+`InvalidOperationException("local_repository_catalog_snapshot_invalid")`, and
+the archive contributor is not called. The resulting one frozen Repository
+sequence is reused for archive input, direct-fact exact-set validation,
+assignment composition, and Repository projection; no later code rebuilds a
+weaker set.
+
+#161 returns exactly one fact for every ID in both collections. A missing
+`local_archive_current` row materializes as `Active, revision 0`. Output order
+is not semantic; exact set identity is. Reversed and independently shuffled
+Session and Repository fact collections are valid and produce the same snapshot
+values and record ordering. #156 joins each copied fact by its exact canonical
+ID; it never zips a fact collection positionally with an input ID collection.
+
+### Direct-fact validity and fail-closed behavior
+
+#156 copies each returned fact into its own frozen representation and validates
+both collections independently before any composition. A contribution is valid
+only when all of the following hold:
+
+- the contribution, both lists, and every item are non-null;
+- collection cardinality equals the corresponding exact input cardinality;
+- every ID is a canonical lowercase UUIDv7 string;
+- every ID belongs to the corresponding input set exactly once;
+- there is no missing, extra, duplicate, or same-count substituted ID;
+- `State` is a defined `LocalArchiveState` value;
+- the state/revision pair is exactly one of:
+
+```text
+Active, 0
+Active, positive even revision
+Archived, positive odd revision
+```
+
+The parity check is a carrier-integrity invariant. It does not authorize #156
+to query archive tables or validate event chains. It prevents a contributor
+from returning `Active,1` and causing an actually archived target to fail open.
+`Archived,0`, archived/even, active/positive-odd, negative revision, and an
+undefined enum value are invalid.
+
+Any invalid contribution throws one fixed internal
+`InvalidOperationException("local_archive_fact_contribution_invalid")`; the
+message contains no target or row data, and no partial snapshot is returned.
+Cancellation is checked while freezing each collection and before composition.
+
+The contributor-owned `IReadOnlyList` instances are hostile mutable carriers,
+not trusted storage. For each collection, #156 captures `Count` exactly once,
+requires the exact expected count, then reads each indexed item exactly once
+into a new #156-owned fact record. From that point onward validation, lookup,
+reason selection, and snapshot construction use only the owned copies; #156
+does not reread `Count`, an indexer, an enumerator, or a contributor-owned item.
+This closes time-of-check/time-of-use behavior from a list that mutates after
+its first read or alternates values on repeated reads.
+
+### Snapshot fields and exact composition
+
+The internal returned records are:
+
+```csharp
+internal sealed record LocalRepositoryCatalogSnapshot(
+    string RepositoryId,
+    string DisplayName,
+    long Revision,
+    string? CurrentLocatorId,
+    long AssignmentConflictCount,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision);
+
+internal sealed record LocalRepositoryScopeSessionSnapshot(
+    string SessionId,
+    ILocalRepositorySessionSnapshotRow Session,
+    long AssignmentRevision,
+    LocalRepositoryScopeAssignmentState AssignmentState,
+    LocalRepositoryScopeAssignmentAuthority AssignmentAuthority,
+    string? RepositoryId,
+    IReadOnlyList<string> CandidateRepositoryIds,
+    bool IsAllScopeMember,
+    bool IsUnassignedScopeMember,
+    bool IsRequestedScopeMember,
+    LocalArchiveState ArchiveState,
+    long ArchiveRevision,
+    bool IsEffectivelyEligible,
+    string? ArchiveExclusionReason);
+```
+
+Repository rows receive their exact direct Repository fact. Session rows
+receive their exact direct Session fact. Timestamps are not added to this
+bounded seam; #161 direct/list routes own complete archive current facts.
+
+For each Session, after exact assignment resolution, #156 computes:
+
+```text
+session_archived = session_fact.state == Archived
+
+assigned_repository_archived =
+    exact current RepositoryId is non-null
+    AND repository_fact[RepositoryId].state == Archived
+
+IsEffectivelyEligible =
+    NOT session_archived AND NOT assigned_repository_archived
+
+ArchiveExclusionReason =
+    session_archived              ? "session_archived" :
+    assigned_repository_archived ? "repository_archived" :
+                                   null
+```
+
+Consequences are exact:
+
+- both direct facts archived -> ineligible, reason `session_archived`;
+- restoring only the Session -> still ineligible, reason
+  `repository_archived` on a fresh snapshot;
+- restoring only the Repository -> still ineligible, reason
+  `session_archived` on a fresh snapshot;
+- manual and automatic exact assignment use the same predicate;
+- conflict, unassigned, and explicitly-unassigned Sessions have no exact
+  current assigned Repository and ignore every candidate Repository archive
+  fact;
+- `IsRequestedScopeMember` is computed solely from the requested
+  all/repository/unassigned scope;
+- `IsEffectivelyEligible` is computed solely from archive facts and is never
+  ANDed with `IsRequestedScopeMember`;
+- consumers implement `active_only` by requiring both membership and effective
+  eligibility; `include_archived` may retain membership while exposing the
+  direct facts and reason. This preserves exact archived Repository routes.
+
+### Exact Repository target existence authority
+
+#156 owns one stateless internal authority:
+
+```csharp
+internal interface ILocalRepositoryTargetExistenceAuthority
+{
+    IReadOnlyList<string> ReadExisting(
+        SqliteConnection openConnection,
+        SqliteTransaction exactTransaction,
+        IReadOnlyList<string> canonicalRepositoryIds,
+        CancellationToken cancellationToken);
+}
+```
+
+The core is deliberately synchronous. Runtime-backup source, staging, and
+installed validators are synchronous, while this is one bounded local SQLite
+statement. HTTP callers invoke the same synchronous authority inside their
+existing transaction; no asynchronous wrapper is another authority, and there
+is no asynchronous dual interface.
+
+The concrete SQLite implementation is owned in the Repository persistence
+namespace and follows this exact precedence:
+
+1. reject null arguments using the normal BCL null guards;
+2. require `openConnection.State == ConnectionState.Open`, a non-null active
+   `exactTransaction.Connection`, and
+   `ReferenceEquals(exactTransaction.Connection, openConnection)`; otherwise
+   throw fixed internal
+   `InvalidOperationException("local_repository_target_existence_transaction_invalid")`;
+3. require count `1..200`; copy each item once to a private array; require every
+   item to be canonical lowercase UUIDv7 and each adjacent item to be strictly
+   increasing under `StringComparer.Ordinal`; otherwise throw fixed internal
+   `ArgumentException("local_repository_target_ids_invalid", nameof(canonicalRepositoryIds))`;
+4. check cancellation;
+5. execute exactly one query on the supplied transaction;
+6. validate and freeze the complete returned subset before return.
+
+The SQL command is one dynamically parameterized equivalent of:
+
+```sql
+SELECT repository_id, typeof(repository_id)
+FROM local_repositories
+WHERE repository_id IN ($repository_id_000, ..., $repository_id_NNN)
+ORDER BY repository_id COLLATE BINARY;
+```
+
+Every placeholder is bound as exact text. There are 1..200 parameters and no
+string interpolation of values. The authority performs no schema probe, PRAGMA,
+second query, retry, alternate lookup, or N+1 read. It does not open, begin,
+commit, roll back, or dispose a connection or transaction.
+
+An actual SQLite exclusive-lock contention is attempted exactly once. The
+authority propagates the original `SqliteException` with primary error code
+`5` (`SQLITE_BUSY`) or `6` (`SQLITE_LOCKED`) unchanged; it does not wrap, map,
+sleep, retry, replace the command, or reopen anything. The caller's supplied
+connection remains open, `exactTransaction.Connection` remains reference-equal
+to that connection, and the authority neither commits, rolls back, nor disposes
+the transaction.
+
+The result is a newly frozen read-only list that is:
+
+- canonical, distinct, and strictly ordinally increasing;
+- an exact subset of the frozen input;
+- composed only of `repository_id`, with no Repository fields.
+
+A non-text, noncanonical, duplicate, out-of-input, or out-of-order returned row
+throws fixed internal
+`InvalidOperationException("local_repository_target_existence_result_invalid")`.
+Cancellation or any failure returns no partial set. SQLite busy, corruption,
+and other storage exceptions, plus the fixed transaction/result-integrity
+exceptions above, propagate unchanged to the #161 service/backup boundary; the
+#156 authority does not retry or map them. Cancellation remains cancellation.
+#161 public callers map only SQLite busy/locked to fixed `persistence_busy`;
+every other authority exception, including null/input/transaction/result
+validation, corruption, and other storage failure, maps to fixed no-detail
+`archive_store_unavailable`. An empty valid subset remains the semantic
+`target_not_found` path, not corruption. Runtime-backup source/staging
+validation maps every non-cancellation authority exception, or returned-set
+inequality, to `restore_incompatible`. No framework error or target, row, or
+SQLite detail is exposed.
+
+#161 uses the authority as follows:
+
+- `GET /api/local-monitor/v1/archive?target_kind=repository&target_id=...`
+  supplies exactly one ID on its exact read transaction and requires returned-
+  set equality before archive-current read; an empty subset is the D082-owned
+  fixed `404 target_not_found` result;
+- a Repository mutation supplies exactly one ID inside its existing
+  `BEGIN IMMEDIATE` transaction and requires returned-set equality before any
+  archive current/head read; an empty subset is the same fixed missing-target
+  result before revision/state evaluation;
+- runtime-backup validation keyset-pages distinct Repository archive target IDs
+  in nonempty ordinal pages of at most 200 on the exact staging/read
+  transaction, calls the authority once per page, and requires set equality;
+- there is no overall target-count cap and no all-ID materialization;
+- no call is made for an empty page.
+
+The existing private dynamic `TargetExists` helper in catalog mutations is not
+this authority and is not exposed: it is synchronous, one-target,
+table/column-name driven, and lacks the bounded, frozen, and cancellation
+contract.
+
+### Connection, ordering, and registration boundaries
+
+The service creates one internal `ILocalRepositoryReadTransaction` capability
+containing the already-open connection and transaction. Contributors may
+execute only their owning queries through that capability. They cannot open
+another connection, begin, commit, roll back, or dispose the transaction, or
+query catalog tables outside #156. Each contributor capability is revoked when
+its owning phase ends; a retained capability cannot be used by a later phase.
 
 The fixed call order inside the same snapshot is:
 
-1. #134 contributor reads exact Session identities and bounded base rows;
-2. #156 reads catalog assignments, candidate sets, Repository/locator heads,
-   revisions, and conflict counts for those exact IDs;
-3. #161 contributor reads direct Session and Repository archive states for the
-   exact collected IDs;
-4. #156 composes virtual scope membership and effective archive eligibility;
-5. #134 serializes only the completed returned snapshot.
+```text
+#134 Session contributor
+  -> #156 catalog reads
+  -> #161 direct archive fact contributor
+  -> #156 validation/composition
+  -> return one complete snapshot
+```
 
 The first read occurs immediately after beginning the transaction, so all later
 queries share one SQLite snapshot. Calls are sequential; no overlapping reader
 or command uses the connection. Cancellation or contributor failure disposes
-the read transaction and returns no partial snapshot.
+the read transaction and returns no partial snapshot. A `persistence_busy`
+condition is mapped once at the service boundary. No independently timed
+fallback snapshot, client-side merge, N+1 Repository read, scan-on-read, or
+second snapshot is permitted.
 
-#134 does not issue catalog SQL. #161 does not issue catalog SQL. #156 does not
-reimplement Session or archive semantics. The service returns one coherent,
+#156 does not reimplement Session semantics, issue archive SQL, or validate
+archive event chains; it validates the direct-fact carrier and alone composes
+effective eligibility and its scalar reason. The service returns one coherent,
 revision-bearing result for Repository cards, repository/all/unassigned scopes,
 Session paging, conflict counts, and archive exclusion reasons.
 
-A `persistence_busy` condition is mapped once at the service boundary. No
-independently timed fallback snapshot, client-side merge, N+1 Repository read,
-or scan-on-read is permitted.
+Rename the lazy raw-default host dependency to
+`ILocalArchiveFactSnapshotContributor`. Do not register a fake/default #134 or
+#161 contributor. Register exactly one stateless
+`ILocalRepositoryTargetExistenceAuthority` in the existing raw-default
+Repository composition block; it is absent from sanitized-only human host
+composition. The concrete implementation exposes one internal stateless
+singleton instance. Runtime-backup initialization and validation consume that
+same implementation explicitly outside the human-host service provider,
+including sanitized receiver/runtime-backup posture; backup must not depend on
+raw-default DI registration. #161 may consume the raw-default registration for
+public archive reads and mutations.
+
+### Explicit prohibitions
+
+DC156-19 adds none of the following:
+
+- `local_archive` tables, indexes, triggers, schema stamp, route, response, or
+  backup component;
+- archive timestamps on the #156 bounded snapshot seam;
+- Repository archive columns in catalog tables;
+- #161 catalog SQL, generic SQL capability, or separate catalog connection;
+- precomposed #161 eligibility/reason;
+- Repository-candidate archive filtering for non-assigned Sessions;
+- dual reason, combined reason, null/error simultaneous-state behavior;
+- cascade archive, ingest restore, raw deletion, Retention extension, pin, or
+  delete-now behavior;
+- compatibility reader, old/new carrier, permissive parser, fallback, retry,
+  or scan-on-read;
+- any public DTO/route/frozen API/SSE byte change;
+- any sanitized-only human registration; or
+- any Issue #152 completion claim.
 
 ## Released implementation and validation gate
 

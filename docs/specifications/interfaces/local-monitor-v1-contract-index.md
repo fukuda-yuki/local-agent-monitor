@@ -106,8 +106,10 @@ is permitted.
   from source; manifest/restore omit it and restore startup creates it empty.
   Future #166 operational tables require their own exact backup amendment.
 - #156, #161 and #134 use one `ILocalRepositoryScopeSnapshotService`; #161
-  composes archive eligibility and #161/#134 add no direct catalog SQL or
-  parallel reader.
+  supplies complete direct Session/Repository archive facts, #156 validates
+  those facts and alone composes assignment-dependent effective archive
+  eligibility/reason, and #161/#134 add no direct catalog SQL or parallel
+  reader.
 - Repository automatic creation uses exact admitted GitHub locator fingerprints
   only. It never uses name/label/path/CWD/prompt/time/cardinality, and an
   archived exact owner is reused without restore or duplication.
