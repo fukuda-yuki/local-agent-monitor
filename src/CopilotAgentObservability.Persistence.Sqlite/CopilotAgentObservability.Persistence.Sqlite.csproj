@@ -23,4 +23,9 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="LocalArchive\local_archive.schema.v1.sql"
+                      LogicalName="local_archive.schema.v1.sql" />
+  </ItemGroup>
+
 </Project>
