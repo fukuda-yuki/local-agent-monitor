@@ -226,6 +226,146 @@ public sealed class LocalRepositoryScopeSnapshotTests
             unassignedScope.Sessions.Where(item => item.IsRequestedScopeMember).Select(item => item.SessionId));
     }
 
+    [Theory]
+    [InlineData(false, false, true, null)]
+    [InlineData(true, false, false, "session_archived")]
+    [InlineData(false, true, false, "repository_archived")]
+    [InlineData(true, true, false, "session_archived")]
+    public async Task ReadAsync_ComposesTheDirectArchiveFactMatrixEquallyForAutomaticAndManualAssignments(
+        bool sessionArchived,
+        bool repositoryArchived,
+        bool expectedEligible,
+        string? expectedReason)
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 3);
+        database.AddRepository(RepositoryB, LocatorB, revision: 5);
+        var automatic = SessionId(1);
+        var manual = SessionId(2);
+        database.AddCandidate(automatic, RepositoryA);
+        database.SetRevision(automatic, 1);
+        database.AddCandidate(manual, RepositoryA);
+        database.SetManualOverride(manual, "assigned", RepositoryB, revision: 2);
+        database.SetRevision(manual, 2);
+        var rows = new ILocalRepositorySessionSnapshotRow[]
+        {
+            new FakeSessionRow(automatic, "automatic"),
+            new FakeSessionRow(manual, "manual"),
+        };
+        var session = new FakeSessionContributor((capability, _, token) =>
+            ReadSessionContribution(capability, rows, token));
+        var archive = new FakeArchiveContributor(async (capability, input, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            return new(
+                input.SessionIds.Select(id => new LocalArchiveSessionFact(
+                    id,
+                    sessionArchived ? LocalArchiveState.Archived : LocalArchiveState.Active,
+                    sessionArchived ? 3 : 2)).ToArray(),
+                input.RepositoryIds.Select(id => new LocalArchiveRepositoryFact(
+                    id,
+                    repositoryArchived ? LocalArchiveState.Archived : LocalArchiveState.Active,
+                    repositoryArchived ? 5 : 4)).ToArray());
+        });
+
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
+            .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+
+        var automaticResult = snapshot.Sessions.Single(item => item.SessionId == automatic);
+        var manualResult = snapshot.Sessions.Single(item => item.SessionId == manual);
+        Assert.Equal(LocalRepositoryScopeAssignmentAuthority.Automatic, automaticResult.AssignmentAuthority);
+        Assert.Equal(LocalRepositoryScopeAssignmentAuthority.Manual, manualResult.AssignmentAuthority);
+        Assert.All(snapshot.Sessions, item =>
+        {
+            Assert.Equal(sessionArchived ? LocalArchiveState.Archived : LocalArchiveState.Active, item.ArchiveState);
+            Assert.Equal(sessionArchived ? 3 : 2, item.ArchiveRevision);
+            Assert.Equal(expectedEligible, item.IsEffectivelyEligible);
+            Assert.Equal(expectedReason, item.ArchiveExclusionReason);
+        });
+        Assert.All(snapshot.Repositories, item =>
+        {
+            Assert.Equal(repositoryArchived ? LocalArchiveState.Archived : LocalArchiveState.Active, item.ArchiveState);
+            Assert.Equal(repositoryArchived ? 5 : 4, item.ArchiveRevision);
+        });
+    }
+
+    [Fact]
+    public async Task ReadAsync_UsesOnlyTheExactAssignmentForEligibilityAndKeepsMembershipIndependent()
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 3);
+        database.AddRepository(RepositoryB, LocatorB, revision: 5);
+        var requestedButArchived = SessionId(1);
+        var manualOutsideScope = SessionId(2);
+        var conflict = SessionId(3);
+        var unassigned = SessionId(4);
+        var explicitlyUnassigned = SessionId(5);
+        database.AddCandidate(requestedButArchived, RepositoryA);
+        database.SetRevision(requestedButArchived, 1);
+        database.AddCandidate(manualOutsideScope, RepositoryA);
+        database.SetManualOverride(manualOutsideScope, "assigned", RepositoryB, revision: 2);
+        database.SetRevision(manualOutsideScope, 2);
+        database.AddCandidate(conflict, RepositoryA);
+        database.AddCandidate(conflict, RepositoryB);
+        database.SetRevision(conflict, 3);
+        database.AddCandidate(explicitlyUnassigned, RepositoryA);
+        database.SetManualOverride(explicitlyUnassigned, "explicitly_unassigned", null, revision: 4);
+        database.SetRevision(explicitlyUnassigned, 4);
+        var rows = new[]
+        {
+            requestedButArchived,
+            manualOutsideScope,
+            conflict,
+            unassigned,
+            explicitlyUnassigned,
+        }.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, id)).ToArray();
+        var session = new FakeSessionContributor((capability, _, token) =>
+            ReadSessionContribution(capability, rows, token));
+        var archive = new FakeArchiveContributor(async (capability, input, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            return new(
+                input.SessionIds.Select(id => new LocalArchiveSessionFact(
+                    id,
+                    id == requestedButArchived ? LocalArchiveState.Archived : LocalArchiveState.Active,
+                    id == requestedButArchived ? 3 : 2)).ToArray(),
+                input.RepositoryIds.Select(id => new LocalArchiveRepositoryFact(
+                    id,
+                    id == RepositoryA ? LocalArchiveState.Archived : LocalArchiveState.Active,
+                    id == RepositoryA ? 3 : 2)).ToArray());
+        });
+
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
+            .ReadAsync(new(LocalRepositoryScopeKind.Repository, RepositoryA), CancellationToken.None);
+
+        var requested = snapshot.Sessions.Single(item => item.SessionId == requestedButArchived);
+        Assert.True(requested.IsRequestedScopeMember);
+        Assert.False(requested.IsEffectivelyEligible);
+        Assert.Equal("session_archived", requested.ArchiveExclusionReason);
+
+        var outside = snapshot.Sessions.Single(item => item.SessionId == manualOutsideScope);
+        Assert.False(outside.IsRequestedScopeMember);
+        Assert.True(outside.IsEffectivelyEligible);
+        Assert.Null(outside.ArchiveExclusionReason);
+        Assert.Equal(RepositoryB, outside.RepositoryId);
+
+        foreach (var sessionId in new[] { conflict, unassigned, explicitlyUnassigned })
+        {
+            var result = snapshot.Sessions.Single(item => item.SessionId == sessionId);
+            Assert.Null(result.RepositoryId);
+            Assert.False(result.IsRequestedScopeMember);
+            Assert.True(result.IsEffectivelyEligible);
+            Assert.Null(result.ArchiveExclusionReason);
+        }
+
+        var repositoryA = snapshot.Repositories.Single(item => item.RepositoryId == RepositoryA);
+        Assert.Equal(LocalArchiveState.Archived, repositoryA.ArchiveState);
+        Assert.Equal(3, repositoryA.ArchiveRevision);
+        var repositoryB = snapshot.Repositories.Single(item => item.RepositoryId == RepositoryB);
+        Assert.Equal(LocalArchiveState.Active, repositoryB.ArchiveState);
+        Assert.Equal(2, repositoryB.ArchiveRevision);
+    }
+
     [Fact]
     public async Task ReadAsync_FailsClosedForInvalidRequestsContributionsAndCancellation()
     {
@@ -387,6 +527,16 @@ public sealed class LocalRepositoryScopeSnapshotTests
 
         Assert.Equal(10_000, snapshot.Sessions.Count);
         Assert.Equal(Enumerable.Range(1, 10_000).Select(SessionId), snapshot.Sessions.Select(item => item.SessionId));
+        Assert.All(snapshot.Sessions, item =>
+        {
+            Assert.True(item.IsRequestedScopeMember);
+            Assert.Equal(LocalArchiveState.Active, item.ArchiveState);
+            Assert.Equal(0, item.ArchiveRevision);
+            Assert.True(item.IsEffectivelyEligible);
+            Assert.Null(item.ArchiveExclusionReason);
+        });
+        Assert.Equal(LocalArchiveState.Active, snapshot.Repositories.Single().ArchiveState);
+        Assert.Equal(0, snapshot.Repositories.Single().ArchiveRevision);
         var reads = statements.Where(statement => statement.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)
             || statement.Contains("scope-catalog-query", StringComparison.Ordinal)).ToArray();
         var workStatements = statements.Where(statement =>
