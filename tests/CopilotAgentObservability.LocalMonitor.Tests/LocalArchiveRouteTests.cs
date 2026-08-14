@@ -1,8 +1,13 @@
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Archive;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Net.Http.Headers;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -72,6 +77,27 @@ public sealed class LocalArchiveRouteTests
 
         await AssertResponseAsync(context, 405, "{\"error\":\"method_not_allowed\"}");
         Assert.Equal(allow, context.Response.Headers.Allow);
+    }
+
+    [Fact]
+    public async Task WrongMethodSetsAllowBeforeRealServerStartsTheResponse()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, database.CreateStore()));
+        await app.StartAsync();
+        var address = Assert.Single(app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses);
+        using var client = new HttpClient { BaseAddress = new Uri(address) };
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/api/local-monitor/v1/archive");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(405, (int)response.StatusCode);
+        Assert.Equal(["GET"], response.Content.Headers.Allow);
+        Assert.Equal("{\"error\":\"method_not_allowed\"}", await response.Content.ReadAsStringAsync());
     }
 
     [Theory]
@@ -268,6 +294,54 @@ public sealed class LocalArchiveRouteTests
     }
 
     [Fact]
+    public async Task PostCancellationInsideMutateRollsBackAndEmitsNoSuccessEntity()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(First);
+        using var cancellation = new CancellationTokenSource();
+        var store = new SqliteLocalArchiveStore(
+            database.Path,
+            SqliteLocalRepositoryTargetExistenceAuthority.Instance,
+            LocalArchiveSessionTargetExistenceAuthority.Instance,
+            new FixedTimeProvider(DateTimeOffset.Parse(Now)),
+            instant =>
+            {
+                cancellation.Cancel();
+                return Guid.CreateVersion7(instant).ToString("D");
+            });
+        var body = $"{{\"schema_version\":\"local-archive-action.v1\",\"action\":\"archive\",\"target_kind\":\"session\",\"targets\":[{{\"target_id\":\"{First}\",\"expected_revision\":0}}]}}";
+        var context = Post("/api/local-monitor/v1/archive-actions", "application/json", body);
+        context.Request.Headers["x-monitor-csrf"] = "local-monitor";
+        context.RequestAborted = cancellation.Token;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => InvokeAsync(context, store));
+
+        Assert.Equal(0, database.EventCount());
+        Assert.Null(database.Current(First));
+        Assert.Equal(0, context.Response.Body.Length);
+    }
+
+    [Fact]
+    public async Task PostResponseEmissionUsesRequestAbortedAfterDurableCommit()
+    {
+        using var database = new LocalArchiveMutationDatabase();
+        database.InsertSession(First);
+        using var cancellation = new CancellationTokenSource();
+        var body = $"{{\"schema_version\":\"local-archive-action.v1\",\"action\":\"archive\",\"target_kind\":\"session\",\"targets\":[{{\"target_id\":\"{First}\",\"expected_revision\":0}}]}}";
+        var context = Post("/api/local-monitor/v1/archive-actions", "application/json", body);
+        context.Request.Headers["x-monitor-csrf"] = "local-monitor";
+        context.RequestAborted = cancellation.Token;
+        var response = new CancelingResponseStream(cancellation);
+        context.Response.Body = response;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => InvokeAsync(context, database.CreateStore()));
+
+        Assert.Equal(cancellation.Token, response.ObservedToken);
+        Assert.Equal(("archived", 1L, Now), database.Current(First));
+        Assert.Equal(0, response.Length);
+    }
+
+    [Fact]
     public async Task OwnedNon405ResponsesRemoveEveryForbiddenAndAllowHeader()
     {
         using var database = new LocalArchiveMutationDatabase();
@@ -337,5 +411,24 @@ public sealed class LocalArchiveRouteTests
         context.Response.Body.Position = 0;
         using var reader = new StreamReader(context.Response.Body, Encoding.UTF8, false, leaveOpen: true);
         Assert.Equal(entity, await reader.ReadToEndAsync());
+    }
+
+    private sealed class CancelingResponseStream(CancellationTokenSource cancellation) : MemoryStream
+    {
+        internal CancellationToken ObservedToken { get; private set; }
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            ObservedToken = cancellationToken;
+            cancellation.Cancel();
+            return ValueTask.FromCanceled(cancellationToken);
+        }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 }

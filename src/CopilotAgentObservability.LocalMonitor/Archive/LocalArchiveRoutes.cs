@@ -40,9 +40,10 @@ internal static class LocalArchiveRoutes
         var expectedMethod = owned == OwnedRoute.Action ? HttpMethods.Post : HttpMethods.Get;
         if (!string.Equals(context.Request.Method, expectedMethod, StringComparison.Ordinal))
         {
-            await WriteErrorAsync(context, StatusCodes.Status405MethodNotAllowed,
-                LocalArchiveWireError.MethodNotAllowed, head: context.Request.Method == HttpMethods.Head);
-            context.Response.Headers.Allow = expectedMethod;
+            await WriteMethodNotAllowedAsync(
+                context,
+                expectedMethod,
+                head: context.Request.Method == HttpMethods.Head);
             return;
         }
 
@@ -239,18 +240,27 @@ internal static class LocalArchiveRoutes
     private static Task WriteErrorAsync(
         HttpContext context,
         int status,
-        LocalArchiveWireError error,
-        bool head = false)
+        LocalArchiveWireError error)
     {
         var bytes = LocalArchiveWire.ErrorBytes(error);
+        return WriteAsync(context, status, bytes);
+    }
+
+    private static async Task WriteMethodNotAllowedAsync(
+        HttpContext context,
+        string allow,
+        bool head)
+    {
+        var bytes = LocalArchiveWire.ErrorBytes(LocalArchiveWireError.MethodNotAllowed);
+        SetHeaders(context.Response);
+        context.Response.Headers.Allow = allow;
+        context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
         if (head)
         {
-            context.Response.StatusCode = status;
-            SetHeaders(context.Response);
             context.Response.ContentLength = bytes.Length;
-            return Task.CompletedTask;
+            return;
         }
-        return WriteAsync(context, status, bytes);
+        await context.Response.Body.WriteAsync(bytes, context.RequestAborted);
     }
 
     private static async Task WriteAsync(
