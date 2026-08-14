@@ -16,7 +16,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Skill v1 correction/v2 transport/body/path snapshot/current file | [`skill-invocation-snapshot.md`](skill-invocation-snapshot.md), #119/#157/#158 | #158 after gate closure |
 | Session terminal facts/outcome aggregation | [`canvas-session-workspace.md`](canvas-session-workspace.md), #124 | #124 |
 | Sanitized-only receiver posture | #159 | #168 |
-| Session/Repository archive | #160 | #161 |
+| Session/Repository archive | [`local-archive.md`](local-archive.md), #160, D082 | #161 |
 | Optional AI snapshots/results/history | #162 plus the run-ID route amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #163/#164 |
 | Repository Session Compare | #165 plus the identity/expiry amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
 | Repository/Session Workspace reads | #133 semantic requirements plus the collection-request/execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md); exact Session-collection success wire remains a required later canonical #134 contract | #134 after that response contract closes |
@@ -110,6 +110,17 @@ is permitted.
   those facts and alone composes assignment-dependent effective archive
   eligibility/reason, and #161/#134 add no direct catalog SQL or parallel
   reader.
+- D082's singular executable archive owner is
+  [`local-archive.md`](local-archive.md). #161 owns `local_archive:1`, its
+  current/history state machine, direct-fact reader implementation, exact
+  raw-default `GET /api/local-monitor/v1/archive`,
+  `POST /api/local-monitor/v1/archive-actions`, and
+  `GET /api/local-monitor/v1/archived-items` routes, and runtime-backup
+  validation. The component is ordered immediately after
+  `local_repository_catalog:1` and before Retention. Those
+  routes/application/contributor are absent from
+  `--sanitized-only`; no alias, compatibility path, UI, precomposed eligibility
+  or second archive/catalog reader exists.
 - Repository automatic creation uses exact admitted GitHub locator fingerprints
   only. It never uses name/label/path/CWD/prompt/time/cardinality, and an
   archived exact owner is reused without restore or duplication.

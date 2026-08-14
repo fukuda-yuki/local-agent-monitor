@@ -45,7 +45,7 @@ Profile selector は `CAO_COLLECTION_PROFILE` とし、詳細は
 
 `raw-local-receiver` は Langfuse なしで VS Code からこの repository の local receiver へ直接 telemetry を送信する profile であり、Sprint7 の実装対象とする。
 
-Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Route and Session Explorer Transport](specifications/interfaces/local-monitor-v1-route-transport.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
+Local Monitor v1 の現行 product shape は、AI-independent な Repository / Session observation・investigation・deterministic Compare core と、明示実行する optional GitHub Copilot SDK analysis の2層である。primary IA は Repository selection → Session Explorer → Session detail / explicit cohort Compare であり、permanent sidebar、generic aggregate/KPI dashboard、trace-list preview pane、manual Evaluation/Evidence/Proposal flow を primary journey にしない。詳細は [Local Monitor v1 Product Definition](superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md)、[Local Monitor v1 IA](specifications/interfaces/local-monitor-v1-ia.md)、[Local Monitor v1 Route and Session Explorer Transport](specifications/interfaces/local-monitor-v1-route-transport.md)、[Local Monitor v1 Security](specifications/interfaces/local-monitor-v1-security.md)、[Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md)、[Local Archive v1](specifications/interfaces/local-archive.md)、[Local Monitor v1 Contract Index](specifications/interfaces/local-monitor-v1-contract-index.md) を単一 authority とする。
 
 Human page route ownership:
 
@@ -74,6 +74,16 @@ until the server creates an opaque comparison snapshot ID. Exact grammars and
 browser behavior are owned by the route transport specification.
 
 `/api/local-monitor/v1/*` is the raw-default human-UI support namespace. It owns only the accepted Local Monitor v1 readers and mutations, is same-origin/no-store/closed/bounded, and is not registered in `--sanitized-only`. It must not widen or duplicate frozen `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. Repository catalog/assignment and its gated management routes are owned by #155/#156; #134 alone owns and serializes the composite `GET /api/local-monitor/v1/repositories` Workspace read. The sole accepted Session collection request transport is `POST /api/local-monitor/v1/sessions`; the formerly specified GET has no alias, compatibility reader, saved-search handle or fallback. #133 currently fixes semantic row requirements but not a complete exact success wire, so no active POST or consuming primary page is registered until a later canonical #134 Workspace-read response contract closes that gap. #134 then alone maps, reads and serializes it. #156, #161 and #134 share one `ILocalRepositoryScopeSnapshotService`; #161 supplies direct Session/Repository archive facts, #156 validates those complete facts and alone composes assignment-dependent effective archive eligibility/reason, and neither #161 nor #134 adds direct catalog SQL or a second reader. Other Workspace reads are owned by #133/#134, Skill current-valid claims by #154, Skill raw detail by #157/#158, archive by #160/#161, Compare formula/snapshot by #165/#166, and optional AI snapshot/storage/history by #162/#163/#164. Consumers reuse those owners and do not add fallback readers or parallel state vocabularies.
+
+Issue #161/D082 maps exactly `GET /api/local-monitor/v1/archive`,
+`POST /api/local-monitor/v1/archive-actions`, and
+`GET /api/local-monitor/v1/archived-items` in raw-default composition only.
+Their exact path/method/HEAD, Host-first, same-origin, POST-CSRF, closed query/
+body, canonical response/error, no-store and no-echo contract is owned solely by
+[Local Archive v1](specifications/interfaces/local-archive.md). The application
+and its direct-fact contributor are absent from `--sanitized-only`; runtime-
+backup component validation remains an independent database authority. These
+routes add no UI and do not alter frozen v1 surfaces.
 
 The accepted #119/#157/#158 Skill foundation is canonical in
 [Skill Invocation Snapshot](specifications/interfaces/skill-invocation-snapshot.md).
@@ -1001,6 +1011,17 @@ tombstone; it is accepted only for a bound non-terminal source reintroduction.
 HTTP/UI can create or preview but cannot restore. The complete contract is
 [runtime backup and restore](specifications/interfaces/runtime-backup-restore.md).
 
+`local_archive:1` is part of that one SQLite restore unit immediately after
+`local_repository_catalog:1` and before `retention:1`. A declared archive
+component requires exact `session:14` and catalog v1; unlike the archive-absent
+migration path, it has no Session-13 parent exception. Backup/restore validates
+the exact archive schema, current/event chains, heads, parents, manifest version
+and both row counts, and preserves the component through whole-database replace
+without a second ZIP member, merge, overlay or repair. The component is absent
+from sanitized evidence. Exact rules are owned by
+[Local Archive v1](specifications/interfaces/local-archive.md) and
+[Runtime Backup And Restore](specifications/interfaces/runtime-backup-restore.md).
+
 ## Source schema drift and Claude Code P0
 
 Issue #62 stores immutable source-schema observations per committed ingest
@@ -1114,6 +1135,7 @@ sanitized. The canonical contract is
 | Local Monitor v1 exact route and Session Explorer transport | [specifications/interfaces/local-monitor-v1-route-transport.md](specifications/interfaces/local-monitor-v1-route-transport.md) |
 | Local Monitor v1 security supplement | [specifications/interfaces/local-monitor-v1-security.md](specifications/interfaces/local-monitor-v1-security.md) |
 | Local Repository catalog and Session assignment | [specifications/interfaces/local-repository-catalog.md](specifications/interfaces/local-repository-catalog.md) |
+| Local Archive v1 | [specifications/interfaces/local-archive.md](specifications/interfaces/local-archive.md) |
 | Collection profile interface | [specifications/interfaces/collection-profiles.md](specifications/interfaces/collection-profiles.md) |
 | Config CLI interface | [specifications/interfaces/config-cli.md](specifications/interfaces/config-cli.md) |
 | Configuration setup interface | [specifications/interfaces/configuration-setup.md](specifications/interfaces/configuration-setup.md) |
@@ -1181,6 +1203,16 @@ Publicly documented interfaces are:
   `/api/monitor/*`, `/api/session-workspace/*` v1 or SSE. #134 is the sole HTTP
   owner of `GET /api/local-monitor/v1/repositories`; #156 owns only its gated
   management/action routes and the catalog/assignment core.
+- Local Archive v1 raw-default endpoints:
+  `GET /api/local-monitor/v1/archive`,
+  `POST /api/local-monitor/v1/archive-actions`, and
+  `GET /api/local-monitor/v1/archived-items`. All three use exact literal paths,
+  Host-first validation, same-origin and no-store responses; the POST requires
+  the exact CSRF header. Their bounded request grammar, fixed HEAD/method/error
+  behavior and canonical success bytes are owned only by
+  [Local Archive v1](specifications/interfaces/local-archive.md). The routes,
+  application and contributor are absent from `--sanitized-only`, and no alias,
+  fallback, UI or frozen-v1 change is added.
 - Frozen Local Ingestion Monitor machine endpoints: `POST /v1/traces`, `GET /api/monitor/ingestions`, `GET /api/monitor/traces`, `GET /api/monitor/traces/{traceId}/spans`, `GET /api/monitor/summary`, `GET /api/monitor/overview?period=today|7d|30d`, `GET /api/monitor/trace-list?q&model&status&period&sort&offset&limit`, `GET /health/live`, `GET /health/ready`, and the SSE notification stream. Issue #118 does not change their shape, ordering, bytes or availability. `/api/monitor/*` and SSE remain sanitized and contain no raw/PII. `/health/ready` returns `503` for sustained saturation (transient backpressure is `degraded` with `2xx`) with the machine-readable `status` / `checks` / `degraded_reasons` body; default thresholds remain ingestion-stall `10s` and projection-lag `60s` where configurable. These endpoints are compatibility inputs, not an alternate Local Monitor v1 page reader or IA authority.
 - Historical import CLI commands:
   `historical-import preview --database <monitor.db> --request <request.json>`,

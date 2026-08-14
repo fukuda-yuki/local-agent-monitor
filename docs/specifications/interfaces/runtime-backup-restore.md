@@ -365,21 +365,22 @@ v10-to-v11 migration owns the source-compatibility change described above.
 
 ### Session 14 component compatibility
 
-The current runtime-backup component vector pins `session:14`; every other
-currently supported component entry is unchanged:
+The current runtime-backup component vector pins `session:14` and adds exactly
+`local_archive:1`; every other currently supported component entry is
+unchanged:
 
 ```text
 alert_engine:2, alert_lifecycle:1, doctor:1, first_trace_navigation:1,
 historical_import:1, historical_instruction_analysis:1,
-local_repository_catalog:1, monitor:11, pricing:1, retention:1,
+local_archive:1, local_repository_catalog:1, monitor:11, pricing:1, retention:1,
 runtime_backup:1, sanitized_import:1, session:14, skill_projection:1
 ```
 
-The registered migration order remains:
+The registered migration order is now:
 
 ```text
-monitor -> session -> local_repository_catalog -> retention -> skill_projection
--> doctor -> alert_engine -> alert_lifecycle -> first_trace_navigation
+monitor -> session -> local_repository_catalog -> local_archive -> retention
+-> skill_projection -> doctor -> alert_engine -> alert_lifecycle -> first_trace_navigation
 -> historical_instruction_analysis -> historical_import -> sanitized_import
 -> runtime_backup -> pricing
 ```
@@ -492,6 +493,107 @@ sanitized evidence export/import. The complete registered DC156-01–19 contract
 is `READY_FOR_IMPLEMENTATION`; backup registration and restore follow that
 exact component shape without an intermediate schema.
 
+### Local Archive component
+
+The registered `local_archive:1` component is an ordinary member of the one
+SQLite restore unit. Its executable schema, state machine, public wire, and
+canonical SQL artifact are owned by [Local Archive v1](local-archive.md). It is
+ordered immediately after `local_repository_catalog:1` and before Retention;
+`SupportedComponents` contains exactly `local_archive:1`, and
+`MigrationOrder` contains `local_archive` in that position. A declared archive
+component requires exact `session:14` and `local_repository_catalog:1`, even
+when every stored target is a Session. A declared archive with Session 13 has
+no legacy-parent exception and is `restore_incompatible`.
+
+Archive-absent migration preserves the complete Session-14 compatibility
+matrix above:
+
+- when both catalog and archive are wholly absent, every otherwise valid exact
+  Session `1..13`, Session-absent, or Session-14 source first reaches Session
+  14, then creates empty catalog 1, then installs empty archive 1;
+- a declared catalog 1 accepts exact Session 14 and only the existing read-only
+  legacy exception of exact Session 13 with complete legacy shapes. For that
+  exception, staging migrates Session first, validates catalog 1 against
+  Session 14, and then installs empty archive 1;
+- declared catalog 1 with Session `1..12` or Session-absent is incompatible
+  before mutation; and
+- declared archive 1 always requires declared catalog 1 and exact Session 14.
+
+These are archive-absent installation paths. They do not create a dual archive
+parent, compatibility reader, or alternate component order, and every other
+D079 dependency and descendant-preservation rule remains unchanged.
+
+Archive absence is exact: there is no `local_archive` stamp and no reserved
+archive object, matched ASCII case-insensitively by either object `name` or
+`tbl_name`. Only after Session and catalog migration/validation may staging
+install the exact empty v1 namespace and report `local_archive:0->1`. Current
+means one exact integer v1 stamp, both tables, both indexes, all six triggers,
+their exact normalized SQL, valid scalar rows, complete chains and heads,
+valid parents, manifest component version, and exact row counts for
+`local_archive_current` and `local_archive_events`.
+
+Stamp-only, object-only, partial, missing, extra, case-aliased, changed-SQL,
+wrong-target-table, duplicate/non-integer/other-version, reserved-object-
+without-declaration, view, virtual-table, hidden/generated-column,
+partial-index, or expression-index state is invalid. It is never adopted,
+cleaned, repaired, renamed, or migrated as an archive predecessor.
+
+Owned-namespace discovery adds the ASCII case-insensitive prefixes
+`local_archive_` and `IX_local_archive_` and examines table, index, trigger, and
+view names plus every object's target table name. When and only when archive 1
+is declared, the executable trigger allowlist adds these exact
+`(name, target table, normalized SQL)` definitions from the archive owner:
+
+```text
+local_archive_current_identity_update_rejected     local_archive_current
+local_archive_current_delete_rejected              local_archive_current
+local_archive_current_insert_replacement_rejected  local_archive_current
+local_archive_events_update_rejected               local_archive_events
+local_archive_events_delete_rejected               local_archive_events
+local_archive_events_insert_replacement_rejected   local_archive_events
+```
+
+At source preflight, after staging migration, at the existing pre-swap staging
+fence, and during installed validation, archive validation:
+
+1. requires exact SQLite storage types and canonical bytes for every current
+   and event scalar;
+2. rejects an event without current state and current state without at least
+   one event;
+3. streams by `(target_kind,target_id,new_revision)` and requires the first
+   transition to be `archive 0->1`, every revision increment to be contiguous,
+   actions to alternate, and no gap or duplicate;
+4. requires head/current revision, action/state, `updated_at`, and
+   `archived_at` equality while allowing timestamps to move backward because
+   revision is the authority;
+5. proves every Session current target against Session and every Repository
+   current target through the D081 synchronous Repository-existence authority,
+   using nonempty exact-transaction pages of at most 200 IDs, no total target
+   cap, and no all-parent-ID materialization; and
+6. requires `component_versions.local_archive == 1` and exact manifest
+   `row_counts` entries for both archive tables.
+
+Validation repeats these semantic invariants even when the source was written
+with CHECK or foreign-key enforcement disabled. Complete current-parent proof
+plus complete chain proof covers every event parent.
+
+Archive has two distinct ensure insertion points. `MigrateStaging` runs the
+archive ensure after catalog ensure and any conditional legacy restored-lease
+normalization, but before Retention initialization, in the same staging
+non-deferred transaction. `EnsureCurrentBackupTail` runs archive ensure after
+catalog ensure and before runtime-backup/pricing ensure in the current-database
+transaction; that path performs neither restored-lease normalization nor
+Retention initialization. Component-shape validation holds one supplied
+deferred transaction across catalog and archive validation, so the D081
+Repository proof observes that exact source or staging database.
+
+There is no archive ZIP member, merge, overlay, target remap, orphan drop,
+repair mode, queue, lease normalization, collision resolver, or synthesized
+event. Source current state and complete event history replace destination
+bytes as part of the whole database. Incoming data after installation cannot
+restore a target. Sanitized evidence export/import contains neither archive
+namespace nor archive carrier, including for an empty archive component.
+
 Because every valid `sanitized_import` v1 schema is created only after
 `historical_import` v1 in the same transaction, a declared `sanitized_import`
 component without `historical_import` is an incompatible forged vector rather
@@ -596,9 +698,12 @@ restore-receipt write.
 Writable-schema objects hidden under the SQLite-reserved `sqlite_*` namespace
 are accepted only for the exact built-in table and auto-index shapes. The
 `doctor_`, `alert_`, `historical_instruction_analysis_`,
-`historical_import_`, `sanitized_import_`, `runtime_backup_`, `pricing_`, and
-`first_trace_` namespaces accept only exact objects owned by a declared
-component; absent or extra objects fail closed.
+`historical_import_`, `sanitized_import_`, `runtime_backup_`, `pricing_`,
+`first_trace_`, `local_archive_`, and `IX_local_archive_` namespaces accept
+only exact objects owned by a declared component; absent or extra objects fail
+closed. Archive discovery also examines each object's target-table name, so a
+trigger or index cannot escape the reserved namespace by changing only its own
+name.
 
 Schema metadata is guard-first for every table, index, and trigger before a
 component-specific validator runs: object/table/column identifiers are limited
@@ -619,8 +724,9 @@ If a component is absent from `schema_version`, its reserved table/trigger
 namespace must also be absent. Case aliases such as an undeclared
 `RUNTIME_BACKUP_RECEIPTS`, doctor-prefixed objects, alert engine/lifecycle
 objects, historical-instruction/import/sanitized-import objects, pricing
-objects, or first-trace navigation objects are `restore_incompatible`; a
-production migrator never
+objects, first-trace navigation objects, or any archive table/index/trigger
+name or archive-targeting object are `restore_incompatible`; a production
+migrator never
 adopts or overwrites the collision.
 
 Restore preview additionally compares with the destination database and
@@ -636,6 +742,18 @@ returns:
 - projection cursors and counts;
 - `monitor_stop_required=true` and `restart_required=true`; and
 - resurrection risk count, digest, and confirmation requirement.
+
+Preview is its own terminal branch. It performs immutable inspection and the
+existing bounded compatibility/migration preview. After ordered staging
+migration and complete Session, catalog, archive, Retention, and remaining
+component validation, it runs D079 `CompareRetention` against the unchanged
+destination and reports the terminal count/digest, non-terminal
+reintroduction count/confirmation digest, and whether resurrection
+confirmation is required. It then emits only the preview result, cleans its
+owned inspection artifacts, and stops. Preview never calls either Retention
+reconciliation mutation, mutates the destination, creates a safety backup,
+appends a restore receipt, creates or prepares a swap journal, or swaps a
+database.
 
 A source component newer than the executable's supported version, an unknown
 component, malformed version vector, missing required source shape, or blocked
@@ -741,50 +859,79 @@ target hash and external state are checked again immediately before swap.
 
 The state machine is:
 
-1. structurally inspect archive;
-2. create and flush `runtime-restore-journal.v2` in its `staging` phase before
+1. recover owned state, acquire offline destination ownership, and complete
+   destination current-component preflight and external-state validation;
+2. perform bounded structural ZIP validation and compute the exact archive
+   hash;
+3. create and flush `runtime-restore-journal.v2` in its `staging` phase before
    any staging file, binding a random operation nonce to one exact bounded
    sibling staging basename, the archive digest, and the unchanged target
    identity/hash;
-3. extract the database to that journal-bound unique sibling staging file;
-4. validate checksums, compatibility, integrity, foreign keys, retention
-   invariants, terminal reconciliation, and non-terminal reintroduction policy;
-5. apply supported component migrations in the fixed integration order,
-   including the ordered Session `1..12 -> ... -> 13` path and exact atomic
-   `13 -> 14` step before downstream consumers; create or migrate
-   `alert_engine` to v2 in staging without
-   reserializing a v1 row, validate lifecycle v1 against that parent, and then
-   continue with
-   `historical_instruction_analysis` v1,
-   `historical_import` v1, `sanitized_import` v1, `runtime_backup` v1, then
-   `pricing` v1; pricing is never created while the parent remains v1;
-6. create and validate a pre-restore `local-runtime-backup` by default when the
-   target exists;
-7. append the sanitized, operation-bound restore receipt inside staging, close
-   and checkpoint its SQLite transaction, then revalidate and flush staging;
-8. replace the journal with its `prepared` phase and the exact staged hash;
-9. atomically replace the target while retaining an exact sibling rollback
-   file, or atomically rename for a new target;
-10. validate the installed DB, exact expected component/cursor/Retention facts,
-   invariants, and Doctor store again;
-11. durably replace the journal with `installed` and then its hash-bound
-    `committed` phase without opening the target for write, then
-    remove the exact rollback file first and the journal last; and
-12. report `restore_succeeded`.
+4. extract the manifest and database only through that journal-bound sibling,
+   then complete manifest/source-database preflight;
+5. apply supported staging migrations in fixed order: ordered Session
+   `1..12 -> ... -> 13` and exact atomic `13 -> 14`, catalog ensure/validation,
+   archive validate-or-empty-v1 installation, Retention, then all later
+   components. Alert engine reaches v2 without reserializing a v1 row before
+   lifecycle validation, and the fixed tail remains
+   `historical_instruction_analysis -> historical_import -> sanitized_import
+   -> runtime_backup -> pricing`;
+6. completely revalidate the staging archive namespace and full database;
+7. run D079 `CompareRetention` against the unchanged destination;
+8. when any non-terminal reintroduction exists, require both
+   `--allow-resurrection` and the exact current confirmation digest before any
+   reconciliation;
+9. run `ReconcileTerminal` into staging, including exact
+   ownership/lineage/source-removal proof for current `deleted` or
+   `read_denied_at` authority;
+10. run `ReconcileNonTerminal` into staging only for the admitted exact
+    non-terminal reintroduction set;
+11. create and validate a private pre-restore `local-runtime-backup` of the
+    unchanged destination by default when it exists;
+12. append the sanitized operation-bound restore receipt inside staging,
+    checkpoint and close its SQLite transaction, completely revalidate the
+    staging archive/full database, and flush it;
+13. replace the journal with its `prepared` phase and exact staged hash;
+14. revalidate unchanged destination identity/hash and external state;
+15. atomically replace the target while retaining an exact sibling rollback
+    file, or atomically rename for a new target;
+16. read-only validate the installed database, exact expected archive,
+    component, cursor, Retention, invariant, and Doctor facts;
+17. durably replace the journal with `installed` and then its hash-bound
+    `committed` phase without opening the target for write, remove the exact
+    rollback file first and the journal last, and report
+    `restore_succeeded`.
 
-Step 6 does not invoke the live-target mutation path of normal backup. It
-read-only preflights and online-copies the unchanged target into a private owned
+Structural ZIP layout/size validation and archive hashing precede journal
+creation. Manifest/database extraction and complete compatibility preflight
+occur only after the journal durably binds that exact hash and staging
+basename. The pre-swap live-destination gate rechecks only destination
+identity/hash/external state; it does not invent another archive-fact read.
+
+The D079 Retention subsequence is unchanged and exact. Missing or mismatched
+non-terminal confirmation fails `restore_resurrection_blocked` before either
+reconciliation. `ReconcileTerminal` always precedes `ReconcileNonTerminal`.
+Any comparison or reconciliation contradiction is
+`restore_tombstone_reconcile_failed`, creates no safety backup or receipt, and
+leaves the destination byte-identical. Both reconciliations finish before
+safety-backup creation and before the operation-bound staging receipt.
+
+The private safety-backup step does not invoke the live-target mutation path of
+normal backup. It read-only preflights and online-copies the unchanged target
+into a private owned
 snapshot, then applies the same fixed migration order as restore staging,
-including Session before `local_repository_catalog` and every other Session
-consumer, followed by the alert/runtime/pricing tail. It runs the same current
-component/row validation after each dependency reaches current. The safety-
-backup manifest, component vector, database hash, archive hashes, and published
-bytes are derived only from that fully migrated private copy. It validates and
-packages the copy and appends no receipt to the live target. Thus the live
-target remains byte-identical through safety-backup construction and every
-failure before atomic swap, even when its accepted component vector was older.
+including Session, catalog, archive, Retention, and the remaining components.
+It runs the same current component/row validation after each dependency reaches
+current. A current destination archive is preserved byte-for-byte, including
+current rows and complete history; a valid older destination with archive
+wholly absent receives empty archive v1 only in the migrated private copy. The
+safety-backup manifest, component vector, database hash, archive hashes, and
+published bytes derive only from that validated copy. No receipt is appended to
+the live target, which remains byte-identical through safety-backup construction
+and every failure before atomic swap. Installed validation after swap is
+read-only; only the journal records installed/committed state.
 
-Only this step-6 private safety copy, and only after every required terminal
+Only this private safety copy, and only after every required terminal
 reconciliation and non-terminal confirmation gate for the restore has passed,
 uses the existing Retention restorable-coverage validator during that fixed
 migration. A catalog-backed source proof of exact `Match` counts normally;
@@ -818,11 +965,11 @@ retained and fail closed.
 The target is never opened for a SQLite write after swap, so it cannot acquire a
 new rollback journal or WAL in the recovery window. Recovery nevertheless
 rejects any target `-journal`/`-wal`/`-shm` before hashing or replacing the
-target. Any failure before step 9 leaves the target byte-for-byte unchanged. Any
+target. Any failure before step 15 leaves the target byte-for-byte unchanged. Any
 pre-swap domain result is returned only after its owned stage/journal cleanup is
 verified; cleanup failure instead returns `restore_rollback_failed` and retains
 the exact recovery controls. Any
-failure after step 9 but before the flushed `committed` marker restores the
+failure after step 15 but before the flushed `committed` marker restores the
 rollback file atomically and validates the old target before reporting
 `restore_rolled_back`. If rollback cannot be
 validated, the fixed result is `restore_rollback_failed`; recovery artifacts

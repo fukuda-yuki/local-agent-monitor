@@ -3408,3 +3408,274 @@ or test dependency. The binding runtime rollout is:
 `local_archive:1` after catalog and before Retention; `local_archive:1` plus
 `session:13` is incompatible. #134 starts only after #156/#161/#158 and creates
 no placeholder facts, direct SQL, second reader or fallback projection.
+
+## D082: Local archive uses append-only state/history and head-adjacent semantic retry
+
+Status: Accepted (2026-08-09)
+
+Issue #161 adopts PO161-B and the singular executable
+[Local Archive v1](specifications/interfaces/local-archive.md) authority.
+`local_archive:1` owns reversible direct Session/Repository archive state,
+append-only history, mutation/read/list application, the #161 implementation of
+D081's direct-fact contributor, three exact raw-default routes and whole-database
+runtime backup/restore validation. Archive remains visibility/selection
+metadata, not deletion, Retention, pinning, Session status, assignment or ingest
+state.
+
+The selected contract consists of seven decisions.
+
+1. Archive mutation uses two-table state plus head-adjacent semantic retry and
+   persists no request or response receipt.
+2. The schema contains exactly one current table, one event table, two indexes
+   and six append-only/identity guards. Logical absence is `Active,0`; every
+   stored current row has a complete contiguous alternating event chain whose
+   head agrees with current. Revision, not timestamp or event UUID order, is
+   history authority.
+3. D081's synchronous `ILocalRepositoryTargetExistenceAuthority.ReadExisting`
+   proves Repository targets on the caller's exact open connection and owning
+   transaction. #161 issues no catalog SQL, opens no second connection and
+   performs no retry or alternate lookup.
+4. D081's `ILocalArchiveFactSnapshotContributor` receives the complete exact
+   Session set and full Repository catalog and returns direct state/revision
+   facts only. A missing archive-current row materializes as `Active,0`; the
+   contributor reads no archive event/head history and returns no eligibility
+   or exclusion reason.
+5. D081 remains the sole authority that validates those complete fact sets and
+   composes assignment-dependent effective eligibility. When both the Session
+   and its exact assigned Repository are archived, both facts/revisions remain
+   visible and D081's scalar primary reason is `session_archived`. D082 does not
+   re-decide or duplicate that composition.
+6. The public contract is three exact raw-default routes with closed method,
+   query, media, UTF-8, JSON, cursor, success and fixed no-echo error behavior.
+   Framework-generated binding/error bodies, aliases and permissive parsing are
+   not authorities.
+7. `local_archive:1` is an ordinary component of the single SQLite restore unit
+   immediately after `local_repository_catalog:1` and before Retention. It is
+   validated at every existing source, staging, pre-swap, safety-backup and
+   installed fence and is wholly absent from sanitized evidence export/import.
+
+Let `M = 9,223,372,036,854,775,807`. For a desired state/action and one valid
+target, classification is exact:
+
+```text
+apply
+  current.revision == expected
+  AND current state differs from desired
+  AND current.revision < M
+
+no_op
+  current.revision == expected
+  AND current state already equals desired
+
+semantic_retry
+  expected < M
+  AND current.revision == expected + 1
+  AND current state equals desired
+  AND the unique current head has the same action
+  AND that head has the exact expected -> current revision pair
+
+revision_exhausted
+  current.revision == expected == M
+  AND current state differs from desired
+
+stale
+  every other valid combination
+```
+
+Only the adjacent current head qualifies as semantic retry. It has no TTL or
+count limit while that head remains current; a later restore/rearchive makes
+the old request stale. `no_op` is not semantic retry, and success is freshly
+serialized from the current fact rather than replaying durable response bytes.
+`Idempotency-Key` is not required, interpreted, rejected, persisted or echoed
+and cannot change these semantics.
+
+Session mutation freezes original request order for the response and a separate
+canonical-ID order for proof, locking, validation and writes. For all 1..200
+targets, precedence is:
+
+1. prove every exact Session parent; any absence is `404 target_not_found`
+   before any archive current/event read;
+2. validate all complete current/history/head facts; any contradiction is
+   `503 archive_store_unavailable`;
+3. classify every target; any `stale`, or any batch containing both `apply` and
+   `semantic_retry`, is `409 revision_conflict` with no write;
+4. otherwise any `revision_exhausted` is
+   `503 archive_store_unavailable` with no write; and
+5. `apply + no_op`, `semantic_retry + no_op`, all-apply, all-no-op and
+   all-semantic-retry batches succeed.
+
+Repository mutation has exactly one target and uses the same classification.
+Every successful applied target appends one distinct canonical UUIDv7 event and
+advances current once; all applies in one request use one captured UTC instant.
+No-op/retry facts retain their existing timestamps. The complete success entity
+is canonically serialized and copied before commit and emitted only after a
+successful commit. Writer failure, empty bytes, cancellation before commit or
+commit failure rolls back and returns no entity. Once commit succeeds, durable
+success wins without another cancellation or database/clock read; transport
+loss is recovered only by a fresh semantic retry.
+
+Mutation proof, validation, classification, writes, pre-commit serialization
+and commit use one connection and one `BEGIN IMMEDIATE` transaction. Direct and
+list reads use one deferred transaction. SQLite primary code 5/6 encountered
+before successful commit maps once to `503 persistence_busy`; there is no
+retry/fallback. Schema/current/event/chain/head contradiction, revision
+exhaustion and every other non-busy, non-cancellation route-local store or
+parent-authority failure map to fixed `503 archive_store_unavailable`. Failure
+never appends a partial event or changes a current row.
+
+The exact public paths are:
+
+```text
+GET  /api/local-monitor/v1/archive
+POST /api/local-monitor/v1/archive-actions
+GET  /api/local-monitor/v1/archived-items
+```
+
+The two GET paths accept only GET and the action path accepts only POST. A
+matched unsupported method returns fixed 405 with exact route `Allow`; HEAD has
+the same representation length and headers but zero entity bytes. Valid-Host
+matched responses use `Content-Type: application/json; charset=utf-8` and
+`Cache-Control: no-store`; they emit no CORS, redirect, cookie, ETag or input/
+exception detail. Global loopback/Host validation is first, exact machine path
+classification precedes the human fallback, matched routes enforce the existing
+same-origin decision, and POST additionally requires exactly one effective
+`x-monitor-csrf: local-monitor` value.
+
+Queries, cursor frames and POST bodies use the closed bounds and canonical bytes
+owned by the executable archive specification. Session actions contain 1..200
+distinct canonical lowercase UUIDv7 targets; Repository actions contain exactly
+one. Archived-item limits are canonical decimal `1..200`, default 50, and list
+order is `archived_at DESC, target_id DESC` with `limit+1` lookahead and a
+cursor for the last emitted item. The closed non-HEAD error set is exactly:
+
+```text
+400 invalid_host
+400 invalid_request
+400 invalid_cursor
+403 csrf_rejected
+404 target_not_found
+405 method_not_allowed
+409 revision_conflict
+413 request_too_large
+415 unsupported_media_type
+503 archive_store_unavailable
+503 persistence_busy
+```
+
+The schema artifact owns exactly `local_archive_current`,
+`local_archive_events`, two named indexes and six named triggers. There is no
+seeded active row, third head/receipt table, operation ID, response BLOB, view,
+generated column or compatibility namespace. Current facts are positive
+revisions: archived is odd with non-null `archived_at`; stored active is even
+with null `archived_at`. Every history starts `archive 0->1`, alternates action,
+advances by one, and matches current state/revision/timestamps at its head.
+Backward timestamps are valid because revision alone orders history. Corrupt or
+partial state never degrades to logical `Active,0`, conflict or a partial page.
+
+Runtime backup records `local_archive:1` in this order:
+
+```text
+monitor
+session:14
+local_repository_catalog:1
+local_archive:1
+retention:1
+skill_projection:1
+skill_invocation_snapshot:1       # only when separately released
+local_workspace_projection:1      # only when separately released
+```
+
+A declared archive requires exact Session 14 and catalog 1; declared archive
+with Session 13 has no compatibility exception. When archive is wholly absent,
+D079's complete older/absent Session migration matrix remains valid: Session is
+first brought to 14, catalog is installed/validated as required, then empty
+archive v1 is installed. This is an archive-absent migration path, not a dual
+archive reader or parent. Validation streams every scalar, chain and head,
+proves Session and Repository parents in nonempty pages of at most 200 on the
+exact transaction, has no total-target cap, and requires exact manifest version
+and both table row counts.
+
+Backup and restore remain one whole-database replacement. There is no archive
+ZIP member, merge, overlay, orphan drop/remap, synthesized repair event, queue,
+alternate collision resolver or archive-specific Retention reconciliation.
+Archive history/current bytes, including an empty namespace, are excluded
+entirely from sanitized evidence export/import. `--sanitized-only` still runs
+database initialization/backup validation, but registers no archive route,
+application, contributor, page, script or human scope service and returns the
+existing empty no-store 404 for every archive path.
+
+Rejected retry/storage alternatives are durable request/response receipts,
+same-state-as-retry, every-behind-is-stale and an operation/batch ID or response
+BLOB on events. Receipts add a third lifetime/backup/public-key contract and can
+replay an old response after later state changes; broader same-state retry loses
+revision authority, while rejecting every behind request prevents deterministic
+recovery of a lost post-commit response. Current-only state cannot prove retry
+history; event-only fold-on-read is unbounded; a third head table duplicates
+current; wall-clock or UUID order fails under backward local time.
+
+Rejected ownership/composition alternatives are #161 catalog SQL, a path-bound
+catalog store, a generic SQL capability, cross-component foreign keys/copy
+tables, precomposed eligibility, Session-only or assigned-Repository-only facts,
+and another #134/#161 join. Rejected simultaneous-archive alternatives are
+Repository-first, null/error, a combined enum and an ordered reason array.
+Rejected wire/backup alternatives are framework-default 405/JSON binding,
+permissive media, unbounded cursor/body, route aliases, frozen API/SSE fields, a
+separate ZIP member, component merge/overlay, orphan repair/remap, synthesized
+events, a dual Session parent or a sanitized carrier.
+
+The strongest binding counterexample combines all critical boundaries:
+
+1. Session `S` is directly archived at revision 3.
+2. Its exact assigned Repository `R` is directly archived at revision 5.
+3. Archived conflict candidate `R2` is not the exact assignment.
+4. A prior batch lost its HTTP response and a new batch mixes that adjacent
+   semantic retry with a fresh apply.
+5. Restore staging database B contains archive target `R`, B's catalog does
+   not, and live database A happens to contain the same Repository ID.
+6. An archived Repository page at limit 200 has a 201st lookahead whose parent
+   is absent from the catalog.
+7. The contributor returns reversed fact lists, then changes a value on a
+   second carrier read.
+8. Another SQLite connection holds an exclusive lock during Repository proof.
+
+D082 closes the example without another table or composition authority. #161
+returns direct `S`, `R` and `R2` facts; D081/#156 alone joins exact assignment
+`R`, retains both direct causes, selects scalar `session_archived` and ignores
+`R2` for eligibility. Apply plus semantic retry conflicts with no write. The
+synchronous Repository proof uses exact staging B and rejects the orphan. The
+201 rows are split into nonempty <=200-ID proofs on the same transaction and an
+unequal union returns 503 before any entity or cursor. #156 copies each hostile
+carrier element once and joins only by exact ID. Lock contention is attempted
+once and propagates original primary code 5/6 without replacing the transaction.
+
+#161 adds no UI: no Razor page/model, static asset, navigation, Settings section,
+button, dialog, visual state or sentence-level copy. It does not cascade between
+Repository and Session, restore on ingest, alter Session status/completeness/
+assignment, extend Retention, substitute pin/delete-now, or change frozen
+`/api/monitor/*`, `/api/session-workspace/*` v1 or SSE bytes. There is no
+fallback reader, compatibility carrier, permissive parser, second Skill
+authority or Issue #152 resolution.
+
+Canonical promotion follows D079 -> D080 -> D081 -> D082. Runtime rollout is:
+
+```text
+#124 reviewed Session-14 implementation
+  -> #156 D081 direct-fact + synchronous Repository-existence code
+  -> #161 D082 dormant schema/store
+  -> #161 runtime-backup installation/validation
+
+#136 reviewed LocalMonitorV1 parser delta
+  -> required before archive route activation, not before #156 code
+
+converged #161 archive storage/backup + D080 parser foundation
+  -> #161 raw-default contributor/routes
+  -> #158 D083 Skill snapshot/current-file authority
+  -> #134 D084 Workspace projection/read serialization
+```
+
+#124 Session-14 code and the disjoint #136 parser delta may be reviewed in
+parallel, but both are integrated before archive route activation. Runtime
+backup changes remain serialized in the exact order Session -> catalog ->
+archive -> Retention -> Skill. #134 begins only after the D081 seam and D082
+contributor are integrated, consumes one completed #156 snapshot, and adds no
+placeholder fact, direct SQL, second reader or fallback projection.

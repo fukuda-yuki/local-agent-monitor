@@ -178,13 +178,18 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   [single Repository catalog/assignment authority](specifications/interfaces/local-repository-catalog.md),
   #133/#134 Workspace reads,
   [#157/#158 Skill snapshot/raw detail](specifications/interfaces/skill-invocation-snapshot.md),
-  #160/#161 archive,
+  [#160/#161 D082 Local Archive](specifications/interfaces/local-archive.md),
   #165/#166 Compare and #162/#163/#164 AI owners. #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`; #156, #161 and #134 share one
   `ILocalRepositoryScopeSnapshotService`. #161 supplies direct Session and
   Repository archive facts, #156 validates those facts and alone composes
   assignment-dependent effective eligibility/reason, and #161/#134 do not add
   catalog SQL, a second connection, or a parallel reader.
+  #161 maps exactly the raw-default `GET /api/local-monitor/v1/archive`,
+  `POST /api/local-monitor/v1/archive-actions`, and
+  `GET /api/local-monitor/v1/archived-items` routes. Their application and
+  contributor are absent from sanitized-only composition, runtime-backup
+  validation remains independent, and D082 adds no UI or frozen-v1 change.
   The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
   accepted Session collection request transport; q/model search values remain
   transient and it has no GET or saved-search fallback. #133 does not yet fix
@@ -741,6 +746,8 @@ not through this loop.
 
 ```text
 exact Repository catalog/assignment
+  -> #161 direct Session/full-catalog Repository archive facts
+  -> #156 exact-set validation and eligibility/reason composition
   -> one coherent Repository/archive scope snapshot
   -> Repository selection
   -> bounded Session Explorer read
@@ -766,7 +773,11 @@ cardinality. Issue #152 remains unresolved.
 
 Repository/Session/Run/Trace/Span/Event/raw-record identities remain opaque and
 exact. Missing facts remain missing. Archive changes default eligibility only;
-it is not Retention, pin or deletion. Whole-Session AI reports alone have
+it is not Retention, pin or deletion. Its direct facts, composition seam and
+consumer independence are fixed by
+[Local Archive v1](specifications/interfaces/local-archive.md) and the
+[Repository catalog executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+Whole-Session AI reports alone have
 durable immutable history; node/Repository/Compare results are transient or
 bounded operational state under #162.
 
@@ -1010,21 +1021,34 @@ inspect but never restores a live database; restore authority is offline CLI
 only. Details are canonical in
 [Runtime Backup And Restore Interface](specifications/interfaces/runtime-backup-restore.md).
 
-The accepted `local_repository_catalog:1` component is ordered
-immediately after Session and before `local_archive`, followed by Retention,
-`skill_projection:1`, `skill_invocation_snapshot:1` and Workspace projection.
-The snapshot component backs up index/metadata and equality receipts while
-existing Session Event content backs up body/path bytes exactly once; older
-component-absent state initializes empty and partial/newer state fails closed.
-Its registration remains blocked with #158. The catalog component backs up all
-catalog-owned tables and durable receipts; an older absent component
-initializes empty while partial/newer/unknown shapes fail closed. Catalog
-metadata may restore without source raw and reports unavailable provenance
-without reconstructing content. The component is excluded from sanitized
-evidence export/import. Its complete DC156-01–19 implementation contract is
-`READY_FOR_IMPLEMENTATION` under the [Repository catalog
-authority](specifications/interfaces/local-repository-catalog.md) and its
-[DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+The relevant accepted dependency sequence is `monitor`, `session:14`,
+`local_repository_catalog:1`, `local_archive:1`, `retention:1` and
+`skill_projection:1`, followed by `skill_invocation_snapshot:1` and Workspace
+projection only when each is separately released.
+The catalog component backs up all catalog-owned tables and durable receipts;
+an older absent component initializes empty while partial/newer/unknown shapes
+fail closed. Catalog metadata may restore without source raw and reports
+unavailable provenance without reconstructing content. The component is
+excluded from sanitized evidence export/import. Its complete DC156-01–19
+implementation contract is `READY_FOR_IMPLEMENTATION` under the [Repository
+catalog authority](specifications/interfaces/local-repository-catalog.md) and
+its [DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md).
+
+A declared `local_archive:1` requires exact Session 14 and declared catalog v1;
+it has no Session-13 parent exception. When catalog and archive are wholly
+absent, the accepted older/absent Session path reaches Session 14, installs an
+empty catalog, and then installs an empty archive before Retention. Current and
+restore validation cover the exact two-table/two-index/six-trigger namespace,
+all current/event chains and heads, exact Session/Repository parents, manifest
+version and both row counts. Whole-database backup/restore preserves those
+bytes without another ZIP member, merge, overlay, orphan repair/remap or
+synthesized event. The component is absent from sanitized evidence; its exact
+contract is [Local Archive v1](specifications/interfaces/local-archive.md).
+
+The Skill invocation snapshot component backs up index/metadata and equality
+receipts while existing Session Event content backs up body/path bytes exactly
+once; older component-absent state initializes empty and partial/newer state
+fails closed. Its registration remains blocked with #158.
 
 ## 5. Aspire AppHost Boundary
 

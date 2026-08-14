@@ -2,6 +2,7 @@
 
 Status: **Accepted current authority**
 Route/transport amendment: PO136-A2b, 2026-08-09
+Archive amendment: D082, 2026-08-09
 Product posture: loopback-only, single trusted local user
 
 ## Human UI posture
@@ -107,6 +108,22 @@ Authority:
 #155/#156. #134 alone owns the composite
 `GET /api/local-monitor/v1/repositories` route.
 
+### Archive
+
+The accepted raw-default archive surface contains exactly:
+
+- `GET /api/local-monitor/v1/archive`;
+- `POST /api/local-monitor/v1/archive-actions`; and
+- `GET /api/local-monitor/v1/archived-items`.
+
+Authority: [Local Archive v1](local-archive.md), #160/#161 and D082. #161
+supplies direct Session/full-catalog Repository facts; #156/D081 alone validates
+and composes assignment-dependent effective eligibility/reason. The archive
+routes, application and contributor are absent from `--sanitized-only` before
+route adaptation, request-body read or archive-store access. Runtime-backup
+component validation remains a separate non-human database authority. Archive
+state/history is absent from sanitized evidence and repository-safe artifacts.
+
 ### AI
 
 - immutable Session report content;
@@ -131,6 +148,19 @@ This namespace is raw-default human-UI support, not a sanitized public API.
 - error responses use fixed codes and never echo raw input or inner exceptions;
 - raw values, display names, local paths and provider content never become URL identity;
 - routes are absent in sanitized-only posture.
+
+For each exact matched archive path, global loopback/Host validation precedes
+path and method dispatch. Both GET routes accept GET only and the action route
+accepts POST only; unsupported methods, including OPTIONS, use the owner-fixed
+405 response and never become CORS preflight. HEAD uses the same fixed status,
+headers and representation length with zero entity bytes. Every archive route
+then requires same-origin; POST additionally requires exactly one effective
+`x-monitor-csrf: local-monitor` value. Complete query admission precedes cursor
+decoding, and POST origin/CSRF precede bounded media/body reads. Every response
+is no-store; fixed errors echo no target, row, path, SQLite/framework message,
+inner exception or request value. Exact bytes and precedence are owned by
+[Local Archive v1](local-archive.md), with no alias or framework-generated
+fallback entity.
 
 The sole Session collection transport is the 32,768-byte closed JSON
 `POST /api/local-monitor/v1/sessions`. The former unimplemented GET is removed;

@@ -5,6 +5,7 @@ Authority: Issue #132
 Product design input: Issue #153  
 Date: 2026-07-30
 Route/transport amendment: PO136-A2b, 2026-08-09
+Archive amendment: D082, 2026-08-09
 
 ## 1. Product boundary
 
@@ -433,6 +434,12 @@ Each section shows current state and primary supported action together. Complex 
 - Repository archive does not cascade Session archive;
 - new data does not silently restore an item.
 
+The exact executable storage, state, mutation, route and backup contract is
+[Local Archive v1](local-archive.md). D082 adds no Razor page/model, static
+asset, navigation item, Settings layout, archive button, dialog, visual state
+or sentence-level copy. Those later UI surfaces remain owned by
+#145/#146/#167/#138 and #169.
+
 ## 14. User-facing terminology
 
 Binding key labels:
@@ -582,7 +589,7 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 | Skill projection validity | #154 | #154 |
 | Skill v1 correction/v2 transport/body/path snapshot/current file | [snapshot contract](skill-invocation-snapshot.md) + #119/#157/#158 | #158 after gate closure |
 | Sanitized-only runtime | #159 | #168 |
-| Archive | #160 | #161 |
+| Archive | [Local Archive v1](local-archive.md) + #160/D082 | #161 |
 | AI scope/history | #162 | #163/#164 |
 | Compare | #165 | #166 |
 | Workspace read APIs | #133 plus a required later exact response contract | #134 after that contract closes |
