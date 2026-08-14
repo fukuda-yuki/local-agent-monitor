@@ -235,6 +235,62 @@ public sealed class LocalArchiveSessionTargetExistenceAuthorityTests
         Assert.Same(connection, transaction.Connection);
     }
 
+    [Fact]
+    public void ReadExisting_PropagatesBusyOnceAndLeavesTheCallerTransactionActive()
+    {
+        using var database = new SessionDatabase();
+        using (var seedConnection = database.Open())
+        using (var seedTransaction = seedConnection.BeginTransaction())
+        {
+            database.Insert(seedConnection, seedTransaction, SessionOne);
+            seedTransaction.Commit();
+        }
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        using var blocker = database.Open();
+        var attempts = 0;
+        Exception? blockerFailure = null;
+        SQLitePCL.strdelegate_trace trace = (_, sql) =>
+        {
+            if (attempts == 0 && sql.Contains("FROM sessions", StringComparison.Ordinal))
+            {
+                attempts++;
+                try
+                {
+                    Execute(blocker, null, "BEGIN EXCLUSIVE;");
+                }
+                catch (Exception error)
+                {
+                    blockerFailure = error;
+                }
+            }
+        };
+        SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
+
+        SqliteException error;
+        try
+        {
+            error = Assert.Throws<SqliteException>(() =>
+                LocalArchiveSessionTargetExistenceAuthority.Instance.ReadExisting(
+                    connection, transaction, [SessionOne], CancellationToken.None));
+        }
+        finally
+        {
+            SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.strdelegate_trace)null!, null);
+            if (blockerFailure is null && attempts > 0)
+                Execute(blocker, null, "ROLLBACK;");
+            GC.KeepAlive(trace);
+        }
+
+        Assert.Null(blockerFailure);
+        Assert.Contains(error.SqliteErrorCode, new[] { 5, 6 });
+        Assert.Equal(1, attempts);
+        Assert.Null(error.InnerException);
+        Assert.Equal(System.Data.ConnectionState.Open, connection.State);
+        Assert.Same(connection, transaction.Connection);
+        transaction.Rollback();
+    }
+
     [Theory]
     [InlineData("duplicate")]
     [InlineData("noncanonical")]
