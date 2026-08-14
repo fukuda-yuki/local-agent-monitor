@@ -226,34 +226,57 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         FrozenCatalog catalog,
         CancellationToken cancellationToken)
     {
-        if (contribution?.Sessions is null
-            || contribution.Repositories is null
-            || contribution.Sessions.Count != exactSessionIds.Count
-            || contribution.Repositories.Count != catalog.Repositories.Count)
+        var contributedSessions = contribution?.Sessions;
+        var contributedRepositories = contribution?.Repositories;
+        if (contributedSessions is null || contributedRepositories is null)
+        {
+            throw new InvalidOperationException("local_archive_fact_contribution_invalid");
+        }
+        var contributedSessionCount = contributedSessions.Count;
+        var contributedRepositoryCount = contributedRepositories.Count;
+        if (contributedSessionCount != exactSessionIds.Count
+            || contributedRepositoryCount != catalog.Repositories.Count)
         {
             throw new InvalidOperationException("local_archive_fact_contribution_invalid");
         }
         var expectedSessions = exactSessionIds.ToHashSet(StringComparer.Ordinal);
-        var sessions = new Dictionary<string, LocalArchiveSessionFact>(StringComparer.Ordinal);
-        foreach (var item in contribution.Sessions)
+        var sessions = new Dictionary<string, LocalArchiveSessionFact>(contributedSessionCount, StringComparer.Ordinal);
+        for (var index = 0; index < contributedSessionCount; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (item is null
-                || !expectedSessions.Contains(item.SessionId)
-                || !IsValidArchiveFact(item.State, item.Revision)
-                || !sessions.TryAdd(item.SessionId, new(item.SessionId, item.State, item.Revision)))
+            var item = contributedSessions[index];
+            if (item is null)
+            {
+                throw new InvalidOperationException("local_archive_fact_contribution_invalid");
+            }
+            var sessionId = item.SessionId;
+            var state = item.State;
+            var revision = item.Revision;
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId)
+                || !expectedSessions.Contains(sessionId)
+                || !IsValidArchiveFact(state, revision)
+                || !sessions.TryAdd(sessionId, new(sessionId, state, revision)))
             {
                 throw new InvalidOperationException("local_archive_fact_contribution_invalid");
             }
         }
-        var repositories = new Dictionary<string, LocalArchiveRepositoryFact>(StringComparer.Ordinal);
-        foreach (var item in contribution.Repositories)
+        cancellationToken.ThrowIfCancellationRequested();
+        var repositories = new Dictionary<string, LocalArchiveRepositoryFact>(contributedRepositoryCount, StringComparer.Ordinal);
+        for (var index = 0; index < contributedRepositoryCount; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (item is null
-                || !catalog.RepositoryById.ContainsKey(item.RepositoryId)
-                || !IsValidArchiveFact(item.State, item.Revision)
-                || !repositories.TryAdd(item.RepositoryId, new(item.RepositoryId, item.State, item.Revision)))
+            var item = contributedRepositories[index];
+            if (item is null)
+            {
+                throw new InvalidOperationException("local_archive_fact_contribution_invalid");
+            }
+            var repositoryId = item.RepositoryId;
+            var state = item.State;
+            var revision = item.Revision;
+            if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(repositoryId)
+                || !catalog.RepositoryById.ContainsKey(repositoryId)
+                || !IsValidArchiveFact(state, revision)
+                || !repositories.TryAdd(repositoryId, new(repositoryId, state, revision)))
             {
                 throw new InvalidOperationException("local_archive_fact_contribution_invalid");
             }

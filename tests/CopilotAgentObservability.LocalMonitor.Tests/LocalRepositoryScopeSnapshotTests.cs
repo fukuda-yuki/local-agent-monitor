@@ -7,8 +7,10 @@ public sealed class LocalRepositoryScopeSnapshotTests
 {
     private const string RepositoryA = "01900000-0000-7000-8000-000000000001";
     private const string RepositoryB = "01900000-0000-7000-8000-000000000002";
+    private const string RepositoryC = "01900000-0000-7000-8000-000000000003";
     private const string LocatorA = "01900000-0000-7000-8000-000000000011";
     private const string LocatorB = "01900000-0000-7000-8000-000000000012";
+    private const string LocatorC = "01900000-0000-7000-8000-000000000013";
 
     [Fact]
     public async Task ReadAsync_UsesOneSequentialSnapshotAndKeepsContributorRowsOpaque()
@@ -849,91 +851,212 @@ public sealed class LocalRepositoryScopeSnapshotTests
                 .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
     }
 
-    [Theory]
-    [InlineData("missing")]
-    [InlineData("extra")]
-    [InlineData("duplicate")]
-    [InlineData("unknown")]
-    public async Task ReadAsync_RejectsCorruptArchiveContribution(string corruption)
+    [Fact]
+    public async Task ReadAsync_MapsNullArchiveContributionToFixedFailureBeforeComposition()
     {
         using var database = new ScopeDatabase();
-        var rows = new[] { SessionId(1), SessionId(2) };
         var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
             capability,
-            rows.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, corruption)).ToArray(),
+            [new FakeSessionRow(SessionId(1), "null-contribution")],
+            token));
+        var archive = new FakeArchiveContributor(async (capability, _, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            return null!;
+        });
+        var composeCalls = 0;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new SqliteLocalRepositoryScopeSnapshotService(
+                database.Path,
+                session,
+                archive,
+                compositionObserver: _ => composeCalls++)
+                .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
+
+        Assert.Equal("local_archive_fact_contribution_invalid", exception.Message);
+        Assert.Equal(0, composeCalls);
+    }
+
+    [Theory]
+    [InlineData("session", "null_list")]
+    [InlineData("session", "null_item")]
+    [InlineData("session", "missing")]
+    [InlineData("session", "extra")]
+    [InlineData("session", "duplicate")]
+    [InlineData("session", "substitution")]
+    [InlineData("session", "noncanonical")]
+    [InlineData("session", "undefined_state")]
+    [InlineData("session", "active_negative")]
+    [InlineData("session", "active_odd")]
+    [InlineData("session", "archived_negative")]
+    [InlineData("session", "archived_zero")]
+    [InlineData("session", "archived_even")]
+    [InlineData("repository", "null_list")]
+    [InlineData("repository", "null_item")]
+    [InlineData("repository", "missing")]
+    [InlineData("repository", "extra")]
+    [InlineData("repository", "duplicate")]
+    [InlineData("repository", "substitution")]
+    [InlineData("repository", "noncanonical")]
+    [InlineData("repository", "undefined_state")]
+    [InlineData("repository", "active_negative")]
+    [InlineData("repository", "active_odd")]
+    [InlineData("repository", "archived_negative")]
+    [InlineData("repository", "archived_zero")]
+    [InlineData("repository", "archived_even")]
+    public async Task ReadAsync_RejectsEachInvalidArchiveCollectionWithOneFixedNoDataFailure(
+        string target,
+        string corruption)
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 1);
+        database.AddRepository(RepositoryB, LocatorB, revision: 1);
+        var sessionIds = new[] { SessionId(1), SessionId(2) };
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
+            capability,
+            sessionIds.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, corruption)).ToArray(),
             token));
         var archive = new FakeArchiveContributor(async (capability, input, token) =>
         {
             await ReadArchiveTable(capability, token);
-            IReadOnlyList<LocalArchiveSessionFact> facts = corruption switch
-            {
-                "missing" => [new(rows[0], LocalArchiveState.Active, 0)],
-                "extra" => [new(rows[0], LocalArchiveState.Active, 0), new(rows[1], LocalArchiveState.Active, 0), new(SessionId(3), LocalArchiveState.Active, 0)],
-                "duplicate" => [new(rows[0], LocalArchiveState.Active, 0), new(rows[0], LocalArchiveState.Active, 0)],
-                "unknown" => [new(rows[0], LocalArchiveState.Active, 0), new(SessionId(3), LocalArchiveState.Active, 0)],
-                _ => throw new InvalidOperationException(),
-            };
-            return new(facts, []);
+            return CorruptArchiveFacts(input, target, corruption);
+        });
+        var composeCalls = 0;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new SqliteLocalRepositoryScopeSnapshotService(
+                database.Path,
+                session,
+                archive,
+                compositionObserver: _ => composeCalls++)
+                .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
+
+        Assert.Equal("local_archive_fact_contribution_invalid", exception.Message);
+        Assert.Equal(0, composeCalls);
+    }
+
+    [Fact]
+    public async Task ReadAsync_CopiesHostileArchiveListsByOneCountAndOneIndexedReadWithoutEnumeration()
+    {
+        using var database = new ScopeDatabase();
+        database.AddRepository(RepositoryA, LocatorA, revision: 1);
+        database.AddRepository(RepositoryB, LocatorB, revision: 1);
+        database.AddRepository(RepositoryC, LocatorC, revision: 1);
+        var sessionIds = new[] { SessionId(1), SessionId(2), SessionId(3) };
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
+            capability,
+            sessionIds.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, "hostile-list")).ToArray(),
+            token));
+        OneReadList<LocalArchiveSessionFact>? hostileSessions = null;
+        OneReadList<LocalArchiveRepositoryFact>? hostileRepositories = null;
+        var archive = new FakeArchiveContributor(async (capability, _, token) =>
+        {
+            await ReadArchiveTable(capability, token);
+            hostileSessions = new(
+            [
+                new(sessionIds[2], LocalArchiveState.Archived, 3),
+                new(sessionIds[0], LocalArchiveState.Active, 0),
+                new(sessionIds[1], LocalArchiveState.Active, 2),
+            ]);
+            hostileRepositories = new(
+            [
+                new(RepositoryC, LocalArchiveState.Active, 4),
+                new(RepositoryA, LocalArchiveState.Archived, 5),
+                new(RepositoryB, LocalArchiveState.Active, 0),
+            ]);
+            return new(hostileSessions, hostileRepositories);
         });
 
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
-                .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
+            .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+
+        Assert.Equal(1, hostileSessions!.CountReads);
+        Assert.Equal([1, 1, 1], hostileSessions.IndexReads);
+        Assert.Equal(0, hostileSessions.EnumerationAttempts);
+        Assert.Equal(1, hostileRepositories!.CountReads);
+        Assert.Equal([1, 1, 1], hostileRepositories.IndexReads);
+        Assert.Equal(0, hostileRepositories.EnumerationAttempts);
+        Assert.Equal(
+            [
+                (SessionId(1), LocalArchiveState.Active, 0L),
+                (SessionId(2), LocalArchiveState.Active, 2L),
+                (SessionId(3), LocalArchiveState.Archived, 3L),
+            ],
+            snapshot.Sessions.Select(item => (item.SessionId, item.ArchiveState, item.ArchiveRevision)));
+        Assert.Equal(
+            [
+                (RepositoryA, LocalArchiveState.Archived, 5L),
+                (RepositoryB, LocalArchiveState.Active, 0L),
+                (RepositoryC, LocalArchiveState.Active, 4L),
+            ],
+            snapshot.Repositories.Select(item => (item.RepositoryId, item.ArchiveState, item.ArchiveRevision)));
     }
 
     [Theory]
     [InlineData("session")]
     [InlineData("repository")]
-    public async Task ReadAsync_RejectsInvalidArchiveFactsBeforeTheyCanFailOpenEligibility(string invalidFact)
+    public async Task ReadAsync_ObservesCancellationDuringEachArchiveFreezeBeforeComposition(string target)
     {
         using var database = new ScopeDatabase();
+        using var cancellation = new CancellationTokenSource();
         database.AddRepository(RepositoryA, LocatorA, revision: 1);
-        var sessionId = SessionId(1);
-        database.AddCandidate(sessionId, RepositoryA);
-        database.SetRevision(sessionId, 1);
+        database.AddRepository(RepositoryB, LocatorB, revision: 1);
+        var sessionIds = new[] { SessionId(1), SessionId(2) };
         var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
             capability,
-            [new FakeSessionRow(sessionId, invalidFact)],
+            sessionIds.Select(id => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(id, "freeze-cancel")).ToArray(),
             token));
         var archive = new FakeArchiveContributor(async (capability, input, token) =>
         {
             await ReadArchiveTable(capability, token);
-            return new(
-                [new LocalArchiveSessionFact(
-                    sessionId,
-                    invalidFact == "session" ? (LocalArchiveState)2 : LocalArchiveState.Active,
-                    0)],
-                [new LocalArchiveRepositoryFact(
-                    RepositoryA,
-                    LocalArchiveState.Active,
-                    invalidFact == "repository" ? 1 : 0)]);
+            IReadOnlyList<LocalArchiveSessionFact> sessions = input.SessionIds
+                .Select(id => new LocalArchiveSessionFact(id, LocalArchiveState.Active, 0))
+                .ToArray();
+            IReadOnlyList<LocalArchiveRepositoryFact> repositories = input.RepositoryIds
+                .Select(id => new LocalArchiveRepositoryFact(id, LocalArchiveState.Active, 0))
+                .ToArray();
+            if (target == "session")
+                sessions = new CancelingIndexedList<LocalArchiveSessionFact>(sessions, cancellation);
+            else
+                repositories = new CancelingIndexedList<LocalArchiveRepositoryFact>(repositories, cancellation);
+            return new(sessions, repositories);
         });
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive)
-                .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
-
-        Assert.Equal("local_archive_fact_contribution_invalid", exception.Message);
-    }
-
-    [Fact]
-    public async Task ReadAsync_ObservesCancellationDuringArchiveValidation()
-    {
-        using var database = new ScopeDatabase();
-        using var cancellation = new CancellationTokenSource();
-        var rows = Enumerable.Range(1, 100)
-            .Select(index => (ILocalRepositorySessionSnapshotRow)new FakeSessionRow(SessionId(index), "cancel"))
-            .ToArray();
-        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(capability, rows, token));
-        var archive = new FakeArchiveContributor(async (capability, input, token) =>
-        {
-            await ReadArchiveTable(capability, token);
-            return new(new CancelingSessionFactList(input.SessionIds, cancellation), []);
-        });
-        var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive);
+        var composeCalls = 0;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-            await service.ReadAsync(new(LocalRepositoryScopeKind.All, null), cancellation.Token));
+            await new SqliteLocalRepositoryScopeSnapshotService(
+                database.Path,
+                session,
+                archive,
+                compositionObserver: _ => composeCalls++)
+                .ReadAsync(new(LocalRepositoryScopeKind.All, null), cancellation.Token));
+
+        Assert.Equal(0, composeCalls);
+    }
+
+    [Theory]
+    [InlineData("noncanonical")]
+    [InlineData("duplicate")]
+    public async Task ReadAsync_RejectsInvalidFrozenCatalogBeforeCallingArchiveContributor(string corruption)
+    {
+        using var database = new ScopeDatabase();
+        if (corruption == "noncanonical")
+            database.AddRawRepository("01900000-0000-7000-8000-00000000000A", "Repository", 1, LocatorA);
+        else
+            database.InstallDuplicateRepositoryRows(RepositoryA);
+        var session = new FakeSessionContributor((capability, _, token) => ReadSessionContribution(
+            capability,
+            [new FakeSessionRow(SessionId(1), "catalog-order")],
+            token));
+        var archive = new FakeArchiveContributor((_, _, _) => throw new InvalidOperationException("must not run"));
+        var service = new SqliteLocalRepositoryScopeSnapshotService(database.Path, session, archive);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await service.ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None));
+
+        Assert.Equal("local_repository_catalog_snapshot_invalid", exception.Message);
+        Assert.Equal(0, archive.CallCount);
     }
 
     [Fact]
@@ -1149,6 +1272,60 @@ public sealed class LocalRepositoryScopeSnapshotTests
             input.SessionIds.Select(id => new LocalArchiveSessionFact(id, LocalArchiveState.Active, 0)).ToArray(),
             input.RepositoryIds.Select(id => new LocalArchiveRepositoryFact(id, LocalArchiveState.Active, 0)).ToArray());
 
+    private static LocalArchiveFactContribution CorruptArchiveFacts(
+        LocalRepositoryArchiveInput input,
+        string target,
+        string corruption)
+    {
+        IReadOnlyList<LocalArchiveSessionFact> sessions = input.SessionIds
+            .Select(id => new LocalArchiveSessionFact(id, LocalArchiveState.Active, 0))
+            .ToArray();
+        IReadOnlyList<LocalArchiveRepositoryFact> repositories = input.RepositoryIds
+            .Select(id => new LocalArchiveRepositoryFact(id, LocalArchiveState.Active, 0))
+            .ToArray();
+        if (target == "session")
+        {
+            sessions = corruption switch
+            {
+                "null_list" => null!,
+                "null_item" => [null!, sessions[1]],
+                "missing" => [sessions[0]],
+                "extra" => [sessions[0], sessions[1], new(SessionId(3), LocalArchiveState.Active, 0)],
+                "duplicate" => [sessions[0], new(input.SessionIds[0], LocalArchiveState.Active, 0)],
+                "substitution" => [sessions[0], new(SessionId(3), LocalArchiveState.Active, 0)],
+                "noncanonical" => [sessions[0], new("01900000-0000-7000-8000-00000000000A", LocalArchiveState.Active, 0)],
+                "undefined_state" => [new(input.SessionIds[0], (LocalArchiveState)99, 0), sessions[1]],
+                "active_negative" => [new(input.SessionIds[0], LocalArchiveState.Active, -2), sessions[1]],
+                "active_odd" => [new(input.SessionIds[0], LocalArchiveState.Active, 1), sessions[1]],
+                "archived_negative" => [new(input.SessionIds[0], LocalArchiveState.Archived, -1), sessions[1]],
+                "archived_zero" => [new(input.SessionIds[0], LocalArchiveState.Archived, 0), sessions[1]],
+                "archived_even" => [new(input.SessionIds[0], LocalArchiveState.Archived, 2), sessions[1]],
+                _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+            };
+        }
+        else
+        {
+            repositories = corruption switch
+            {
+                "null_list" => null!,
+                "null_item" => [null!, repositories[1]],
+                "missing" => [repositories[0]],
+                "extra" => [repositories[0], repositories[1], new(RepositoryC, LocalArchiveState.Active, 0)],
+                "duplicate" => [repositories[0], new(input.RepositoryIds[0], LocalArchiveState.Active, 0)],
+                "substitution" => [repositories[0], new(RepositoryC, LocalArchiveState.Active, 0)],
+                "noncanonical" => [repositories[0], new("01900000-0000-7000-8000-00000000000A", LocalArchiveState.Active, 0)],
+                "undefined_state" => [new(input.RepositoryIds[0], (LocalArchiveState)99, 0), repositories[1]],
+                "active_negative" => [new(input.RepositoryIds[0], LocalArchiveState.Active, -2), repositories[1]],
+                "active_odd" => [new(input.RepositoryIds[0], LocalArchiveState.Active, 1), repositories[1]],
+                "archived_negative" => [new(input.RepositoryIds[0], LocalArchiveState.Archived, -1), repositories[1]],
+                "archived_zero" => [new(input.RepositoryIds[0], LocalArchiveState.Archived, 0), repositories[1]],
+                "archived_even" => [new(input.RepositoryIds[0], LocalArchiveState.Archived, 2), repositories[1]],
+                _ => throw new ArgumentOutOfRangeException(nameof(corruption)),
+            };
+        }
+        return new(sessions, repositories);
+    }
+
     private sealed record FakeSessionRow(string SessionId, string OpaqueValue) : ILocalRepositorySessionSnapshotRow;
 
     private sealed class MutableSessionRow(string first, string later) : ILocalRepositorySessionSnapshotRow
@@ -1157,22 +1334,65 @@ public sealed class LocalRepositoryScopeSnapshotTests
         public string SessionId => ++GetterCount == 1 ? first : later;
     }
 
-    private sealed class CancelingSessionFactList(
-        IReadOnlyList<string> sessionIds,
-        CancellationTokenSource cancellation) : IReadOnlyList<LocalArchiveSessionFact>
+    private sealed class OneReadList<T>(IReadOnlyList<T> source) : IReadOnlyList<T>
     {
-        public int Count => sessionIds.Count;
-        public LocalArchiveSessionFact this[int index] =>
-            new(sessionIds[index], LocalArchiveState.Active, 0);
-        public IEnumerator<LocalArchiveSessionFact> GetEnumerator()
+        private readonly T[] items = source.ToArray();
+        private readonly int[] indexReads = new int[source.Count];
+
+        public int CountReads { get; private set; }
+        public int EnumerationAttempts { get; private set; }
+        public IReadOnlyList<int> IndexReads => indexReads;
+
+        public int Count
         {
-            for (var index = 0; index < sessionIds.Count; index++)
+            get
             {
-                if (index == 10)
-                    cancellation.Cancel();
-                yield return this[index];
+                if (++CountReads != 1)
+                    throw new InvalidOperationException("Count was reread");
+                return items.Length;
             }
         }
+
+        public T this[int index]
+        {
+            get
+            {
+                if (++indexReads[index] != 1)
+                    throw new InvalidOperationException("Item was reread");
+                return items[index];
+            }
+        }
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            EnumerationAttempts++;
+            throw new InvalidOperationException("Enumeration is not allowed");
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private sealed class CancelingIndexedList<T>(
+        IReadOnlyList<T> items,
+        CancellationTokenSource cancellation) : IReadOnlyList<T>
+    {
+        public int Count => items.Count;
+        public T this[int index]
+        {
+            get
+            {
+                if (index == items.Count - 1)
+                    cancellation.Cancel();
+                return items[index];
+            }
+        }
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            for (var index = 0; index < items.Count; index++)
+                yield return this[index];
+        }
+
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
