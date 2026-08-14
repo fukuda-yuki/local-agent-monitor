@@ -151,6 +151,86 @@ public sealed class LocalArchiveStoreReadTests
         Assert.Equal(3, page.Success!.Items.Single().Revision);
     }
 
+    [Theory]
+    [InlineData("missing_head")]
+    [InlineData("contradictory_head")]
+    [InlineData("event_beyond_current")]
+    public void ListArchived_RejectsCurrentHeadCorruptionWithoutReturningAPartialPage(string corruption)
+    {
+        using var database = new ArchiveReadDatabase();
+        database.InsertRepository(RepositoryOne);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, RepositoryOne, 1, AtOne);
+        if (corruption == "missing_head")
+        {
+            database.Execute(
+                "PRAGMA foreign_keys=OFF; DROP TRIGGER local_archive_events_delete_rejected; " +
+                "DELETE FROM local_archive_events WHERE target_kind='repository' AND target_id=$id;",
+                ("$id", RepositoryOne));
+        }
+        else if (corruption == "contradictory_head")
+        {
+            database.Execute(
+                "DROP TRIGGER local_archive_events_update_rejected; " +
+                "UPDATE local_archive_events SET occurred_at='2026-08-13T01:02:03.0000000+00:00' " +
+                "WHERE target_kind='repository' AND target_id=$id;",
+                ("$id", RepositoryOne));
+        }
+        else
+        {
+            database.Execute(
+                "INSERT INTO local_archive_events(event_id,target_kind,target_id,action,previous_revision,new_revision,occurred_at) " +
+                "VALUES($event,'repository',$id,'restore',1,2,$at);",
+                ("$event", Guid.CreateVersion7().ToString("D")), ("$id", RepositoryOne), ("$at", AtOne));
+        }
+
+        var result = database.CreateStore().ListArchived(
+            LocalArchiveTargetKind.Repository,
+            afterArchivedAt: null,
+            afterTargetId: null,
+            limit: 50,
+            CancellationToken.None);
+
+        Assert.Equal(LocalArchiveStoreError.ArchiveStoreUnavailable, result.Error);
+        Assert.Null(result.Success);
+    }
+
+    [Fact]
+    public void ListArchived_KeysetResumeContinuesStrictlyAcrossATimestampTieAndEarlierTimestamp()
+    {
+        using var database = new ArchiveReadDatabase();
+        var later = "01900000-0000-7000-8000-000000000221";
+        var tieHigh = "01900000-0000-7000-8000-000000000224";
+        var tieLow = "01900000-0000-7000-8000-000000000223";
+        var earlier = "01900000-0000-7000-8000-000000000222";
+        foreach (var id in new[] { later, tieHigh, tieLow, earlier })
+            database.InsertRepository(id);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, later, 1, "2026-08-14T01:02:04.0000000+00:00");
+        database.InsertArchive(LocalArchiveTargetKind.Repository, tieHigh, 1, AtOne);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, tieLow, 1, AtOne);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, earlier, 1, "2026-08-14T01:02:02.0000000+00:00");
+        var store = database.CreateStore();
+
+        var first = store.ListArchived(
+            LocalArchiveTargetKind.Repository, null, null, 2, CancellationToken.None);
+        var second = store.ListArchived(
+            LocalArchiveTargetKind.Repository, AtOne, tieHigh, 2, CancellationToken.None);
+        var terminal = store.ListArchived(
+            LocalArchiveTargetKind.Repository,
+            "2026-08-14T01:02:02.0000000+00:00",
+            earlier,
+            2,
+            CancellationToken.None);
+
+        Assert.Equal(new[] { later, tieHigh }, first.Success!.Items.Select(item => item.TargetId));
+        Assert.True(first.Success.HasMore);
+        Assert.Equal(new[] { tieLow, earlier }, second.Success!.Items.Select(item => item.TargetId));
+        Assert.False(second.Success.HasMore);
+        Assert.Empty(terminal.Success!.Items);
+        Assert.Equal(
+            new[] { later, tieHigh, tieLow, earlier },
+            first.Success.Items.Concat(second.Success.Items).Select(item => item.TargetId));
+    }
+
     [Fact]
     public void ListArchived_ProvesAllTwoHundredAndOneLookaheadParentsInSortedChunks()
     {
@@ -237,7 +317,48 @@ public sealed class LocalArchiveStoreReadTests
             cancellation.Token));
     }
 
-    private sealed class BusyRepositoryAuthority : ILocalRepositoryTargetExistenceAuthority
+    [Theory]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void ListArchived_MapsBusyOrLockedAfterExactlyOneParentAttempt(int primaryCode)
+    {
+        using var database = new ArchiveReadDatabase();
+        database.InsertRepository(RepositoryOne);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, RepositoryOne, 1, AtOne);
+        var authority = new BusyRepositoryAuthority(primaryCode);
+
+        var result = database.CreateStore(authority).ListArchived(
+            LocalArchiveTargetKind.Repository,
+            afterArchivedAt: null,
+            afterTargetId: null,
+            limit: 50,
+            CancellationToken.None);
+
+        Assert.Equal(LocalArchiveStoreError.PersistenceBusy, result.Error);
+        Assert.Null(result.Success);
+        Assert.Equal(1, authority.Calls);
+    }
+
+    [Fact]
+    public void ListArchived_PreservesCancellationObservedDuringParentProof()
+    {
+        using var database = new ArchiveReadDatabase();
+        database.InsertRepository(RepositoryOne);
+        database.InsertArchive(LocalArchiveTargetKind.Repository, RepositoryOne, 1, AtOne);
+        using var cancellation = new CancellationTokenSource();
+        var authority = new CancellingRepositoryAuthority(cancellation);
+
+        Assert.Throws<OperationCanceledException>(() => database.CreateStore(authority).ListArchived(
+            LocalArchiveTargetKind.Repository,
+            afterArchivedAt: null,
+            afterTargetId: null,
+            limit: 50,
+            cancellation.Token));
+        Assert.Equal(1, authority.Calls);
+    }
+
+    private sealed class BusyRepositoryAuthority(int primaryCode = 5)
+        : ILocalRepositoryTargetExistenceAuthority
     {
         internal int Calls { get; private set; }
 
@@ -248,7 +369,25 @@ public sealed class LocalArchiveStoreReadTests
             CancellationToken cancellationToken)
         {
             Calls++;
-            throw new SqliteException("synthetic busy", 5);
+            throw new SqliteException("synthetic busy", primaryCode);
+        }
+    }
+
+    private sealed class CancellingRepositoryAuthority(CancellationTokenSource cancellation)
+        : ILocalRepositoryTargetExistenceAuthority
+    {
+        internal int Calls { get; private set; }
+
+        public IReadOnlyList<string> ReadExisting(
+            SqliteConnection openConnection,
+            SqliteTransaction exactTransaction,
+            IReadOnlyList<string> canonicalRepositoryIds,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            cancellation.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException();
         }
     }
 
