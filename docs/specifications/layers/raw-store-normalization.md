@@ -979,7 +979,7 @@ instead of publishing an unguarded generation. A callback may mark a handle lost
 only when its generation is still current and its time is at or after the
 published expiry; every old or racing callback is a stale no-op. Composite
 renewal prebuilds/arms, commits, publishes, activates, and swaps every member in
-canonical frontier order all-or-none; an already-due member loses and releases
+semantic frontier order all-or-none; an already-due member loses and releases
 the complete composite.
 
 The #158 current-file consumer never renews its operation lease. Its one
@@ -990,12 +990,62 @@ cancel work, retract the terminal result, or prevent the already-authorized
 runtime seal/send. A notification or terminal sample at or after expiry wins
 `lost` and cancels only that Retention-tagged current-file work.
 
-SQLite transaction order is always `BEGIN IMMEDIATE` first, then grant
-publication locks acquired in persisted canonical frontier order; release
-publication locks in reverse order. No path acquires these locks in the
-inverse order. A composite renewal updates the caller queue fence and every
-due Retention lease in one transaction, commits all or none, and then
-publishes every in-memory expiry while all publication locks are still held.
+SQLite transaction order is always `BEGIN IMMEDIATE` first. Before acquiring
+any grant publication lock, Retention constructs a lock-only permutation in
+ascending order by the exact immutable admitted lease tuple:
+
+```text
+(
+  store_instance_id  -- ordinal, case-sensitive,
+  item_id            -- ordinal, case-sensitive,
+  lease_kind_rank    -- access=0, operation=1, deletion=2,
+  owner              -- ordinal, case-sensitive,
+  generation         -- signed integer numeric order
+)
+```
+
+The tuple is simultaneously the sole global publication-lock sort key and the
+publication-lock identity for every composite Retention scope. One admitted
+lease tuple must resolve to one in-memory publication state and lock authority
+for the lifetime of that handle. A wrapper, batch, renewal, terminal path,
+cleanup path, or owner adapter must not manufacture another independently
+lockable `RetentionReadGrant` for the same exact tuple. The following rules are
+invariant:
+
+1. An owner-persisted semantic frontier ordinal does not override the
+   publication-lock order.
+2. Owner/caller/selector order remains the semantic frontier for selection,
+   returned values, output serialization, and digests, as well as all
+   owner-visible processing.
+3. Retention stores the permutation between semantic frontier order and
+   publication-lock order and never reorders the owner-visible result.
+4. Before the first publication lock, Retention rejects a duplicate exact lease
+   tuple. A duplicate object reference to the same grant and a distinct object
+   carrying the same exact tuple are both duplicate members and are both
+   rejected at that point unconditionally; proving alias uniqueness does not
+   admit either. It also rejects a generation that is not a positive canonical
+   persisted integer. Signed integer numeric order is the sort comparator; it
+   does not make a zero, negative, or noncanonical persisted generation valid.
+   A contradictory duplicate grant or any case in which alias uniqueness
+   cannot be proven fails at the same point.
+   The tuple is a total order over the members of a composite scope: no two
+   distinct publication locks in one scope may compare equal.
+5. Retention computes the complete publication-lock permutation before the
+   first publication lock. While publication locks are held, it never
+   discovers, adds, or reorders a member or its publication lock, and it
+   performs no `await`, HTTP, or file I/O. The exact live-lease,
+   persisted-expiry, and admitted-capability proofs that bind an already-locked
+   member's published state remain inside their publication scope.
+6. Retention acquires every publication lock in ascending publication-lock
+   order and releases them in the exact reverse acquisition order. No path
+   acquires these locks in the inverse order.
+7. A single-member scope follows the same rule trivially.
+8. #154 and any future owner may retain a persisted semantic frontier ordinal
+   as graph or replay authority, but never as a second lock-order authority.
+
+A composite renewal updates the caller queue fence and every due Retention
+lease in one transaction, commits all or none, and then publishes every
+in-memory expiry while all publication locks are still held.
 
 Golden cross-expiry timeline: admit an `expiring` item at `T1 - 1 tick` and
 publish lease expiry `admission + 2 minutes`; cleanup at `T1` commits
@@ -1142,20 +1192,23 @@ makes any pending or claimed terminal attempt irreversibly `failed`, and returns
 `busy`; it cannot be retried, reopened, renewed, or reused. Its idempotent final
 release still runs exactly once.
 
-`RetentionBatchReadLease<T>` owns one composite terminal state over the complete
-canonical member frontier. A terminal call wins the composite CAS, opens one
-transaction, acquires every member publication scope in canonical order, proves
-every exact live lease against one clock sample, and moves the composite plus
-all members to sealed-pending or completed-pending atomically. The commit then
-publishes every final result all-or-none. Completion deletes all member leases
-in that transaction; sealing retains them only for exact final release. Any
-member loss or mismatch loses the whole entity; any transaction failure rolls
-back the partial rows, leaves the claimed composite irreversibly failed, and is
-`busy`. Loss or failure discards the complete buffered entity and final release
-deletes every exact member lease, or accepts cleanup's stale no-op, exactly once
-in canonical frontier order. Renewal, cleanup, and expiry race the same
-composite CAS and ordered scopes. Partial or first-member-only terminal
-authority does not exist.
+`RetentionBatchReadLease<T>` owns one composite terminal state over the
+complete semantic member frontier. A terminal call wins the composite CAS,
+opens one transaction, acquires every member publication scope in ascending
+publication-lock order, proves every exact live lease against one clock sample,
+and moves the composite plus all members to sealed-pending or completed-pending
+atomically. The commit then publishes every final result all-or-none.
+Completion deletes all member leases in that transaction; sealing retains them
+only for exact final release. Any member loss or mismatch loses the whole
+entity; any transaction failure rolls back the partial rows, leaves the claimed
+composite irreversibly failed, and is `busy`. Loss or failure discards the
+complete buffered entity and final release deletes every exact member lease, or
+accepts cleanup's stale no-op, exactly once in semantic frontier order. Every
+publication-lock acquisition uses ascending publication-lock order and releases
+the locks in exact reverse acquisition order. Renewal, cleanup, and expiry race
+the same composite CAS and publication-lock-ordered scopes. Partial or first-
+member-only terminal authority does not exist. Returned values, serialization,
+digests, and owner-visible processing remain in semantic frontier order.
 
 Raw-local replay exposes two additional one-shot terminal operations over this
 same state machine:
@@ -1194,6 +1247,10 @@ item selects no raw and may be `valid` only after proving the absent content row
 and exact tombstone graph. Source, owner, receipt, or graph contradiction is
 `invalid`; SQLite contention is `busy`. The validator performs zero writes and
 exposes no raw value.
+
+Canonical Session content selection and digest checking remain in semantic
+frontier order. This validation-only exception acquires no grant publication
+lock and therefore constructs no publication-lock permutation.
 
 `ValidateInTransactionAsync` is the sole race-entry variant. It receives #158's
 already-open exact connection and `BEGIN IMMEDIATE` transaction, rechecks the
@@ -1240,8 +1297,9 @@ generic marker and cannot authorize another kind, run, parent, or child.
 Activation atomically creates the item and an operation lease after the
 marker-proven child is quiescent. Activation uses the catalog's single trusted
 clock sample taken immediately after its `BEGIN IMMEDIATE` succeeds. Renewal
-takes its authoritative sample after `BEGIN IMMEDIATE` succeeds and after
-canonical publication scopes are acquired, before proof and compare-and-swap.
+takes its authoritative sample after `BEGIN IMMEDIATE` succeeds and after the
+publication scopes are acquired in ascending publication-lock order, before
+proof and compare-and-swap.
 An owner/caller timestamp cannot move the policy boundary or resurrect an
 expired lease. The operation lease is held and renewed for the complete SDK use,
 including Session and Client disposal, and is released only after that use ends.

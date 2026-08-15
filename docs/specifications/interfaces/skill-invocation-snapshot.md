@@ -400,9 +400,12 @@ Every raw HTTP access/operation consumer—not only #158—fully buffers under i
 handle and wins the store-backed raw terminal seal before response start. Raw
 trace/detail/page, analysis-run, generic Session, historical, and current-file
 retain their existing successful bytes; loss/busy aborts without a response.
-For 2+ members, one composite handle wins one CAS/transaction/clock sample and
-every member scope/live tuple in canonical frontier order; seal/completion and
-release are all-or-none, and any member loss/busy discards the whole entity.
+For 2+ members, one composite handle wins one CAS/transaction/clock sample,
+acquires every member publication scope in the Retention publication-lock
+order, and proves every exact live tuple while those scopes are held;
+seal/completion and release are all-or-none, and any member loss/busy discards
+the whole entity. Returned values and owner-visible processing remain in
+semantic frontier order.
 Raw-local replay preserves four modes. `PreviewAsync` uses
 `TryCompleteWithoutRaw`; HTTP preview terminal loss/busy aborts, while direct CLI
 retains its exact safe DTO/error/exit. Handle-derived existing results for Local

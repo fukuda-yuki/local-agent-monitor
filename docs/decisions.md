@@ -3893,3 +3893,55 @@ response-byte storage, runtime reflection, direct historical path read,
 inferred join, second Skill/#154/Retention authority, raw-content logging,
 repository-safe raw carrier, #152 resolution, or claim that any engineering or
 release gate is complete.
+
+## D085: Exact admitted lease tuple is the Retention publication-lock order
+
+Status: Accepted (2026-08-15)
+
+Issue #170 closes the undefined lock order for composite Retention owners that
+persist no semantic frontier ordinal. It also prevents owners that do persist
+such an ordinal from creating a second global lock-order authority.
+
+D085 selects the following eight decisions.
+
+1. Before any publication lock, Retention constructs a lock-only permutation
+   ascending by exact immutable admitted `(store_instance_id, item_id,
+   lease_kind_rank, owner, generation)`, where both IDs and owner use ordinal
+   case-sensitive order, `lease_kind_rank` is `access=0`, `operation=1`,
+   `deletion=2`, and generation uses signed integer numeric order. Persisted
+   generation must be positive and canonical before lock acquisition.
+2. This five-tuple is both the sole global publication-lock sort key and the
+   publication-lock identity; a persisted semantic frontier ordinal cannot
+   override either authority.
+3. Owner/caller/selector order remains the semantic frontier for selection,
+   returned values, output serialization, digests, and owner-visible
+   processing. Retention stores the permutation and does not reorder
+   owner-visible results.
+4. One admitted tuple resolves to one in-memory publication state and lock
+   authority for the handle lifetime. No wrapper, batch, renewal, terminal
+   path, cleanup path, or owner adapter may manufacture an independently
+   lockable grant for that tuple. Duplicate object references and distinct
+   objects carrying the same tuple are duplicate members and are rejected
+   before the first publication lock, alongside invalid generation,
+   contradictory duplicates, and unproven alias uniqueness.
+5. Retention computes the complete publication-lock permutation before the
+   first publication lock. While publication locks are held, it never
+   discovers, adds, or reorders a member or its publication lock, and it
+   performs no `await`, HTTP, or file I/O. The exact live-lease,
+   persisted-expiry, and admitted-capability proofs that bind an already-locked
+   member's published state remain inside their publication scope.
+6. Every publication lock is acquired in ascending tuple order and released in
+   exact reverse acquisition order.
+7. Single-member scopes follow the same rule trivially.
+8. #154 and any future owner may retain a persisted semantic frontier ordinal
+   for its own graph or replay authority, but that ordinal is not a second
+   lock-order authority. Existing all-or-none terminal, grant, and renewal
+   behavior plus cleanup, read-taxonomy, public-shape, and frozen-wire
+   contracts remain unchanged.
+
+Rejected alternatives are requiring a persisted ordinal for every owner,
+because it adds unnecessary schema/API surface and prevents generic batch use;
+using caller/selector order, because reversed input permits lock inversion; and
+using an owner ordinal when present with tuple fallback otherwise, because the
+same grants could then participate in different global lock orders and the
+deadlock proof would remain open.
