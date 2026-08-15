@@ -321,15 +321,17 @@ public sealed class RetentionRawReplayStoreTests
     }
 
     [Fact]
-    public async Task ReadAsync_DoesNotRecreateAMissingCatalog()
+    public async Task ReadAsync_MissingCatalogReturnsDeniedWithoutRecreatingIt()
     {
         using var fixture = new Fixture();
         var store = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
         SqliteConnection.ClearAllPools();
         File.Delete(fixture.DatabasePath);
 
-        await Assert.ThrowsAsync<SqliteException>(() => store.ReadAsync("replay-missing-db", CancellationToken.None).AsTask());
+        var result = await store.ReadAsync("replay-missing-db", CancellationToken.None);
 
+        Assert.Equal(RetainedRawReplayReadDisposition.Denied, result.Disposition);
+        Assert.Null(result.Lease);
         Assert.False(File.Exists(fixture.DatabasePath));
     }
 

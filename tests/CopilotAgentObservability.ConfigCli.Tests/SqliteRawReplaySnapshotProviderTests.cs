@@ -91,28 +91,20 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     }
 
     [Fact]
-    public async Task CaptureAsync_MixedThreeMemberBoundaryReturnsNoPartialSnapshotAndMutatesOnlyExpiredExpiringMember()
+    public async Task CaptureAsync_MixedThreeMemberBoundaryAfterAdmissionRetainsTheCompleteSnapshotWithoutCatalogMutation()
     {
         using var temp = new TempDirectory();
         var boundary = Now.AddSeconds(1);
         var fixture = SeedSelectedBatchFixture(temp, boundary);
         var authorityBefore = CaptureRetentionAuthorityState(temp.DatabasePath, fixture.SelectedItemIds);
-        var pinnedCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId);
-        var unexpiredCatalogBefore = FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.UnexpiredItem.ItemId);
+        var selectedCatalogBefore = fixture.Items
+            .Select(item => FullRowDump(temp.DatabasePath, "retention_items", "item_id", item.ItemId))
+            .ToArray();
         var boundarySiblingCatalogBefore = FullRowDump(
             temp.DatabasePath,
             "retention_items",
             "item_id",
             fixture.BoundarySiblingItem.ItemId);
-        var boundaryInvariantBefore = RowDumpExcluding(
-            temp.DatabasePath,
-            "retention_items",
-            "item_id",
-            fixture.BoundaryItem.ItemId,
-            "state",
-            "revision",
-            "read_denied_at",
-            "queued_at");
         var pinnedSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId);
         var unexpiredSourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId);
         var boundarySourceBefore = FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId);
@@ -131,9 +123,10 @@ public sealed class SqliteRawReplaySnapshotProviderTests
                 checkpoint)
             .CaptureAsync(new RawReplaySelection(RawRecordIds: fixture.RequestedIds), false, CancellationToken.None);
 
-        Assert.False(result.Success);
-        Assert.Equal("snapshot_read_denied", result.ErrorCode);
-        Assert.Null(result.Lease);
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Null(result.ErrorCode);
+        var lease = Assert.IsType<RawReplaySnapshotLease>(result.Lease);
+        Assert.Equal(fixture.CanonicalIds, lease.Snapshot.Records.Select(static record => record.RawRecordId));
         Assert.Equal(1, checkpoint.InvocationCount);
         var acquisitionAudit = ReadLeaseAcquisitionAudit(temp.DatabasePath);
         Assert.Equal(
@@ -145,54 +138,33 @@ public sealed class SqliteRawReplaySnapshotProviderTests
             },
             acquisitionAudit.Select(static row => $"{row.SourceItemId}|{row.ActiveCount}"));
         AssertSharedCompositeLeaseTuple(acquisitionAudit);
-        AssertUnrelatedLeaseSurvives(temp.DatabasePath, fixture, acquisitionAudit[0]);
-
-        var catalog = new RetentionCatalogStore(fixture.Context, new FixedTimeProvider(boundary));
-        var denied = Assert.IsType<RetentionCatalogItem>(catalog.Find(fixture.BoundaryItem.OwnershipKey));
-        Assert.Equal(RetentionItemLifecycle.ExpiredPendingDeletion, denied.State);
-        Assert.Equal(boundary, denied.ReadDeniedAt);
-        Assert.Equal(fixture.BoundaryItem.Revision + 1, denied.Revision);
-        var unselectedBoundary = Assert.IsType<RetentionCatalogItem>(catalog.Find(fixture.BoundarySiblingItem.OwnershipKey));
-        Assert.Equal(RetentionItemLifecycle.Expiring, unselectedBoundary.State);
-        Assert.Null(unselectedBoundary.ReadDeniedAt);
-        Assert.Equal(fixture.BoundarySiblingItem.Revision, unselectedBoundary.Revision);
-        Assert.Equal(boundary.ToString("O", CultureInfo.InvariantCulture), TextScalar(
+        Assert.Equal(4, Scalar<long>(temp.DatabasePath, "SELECT COUNT(*) FROM retention_leases;"));
+        Assert.Equal(3, Scalar<long>(
             temp.DatabasePath,
-            $"SELECT queued_at FROM retention_items WHERE item_id='{fixture.BoundaryItem.ItemId}';"));
-        Assert.Null(TextScalar(
-            temp.DatabasePath,
-            $"SELECT error_code FROM retention_items WHERE item_id='{fixture.BoundaryItem.ItemId}';"));
+            $"SELECT COUNT(*) FROM retention_leases WHERE item_id IN ('{fixture.PinnedItem.ItemId}','{fixture.UnexpiredItem.ItemId}','{fixture.BoundaryItem.ItemId}');"));
 
-        Assert.Equal(pinnedCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.PinnedItem.ItemId));
-        Assert.Equal(unexpiredCatalogBefore, FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.UnexpiredItem.ItemId));
+        Assert.Equal(selectedCatalogBefore, fixture.Items
+            .Select(item => FullRowDump(temp.DatabasePath, "retention_items", "item_id", item.ItemId))
+            .ToArray());
         Assert.Equal(
             boundarySiblingCatalogBefore,
             FullRowDump(temp.DatabasePath, "retention_items", "item_id", fixture.BoundarySiblingItem.ItemId));
-        Assert.Equal(boundaryInvariantBefore, RowDumpExcluding(
-            temp.DatabasePath,
-            "retention_items",
-            "item_id",
-            fixture.BoundaryItem.ItemId,
-            "state",
-            "revision",
-            "read_denied_at",
-            "queued_at"));
         Assert.Equal(pinnedSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.PinnedId));
         Assert.Equal(unexpiredSourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.UnexpiredId));
         Assert.Equal(boundarySourceBefore, FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundaryId));
         Assert.Equal(
             boundarySiblingSourceBefore,
             FullRowDump(temp.DatabasePath, "raw_records", "id", fixture.BoundarySiblingId));
+
+        await lease.DisposeAsync();
+
+        AssertUnrelatedLeaseSurvives(temp.DatabasePath, fixture, acquisitionAudit[0]);
         AssertRetentionAuthorityChangedOnly(
             temp.DatabasePath,
             fixture,
             authorityBefore,
             acquisitionAudit[0],
-            fixture.BoundaryItem.ItemId,
-            "state",
-            "revision",
-            "read_denied_at",
-            "queued_at");
+            normalizedItemId: null);
     }
 
     [Fact]
