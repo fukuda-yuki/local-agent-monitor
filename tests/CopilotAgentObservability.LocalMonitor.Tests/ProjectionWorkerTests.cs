@@ -471,6 +471,28 @@ public class ProjectionWorkerTests
 
         Assert.False(subscription.Reader.TryRead(out _));
     }
+
+    [Fact]
+    public async Task Pass_EmptyBatchesRefreshProjectionStatusAndPermitReadyHealth()
+    {
+        var store = new FakeProjectionStore();
+        var health = ReadyHealth();
+        health.SetLoopbackBound(true);
+        health.SetWriterRunning(true);
+        health.SetProjectionWorkerRunning(true);
+        var worker = new ProjectionWorker(store, health);
+
+        await worker.RunProjectionPassAsync();
+
+        var readiness = health.Evaluate(
+            ingestionStallThresholdSeconds: 10,
+            projectionLagThresholdSeconds: 60);
+        Assert.Equal("ready", readiness.Status);
+        Assert.Equal(0, readiness.ProjectionBacklog);
+        Assert.Equal(0, readiness.SpanProjectionBacklog);
+        Assert.Empty(readiness.DegradedReasons);
+    }
+
     [Fact]
     public async Task Pass_ProjectsPreExistingUnprocessedRows()
     {
@@ -804,8 +826,13 @@ public class ProjectionWorkerTests
 
         public string GetPayload(long id) => records.Single(record => record.Id == id).PayloadJson;
 
-        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(Granted<IReadOnlyList<RawTelemetryRecord>>(records.Where(r => !projected.Contains(r.Id!.Value)).Take(limit).ToList()));
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken)
+        {
+            var selected = records.Where(r => !projected.Contains(r.Id!.Value)).Take(limit).ToList();
+            return ValueTask.FromResult(selected.Count == 0
+                ? RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.Empty(selected)
+                : Granted<IReadOnlyList<RawTelemetryRecord>>(selected));
+        }
 
         public override bool ApplyProjection(
             long rawRecordId,
@@ -855,8 +882,13 @@ public class ProjectionWorkerTests
             return new MonitorProjectionStatus(unprocessed.Count, oldest);
         }
 
-        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(Granted<IReadOnlyList<RawTelemetryRecord>>(records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).Take(limit).ToList()));
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken)
+        {
+            var selected = records.Where(r => projected.Contains(r.Id!.Value) && !spanProjected.Contains(r.Id!.Value)).Take(limit).ToList();
+            return ValueTask.FromResult(selected.Count == 0
+                ? RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.Empty(selected)
+                : Granted<IReadOnlyList<RawTelemetryRecord>>(selected));
+        }
 
         public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt)
         {

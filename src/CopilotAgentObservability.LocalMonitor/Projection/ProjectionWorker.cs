@@ -116,17 +116,17 @@ internal sealed class ProjectionWorker : BackgroundService
             {
                 throw new PersistenceBusyException();
             }
-            if (recordsResult.Lease is null)
-            {
-                if (anyProjected)
-                {
-                    eventBroker?.PublishProjectionChanged();
-                }
-                return;
-            }
             await using (var recordsLease = recordsResult.Lease)
             {
-                var records = recordsLease.Value;
+                var records = recordsLease?.Value ?? recordsResult.EmptyValue;
+                if (records is null)
+                {
+                    if (anyProjected)
+                    {
+                        eventBroker?.PublishProjectionChanged();
+                    }
+                    return;
+                }
                 foreach (var record in records)
                 {
                     if (cancellationToken.IsCancellationRequested)
@@ -207,7 +207,9 @@ internal sealed class ProjectionWorker : BackgroundService
             {
                 throw new PersistenceBusyException();
             }
-            if (spanRecordsResult.Lease is null)
+            await using var spanRecordsLease = spanRecordsResult.Lease;
+            var spanRecords = spanRecordsLease?.Value ?? spanRecordsResult.EmptyValue;
+            if (spanRecords is null)
             {
                 if (anyProjected)
                 {
@@ -215,8 +217,6 @@ internal sealed class ProjectionWorker : BackgroundService
                 }
                 return;
             }
-            await using var spanRecordsLease = spanRecordsResult.Lease;
-            var spanRecords = spanRecordsLease.Value;
             foreach (var record in spanRecords)
             {
                 if (cancellationToken.IsCancellationRequested)
