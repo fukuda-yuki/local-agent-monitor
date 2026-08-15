@@ -286,24 +286,37 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                     [lease.RawRecordId],
                     publications,
                     at,
-                    out var renewedGrantIndices)
+                    out var renewedGrantIndices,
+                    out var notificationRenewal)
                 || !UpdateOwned(connection, transaction, lease, at, "lease_expires_at=$expiry,updated_at=$at", ("$expiry", Timestamp(queueExpiry))))
             {
+                notificationRenewal?.Dispose();
                 transaction.Rollback();
                 return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
             }
-            transaction.Commit();
-            if (renewedGrantIndices.Count > 0)
+            using (notificationRenewal)
             {
-                var retentionExpiry = at.Add(RetentionV1Constants.LeaseDuration);
-                try
+                try { transaction.Commit(); }
+                catch
                 {
-                    checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeRetentionRenewalPublication);
+                    notificationRenewal?.Dispose();
+                    try { transaction.Rollback(); }
+                    catch { }
+                    return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
                 }
-                finally
+                if (renewedGrantIndices.Count > 0)
                 {
-                    foreach (var index in renewedGrantIndices)
-                        publications.AdvanceExpiry(index, retentionExpiry);
+                    var notificationPublished = false;
+                    try
+                    {
+                        checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeRetentionRenewalPublication);
+                    }
+                    finally
+                    {
+                        notificationPublished = notificationRenewal?.Publish() == true;
+                    }
+                    if (!notificationPublished)
+                        return new(LocalRepositoryQueueTransitionResult.StaleOwner, null);
                 }
             }
             return new(LocalRepositoryQueueTransitionResult.Applied, lease with { LeaseExpiresAt = queueExpiry });

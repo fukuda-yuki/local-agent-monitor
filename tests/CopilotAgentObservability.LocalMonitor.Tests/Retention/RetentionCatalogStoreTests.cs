@@ -315,6 +315,166 @@ public sealed class RetentionCatalogStoreTests
         }
     }
 
+    [Theory]
+    [InlineData("construction")]
+    [InlineData("arm")]
+    [InlineData("update")]
+    [InlineData("commit")]
+    public async Task RenewOperationLease_RenewalFailureReturnsLeaseLostAndPreservesPublishedAuthority(
+        string failure)
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var admissionAt = new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero);
+            var time = new RenewalFailureTimeProvider(admissionAt, failure);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+            var key = RawKey(path, store);
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var admission = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, admissionAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
+                CancellationToken.None);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
+            var grant = lease.Grant;
+            time.Advance(RetentionV1Constants.LeaseRenewalDeadline);
+            var persistedBefore = Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';");
+            var publishedBefore = PublishedLeaseExpiry(grant);
+            if (failure == "update")
+                Execute(path, "CREATE TRIGGER fail_renewal_update BEFORE UPDATE OF expires_at ON retention_leases BEGIN SELECT RAISE(ABORT,'synthetic_renewal_update_failure'); END;");
+            if (failure == "commit")
+                Execute(path, "CREATE TABLE renewal_commit_parent(id INTEGER PRIMARY KEY); CREATE TABLE renewal_commit_failure(id INTEGER, FOREIGN KEY(id) REFERENCES renewal_commit_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER fail_renewal_commit AFTER UPDATE OF expires_at ON retention_leases BEGIN INSERT INTO renewal_commit_failure VALUES(1); END;");
+
+            RetentionOperationRenewalDisposition? disposition = null;
+            var exception = Record.Exception(() => disposition = store.RenewOperationLease(grant));
+
+            Assert.Null(exception);
+            Assert.Equal(RetentionOperationRenewalDisposition.LeaseLost, disposition);
+            Assert.Equal(persistedBefore, Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';"));
+            Assert.Equal(publishedBefore, PublishedLeaseExpiry(grant));
+            Assert.False(time.Timers[0].IsDisposed);
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RenewOperationLease_CheckedAddFailureReturnsLeaseLostAndPreservesPublishedAuthority()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var admissionAt = new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero);
+            var time = new MutableTimeProvider(admissionAt);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+            var key = RawKey(path, store);
+            Execute(path, "UPDATE retention_items SET state='retained_by_policy' WHERE store_kind='raw_record' AND source_item_id=$source;", ("$source", key.SourceItemId));
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var admission = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, admissionAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
+                CancellationToken.None);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
+            var grant = lease.Grant;
+            using (var publication = grant.EnterLeasePublication())
+                publication.AdvanceExpiry(DateTimeOffset.MaxValue);
+            Execute(
+                path,
+                "UPDATE retention_leases SET expires_at=$expiry WHERE item_id=$item;",
+                ("$expiry", DateTimeOffset.MaxValue.ToString("O", CultureInfo.InvariantCulture)),
+                ("$item", grant.ItemId));
+            time.Advance(DateTimeOffset.MaxValue.AddMinutes(-1) - time.GetUtcNow());
+            var persistedBefore = Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';");
+
+            RetentionOperationRenewalDisposition? disposition = null;
+            var exception = Record.Exception(() => disposition = store.RenewOperationLease(grant));
+
+            Assert.Null(exception);
+            Assert.Equal(RetentionOperationRenewalDisposition.LeaseLost, disposition);
+            Assert.Equal(persistedBefore, Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';"));
+            Assert.Equal(DateTimeOffset.MaxValue, PublishedLeaseExpiry(grant));
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RenewOperationLease_LeaseDeletedDuringExpiryUpdateReturnsLeaseLost()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var admissionAt = new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero);
+            var time = new MutableTimeProvider(admissionAt);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+            var key = RawKey(path, store);
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var admission = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, admissionAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
+                CancellationToken.None);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
+            var grant = lease.Grant;
+            time.Advance(RetentionV1Constants.LeaseRenewalDeadline);
+            var persistedBefore = Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';");
+            Execute(
+                path,
+                "CREATE TRIGGER delete_renewal_lease BEFORE UPDATE OF expires_at ON retention_leases BEGIN DELETE FROM retention_leases WHERE item_id=OLD.item_id AND lease_kind=OLD.lease_kind AND owner=OLD.owner AND generation=OLD.generation; END;");
+
+            var disposition = store.RenewOperationLease(grant);
+
+            Assert.Equal(RetentionOperationRenewalDisposition.LeaseLost, disposition);
+            Assert.Equal(persistedBefore, Scalar<string>(path, $"SELECT expires_at FROM retention_leases WHERE item_id='{grant.ItemId}';"));
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RenewOperationLease_ImmediateWriterContentionReturnsCatalogBusy()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var admissionAt = new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero);
+            var time = new MutableTimeProvider(admissionAt);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            Execute(path, "INSERT INTO retention_adapter_coverage(store_kind,coverage_version) VALUES ('session_event_content',1),('raw_record',1),('analysis_run_raw',1),('sensitive_bundle',1),('analysis_sdk_directory',1);");
+            var key = RawKey(path, store);
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var admission = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, admissionAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
+                CancellationToken.None);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
+            time.Advance(RetentionV1Constants.LeaseRenewalDeadline);
+            using var blocker = Open(path);
+            using var blockerTransaction = blocker.BeginTransaction(deferred: false);
+
+            var disposition = store.RenewOperationLease(lease.Grant);
+
+            blockerTransaction.Rollback();
+            Assert.Equal(RetentionOperationRenewalDisposition.CatalogBusy, disposition);
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
     [Fact]
     public async Task RenewOperationLease_PublicationWaitCrossingExactExpiryReturnsLeaseLostWithoutResurrection()
     {
@@ -1870,6 +2030,36 @@ public sealed class RetentionCatalogStoreTests
         }
 
         internal void ResetReadCount() => ReadCount = 0;
+    }
+
+    private sealed class RenewalFailureTimeProvider(DateTimeOffset initialNow, string failure) : TimeProvider
+    {
+        private DateTimeOffset now = initialNow;
+        internal List<RenewalFailureTimer> Timers { get; } = [];
+        public override DateTimeOffset GetUtcNow() => now;
+        internal void Advance(TimeSpan elapsed) => now += elapsed;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var ordinal = Timers.Count + 1;
+            if (ordinal == 3 && failure == "construction")
+                throw new InvalidOperationException("synthetic_renewal_notification_construction_failure");
+            var timer = new RenewalFailureTimer(callback, state, ordinal == 3 && failure == "arm");
+            timer.Change(dueTime, period);
+            Timers.Add(timer);
+            return timer;
+        }
+    }
+
+    private sealed class RenewalFailureTimer(TimerCallback callback, object? state, bool rejectChange) : ITimer
+    {
+        private readonly TimerCallback callback = callback;
+        private readonly object? callbackState = state;
+        private bool disposed;
+        internal bool IsDisposed => disposed;
+        internal void Fire() => callback(callbackState);
+        public bool Change(TimeSpan dueTime, TimeSpan period) => !disposed && !rejectChange;
+        public void Dispose() => disposed = true;
+        public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
     }
 
     private sealed class DirectReadBeginClockGate : IRetentionReadAdmissionCheckpoint, IDisposable

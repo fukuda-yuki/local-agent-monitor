@@ -223,10 +223,15 @@ public sealed class RetentionReadPrimitiveTests
         {
             var now = ReadCapturedAt(path);
             using var cancellation = new CancellationTokenSource();
+            var cancellationCallbackElapsed = TimeSpan.Zero;
             var checkpoint = new DelegateReadCheckpoint(reached =>
             {
                 if (reached == RetentionReadBoundaryCheckpoint.AfterPublicationProofBeforeCommit)
+                {
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     cancellation.Cancel();
+                    cancellationCallbackElapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                }
             });
             var store = new RetentionCatalogStore(path, new MutableTimeProvider(now), checkpoint);
             store.CreateSchema();
@@ -252,7 +257,50 @@ public sealed class RetentionReadPrimitiveTests
             Assert.Equal(RetentionReadDisposition.LeaseLost, Assert.IsType<RetentionReadResult<string>>(result).Disposition);
             Assert.Null(result!.Lease);
             Assert.Equal(0, selectorCalls);
+            Assert.True(
+                cancellationCallbackElapsed < TimeSpan.FromSeconds(1),
+                $"Cancellation callback blocked for {cancellationCallbackElapsed}.");
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Fact]
+    public async Task ExpiryCleanupCallback_DoesNotBlockOnContendedSqliteWriter()
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = ReadCapturedAt(path);
+            var time = new MutableTimeProvider(now);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            var sourceId = ReadIds(path)[0];
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, sourceId.ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var result = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, now, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("materialized"),
+                CancellationToken.None);
+            await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
+            using var blocker = new SqliteConnection($"Data Source={path};Pooling=False");
+            blocker.Open();
+            using var blockerTransaction = blocker.BeginTransaction(deferred: false);
+
+            var callbacks = Task.Run(() =>
+            {
+                time.Advance(RetentionV1Constants.LeaseDuration);
+                time.Advance(TimeSpan.Zero);
+            });
+            await callbacks.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.Equal(1L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{lease.Grant.ItemId}';"));
+
+            blockerTransaction.Rollback();
+            for (var attempt = 0; attempt < 100
+                 && Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{lease.Grant.ItemId}';") != 0;
+                 attempt++)
+                await Task.Delay(10);
+            Assert.Equal(0L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{lease.Grant.ItemId}';"));
         }
         finally { Delete(path); }
     }
@@ -2148,6 +2196,10 @@ public sealed class RetentionReadPrimitiveTests
             Assert.Equal(1L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{secondItem.ItemId}';"));
             Execute(path, "DROP TRIGGER reject_first_release;");
             time.Advance(TimeSpan.FromMilliseconds(10));
+            for (var attempt = 0; attempt < 100
+                 && Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;") != 0;
+                 attempt++)
+                await Task.Delay(10);
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }

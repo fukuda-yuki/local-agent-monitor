@@ -8,6 +8,215 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
+    public async Task OldExpiryGeneration_AfterRenewalIsStaleWhilePublicationScopeIsContended()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var grant = CreateGrant("first", 0x11, now.AddMinutes(2));
+        var handle = new RetentionCommittedReadHandle([grant], time, _ => true);
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        var oldNotification = time.Timers[0];
+        using (var publications = RetentionGrantPublicationSet.EnterInOrder([new(grant, 0)]))
+        using (var renewal = publications.PrepareExpiryNotificationRenewal([0], now.AddMinutes(3)))
+            Assert.True(renewal.Publish());
+        oldNotification.ThrowOnChange = true;
+
+        var publicationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releasePublication = new ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            using var publication = grant.EnterLeasePublication();
+            publicationHeld.SetResult();
+            releasePublication.Wait();
+        });
+        try
+        {
+            await publicationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            oldNotification.Fire();
+            Assert.True(handle.IsPublished);
+        }
+        finally
+        {
+            releasePublication.Set();
+            await holder.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DormantReplacement_DueBeforeActivationLosesCompleteComposite()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var grants = new[]
+        {
+            CreateGrant("first", 0x11, now.AddMinutes(2)),
+            CreateGrant("second", 0x22, now.AddMinutes(2)),
+        };
+        var releases = 0;
+        var handle = new RetentionCommittedReadHandle(grants, time, _ =>
+        {
+            Interlocked.Increment(ref releases);
+            return true;
+        });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        using (var publications = RetentionGrantPublicationSet.EnterInOrder([new(grants[0], 0), new(grants[1], 1)]))
+        using (var renewal = publications.PrepareExpiryNotificationRenewal([0, 1], now.AddMinutes(3)))
+        {
+            time.Timers[2].Fire();
+            Assert.False(renewal.Publish());
+            Assert.Equal(now.AddMinutes(3), publications.LeaseExpiresAt(0));
+            Assert.Equal(now.AddMinutes(3), publications.LeaseExpiresAt(1));
+        }
+        Assert.False(handle.IsPublished);
+        await WaitUntilAsync(() => Volatile.Read(ref releases) == 1);
+        await handle.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task RenewalNotificationPreparationFailure_LeavesCompositePublicationAndOldNotificationUnchanged(
+        bool throwOnConstruction,
+        bool rejectArm)
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now)
+        {
+            ThrowOnCreateOrdinal = throwOnConstruction ? 3 : 0,
+            RejectChangeOrdinal = rejectArm ? 3 : 0,
+        };
+        var grants = new[]
+        {
+            CreateGrant("first", 0x11, now.AddMinutes(2)),
+            CreateGrant("second", 0x22, now.AddMinutes(2)),
+        };
+        var handle = new RetentionCommittedReadHandle(grants, time, _ => true);
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        using var publications = RetentionGrantPublicationSet.EnterInOrder([new(grants[0], 0), new(grants[1], 1)]);
+
+        Assert.ThrowsAny<Exception>(() =>
+            publications.PrepareExpiryNotificationRenewal([0, 1], now.AddMinutes(3)));
+
+        Assert.Equal(now.AddMinutes(2), publications.LeaseExpiresAt(0));
+        Assert.Equal(now.AddMinutes(2), publications.LeaseExpiresAt(1));
+        Assert.True(handle.IsPublished);
+        Assert.False(time.Timers[0].IsDisposed);
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CurrentExpiryNotification_BeforePublishedExpiryIsANoOpUntilExactExpiry()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var releases = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                Interlocked.Increment(ref releases);
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+
+        time.Timers[0].Fire();
+
+        Assert.True(handle.IsPublished);
+        Assert.Equal(0, Volatile.Read(ref releases));
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        time.Timers[0].Fire();
+        Assert.False(handle.IsPublished);
+        time.Timers[1].Fire();
+        await WaitUntilAsync(() => Volatile.Read(ref releases) == 1);
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_ReleaseExceptionDoesNotEscapeAndLeavesRetryScheduled()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var attempts = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                    throw new InvalidOperationException("synthetic_release_failure");
+                return true;
+            });
+
+        var exception = await Record.ExceptionAsync(async () => await handle.DisposeAsync());
+
+        Assert.Null(exception);
+        Assert.Equal(1, Volatile.Read(ref attempts));
+        Assert.True(time.Timers[1].IsScheduled);
+        time.Timers[1].Fire();
+        await WaitUntilAsync(() => Volatile.Read(ref attempts) == 2);
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_TimerFailuresDoNotEscapeOrAbandonReleaseAuthority()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var attempts = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ => Interlocked.Increment(ref attempts) > 1);
+        time.Timers[1].ThrowOnChange = true;
+        time.Timers[1].ThrowOnDispose = true;
+
+        var exception = await Record.ExceptionAsync(async () => await handle.DisposeAsync());
+
+        Assert.Null(exception);
+        await WaitUntilAsync(() => Volatile.Read(ref attempts) == 2);
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_TimerCallbackSignalsWorkerWithoutWaitingForRelease()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        using var releaseEntered = new ManualResetEventSlim();
+        using var allowRelease = new ManualResetEventSlim();
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                releaseEntered.Set();
+                allowRelease.Wait();
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        time.Advance(TimeSpan.FromMinutes(2));
+        time.Timers[0].Fire();
+
+        var callback = Task.Run(time.Timers[1].Fire);
+        try
+        {
+            await callback.WaitAsync(TimeSpan.FromMilliseconds(250));
+            Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            allowRelease.Set();
+        }
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
     public async Task HiddenHandle_PartiallyRenewedCompositeExpiresAtEarliestPublishedMemberExpiry()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
@@ -35,6 +244,7 @@ public sealed class RetentionWorkerRaceTests
         time.Advance(TimeSpan.Zero);
 
         Assert.False(handle.IsPublished);
+        await WaitUntilAsync(() => Volatile.Read(ref releaseCount) == 1);
         Assert.Equal(1, Volatile.Read(ref releaseCount));
         await handle.DisposeAsync();
     }
@@ -63,6 +273,7 @@ public sealed class RetentionWorkerRaceTests
 
         Assert.Equal(["first", "second"], Assert.Single(attempts));
         time.Advance(TimeSpan.FromMilliseconds(10));
+        await WaitUntilAsync(() => attempts.Count == 2);
         Assert.Equal(2, attempts.Count);
         Assert.All(attempts, attempt => Assert.Equal(["first", "second"], attempt));
     }
@@ -260,6 +471,65 @@ public sealed class RetentionWorkerRaceTests
     private static void Execute(string path, string sql, params (string Name, object Value)[] values) { using var c = Open(path); using var q = c.CreateCommand(); q.CommandText = sql; foreach (var (name, value) in values) q.Parameters.AddWithValue(name, value); q.ExecuteNonQuery(); }
     private static SqliteConnection Open(string path) { var c = new SqliteConnection($"Data Source={path};Pooling=False"); c.Open(); return c; }
     private static async Task DrainAsync() { for (var i = 0; i < 8; i++) await Task.Yield(); }
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var attempt = 0; attempt < 100 && !condition(); attempt++)
+            await Task.Delay(10);
+        Assert.True(condition());
+    }
+
+    private sealed class ManualNotificationTimeProvider(DateTimeOffset initialNow) : TimeProvider
+    {
+        private DateTimeOffset now = initialNow;
+        internal List<ManualTimer> Timers { get; } = [];
+        internal int ThrowOnCreateOrdinal { get; init; }
+        internal int RejectChangeOrdinal { get; init; }
+        public override DateTimeOffset GetUtcNow() => now;
+        internal void Advance(TimeSpan elapsed) => now += elapsed;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var ordinal = Timers.Count + 1;
+            if (ordinal == ThrowOnCreateOrdinal)
+                throw new InvalidOperationException("synthetic_notification_construction_failure");
+            var timer = new ManualTimer(callback, state)
+            {
+                RejectChange = ordinal == RejectChangeOrdinal,
+            };
+            timer.Change(dueTime, period);
+            Timers.Add(timer);
+            return timer;
+        }
+    }
+
+    private sealed class ManualTimer(TimerCallback callback, object? state) : ITimer
+    {
+        private bool disposed;
+        internal bool IsScheduled { get; private set; }
+        internal bool IsDisposed => disposed;
+        internal bool RejectChange { get; init; }
+        internal bool ThrowOnChange { get; set; }
+        internal bool ThrowOnDispose { get; set; }
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            if (ThrowOnChange) throw new InvalidOperationException("synthetic_notification_change_failure");
+            if (RejectChange) return false;
+            if (disposed) return false;
+            IsScheduled = dueTime != Timeout.InfiniteTimeSpan;
+            return true;
+        }
+        internal void Fire()
+        {
+            IsScheduled = false;
+            callback(state);
+        }
+        public void Dispose()
+        {
+            disposed = true;
+            IsScheduled = false;
+            if (ThrowOnDispose) throw new InvalidOperationException("synthetic_notification_dispose_failure");
+        }
+        public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+    }
 
     private sealed record Fixture(string Path, RetentionCatalogContext Context, MutableTimeProvider Time, RetentionCatalogStore Catalog, string ItemId) : IDisposable
     {

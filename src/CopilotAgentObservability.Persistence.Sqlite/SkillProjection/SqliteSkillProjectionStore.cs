@@ -276,20 +276,24 @@ internal sealed class SqliteSkillProjectionStore
                 persistedInputs.Select(static input => input.RawRecordId).ToArray(),
                 publications,
                 renewalAt,
-                out var renewedGrantIndices))
+                out var renewedGrantIndices,
+                out var notificationRenewal))
         {
+            notificationRenewal?.Dispose();
             transaction.Rollback();
             return null;
         }
 
-        var queueExpiry = persistedExpiry;
-        if (renewalAt - previousHeartbeatAt >= QueueHeartbeatInterval)
+        using (notificationRenewal)
         {
-            queueExpiry = renewalAt.Add(QueueLeaseDuration);
-            Execute(
-                connection,
-                transaction,
-                """
+            var queueExpiry = persistedExpiry;
+            if (renewalAt - previousHeartbeatAt >= QueueHeartbeatInterval)
+            {
+                queueExpiry = renewalAt.Add(QueueLeaseDuration);
+                Execute(
+                    connection,
+                    transaction,
+                    """
                 UPDATE skill_projection_queue
                 SET lease_expires_at=$lease_expires_at
                 WHERE generation_id=$generation_id
@@ -304,33 +308,41 @@ internal sealed class SqliteSkillProjectionStore
                           AND desired_generation_id=$generation_id
                   );
                 """,
-                ("$lease_expires_at", Timestamp(queueExpiry)),
-                ("$generation_id", lease.GenerationId),
-                ("$owner", lease.LeaseOwner),
-                ("$lease_generation", lease.LeaseGeneration),
-                ("$heartbeat_at", Timestamp(renewalAt)),
-                ("$trace_id", lease.TraceId));
-            if (Changes(connection, transaction) != 1)
+                    ("$lease_expires_at", Timestamp(queueExpiry)),
+                    ("$generation_id", lease.GenerationId),
+                    ("$owner", lease.LeaseOwner),
+                    ("$lease_generation", lease.LeaseGeneration),
+                    ("$heartbeat_at", Timestamp(renewalAt)),
+                    ("$trace_id", lease.TraceId));
+                if (Changes(connection, transaction) != 1)
+                {
+                    transaction.Rollback();
+                    return null;
+                }
+            }
+            try { transaction.Commit(); }
+            catch
             {
-                transaction.Rollback();
+                notificationRenewal?.Dispose();
+                try { transaction.Rollback(); }
+                catch { }
                 return null;
             }
-        }
-        transaction.Commit();
-        if (renewedGrantIndices.Count > 0)
-        {
-            var renewedRetentionExpiry = renewalAt.Add(RetentionV1Constants.LeaseDuration);
-            try
+            if (renewedGrantIndices.Count > 0)
             {
-                checkpoint?.Reached(SkillProjectionCheckpoint.BeforeRetentionRenewalPublication);
+                var notificationPublished = false;
+                try
+                {
+                    checkpoint?.Reached(SkillProjectionCheckpoint.BeforeRetentionRenewalPublication);
+                }
+                finally
+                {
+                    notificationPublished = notificationRenewal?.Publish() == true;
+                }
+                if (!notificationPublished) return null;
             }
-            finally
-            {
-                foreach (var index in renewedGrantIndices)
-                    publications.AdvanceExpiry(index, renewedRetentionExpiry);
-            }
+            return lease with { LeaseExpiresAt = queueExpiry };
         }
-        return lease with { LeaseExpiresAt = queueExpiry };
     }
 
     internal SkillProjectionWorkOutcome Publish(

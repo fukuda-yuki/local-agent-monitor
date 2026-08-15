@@ -9,10 +9,9 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private static readonly TimeSpan PublicationRetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly TimeProvider timeProvider;
-    private readonly DateTimeOffset expiresAt;
     private readonly RetentionGrantPublicationMember[] publicationMembers;
-    private readonly ITimer expiryNotification;
     private readonly RetentionMandatoryLeaseCleanup cleanup;
+    private RetentionExpiryNotification currentNotification;
     private int state;
 
     internal RetentionCommittedReadHandle(
@@ -25,29 +24,26 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(exactRelease);
         if (grants.Count == 0) throw new ArgumentException("A committed handle requires at least one grant.", nameof(grants));
         var snapshot = grants.ToArray();
-        expiresAt = snapshot[0].LeaseExpiresAt;
+        var expiresAt = snapshot[0].LeaseExpiresAt;
         if (snapshot.Any(grant => grant.LeaseExpiresAt != expiresAt))
             throw new ArgumentException("A composite handle requires one common expiry.", nameof(grants));
 
         Grants = Array.AsReadOnly(snapshot);
         this.timeProvider = timeProvider;
-        ITimer? preparedExpiry = null;
+        RetentionExpiryNotification? preparedExpiry = null;
         try
         {
             publicationMembers = Grants
                 .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
                 .ToArray();
-            preparedExpiry = timeProvider.CreateTimer(
-                static state => ((RetentionCommittedReadHandle)state!).ExpiryDue(),
-                this,
-                Timeout.InfiniteTimeSpan,
-                Timeout.InfiniteTimeSpan);
+            foreach (var grant in Grants) grant.AttachCommittedHandle(this);
+            preparedExpiry = new RetentionExpiryNotification(this, 1, expiresAt, timeProvider, armDormant: false);
             cleanup = new RetentionMandatoryLeaseCleanup(Grants, timeProvider, exactRelease);
-            expiryNotification = preparedExpiry;
+            currentNotification = preparedExpiry;
         }
         catch
         {
-            preparedExpiry?.Dispose();
+            preparedExpiry?.Invalidate();
             throw;
         }
     }
@@ -57,17 +53,8 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     internal bool Activate()
     {
-        try
-        {
-            var due = expiresAt - timeProvider.GetUtcNow();
-            if (due < TimeSpan.Zero) due = TimeSpan.Zero;
-            return expiryNotification.Change(due, Timeout.InfiniteTimeSpan)
-                && Volatile.Read(ref state) == Hidden;
-        }
-        catch
-        {
-            return false;
-        }
+        return currentNotification.Activate()
+            && Volatile.Read(ref state) == Hidden;
     }
 
     internal bool Publish() =>
@@ -76,12 +63,15 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     internal void AbandonBeforeCommit()
     {
         if (Interlocked.CompareExchange(ref state, Released, Hidden) != Hidden) return;
-        expiryNotification.Dispose();
+        currentNotification.Invalidate();
         cleanup.Abandon();
     }
 
     internal void Lose()
         => Lose(releaseSynchronously: true);
+
+    internal void LoseAsynchronously()
+        => Lose(releaseSynchronously: false);
 
     private void Lose(bool releaseSynchronously)
     {
@@ -95,7 +85,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
             }
             if (observed == Released) return;
             if (Interlocked.CompareExchange(ref state, Lost, observed) != observed) continue;
-            expiryNotification.Dispose();
+            Volatile.Read(ref currentNotification).Invalidate();
             if (releaseSynchronously)
                 cleanup.ReleaseOrOwn();
             else
@@ -116,7 +106,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
             }
             if (observed == Released) return ValueTask.CompletedTask;
             if (Interlocked.CompareExchange(ref state, Released, observed) != observed) continue;
-            expiryNotification.Dispose();
+            Volatile.Read(ref currentNotification).Invalidate();
             cleanup.ReleaseOrOwn();
             return ValueTask.CompletedTask;
         }
@@ -124,21 +114,62 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     public override string ToString() => nameof(RetentionCommittedReadHandle);
 
-    private void ExpiryDue()
+    internal RetentionExpiryNotificationPreparation PrepareExpiryNotification(DateTimeOffset expiresAt)
+    {
+        var current = Volatile.Read(ref currentNotification);
+        var generation = checked(current.Generation + 1);
+        var replacement = new RetentionExpiryNotification(
+            this,
+            generation,
+            expiresAt,
+            timeProvider,
+            armDormant: true);
+        return new RetentionExpiryNotificationPreparation(this, current, replacement);
+    }
+
+    internal bool PublishExpiryNotification(
+        RetentionExpiryNotification expected,
+        RetentionExpiryNotification replacement)
+    {
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(ref currentNotification, replacement, expected),
+                expected))
+        {
+            replacement.Invalidate();
+            Lose(releaseSynchronously: false);
+            return false;
+        }
+
+        var activated = replacement.Activate();
+        expected.Invalidate();
+        if (!activated) Lose(releaseSynchronously: false);
+        return activated;
+    }
+
+    internal void ExpiryDue(RetentionExpiryNotification notification)
     {
         try
         {
+            var current = Volatile.Read(ref currentNotification);
+            if (!ReferenceEquals(current, notification)
+                || current.Generation != notification.Generation)
+                return;
             if (Volatile.Read(ref state) is Lost or Released) return;
 
             if (!RetentionGrantPublicationSet.TryEnterInOrder(publicationMembers, out var publications))
             {
-                RearmExpiryNotification(PublicationRetryDelay);
+                if (ReferenceEquals(Volatile.Read(ref currentNotification), notification))
+                    notification.Rearm(PublicationRetryDelay);
                 return;
             }
 
             TimeSpan nextDue;
             using (publications)
             {
+                current = Volatile.Read(ref currentNotification);
+                if (!ReferenceEquals(current, notification)
+                    || current.Generation != notification.Generation)
+                    return;
                 var now = timeProvider.GetUtcNow();
                 var earliestExpiry = publications.LeaseExpiresAt(0);
                 for (var index = 1; index < publications.Count; index++)
@@ -154,28 +185,174 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
                 nextDue = earliestExpiry - now;
             }
 
-            RearmExpiryNotification(nextDue);
+            notification.Rearm(nextDue);
         }
         catch
         {
-            // An ITimer callback must fail closed because an exception escaping it can terminate the process.
-            Lose(releaseSynchronously: false);
+            if (ReferenceEquals(Volatile.Read(ref currentNotification), notification))
+                Lose(releaseSynchronously: false);
+        }
+    }
+}
+
+internal sealed class RetentionExpiryNotification
+{
+    private const int Dormant = 0;
+    private const int Active = 1;
+    private const int Invalid = 2;
+    private readonly RetentionCommittedReadHandle handle;
+    private readonly DateTimeOffset expiresAt;
+    private readonly TimeProvider timeProvider;
+    private readonly ITimer timer;
+    private int state;
+    private int armed;
+    private int due;
+
+    internal RetentionExpiryNotification(
+        RetentionCommittedReadHandle handle,
+        long generation,
+        DateTimeOffset expiresAt,
+        TimeProvider timeProvider,
+        bool armDormant)
+    {
+        this.handle = handle;
+        Generation = generation;
+        this.expiresAt = expiresAt;
+        this.timeProvider = timeProvider;
+        timer = timeProvider.CreateTimer(
+            static state => ((RetentionExpiryNotification)state!).Due(),
+            this,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
+        if (!armDormant) return;
+        try
+        {
+            if (!Arm()) throw new InvalidOperationException("The expiry notification could not be armed.");
+        }
+        catch
+        {
+            Invalidate();
+            throw;
         }
     }
 
-    private void RearmExpiryNotification(TimeSpan due)
+    internal long Generation { get; }
+
+    internal bool Activate()
     {
         try
         {
-            if (!expiryNotification.Change(due, Timeout.InfiniteTimeSpan))
-                Lose(releaseSynchronously: false);
+            var wasArmed = Volatile.Read(ref armed) != 0;
+            if (!wasArmed && !Arm()) return false;
+            if (Interlocked.CompareExchange(ref state, Active, Dormant) != Dormant) return false;
+            return Volatile.Read(ref due) == 0
+                && (!wasArmed || timeProvider.GetUtcNow() < expiresAt);
         }
-        catch { Lose(releaseSynchronously: false); }
+        catch { return false; }
+    }
+
+    internal void Rearm(TimeSpan delay)
+    {
+        if (Volatile.Read(ref state) != Active) return;
+        try
+        {
+            if (!timer.Change(delay, Timeout.InfiniteTimeSpan))
+                handle.LoseAsynchronously();
+        }
+        catch { handle.LoseAsynchronously(); }
+    }
+
+    internal void Invalidate()
+    {
+        if (Interlocked.Exchange(ref state, Invalid) == Invalid) return;
+        try { timer.Dispose(); }
+        catch { }
+    }
+
+    private bool Arm()
+    {
+        var delay = expiresAt - timeProvider.GetUtcNow();
+        if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+        if (!timer.Change(delay, Timeout.InfiniteTimeSpan)) return false;
+        Volatile.Write(ref armed, 1);
+        return true;
+    }
+
+    private void Due()
+    {
+        try
+        {
+            if (Volatile.Read(ref state) == Dormant)
+            {
+                Volatile.Write(ref due, 1);
+                return;
+            }
+            if (Volatile.Read(ref state) == Active) handle.ExpiryDue(this);
+        }
+        catch { handle.LoseAsynchronously(); }
+    }
+}
+
+internal sealed class RetentionExpiryNotificationPreparation : IDisposable
+{
+    private readonly RetentionCommittedReadHandle handle;
+    private readonly RetentionExpiryNotification expected;
+    private readonly RetentionExpiryNotification replacement;
+    private int completed;
+
+    internal RetentionExpiryNotificationPreparation(
+        RetentionCommittedReadHandle handle,
+        RetentionExpiryNotification expected,
+        RetentionExpiryNotification replacement) =>
+        (this.handle, this.expected, this.replacement) = (handle, expected, replacement);
+
+    internal bool Publish()
+    {
+        if (Interlocked.Exchange(ref completed, 1) != 0) return false;
+        return handle.PublishExpiryNotification(expected, replacement);
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref completed, 1) == 0) replacement.Invalidate();
+    }
+}
+
+internal sealed class RetentionExpiryNotificationRenewal : IDisposable
+{
+    private readonly RetentionGrantPublicationSet publications;
+    private readonly IReadOnlyList<int> renewedIndices;
+    private readonly DateTimeOffset expiry;
+    private readonly IReadOnlyList<RetentionExpiryNotificationPreparation> preparations;
+    private int completed;
+
+    internal RetentionExpiryNotificationRenewal(
+        RetentionGrantPublicationSet publications,
+        IReadOnlyList<int> renewedIndices,
+        DateTimeOffset expiry,
+        IReadOnlyList<RetentionExpiryNotificationPreparation> preparations) =>
+        (this.publications, this.renewedIndices, this.expiry, this.preparations) =
+        (publications, renewedIndices, expiry, preparations);
+
+    internal bool Publish()
+    {
+        if (Interlocked.Exchange(ref completed, 1) != 0) return false;
+        foreach (var index in renewedIndices) publications.AdvanceExpiry(index, expiry);
+        var active = true;
+        foreach (var preparation in preparations) active &= preparation.Publish();
+        return active;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref completed, 1) != 0) return;
+        foreach (var preparation in preparations) preparation.Dispose();
     }
 }
 
 internal sealed class RetentionMandatoryLeaseCleanup
 {
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
     private readonly IReadOnlyList<RetentionReadGrant> grants;
     private readonly Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease;
     private readonly ITimer retry;
@@ -190,19 +367,21 @@ internal sealed class RetentionMandatoryLeaseCleanup
         this.grants = grants;
         this.exactRelease = exactRelease;
         retry = timeProvider.CreateTimer(
-            static state => ((RetentionMandatoryLeaseCleanup)state!).TryRelease(),
+            static state => ((RetentionMandatoryLeaseCleanup)state!).SignalRelease(),
             this,
             Timeout.InfiniteTimeSpan,
             Timeout.InfiniteTimeSpan);
     }
 
-    internal void ReleaseOrOwn() => TryRelease();
-
-    internal void Own()
+    internal void ReleaseOrOwn()
     {
-        if (Volatile.Read(ref completed) == 0)
-            retry.Change(TimeSpan.Zero, Timeout.InfiniteTimeSpan);
+        if (Volatile.Read(ref completed) != 0
+            || Interlocked.CompareExchange(ref active, 1, 0) != 0)
+            return;
+        TryRelease(retryOnFailure: true);
     }
+
+    internal void Own() => SignalRelease();
 
     internal void Abandon()
     {
@@ -212,24 +391,77 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     public override string ToString() => nameof(RetentionMandatoryLeaseCleanup);
 
-    private void TryRelease()
+    private void SignalRelease()
     {
-        if (Volatile.Read(ref completed) != 0) return;
-        if (Interlocked.CompareExchange(ref active, 1, 0) != 0) return;
+        if (TryQueueRelease()) return;
+        ScheduleRetry();
+    }
+
+    private bool TryQueueRelease()
+    {
         try
         {
-            if (exactRelease(grants))
+            if (Volatile.Read(ref completed) != 0
+                || Interlocked.CompareExchange(ref active, 1, 0) != 0)
+                return true;
+            if (!ThreadPool.UnsafeQueueUserWorkItem(
+                    static cleanup => cleanup.TryRelease(retryOnFailure: true),
+                    this,
+                    preferLocal: false))
             {
-                if (Interlocked.Exchange(ref completed, 1) == 0)
-                    retry.Dispose();
-                return;
+                Volatile.Write(ref active, 0);
+                return false;
             }
-            retry.Change(TimeSpan.FromMilliseconds(10), Timeout.InfiniteTimeSpan);
+            return true;
         }
+        catch
+        {
+            Volatile.Write(ref active, 0);
+            return false;
+        }
+    }
+
+    private void TryRelease(bool retryOnFailure)
+    {
+        var released = false;
+        try
+        {
+            released = exactRelease(grants);
+        }
+        // Cleanup must not propagate release failures; the scheduled retry owns recovery.
+        catch { }
         finally
         {
             Volatile.Write(ref active, 0);
         }
+
+        if (released)
+        {
+            Complete();
+            return;
+        }
+        if (retryOnFailure) ScheduleRetry();
+    }
+
+    private void ScheduleRetry()
+    {
+        while (Volatile.Read(ref completed) == 0)
+        {
+            try
+            {
+                if (retry.Change(RetryDelay, Timeout.InfiniteTimeSpan)) return;
+            }
+            catch { }
+            if (TryQueueRelease()) return;
+            Thread.Yield();
+        }
+    }
+
+    private void Complete()
+    {
+        if (Interlocked.Exchange(ref completed, 1) != 0) return;
+        try { retry.Dispose(); }
+        catch { }
     }
 }
 

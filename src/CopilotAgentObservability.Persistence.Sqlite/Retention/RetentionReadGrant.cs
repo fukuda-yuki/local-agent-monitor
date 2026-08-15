@@ -29,6 +29,7 @@ internal sealed class RetentionReadGrant
     private readonly object leasePublicationGate = new();
     private readonly byte[] sourceToken;
     private DateTimeOffset publishedLeaseExpiresAt;
+    private RetentionCommittedReadHandle? committedHandle;
 
     internal RetentionReadGrant(
         RetentionOwnershipKey ownershipKey,
@@ -68,6 +69,14 @@ internal sealed class RetentionReadGrant
     {
         using var publication = EnterLeasePublication();
         publication.AdvanceExpiry(expiry);
+    }
+
+    internal void AttachCommittedHandle(RetentionCommittedReadHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (Interlocked.CompareExchange(ref committedHandle, handle, null) is { } existing
+            && !ReferenceEquals(existing, handle))
+            throw new InvalidOperationException("A retention grant cannot belong to multiple committed handles.");
     }
 
     // Database participants acquire their immediate transaction before retaining this scope.
@@ -123,6 +132,7 @@ internal sealed class RetentionReadGrant
         private LeasePublication() { }
 
         internal DateTimeOffset LeaseExpiresAt => Owner.publishedLeaseExpiresAt;
+        internal RetentionCommittedReadHandle? CommittedHandle => Owner.committedHandle;
 
         internal void AdvanceExpiry(DateTimeOffset expiry) => Owner.publishedLeaseExpiresAt = expiry;
 
@@ -411,6 +421,53 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         scopes[index].AdvanceExpiry(expiry);
+    }
+
+    internal RetentionExpiryNotificationRenewal PrepareExpiryNotificationRenewal(
+        IReadOnlyList<int> renewedIndices,
+        DateTimeOffset expiry)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(renewedIndices);
+        var indices = renewedIndices.ToArray();
+        if (indices.Distinct().Count() != indices.Length
+            || indices.Any(index => index < 0 || index >= scopes.Count))
+            throw new ArgumentOutOfRangeException(nameof(renewedIndices));
+
+        var renewed = indices.ToHashSet();
+        var preparations = new List<RetentionExpiryNotificationPreparation>();
+        try
+        {
+            foreach (var group in Enumerable.Range(0, scopes.Count)
+                         .Where(index => scopes[index].CommittedHandle is not null)
+                         .GroupBy(index => scopes[index].CommittedHandle!)
+                         .OrderBy(group => group.Min()))
+            {
+                var handle = group.Key;
+                var handleIndices = handle.Grants
+                    .Select(FindGrantIndex)
+                    .ToArray();
+                if (handleIndices.Any(index => index < 0))
+                    throw new InvalidOperationException("Every composite member must participate in renewal publication.");
+                var earliestExpiry = handleIndices
+                    .Select(index => renewed.Contains(index) ? expiry : scopes[index].LeaseExpiresAt)
+                    .Min();
+                preparations.Add(handle.PrepareExpiryNotification(earliestExpiry));
+            }
+            return new RetentionExpiryNotificationRenewal(this, indices, expiry, preparations);
+        }
+        catch
+        {
+            foreach (var preparation in preparations) preparation.Dispose();
+            throw;
+        }
+    }
+
+    private int FindGrantIndex(RetentionReadGrant grant)
+    {
+        for (var index = 0; index < grants.Count; index++)
+            if (ReferenceEquals(grants[index], grant)) return index;
+        return -1;
     }
 
     public void Dispose()

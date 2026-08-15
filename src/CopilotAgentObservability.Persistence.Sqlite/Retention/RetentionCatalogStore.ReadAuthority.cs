@@ -21,7 +21,7 @@ public sealed partial class RetentionCatalogStore
         try
         {
             using var cancellationRegistration = cancellationToken.UnsafeRegister(
-                static state => ((RetentionCommittedReadHandle)state!).Lose(),
+                static state => ((RetentionCommittedReadHandle)state!).LoseAsynchronously(),
                 handle);
             bool published;
             using (var connection = OpenExisting())
@@ -257,6 +257,17 @@ public sealed partial class RetentionCatalogStore
         if (proof != SourceReceiptProof.Match)
             return RetentionOperationRenewalDisposition.NonrenewableGrantStillUsable;
 
+        return RetentionOperationRenewalDisposition.Renewed;
+    }
+
+    private static RetentionOperationRenewalDisposition UpdateOperationLeaseExpiry(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionReadGrant grant,
+        DateTimeOffset previousExpiry,
+        DateTimeOffset expiry,
+        DateTimeOffset at)
+    {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
@@ -270,11 +281,11 @@ public sealed partial class RetentionCatalogStore
               AND expires_at=$previous_expiry
               AND expires_at>$at;
             """;
-        command.Parameters.AddWithValue("$expiry", Timestamp(at.Add(RetentionV1Constants.LeaseDuration)));
+        command.Parameters.AddWithValue("$expiry", Timestamp(expiry));
         command.Parameters.AddWithValue("$item_id", grant.ItemId);
         command.Parameters.AddWithValue("$owner", grant.LeaseOwner);
         command.Parameters.AddWithValue("$generation", grant.LeaseGeneration);
-        command.Parameters.AddWithValue("$previous_expiry", Timestamp(publishedExpiry));
+        command.Parameters.AddWithValue("$previous_expiry", Timestamp(previousExpiry));
         command.Parameters.AddWithValue("$at", Timestamp(at));
         if (command.ExecuteNonQuery() == 1)
             return RetentionOperationRenewalDisposition.Renewed;
@@ -304,8 +315,32 @@ public sealed partial class RetentionCatalogStore
                 transactionAt);
             if (disposition == RetentionOperationRenewalDisposition.Renewed)
             {
-                transaction.Commit();
-                publications.AdvanceExpiry(0, transactionAt.Add(RetentionV1Constants.LeaseDuration));
+                var expiry = transactionAt.Add(RetentionV1Constants.LeaseDuration);
+                using var notificationRenewal = publications.PrepareExpiryNotificationRenewal([0], expiry);
+                var updateDisposition = UpdateOperationLeaseExpiry(
+                    connection,
+                    transaction,
+                    grant,
+                    publications.LeaseExpiresAt(0),
+                    expiry,
+                    transactionAt);
+                if (updateDisposition != RetentionOperationRenewalDisposition.Renewed)
+                {
+                    transaction.Rollback();
+                    return updateDisposition;
+                }
+                try
+                {
+                    transaction.Commit();
+                }
+                catch
+                {
+                    transaction.Rollback();
+                    return RetentionOperationRenewalDisposition.LeaseLost;
+                }
+                return notificationRenewal.Publish()
+                    ? RetentionOperationRenewalDisposition.Renewed
+                    : RetentionOperationRenewalDisposition.LeaseLost;
             }
             else
             {
@@ -321,6 +356,10 @@ public sealed partial class RetentionCatalogStore
         {
             return RetentionOperationRenewalDisposition.LeaseLost;
         }
+        catch
+        {
+            return RetentionOperationRenewalDisposition.LeaseLost;
+        }
     }
 
     internal static bool TryPrepareOperationLeaseRenewals(
@@ -330,7 +369,8 @@ public sealed partial class RetentionCatalogStore
         IReadOnlyList<long> rawRecordIds,
         RetentionGrantPublicationSet publications,
         DateTimeOffset at,
-        out IReadOnlyList<int> renewedGrantIndices)
+        out IReadOnlyList<int> renewedGrantIndices,
+        out RetentionExpiryNotificationRenewal? notificationRenewal)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -338,6 +378,7 @@ public sealed partial class RetentionCatalogStore
         ArgumentNullException.ThrowIfNull(rawRecordIds);
         ArgumentNullException.ThrowIfNull(publications);
         renewedGrantIndices = Array.Empty<int>();
+        notificationRenewal = null;
         if (grants.Count != rawRecordIds.Count || grants.Count != publications.Count)
             return false;
 
@@ -360,8 +401,35 @@ public sealed partial class RetentionCatalogStore
                 return false;
         }
 
-        renewedGrantIndices = dueIndices;
-        return true;
+        try
+        {
+            var expiry = at.Add(RetentionV1Constants.LeaseDuration);
+            notificationRenewal = dueIndices.Count == 0
+                ? null
+                : publications.PrepareExpiryNotificationRenewal(dueIndices, expiry);
+            foreach (var index in dueIndices)
+            {
+                if (UpdateOperationLeaseExpiry(
+                        connection,
+                        transaction,
+                        grants[index],
+                        publications.LeaseExpiresAt(index),
+                        expiry,
+                        at) == RetentionOperationRenewalDisposition.Renewed)
+                    continue;
+                notificationRenewal?.Dispose();
+                notificationRenewal = null;
+                return false;
+            }
+            renewedGrantIndices = dueIndices;
+            return true;
+        }
+        catch
+        {
+            notificationRenewal?.Dispose();
+            notificationRenewal = null;
+            return false;
+        }
     }
 
     private static bool GrantMatchesRawRecord(RetentionReadGrant grant, long rawRecordId) =>
