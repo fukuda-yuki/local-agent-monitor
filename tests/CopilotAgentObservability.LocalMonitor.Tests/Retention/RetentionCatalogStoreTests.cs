@@ -259,6 +259,63 @@ public sealed class RetentionCatalogStoreTests
     }
 
     [Fact]
+    public async Task RenewOperationLease_CommittedRenewalMovesHiddenHandleExpiryNotification()
+    {
+        var path = CopyFixture("monitor", "monitor-v5.sqlite");
+        try
+        {
+            var admissionAt = new DateTimeOffset(2026, 7, 12, 1, 0, 0, TimeSpan.Zero);
+            var time = new MutableTimeProvider(admissionAt);
+            var store = new RetentionCatalogStore(path, time);
+            store.CreateSchema();
+            Execute(
+                path,
+                """
+                INSERT INTO retention_adapter_coverage(store_kind,coverage_version)
+                VALUES
+                    ('session_event_content',1),
+                    ('raw_record',1),
+                    ('analysis_run_raw',1),
+                    ('sensitive_bundle',1),
+                    ('analysis_sdk_directory',1);
+                """);
+            var key = RawKey(path, store);
+            var rawRecordId = long.Parse(key.SourceItemId, CultureInfo.InvariantCulture);
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var admission = await store.ReadAsync(
+                new RetentionReadRequest(key, RetentionReadKind.Operation, admissionAt, item.Revision),
+                static (_, _, _, _) => ValueTask.FromResult<string?>("value"),
+                CancellationToken.None);
+            var lease = Assert.IsType<RetentionReadLease<string>>(admission.Lease);
+            var grant = lease.Grant;
+            var admissionExpiry = PublishedLeaseExpiry(grant);
+            try
+            {
+                time.Advance(RetentionV1Constants.LeaseRenewalDeadline);
+
+                Assert.Equal(
+                    RetentionOperationRenewalDisposition.Renewed,
+                    store.RenewOperationLease(grant));
+                Assert.True(PublishedLeaseExpiry(grant) > admissionExpiry);
+
+                time.Advance(admissionExpiry - time.GetUtcNow());
+                time.Advance(TimeSpan.Zero);
+
+                Assert.Equal(1L, Scalar<long>(path, $"SELECT COUNT(*) FROM retention_leases WHERE item_id='{grant.ItemId}';"));
+                Assert.True(GrantIsUsable(path, grant, rawRecordId, time.GetUtcNow()));
+            }
+            finally
+            {
+                await lease.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task RenewOperationLease_PublicationWaitCrossingExactExpiryReturnsLeaseLostWithoutResurrection()
     {
         var path = CopyFixture("monitor", "monitor-v5.sqlite");
@@ -1300,13 +1357,14 @@ public sealed class RetentionCatalogStoreTests
             var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
             var requestNow = item.ExpiresAt.AddTicks(-1);
 
-            time.Schedule(requestNow);
+            time.Schedule(requestNow, item.ExpiresAt);
             time.ResetReadCount();
+            var selectorCallCount = 0;
             var result = await store.ReadAsync(
                 new RetentionReadRequest(key, RetentionReadKind.Access, requestNow, item.Revision),
                 (_, _, _, _) =>
                 {
-                    time.Schedule(item.ExpiresAt, item.ExpiresAt.AddTicks(1));
+                    Interlocked.Increment(ref selectorCallCount);
                     return ValueTask.FromResult<string?>("value");
                 },
                 CancellationToken.None);
@@ -1314,6 +1372,7 @@ public sealed class RetentionCatalogStoreTests
             Assert.Equal(RetentionReadDisposition.LifecycleDenied, result.Disposition);
             Assert.Null(result.Lease);
             Assert.Equal(2, time.ReadCount);
+            Assert.Equal(0, selectorCallCount);
             var denied = Assert.IsType<RetentionCatalogItem>(store.Find(key));
             Assert.Equal(item.ExpiresAt, denied.ReadDeniedAt);
             Assert.Equal(item.ExpiresAt.ToString("O"), Scalar<string>(path, $"SELECT queued_at FROM retention_items WHERE item_id='{denied.ItemId}';"));

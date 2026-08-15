@@ -8,6 +8,38 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
+    public async Task HiddenHandle_PartiallyRenewedCompositeExpiresAtEarliestPublishedMemberExpiry()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var admissionExpiry = now.AddMinutes(2);
+        var time = new MutableTimeProvider(now);
+        var grants = new[]
+        {
+            CreateGrant("first", 0x11, admissionExpiry),
+            CreateGrant("second", 0x22, admissionExpiry),
+        };
+        var releaseCount = 0;
+        var handle = new RetentionCommittedReadHandle(
+            grants,
+            time,
+            _ =>
+            {
+                Interlocked.Increment(ref releaseCount);
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        grants[0].AdvanceExpiry(admissionExpiry.AddMinutes(1));
+
+        time.Advance(admissionExpiry - now);
+        time.Advance(TimeSpan.Zero);
+
+        Assert.False(handle.IsPublished);
+        Assert.Equal(1, Volatile.Read(ref releaseCount));
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
     public async Task MandatoryHiddenLeaseCleanup_RetriesTheCompleteOwnedFrontierAfterInitialContention()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);

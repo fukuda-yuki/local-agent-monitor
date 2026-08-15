@@ -73,6 +73,18 @@ internal sealed class RetentionReadGrant
     // Database participants acquire their immediate transaction before retaining this scope.
     internal LeasePublication EnterLeasePublication() => new(this);
 
+    internal bool TryEnterLeasePublication(out LeasePublication publication)
+    {
+        if (!Monitor.TryEnter(leasePublicationGate))
+        {
+            publication = null!;
+            return false;
+        }
+
+        publication = LeasePublication.FromEnteredGate(this);
+        return true;
+    }
+
     internal bool TryBindAdmissionSelectorCapability(SqliteCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
@@ -314,34 +326,7 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
         IReadOnlyList<RetentionGrantPublicationMember> frontierMembers,
         Action<long>? releaseObserverForTesting)
     {
-        ArgumentNullException.ThrowIfNull(frontierMembers);
-        var members = frontierMembers.ToArray();
-        long? previousOrdinal = null;
-        foreach (var member in members)
-        {
-            ArgumentNullException.ThrowIfNull(member.Grant);
-            if (previousOrdinal is { } previous && member.FrontierOrdinal <= previous)
-                throw new ArgumentException("Frontier ordinals must be strictly increasing.", nameof(frontierMembers));
-            previousOrdinal = member.FrontierOrdinal;
-            if (member.Grant.LeaseGeneration <= 0)
-                throw new ArgumentException("Frontier members must have a positive lease generation.", nameof(frontierMembers));
-            if (member.Grant.OwnershipKey.StoreInstanceId is null)
-                throw new ArgumentException("Frontier members must have a store instance identifier.", nameof(frontierMembers));
-            if (LeaseKindRank(member.Grant.LeaseKind) < 0)
-                throw new ArgumentException("Frontier members contain an invalid lease kind.", nameof(frontierMembers));
-        }
-
-        var lockOrder = Enumerable.Range(0, members.Length).ToArray();
-        Array.Sort(
-            lockOrder,
-            (left, right) => CompareLeaseTuples(members[left].Grant, members[right].Grant));
-        for (var index = 1; index < lockOrder.Length; index++)
-        {
-            if (CompareLeaseTuples(
-                    members[lockOrder[index - 1]].Grant,
-                    members[lockOrder[index]].Grant) == 0)
-                throw new ArgumentException("Frontier members contain a duplicate grant tuple.", nameof(frontierMembers));
-        }
+        var (members, lockOrder) = ValidateAndOrder(frontierMembers);
 
         var scopes = new RetentionReadGrant.LeasePublication[members.Length];
         var acquiredLockOrder = new List<int>(members.Length);
@@ -368,6 +353,37 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             scopes,
             lockOrder,
             releaseObserverForTesting);
+    }
+
+    internal static bool TryEnterInOrder(
+        IReadOnlyList<RetentionGrantPublicationMember> frontierMembers,
+        out RetentionGrantPublicationSet publications)
+    {
+        var (members, lockOrder) = ValidateAndOrder(frontierMembers);
+        var scopes = new RetentionReadGrant.LeasePublication[members.Length];
+        var acquiredLockOrder = new List<int>(members.Length);
+        foreach (var semanticIndex in lockOrder)
+        {
+            if (!members[semanticIndex].Grant.TryEnterLeasePublication(out scopes[semanticIndex]))
+            {
+                ReleaseScopesInReverse(
+                    scopes,
+                    members.Select(static member => member.FrontierOrdinal).ToArray(),
+                    acquiredLockOrder,
+                    releaseObserverForTesting: null);
+                publications = null!;
+                return false;
+            }
+            acquiredLockOrder.Add(semanticIndex);
+        }
+
+        publications = new RetentionGrantPublicationSet(
+            members.Select(static member => member.Grant).ToArray(),
+            members.Select(static member => member.FrontierOrdinal).ToArray(),
+            scopes,
+            lockOrder,
+            releaseObserverForTesting: null);
+        return true;
     }
 
     internal int Count
@@ -416,6 +432,41 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             acquiredScopes[semanticIndex].Dispose();
             releaseObserverForTesting?.Invoke(ordinals[semanticIndex]);
         }
+    }
+
+    private static (RetentionGrantPublicationMember[] Members, int[] LockOrder) ValidateAndOrder(
+        IReadOnlyList<RetentionGrantPublicationMember> frontierMembers)
+    {
+        ArgumentNullException.ThrowIfNull(frontierMembers);
+        var members = frontierMembers.ToArray();
+        long? previousOrdinal = null;
+        foreach (var member in members)
+        {
+            ArgumentNullException.ThrowIfNull(member.Grant);
+            if (previousOrdinal is { } previous && member.FrontierOrdinal <= previous)
+                throw new ArgumentException("Frontier ordinals must be strictly increasing.", nameof(frontierMembers));
+            previousOrdinal = member.FrontierOrdinal;
+            if (member.Grant.LeaseGeneration <= 0)
+                throw new ArgumentException("Frontier members must have a positive lease generation.", nameof(frontierMembers));
+            if (member.Grant.OwnershipKey.StoreInstanceId is null)
+                throw new ArgumentException("Frontier members must have a store instance identifier.", nameof(frontierMembers));
+            if (LeaseKindRank(member.Grant.LeaseKind) < 0)
+                throw new ArgumentException("Frontier members contain an invalid lease kind.", nameof(frontierMembers));
+        }
+
+        var lockOrder = Enumerable.Range(0, members.Length).ToArray();
+        Array.Sort(
+            lockOrder,
+            (left, right) => CompareLeaseTuples(members[left].Grant, members[right].Grant));
+        for (var index = 1; index < lockOrder.Length; index++)
+        {
+            if (CompareLeaseTuples(
+                    members[lockOrder[index - 1]].Grant,
+                    members[lockOrder[index]].Grant) == 0)
+                throw new ArgumentException("Frontier members contain a duplicate grant tuple.", nameof(frontierMembers));
+        }
+
+        return (members, lockOrder);
     }
 
     private static int CompareLeaseTuples(

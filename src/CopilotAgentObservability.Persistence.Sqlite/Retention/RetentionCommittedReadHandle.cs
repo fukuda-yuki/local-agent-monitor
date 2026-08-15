@@ -6,9 +6,11 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private const int Published = 1;
     private const int Lost = 2;
     private const int Released = 3;
+    private static readonly TimeSpan PublicationRetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly TimeProvider timeProvider;
     private readonly DateTimeOffset expiresAt;
+    private readonly RetentionGrantPublicationMember[] publicationMembers;
     private readonly ITimer expiryNotification;
     private readonly RetentionMandatoryLeaseCleanup cleanup;
     private int state;
@@ -32,6 +34,9 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         ITimer? preparedExpiry = null;
         try
         {
+            publicationMembers = Grants
+                .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
+                .ToArray();
             preparedExpiry = timeProvider.CreateTimer(
                 static state => ((RetentionCommittedReadHandle)state!).ExpiryDue(),
                 this,
@@ -121,18 +126,51 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     private void ExpiryDue()
     {
-        var now = timeProvider.GetUtcNow();
-        if (now < expiresAt)
+        try
         {
-            try
+            if (Volatile.Read(ref state) is Lost or Released) return;
+
+            if (!RetentionGrantPublicationSet.TryEnterInOrder(publicationMembers, out var publications))
             {
-                if (!expiryNotification.Change(expiresAt - now, Timeout.InfiniteTimeSpan))
-                    Lose(releaseSynchronously: false);
+                RearmExpiryNotification(PublicationRetryDelay);
+                return;
             }
-            catch { Lose(releaseSynchronously: false); }
-            return;
+
+            TimeSpan nextDue;
+            using (publications)
+            {
+                var now = timeProvider.GetUtcNow();
+                var earliestExpiry = publications.LeaseExpiresAt(0);
+                for (var index = 1; index < publications.Count; index++)
+                    if (publications.LeaseExpiresAt(index) < earliestExpiry)
+                        earliestExpiry = publications.LeaseExpiresAt(index);
+
+                if (now >= earliestExpiry)
+                {
+                    Lose(releaseSynchronously: false);
+                    return;
+                }
+
+                nextDue = earliestExpiry - now;
+            }
+
+            RearmExpiryNotification(nextDue);
         }
-        Lose(releaseSynchronously: false);
+        catch
+        {
+            // An ITimer callback must fail closed because an exception escaping it can terminate the process.
+            Lose(releaseSynchronously: false);
+        }
+    }
+
+    private void RearmExpiryNotification(TimeSpan due)
+    {
+        try
+        {
+            if (!expiryNotification.Change(due, Timeout.InfiniteTimeSpan))
+                Lose(releaseSynchronously: false);
+        }
+        catch { Lose(releaseSynchronously: false); }
     }
 }
 
