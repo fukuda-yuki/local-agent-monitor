@@ -775,13 +775,21 @@ public sealed class SkillProjectionGenerationTests
                 .ToArray();
         }
         Assert.All(publishedExpiriesBefore, expiry => Assert.Equal(exactExpiry, expiry));
+        Assert.Equal(retentionLease.Grants[0].OwnershipKey.StoreInstanceId, retentionLease.Grants[1].OwnershipKey.StoreInstanceId);
+        Assert.Equal(retentionLease.Grants[0].LeaseKind, retentionLease.Grants[1].LeaseKind);
+        Assert.Equal(retentionLease.Grants[0].LeaseOwner, retentionLease.Grants[1].LeaseOwner);
+        Assert.Equal(retentionLease.Grants[0].LeaseGeneration, retentionLease.Grants[1].LeaseGeneration);
+        var firstCanonicalIndex = StringComparer.Ordinal.Compare(
+            retentionLease.Grants[0].ItemId,
+            retentionLease.Grants[1].ItemId) < 0 ? 0 : 1;
+        var blockedCanonicalIndex = 1 - firstCanonicalIndex;
 
         var publicationEntered = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
         using var releasePublication = new ManualResetEventSlim(initialState: false);
         var publicationHolder = Task.Run(() =>
         {
-            using var publication = retentionLease.Grants[1].EnterLeasePublication();
+            using var publication = retentionLease.Grants[blockedCanonicalIndex].EnterLeasePublication();
             publicationEntered.TrySetResult();
             if (!releasePublication.Wait(TimeSpan.FromSeconds(5)))
                 throw new TimeoutException("frontier publication scope was not released");
@@ -815,26 +823,12 @@ public sealed class SkillProjectionGenerationTests
         try
         {
             await checkpoint.WasReached.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.True(SpinWait.SpinUntil(
-                () => heartbeatThread.ThreadState.HasFlag(ThreadState.WaitSleepJoin),
-                TimeSpan.FromSeconds(5)));
-            Assert.False(heartbeatCompleted.Task.IsCompleted);
             using var publicationProbeConnection = Open(database.Path);
-            using var firstPublicationProbe = publicationProbeConnection.CreateCommand();
-            firstPublicationProbe.CommandText =
-                """
-                SELECT
-                    $retention_read_source_token,
-                    $retention_read_item_id,
-                    $retention_read_revision,
-                    $retention_read_lease_kind,
-                    $retention_read_lease_owner,
-                    $retention_read_lease_generation,
-                    $retention_read_lease_expires_at;
-                """;
-            Assert.False(
-                retentionLease.Grants[0]
-                    .TryBindAdmissionSelectorCapability(firstPublicationProbe));
+            Assert.True(SpinWait.SpinUntil(
+                () => FirstPublicationIsHeld(publicationProbeConnection, retentionLease.Grants[firstCanonicalIndex]),
+                TimeSpan.FromSeconds(5)),
+                "The heartbeat did not acquire the first canonical publication lock.");
+            Assert.False(heartbeatCompleted.Task.IsCompleted);
             time.Advance(exactExpiry - time.GetUtcNow());
             Assert.Equal(exactExpiry, time.GetUtcNow());
         }
@@ -861,6 +855,23 @@ public sealed class SkillProjectionGenerationTests
         Assert.Equal(
             publishedExpiriesBefore,
             retentionLease.Grants.Select(PublishedLeaseExpiry).ToArray());
+
+        static bool FirstPublicationIsHeld(SqliteConnection connection, RetentionReadGrant grant)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT
+                    $retention_read_source_token,
+                    $retention_read_item_id,
+                    $retention_read_revision,
+                    $retention_read_lease_kind,
+                    $retention_read_lease_owner,
+                    $retention_read_lease_generation,
+                    $retention_read_lease_expires_at;
+                """;
+            return !grant.TryBindAdmissionSelectorCapability(command);
+        }
     }
 
     [Fact]

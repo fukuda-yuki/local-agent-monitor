@@ -287,19 +287,22 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
 {
     private readonly IReadOnlyList<RetentionReadGrant> grants;
     private readonly IReadOnlyList<long> frontierOrdinals;
-    private readonly List<RetentionReadGrant.LeasePublication> scopes;
+    private readonly IReadOnlyList<RetentionReadGrant.LeasePublication> scopes;
+    private readonly IReadOnlyList<int> lockOrder;
     private readonly Action<long>? releaseObserverForTesting;
     private bool disposed;
 
     private RetentionGrantPublicationSet(
         IReadOnlyList<RetentionReadGrant> grants,
         IReadOnlyList<long> frontierOrdinals,
-        List<RetentionReadGrant.LeasePublication> scopes,
+        IReadOnlyList<RetentionReadGrant.LeasePublication> scopes,
+        IReadOnlyList<int> lockOrder,
         Action<long>? releaseObserverForTesting)
     {
         this.grants = grants;
         this.frontierOrdinals = frontierOrdinals;
         this.scopes = scopes;
+        this.lockOrder = lockOrder;
         this.releaseObserverForTesting = releaseObserverForTesting;
     }
 
@@ -313,7 +316,6 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
     {
         ArgumentNullException.ThrowIfNull(frontierMembers);
         var members = frontierMembers.ToArray();
-        var seenTuples = new HashSet<(string ItemId, RetentionLeaseKind Kind, string Owner, long Generation)>();
         long? previousOrdinal = null;
         foreach (var member in members)
         {
@@ -321,22 +323,42 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             if (previousOrdinal is { } previous && member.FrontierOrdinal <= previous)
                 throw new ArgumentException("Frontier ordinals must be strictly increasing.", nameof(frontierMembers));
             previousOrdinal = member.FrontierOrdinal;
-            if (!seenTuples.Add((member.Grant.ItemId, member.Grant.LeaseKind, member.Grant.LeaseOwner, member.Grant.LeaseGeneration)))
+            if (member.Grant.LeaseGeneration <= 0)
+                throw new ArgumentException("Frontier members must have a positive lease generation.", nameof(frontierMembers));
+            if (member.Grant.OwnershipKey.StoreInstanceId is null)
+                throw new ArgumentException("Frontier members must have a store instance identifier.", nameof(frontierMembers));
+            if (LeaseKindRank(member.Grant.LeaseKind) < 0)
+                throw new ArgumentException("Frontier members contain an invalid lease kind.", nameof(frontierMembers));
+        }
+
+        var lockOrder = Enumerable.Range(0, members.Length).ToArray();
+        Array.Sort(
+            lockOrder,
+            (left, right) => CompareLeaseTuples(members[left].Grant, members[right].Grant));
+        for (var index = 1; index < lockOrder.Length; index++)
+        {
+            if (CompareLeaseTuples(
+                    members[lockOrder[index - 1]].Grant,
+                    members[lockOrder[index]].Grant) == 0)
                 throw new ArgumentException("Frontier members contain a duplicate grant tuple.", nameof(frontierMembers));
         }
 
-        // Ordinals are already persisted in canonical order; never sort after a lock is taken.
-        var scopes = new List<RetentionReadGrant.LeasePublication>(members.Length);
+        var scopes = new RetentionReadGrant.LeasePublication[members.Length];
+        var acquiredLockOrder = new List<int>(members.Length);
         try
         {
-            foreach (var member in members)
-                scopes.Add(member.Grant.EnterLeasePublication());
+            foreach (var semanticIndex in lockOrder)
+            {
+                scopes[semanticIndex] = members[semanticIndex].Grant.EnterLeasePublication();
+                acquiredLockOrder.Add(semanticIndex);
+            }
         }
         catch
         {
             ReleaseScopesInReverse(
                 scopes,
                 members.Select(static member => member.FrontierOrdinal).ToArray(),
+                acquiredLockOrder,
                 releaseObserverForTesting);
             throw;
         }
@@ -344,6 +366,7 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             members.Select(static member => member.Grant).ToArray(),
             members.Select(static member => member.FrontierOrdinal).ToArray(),
             scopes,
+            lockOrder,
             releaseObserverForTesting);
     }
 
@@ -378,18 +401,45 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
     {
         if (disposed) return;
         disposed = true;
-        ReleaseScopesInReverse(scopes, frontierOrdinals, releaseObserverForTesting);
+        ReleaseScopesInReverse(scopes, frontierOrdinals, lockOrder, releaseObserverForTesting);
     }
 
     private static void ReleaseScopesInReverse(
         IReadOnlyList<RetentionReadGrant.LeasePublication> acquiredScopes,
         IReadOnlyList<long> ordinals,
+        IReadOnlyList<int> acquiredLockOrder,
         Action<long>? releaseObserverForTesting)
     {
-        for (var index = acquiredScopes.Count - 1; index >= 0; index--)
+        for (var index = acquiredLockOrder.Count - 1; index >= 0; index--)
         {
-            acquiredScopes[index].Dispose();
-            releaseObserverForTesting?.Invoke(ordinals[index]);
+            var semanticIndex = acquiredLockOrder[index];
+            acquiredScopes[semanticIndex].Dispose();
+            releaseObserverForTesting?.Invoke(ordinals[semanticIndex]);
         }
     }
+
+    private static int CompareLeaseTuples(
+        RetentionReadGrant left,
+        RetentionReadGrant right)
+    {
+        var comparison = StringComparer.Ordinal.Compare(
+            left.OwnershipKey.StoreInstanceId,
+            right.OwnershipKey.StoreInstanceId);
+        if (comparison != 0) return comparison;
+        comparison = StringComparer.Ordinal.Compare(left.ItemId, right.ItemId);
+        if (comparison != 0) return comparison;
+        comparison = LeaseKindRank(left.LeaseKind).CompareTo(LeaseKindRank(right.LeaseKind));
+        if (comparison != 0) return comparison;
+        comparison = StringComparer.Ordinal.Compare(left.LeaseOwner, right.LeaseOwner);
+        return comparison != 0 ? comparison : left.LeaseGeneration.CompareTo(right.LeaseGeneration);
+    }
+
+    private static int LeaseKindRank(RetentionLeaseKind leaseKind) =>
+        leaseKind switch
+        {
+            RetentionLeaseKind.Access => 0,
+            RetentionLeaseKind.Operation => 1,
+            RetentionLeaseKind.Deletion => 2,
+            _ => -1,
+        };
 }
