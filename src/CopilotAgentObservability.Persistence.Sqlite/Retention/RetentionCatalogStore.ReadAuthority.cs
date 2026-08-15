@@ -18,43 +18,54 @@ public sealed partial class RetentionCatalogStore
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(handle);
-        if (cancellationToken.IsCancellationRequested)
-            return RetentionHandlePublicationDisposition.LeaseLost;
         try
         {
-            using var connection = OpenExisting();
-            using var transaction = connection.BeginTransaction(deferred: false);
-            using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            using var cancellationRegistration = cancellationToken.UnsafeRegister(
+                static state => ((RetentionCommittedReadHandle)state!).Lose(),
+                handle);
+            bool published;
+            using (var connection = OpenExisting())
+            using (var transaction = connection.BeginTransaction(deferred: false))
+            using (var publications = RetentionGrantPublicationSet.EnterInOrder(
                 handle.Grants
                     .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
-                    .ToArray());
-            if (cancellationToken.IsCancellationRequested)
+                    .ToArray()))
             {
-                transaction.Rollback();
-                return RetentionHandlePublicationDisposition.LeaseLost;
-            }
-            var publicationAt = timeProvider.GetUtcNow();
-            if (cancellationToken.IsCancellationRequested)
-            {
-                transaction.Rollback();
-                return RetentionHandlePublicationDisposition.LeaseLost;
-            }
-            foreach (var grant in handle.Grants)
-            {
-                if (!IsGrantUsable(connection, transaction, grant, publicationAt))
+                if (cancellationToken.IsCancellationRequested)
                 {
                     transaction.Rollback();
                     return RetentionHandlePublicationDisposition.LeaseLost;
                 }
+                var publicationAt = timeProvider.GetUtcNow();
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    transaction.Rollback();
+                    return RetentionHandlePublicationDisposition.LeaseLost;
+                }
+                foreach (var grant in handle.Grants)
+                {
+                    if (!IsGrantUsable(connection, transaction, grant, publicationAt))
+                    {
+                        transaction.Rollback();
+                        return RetentionHandlePublicationDisposition.LeaseLost;
+                    }
+                }
+                readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.AfterPublicationProofBeforeCommit);
+                transaction.Commit();
+                published = handle.Publish();
             }
-            transaction.Commit();
-            return handle.Publish()
+            cancellationRegistration.Dispose();
+            return published && handle.IsPublished
                 ? RetentionHandlePublicationDisposition.Published
                 : RetentionHandlePublicationDisposition.LeaseLost;
         }
         catch (SqliteException)
         {
             return RetentionHandlePublicationDisposition.Busy;
+        }
+        catch
+        {
+            return RetentionHandlePublicationDisposition.LeaseLost;
         }
     }
 
