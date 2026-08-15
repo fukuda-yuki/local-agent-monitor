@@ -17,7 +17,8 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     internal RetentionCommittedReadHandle(
         IReadOnlyList<RetentionReadGrant> grants,
         TimeProvider timeProvider,
-        Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease)
+        Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
+        Action? beforeWaitingForReleaseForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -38,7 +39,11 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
                 .ToArray();
             foreach (var grant in Grants) grant.AttachCommittedHandle(this);
             preparedExpiry = new RetentionExpiryNotification(this, 1, expiresAt, timeProvider, armDormant: false);
-            cleanup = new RetentionMandatoryLeaseCleanup(Grants, timeProvider, exactRelease);
+            cleanup = new RetentionMandatoryLeaseCleanup(
+                Grants,
+                timeProvider,
+                exactRelease,
+                beforeWaitingForReleaseForTesting);
             currentNotification = preparedExpiry;
         }
         catch
@@ -355,17 +360,20 @@ internal sealed class RetentionMandatoryLeaseCleanup
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
     private readonly IReadOnlyList<RetentionReadGrant> grants;
     private readonly Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease;
+    private readonly Action? beforeWaitingForReleaseForTesting;
     private readonly ITimer retry;
-    private int active;
+    private ReleaseAttempt? active;
     private int completed;
 
     internal RetentionMandatoryLeaseCleanup(
         IReadOnlyList<RetentionReadGrant> grants,
         TimeProvider timeProvider,
-        Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease)
+        Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
+        Action? beforeWaitingForReleaseForTesting)
     {
         this.grants = grants;
         this.exactRelease = exactRelease;
+        this.beforeWaitingForReleaseForTesting = beforeWaitingForReleaseForTesting;
         retry = timeProvider.CreateTimer(
             static state => ((RetentionMandatoryLeaseCleanup)state!).SignalRelease(),
             this,
@@ -375,10 +383,21 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     internal void ReleaseOrOwn()
     {
-        if (Volatile.Read(ref completed) != 0
-            || Interlocked.CompareExchange(ref active, 1, 0) != 0)
+        while (Volatile.Read(ref completed) == 0)
+        {
+            var attempt = Volatile.Read(ref active);
+            if (attempt is not null)
+            {
+                beforeWaitingForReleaseForTesting?.Invoke();
+                if (attempt.WaitForOutcome() != ReleaseAttemptOutcome.NotStarted) return;
+                continue;
+            }
+
+            attempt = new ReleaseAttempt();
+            if (Interlocked.CompareExchange(ref active, attempt, null) is not null) continue;
+            TryRelease(attempt, retryOnFailure: true);
             return;
-        TryRelease(retryOnFailure: true);
+        }
     }
 
     internal void Own() => SignalRelease();
@@ -399,29 +418,32 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     private bool TryQueueRelease()
     {
+        var attempt = new ReleaseAttempt();
         try
         {
             if (Volatile.Read(ref completed) != 0
-                || Interlocked.CompareExchange(ref active, 1, 0) != 0)
+                || Interlocked.CompareExchange(ref active, attempt, null) is not null)
                 return true;
             if (!ThreadPool.UnsafeQueueUserWorkItem(
-                    static cleanup => cleanup.TryRelease(retryOnFailure: true),
-                    this,
+                    static state => state.Cleanup.TryRelease(state.Attempt, retryOnFailure: true),
+                    (Cleanup: this, Attempt: attempt),
                     preferLocal: false))
             {
-                Volatile.Write(ref active, 0);
+                Interlocked.CompareExchange(ref active, null, attempt);
+                attempt.Complete(ReleaseAttemptOutcome.NotStarted);
                 return false;
             }
             return true;
         }
         catch
         {
-            Volatile.Write(ref active, 0);
+            Interlocked.CompareExchange(ref active, null, attempt);
+            attempt.Complete(ReleaseAttemptOutcome.NotStarted);
             return false;
         }
     }
 
-    private void TryRelease(bool retryOnFailure)
+    private void TryRelease(ReleaseAttempt attempt, bool retryOnFailure)
     {
         var released = false;
         try
@@ -430,17 +452,15 @@ internal sealed class RetentionMandatoryLeaseCleanup
         }
         // Cleanup must not propagate release failures; the scheduled retry owns recovery.
         catch { }
-        finally
-        {
-            Volatile.Write(ref active, 0);
-        }
 
         if (released)
-        {
             Complete();
-            return;
-        }
-        if (retryOnFailure) ScheduleRetry();
+        Interlocked.CompareExchange(ref active, null, attempt);
+        attempt.Complete(
+            released
+                ? ReleaseAttemptOutcome.Released
+                : ReleaseAttemptOutcome.RetainedForRetry);
+        if (!released && retryOnFailure) ScheduleRetry();
     }
 
     private void ScheduleRetry()
@@ -462,6 +482,23 @@ internal sealed class RetentionMandatoryLeaseCleanup
         if (Interlocked.Exchange(ref completed, 1) != 0) return;
         try { retry.Dispose(); }
         catch { }
+    }
+
+    private enum ReleaseAttemptOutcome
+    {
+        NotStarted,
+        Released,
+        RetainedForRetry,
+    }
+
+    private sealed class ReleaseAttempt
+    {
+        private readonly TaskCompletionSource<ReleaseAttemptOutcome> completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal void Complete(ReleaseAttemptOutcome outcome) => completion.TrySetResult(outcome);
+
+        internal ReleaseAttemptOutcome WaitForOutcome() => completion.Task.GetAwaiter().GetResult();
     }
 }
 

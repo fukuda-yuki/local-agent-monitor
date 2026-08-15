@@ -139,6 +139,32 @@ public sealed class RetentionWorkerRaceTests
     }
 
     [Fact]
+    public async Task CurrentExpiryNotification_PreExpiryRearmFailureLosesHandleWithoutPropagating()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var releases = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                Interlocked.Increment(ref releases);
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        time.Timers[0].ThrowOnChange = true;
+
+        var exception = Record.Exception(time.Timers[0].Fire);
+
+        Assert.Null(exception);
+        Assert.False(handle.IsPublished);
+        await WaitUntilAsync(() => Volatile.Read(ref releases) == 1);
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
     public async Task MandatoryCleanup_ReleaseExceptionDoesNotEscapeAndLeavesRetryScheduled()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
@@ -161,6 +187,36 @@ public sealed class RetentionWorkerRaceTests
         Assert.True(time.Timers[1].IsScheduled);
         time.Timers[1].Fire();
         await WaitUntilAsync(() => Volatile.Read(ref attempts) == 2);
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_TimerCallbackReleaseExceptionDoesNotEscapeAndRetainsRetry()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var attempts = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ => Interlocked.Increment(ref attempts) switch
+            {
+                1 => false,
+                2 => throw new InvalidOperationException("synthetic_callback_release_failure"),
+                _ => true,
+            });
+        await handle.DisposeAsync();
+        Assert.Equal(1, Volatile.Read(ref attempts));
+        Assert.True(time.Timers[1].IsScheduled);
+
+        var exception = Record.Exception(time.Timers[1].Fire);
+
+        Assert.Null(exception);
+        await WaitUntilAsync(() =>
+            Volatile.Read(ref attempts) == 2
+            && time.Timers[1].IsScheduled);
+        Assert.True(time.Timers[1].IsScheduled);
+        time.Timers[1].Fire();
+        await WaitUntilAsync(() => Volatile.Read(ref attempts) == 3);
     }
 
     [Fact]
@@ -214,6 +270,63 @@ public sealed class RetentionWorkerRaceTests
             allowRelease.Set();
         }
         await handle.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_InFlightAsynchronousReleaseWaitsUntilLeaseRowIsDeleted()
+    {
+        using var fixture = CreateFixture();
+        var expiry = fixture.Time.GetUtcNow().AddMinutes(2);
+        InsertOperationLease(fixture.Path, fixture.ItemId, expiry);
+        using var releaseEntered = new ManualResetEventSlim();
+        using var allowRelease = new ManualResetEventSlim();
+        var callerWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var grant = new RetentionReadGrant(
+            new(fixture.Context.StoreInstanceId, RetentionStoreKind.RawRecord, "1"),
+            fixture.ItemId,
+            1,
+            RetentionLeaseKind.Operation,
+            "reader",
+            1,
+            expiry,
+            Enumerable.Repeat((byte)0x11, 32).ToArray());
+        var handle = new RetentionCommittedReadHandle(
+            [grant],
+            fixture.Time,
+            _ =>
+            {
+                releaseEntered.Set();
+                if (!allowRelease.Wait(TimeSpan.FromSeconds(5))) return false;
+                Execute(
+                    fixture.Path,
+                    "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+                    ("$item", fixture.ItemId));
+                return true;
+            },
+            () => callerWaiting.TrySetResult());
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        handle.LoseAsynchronously();
+        Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+
+        var dispose = Task.Run(async () => await handle.DisposeAsync());
+        try
+        {
+            await callerWaiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1L, Number(
+                fixture.Path,
+                "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+                fixture.ItemId));
+        }
+        finally
+        {
+            allowRelease.Set();
+        }
+        await dispose.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0L, Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId));
     }
 
     [Fact]
