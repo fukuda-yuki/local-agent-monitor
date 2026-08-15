@@ -1209,10 +1209,14 @@ public sealed class RetentionReadPrimitiveTests
     public void RetentionGrantPublicationSet_DuplicateObjectReferenceFailsBeforeAnyLock()
     {
         var grant = CreateGrant("item-a", "1", 1);
+        var acquiredOrdinals = new List<long>();
 
         Assert.Throws<ArgumentException>(() => RetentionGrantPublicationSet.EnterInOrder(
-            [new(grant, 10), new(grant, 20)]));
+            [new(grant, 10), new(grant, 20)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
 
+        Assert.Empty(acquiredOrdinals);
         AssertPublicationLocksEnterableFromAnotherThread(grant);
     }
 
@@ -1221,21 +1225,61 @@ public sealed class RetentionReadPrimitiveTests
     {
         var first = CreateGrant("item-a", "1", 1);
         var duplicate = CreateGrant("item-a", "1", 2);
+        var acquiredOrdinals = new List<long>();
 
         Assert.Throws<ArgumentException>(() => RetentionGrantPublicationSet.EnterInOrder(
-            [new(first, 10), new(duplicate, 20)]));
+            [new(first, 10), new(duplicate, 20)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
 
+        Assert.Empty(acquiredOrdinals);
         AssertPublicationLocksEnterableFromAnotherThread(first, duplicate);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_FullyIdenticalDistinctGrantsFailBeforeAnyLock()
+    {
+        var first = CreateGrant("item-a", "1", 1, owner: "owner");
+        var duplicate = CreateGrant("item-a", "1", 1, owner: "owner");
+        var acquiredOrdinals = new List<long>();
+
+        Assert.Throws<ArgumentException>(() => RetentionGrantPublicationSet.EnterInOrder(
+            [new(first, 10), new(duplicate, 20)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
+
+        Assert.Empty(acquiredOrdinals);
+        AssertPublicationLocksEnterableFromAnotherThread(first, duplicate);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_UnprovenAliasFailsBeforeAnyLock()
+    {
+        var first = CreateGrant("item-a", "1", 1, owner: "owner");
+        var alias = CreateGrant("item-a", "2", 2, owner: "owner");
+        var acquiredOrdinals = new List<long>();
+
+        Assert.Throws<ArgumentException>(() => RetentionGrantPublicationSet.EnterInOrder(
+            [new(first, 10), new(alias, 20)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
+
+        Assert.Empty(acquiredOrdinals);
+        AssertPublicationLocksEnterableFromAnotherThread(first, alias);
     }
 
     [Fact]
     public void RetentionGrantPublicationSet_NullGrantFailsBeforeAnyLock()
     {
         var valid = CreateGrant("item-a", "1", 1);
+        var acquiredOrdinals = new List<long>();
 
         Assert.Throws<ArgumentNullException>(() => RetentionGrantPublicationSet.EnterInOrder(
-            [default, new(valid, 10)]));
+            [default, new(valid, 10)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
 
+        Assert.Empty(acquiredOrdinals);
         AssertPublicationLocksEnterableFromAnotherThread(valid);
     }
 
@@ -1246,10 +1290,14 @@ public sealed class RetentionReadPrimitiveTests
     {
         var valid = CreateGrant("item-a", "1", 1);
         var invalid = CreateGrant("item-b", "2", 2, generation: generation);
+        var acquiredOrdinals = new List<long>();
 
         Assert.Throws<ArgumentException>(() => RetentionGrantPublicationSet.EnterInOrder(
-            [new(valid, 10), new(invalid, 20)]));
+            [new(valid, 10), new(invalid, 20)],
+            acquiredOrdinals.Add,
+            releaseObserverForTesting: null));
 
+        Assert.Empty(acquiredOrdinals);
         AssertPublicationLocksEnterableFromAnotherThread(valid, invalid);
     }
 
@@ -1279,6 +1327,76 @@ public sealed class RetentionReadPrimitiveTests
     public void RetentionGrantPublicationSet_TotalOrderUsesGenerationAfterFirstFourComponents()
     {
         var lower = CreateGrant("item", "1", 1, owner: "owner", generation: 1);
+        var higher = CreateGrant("item", "2", 2, owner: "owner", generation: 2);
+
+        var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
+
+        Assert.Equal([lower, higher], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_GenerationUsesSignedNumericRatherThanOrdinalStringOrder()
+    {
+        var lower = CreateGrant("item", "1", 1, owner: "owner", generation: 2);
+        var higher = CreateGrant("item", "2", 2, owner: "owner", generation: 10);
+
+        var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
+
+        Assert.Equal([lower, higher], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_LeaseKindRankOrdersAccessBeforeOperationBeforeDeletion()
+    {
+        var access = CreateGrant("item", "1", 1, leaseKind: RetentionLeaseKind.Access, owner: "owner");
+        var operation = CreateGrant("item", "2", 2, leaseKind: RetentionLeaseKind.Operation, owner: "owner");
+        var deletion = CreateGrant("item", "3", 3, leaseKind: RetentionLeaseKind.Deletion, owner: "owner");
+
+        var acquired = ObserveAcquisitionOrder(
+            new(deletion, 10),
+            new(operation, 20),
+            new(access, 30));
+
+        Assert.Equal([access, operation, deletion], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_StoreInstanceIdPrecedesOpposingItemIdOrder()
+    {
+        var lower = CreateGrant("z-item", "1", 1, storeInstanceId: "Store", owner: "owner");
+        var higher = CreateGrant("a-item", "2", 2, storeInstanceId: "store", owner: "owner");
+
+        var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
+
+        Assert.Equal([lower, higher], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_ItemIdPrecedesOpposingLeaseKindRankOrder()
+    {
+        var lower = CreateGrant("Item", "1", 1, leaseKind: RetentionLeaseKind.Deletion, owner: "owner");
+        var higher = CreateGrant("item", "2", 2, leaseKind: RetentionLeaseKind.Access, owner: "owner");
+
+        var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
+
+        Assert.Equal([lower, higher], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_LeaseKindRankPrecedesOpposingOwnerOrder()
+    {
+        var lower = CreateGrant("item", "1", 1, leaseKind: RetentionLeaseKind.Access, owner: "z-owner");
+        var higher = CreateGrant("item", "2", 2, leaseKind: RetentionLeaseKind.Deletion, owner: "a-owner");
+
+        var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
+
+        Assert.Equal([lower, higher], acquired);
+    }
+
+    [Fact]
+    public void RetentionGrantPublicationSet_OwnerPrecedesOpposingGenerationOrder()
+    {
+        var lower = CreateGrant("item", "1", 1, owner: "Owner", generation: 10);
         var higher = CreateGrant("item", "2", 2, owner: "owner", generation: 2);
 
         var acquired = ObserveAcquisitionOrder(new(higher, 10), new(lower, 20));
@@ -2617,12 +2735,14 @@ public sealed class RetentionReadPrimitiveTests
         params RetentionGrantPublicationMember[] members)
     {
         var membersByOrdinal = members.ToDictionary(static member => member.FrontierOrdinal, static member => member.Grant);
-        var releasedOrdinals = new List<long>();
-        using (RetentionGrantPublicationSet.EnterInOrder(members, releasedOrdinals.Add))
+        var acquiredOrdinals = new List<long>();
+        using (RetentionGrantPublicationSet.EnterInOrder(
+                   members,
+                   acquiredOrdinals.Add,
+                   releaseObserverForTesting: null))
         {
         }
-        releasedOrdinals.Reverse();
-        return releasedOrdinals.Select(ordinal => membersByOrdinal[ordinal]).ToArray();
+        return acquiredOrdinals.Select(ordinal => membersByOrdinal[ordinal]).ToArray();
     }
 
     private static void AssertPublicationLocksEnterableFromAnotherThread(params RetentionReadGrant[] grants)

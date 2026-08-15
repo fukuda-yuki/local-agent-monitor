@@ -334,6 +334,15 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
 
     internal static RetentionGrantPublicationSet EnterInOrder(
         IReadOnlyList<RetentionGrantPublicationMember> frontierMembers,
+        Action<long>? releaseObserverForTesting) =>
+        EnterInOrder(
+            frontierMembers,
+            acquisitionObserverForTesting: null,
+            releaseObserverForTesting);
+
+    internal static RetentionGrantPublicationSet EnterInOrder(
+        IReadOnlyList<RetentionGrantPublicationMember> frontierMembers,
+        Action<long>? acquisitionObserverForTesting,
         Action<long>? releaseObserverForTesting)
     {
         var (members, lockOrder) = ValidateAndOrder(frontierMembers);
@@ -346,6 +355,7 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             {
                 scopes[semanticIndex] = members[semanticIndex].Grant.EnterLeasePublication();
                 acquiredLockOrder.Add(semanticIndex);
+                acquisitionObserverForTesting?.Invoke(members[semanticIndex].FrontierOrdinal);
             }
         }
         catch
