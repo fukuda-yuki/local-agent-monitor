@@ -514,6 +514,36 @@ public sealed class RawReplaySurfaceTests
         }
     }
 
+    [Fact]
+    public async Task Transient_store_disposal_cancels_outstanding_reservation_within_bound_and_late_commit_publishes_nothing()
+    {
+        var store = new RawReplayTransientStore(
+            TimeProvider.System,
+            new RawReplayTransientLimits(2, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(10)));
+        Assert.True(store.TryReserve(
+            "export",
+            "reserved-during-shutdown",
+            3,
+            store.ExpirationFromNow(),
+            out var reservation));
+        var disposal = Task.Run(store.Dispose);
+
+        try
+        {
+            await disposal.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Throws<InvalidOperationException>(() => reservation!.Commit([1, 2, 3], "must-not-publish"));
+
+            Assert.Equal(0, store.Count);
+            Assert.Equal(0, store.TotalBytes);
+            Assert.False(store.TryGet<string>("export", "reserved-during-shutdown", out _, out _));
+        }
+        finally
+        {
+            reservation!.Dispose();
+            await disposal.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
     private static MonitorHostTestOptions Options(IRawReplaySnapshotProvider provider, RawReplayTransientLimits? transientLimits = null) => new()
     {
         StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,

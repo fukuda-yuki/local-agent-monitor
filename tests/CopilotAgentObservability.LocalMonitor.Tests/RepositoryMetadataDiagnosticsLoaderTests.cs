@@ -2,6 +2,7 @@ using CopilotAgentObservability.LocalMonitor.Diagnostics;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using Microsoft.AspNetCore.Http;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -25,8 +26,9 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
                 """),
         ]);
         var loader = new RepositoryMetadataDiagnosticsLoader(store);
+        var leases = new RawRazorPageLeaseTracker();
 
-        var snapshot = await loader.LoadAsync(CancellationToken.None);
+        var snapshot = await loader.LoadAsync(leases, CancellationToken.None);
 
         Assert.Equal(50, store.CandidateLimit);
         Assert.Equal(1_048_576, store.MaximumPayloadBytes);
@@ -56,6 +58,11 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
         Assert.DoesNotContain(
             snapshot.InventoryRows.SelectMany(row => new[] { row.Key, row.Scope, row.Classification }),
             value => value.Contains("private", StringComparison.Ordinal));
+        Assert.True(leases.HasLeases);
+        var context = new DefaultHttpContext();
+        leases.Attach(context);
+        Assert.True(RawRazorPageLeaseTracker.TryTake(context, out var attached));
+        await attached.ExecuteBufferedAsync(context, () => Task.CompletedTask);
     }
 
     [Fact]
@@ -66,13 +73,16 @@ public sealed class RepositoryMetadataDiagnosticsLoaderTests
             ReadDisposition = RetentionReadDisposition.LifecycleDenied,
         };
         var loader = new RepositoryMetadataDiagnosticsLoader(store);
+        var leases = new RawRazorPageLeaseTracker();
 
-        var snapshot = await loader.LoadAsync(CancellationToken.None);
+        var snapshot = await loader.LoadAsync(leases, CancellationToken.None);
 
         Assert.True(snapshot.Unavailable);
         Assert.Equal(0, snapshot.AnalyzedRecordCount);
         Assert.Empty(snapshot.StatusRows);
         Assert.Empty(snapshot.InventoryRows);
+        Assert.False(leases.HasLeases);
+        await leases.DisposeAsync();
     }
 
     [Fact]

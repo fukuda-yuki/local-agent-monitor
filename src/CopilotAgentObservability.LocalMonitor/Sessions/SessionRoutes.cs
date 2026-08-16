@@ -159,6 +159,10 @@ internal static class SessionRoutes
                 }
                 await Json(context, new { items });
             }
+            catch (RawResponseTerminalFailureException)
+            {
+                RawResponsePublication.Abort(context);
+            }
             catch (PersistenceBusyException)
             {
                 await Failure(context, 503, "session_store_busy");
@@ -288,6 +292,10 @@ internal static class SessionRoutes
                         content_state = SessionWire.ToWire(item.ContentState),
                     }),
                 });
+            }
+            catch (RawResponseTerminalFailureException)
+            {
+                RawResponsePublication.Abort(context);
             }
             catch (PersistenceBusyException)
             {
@@ -615,7 +623,7 @@ internal static class SessionRoutes
             if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
             {
                 mapped = [];
-                throw new PersistenceBusyException();
+                throw new RawResponseTerminalFailureException();
             }
             observations.AddRange(mapped);
         }

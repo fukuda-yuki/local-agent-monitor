@@ -472,7 +472,7 @@ internal static class MonitorHost
             if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
             {
                 observations = [];
-                throw new PersistenceBusyException();
+                throw new RawResponseTerminalFailureException();
             }
             var session = FindSessionForTrace(sessionStore, row.TraceId);
             return SourceProjectionStateBuilder.Build(observations, session);
@@ -838,6 +838,10 @@ internal static class MonitorHost
                 long? nextCursor = page.HasMore && page.Items.Count > 0 ? page.Items[^1].Id : null;
                 await WriteJsonAsync(context, new { items, next_cursor = nextCursor });
             }
+            catch (RawResponseTerminalFailureException)
+            {
+                RawResponsePublication.Abort(context);
+            }
             catch (PersistenceBusyException)
             {
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
@@ -999,6 +1003,10 @@ internal static class MonitorHost
                     }),
                 });
             }
+            catch (RawResponseTerminalFailureException)
+            {
+                RawResponsePublication.Abort(context);
+            }
             catch (PersistenceBusyException)
             {
                 await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
@@ -1090,6 +1098,10 @@ internal static class MonitorHost
                     offset = query.Offset,
                     limit = query.Limit,
                 });
+            }
+            catch (RawResponseTerminalFailureException)
+            {
+                RawResponsePublication.Abort(context);
             }
             catch (PersistenceBusyException)
             {

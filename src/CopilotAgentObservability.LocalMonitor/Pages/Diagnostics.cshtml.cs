@@ -32,8 +32,18 @@ public sealed class DiagnosticsModel : PageModel
         ProjectionLagThresholdSeconds = options.ProjectionLagThresholdSeconds;
         Readiness = health.Evaluate(options.IngestionStallThresholdSeconds, options.ProjectionLagThresholdSeconds);
         var store = HttpContext.RequestServices.GetRequiredService<IMonitorProjectionStore>();
-        RepositoryMetadata = await new RepositoryMetadataDiagnosticsLoader(store)
-            .LoadAsync(HttpContext.RequestAborted)
-            .ConfigureAwait(false);
+        var leases = new RawRazorPageLeaseTracker();
+        try
+        {
+            RepositoryMetadata = await new RepositoryMetadataDiagnosticsLoader(store)
+                .LoadAsync(leases, HttpContext.RequestAborted)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await leases.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        if (leases.HasLeases) leases.Attach(HttpContext);
     }
 }

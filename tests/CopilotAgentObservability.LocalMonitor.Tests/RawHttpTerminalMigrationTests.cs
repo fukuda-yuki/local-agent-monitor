@@ -21,6 +21,24 @@ using System.Text;
 
 public sealed class RawHttpTerminalMigrationTests
 {
+    public static TheoryData<string, int> SafeProjectionTerminalFailures
+    {
+        get
+        {
+            var data = new TheoryData<string, int>();
+            foreach (var owner in new[]
+                     {
+                         "monitor-traces", "monitor-summary", "monitor-trace-list",
+                         "session-list", "session-detail",
+                     })
+            {
+                data.Add(owner, (int)RetentionRawTerminalResult.Lost);
+                data.Add(owner, (int)RetentionRawTerminalResult.Busy);
+            }
+            return data;
+        }
+    }
+
     [Theory]
     [InlineData("AuthorizesRawDerivedPublication", (int)RetentionRawTerminalResult.Sealed, true)]
     [InlineData("AuthorizesRawDerivedPublication", (int)RetentionRawTerminalResult.CompletedWithoutRaw, false)]
@@ -128,6 +146,147 @@ public sealed class RawHttpTerminalMigrationTests
         AssertZeroResponse(responseFeature);
         Assert.Equal(1, terminalCount);
         Assert.Equal(1, releaseCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(SafeProjectionTerminalFailures))]
+    public async Task SafeProjectionRoute_PostGrantTerminalFailure_AbortsWithZeroResponse(
+        string owner,
+        int terminalValue)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var abortFeature = new RecordingLifetimeFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        features.Set<IHttpRequestLifetimeFeature>(abortFeature);
+
+        var store = await ExecuteSafeProjectionRouteAsync(
+            owner,
+            features,
+            (RetentionRawTerminalResult)terminalValue);
+
+        Assert.Equal(1, abortFeature.AbortCount);
+        AssertZeroResponse(responseFeature);
+        Assert.Equal(1, store.TerminalCount);
+        Assert.Equal(1, store.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData("monitor-traces")]
+    [InlineData("monitor-summary")]
+    [InlineData("monitor-trace-list")]
+    public async Task MonitorSafeProjectionRoute_PreAdmissionBusy_KeepsExact503Bytes(string owner)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+
+        var store = await ExecuteSafeProjectionRouteAsync(
+            owner,
+            features,
+            RetentionRawTerminalResult.CompletedWithoutRaw,
+            RetentionReadDisposition.Busy);
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, responseFeature.StatusCode);
+        Assert.Equal("application/json", responseFeature.Headers.ContentType);
+        Assert.Equal(
+            "{\"accepted\":false,\"error\":\"persistence_busy\",\"message\":\"The local monitor raw store is busy.\"}",
+            Encoding.UTF8.GetString(((MemoryStream)responseFeature.Body).ToArray()));
+        Assert.Equal(0, store.TerminalCount);
+        Assert.Equal(0, store.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData("session-list")]
+    [InlineData("session-detail")]
+    public async Task SessionSafeProjectionRoute_PreAdmissionBusy_KeepsExact503Bytes(string owner)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+
+        var store = await ExecuteSafeProjectionRouteAsync(
+            owner,
+            features,
+            RetentionRawTerminalResult.CompletedWithoutRaw,
+            RetentionReadDisposition.Busy);
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, responseFeature.StatusCode);
+        Assert.Equal("application/json", responseFeature.Headers.ContentType);
+        Assert.Equal(
+            "{\"error\":\"session_store_busy\"}",
+            Encoding.UTF8.GetString(((MemoryStream)responseFeature.Body).ToArray()));
+        Assert.Equal(0, store.TerminalCount);
+        Assert.Equal(0, store.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData((int)RetentionRawTerminalResult.Lost)]
+    [InlineData((int)RetentionRawTerminalResult.Busy)]
+    public async Task DiagnosticsPage_PostGrantTerminalFailure_DiscardsBufferedPageAndAbortsWithZeroResponse(
+        int terminalValue)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var abortFeature = new RecordingLifetimeFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        features.Set<IHttpRequestLifetimeFeature>(abortFeature);
+        var store = new OwnerProjectionStore((RetentionRawTerminalResult)terminalValue, null, null);
+        var health = new CopilotAgentObservability.LocalMonitor.Health.MonitorHealthState();
+        health.MarkMigrationComplete();
+        var services = new ServiceCollection()
+            .AddSingleton<IMonitorProjectionStore>(store)
+            .AddSingleton(health)
+            .AddSingleton(new MonitorOptions("unused.db", "http://127.0.0.1:4320", false, 31_457_280))
+            .BuildServiceProvider();
+        var context = new DefaultHttpContext(features) { RequestServices = services };
+        var model = new DiagnosticsModel { PageContext = new PageContext { HttpContext = context } };
+
+        await model.OnGetAsync();
+        Assert.True(RawRazorPageLeaseTracker.TryTake(context, out var attached));
+        await attached.ExecuteBufferedAsync(context, () => context.Response.WriteAsync("buffered-diagnostics-page"));
+
+        Assert.Equal(1, abortFeature.AbortCount);
+        AssertZeroResponse(responseFeature);
+        Assert.Equal(1, store.TerminalCount);
+        Assert.Equal(1, store.ReleaseCount);
+    }
+
+    [Fact]
+    public async Task DiagnosticsPage_PreAdmissionBusy_KeepsOrdinaryUnavailablePageArm()
+    {
+        var store = new OwnerProjectionStore(
+            RetentionRawTerminalResult.CompletedWithoutRaw,
+            null,
+            null)
+        {
+            ReadDisposition = RetentionReadDisposition.Busy,
+        };
+        var health = new CopilotAgentObservability.LocalMonitor.Health.MonitorHealthState();
+        health.MarkMigrationComplete();
+        var services = new ServiceCollection()
+            .AddSingleton<IMonitorProjectionStore>(store)
+            .AddSingleton(health)
+            .AddSingleton(new MonitorOptions("unused.db", "http://127.0.0.1:4320", false, 31_457_280))
+            .BuildServiceProvider();
+        var context = new DefaultHttpContext { RequestServices = services };
+        var model = new DiagnosticsModel { PageContext = new PageContext { HttpContext = context } };
+
+        await model.OnGetAsync();
+
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal("no-store", context.Response.Headers.CacheControl);
+        Assert.True(model.RepositoryMetadata.Unavailable);
+        Assert.Equal(0, model.RepositoryMetadata.AnalyzedRecordCount);
+        Assert.Empty(model.RepositoryMetadata.StatusRows);
+        Assert.Empty(model.RepositoryMetadata.InventoryRows);
+        Assert.False(RawRazorPageLeaseTracker.TryTake(context, out _));
+        Assert.Equal(0, store.TerminalCount);
+        Assert.Equal(0, store.ReleaseCount);
     }
 
     [Theory]
@@ -451,6 +610,64 @@ public sealed class RawHttpTerminalMigrationTests
         await endpoint.RequestDelegate!(context);
     }
 
+    private static async Task<OwnerProjectionStore> ExecuteSafeProjectionRouteAsync(
+        string owner,
+        IFeatureCollection features,
+        RetentionRawTerminalResult terminalResult,
+        RetentionReadDisposition? readDisposition = null)
+    {
+        using var temp = new MonitorTempDirectory();
+        temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
+        new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).CreateSchema();
+        var projectionStore = new OwnerProjectionStore(terminalResult, null, null)
+        {
+            ReadDisposition = readDisposition,
+        };
+        var sessionStore = DispatchProxy.Create<ISessionStore, OwnerSessionStoreProxy>();
+        var options = new MonitorOptions(
+            temp.DatabasePath,
+            "http://127.0.0.1:0",
+            false,
+            MonitorOptions.DefaultMaxRequestBodyBytes);
+        await using var app = MonitorHost.Build(options, new MonitorHostTestOptions
+        {
+            ProjectionStore = projectionStore,
+            SessionStore = sessionStore,
+            StartWriter = false,
+            StartProjectionWorker = false,
+            StartSessionWriter = false,
+            StartSessionOtelEnrichment = false,
+            StartLocalRepositoryCatalogHostedService = false,
+            TimeProvider = temp.TimeProvider,
+            UseUserSecrets = false,
+        });
+        var (pattern, path, routeValues) = owner switch
+        {
+            "monitor-traces" => ("/api/monitor/traces", "/api/monitor/traces", new RouteValueDictionary()),
+            "monitor-summary" => ("/api/monitor/summary", "/api/monitor/summary", new RouteValueDictionary()),
+            "monitor-trace-list" => ("/api/monitor/trace-list", "/api/monitor/trace-list", new RouteValueDictionary()),
+            "session-list" => ("/api/session-workspace/sessions", "/api/session-workspace/sessions", new RouteValueDictionary()),
+            "session-detail" => (
+                "/api/session-workspace/sessions/{sessionId}",
+                $"/api/session-workspace/sessions/{OwnerSessionStoreProxy.SessionId:D}",
+                new RouteValueDictionary { ["sessionId"] = OwnerSessionStoreProxy.SessionId.ToString("D") }),
+            _ => throw new ArgumentOutOfRangeException(nameof(owner)),
+        };
+        var endpoint = ((IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Single(candidate => string.Equals(candidate.RoutePattern.RawText, pattern, StringComparison.Ordinal));
+        features.Set<IHttpRequestFeature>(new HttpRequestFeature { Headers = new HeaderDictionary() });
+        var context = new DefaultHttpContext(features) { RequestServices = app.Services };
+        context.Request.Method = HttpMethods.Get;
+        context.Request.Path = path;
+        context.Request.RouteValues = routeValues;
+        context.SetEndpoint(endpoint);
+
+        await endpoint.RequestDelegate!(context);
+        return projectionStore;
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -498,7 +715,9 @@ public sealed class RawHttpTerminalMigrationTests
         internal int TerminalCount { get; private set; }
         internal int ReleaseCount { get; private set; }
         internal RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? LastLease { get; private set; }
+        internal RetentionReadDisposition? ReadDisposition { get; init; }
 
+        public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => new([Trace], false);
         public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => [Trace];
         public override IReadOnlyList<MonitorTraceRow> ListRecentMonitorTraces(int limit) => [Trace];
         public override MonitorTraceListPage ListMonitorTracesFiltered(MonitorTraceListQuery query) => new([Trace], 1, 2);
@@ -525,6 +744,24 @@ public sealed class RawHttpTerminalMigrationTests
             CancellationToken cancellationToken)
         {
             Assert.Equal(TraceId, traceId);
+            if (ReadDisposition is { } disposition)
+                return ValueTask.FromResult(RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(disposition));
+            LastLease = CreateBatchLease<IReadOnlyList<RawTelemetryRecord>>([Raw], cancellationToken);
+            return ValueTask.FromResult(RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromHandle(LastLease));
+        }
+
+        public override IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(
+            int limit,
+            int maxPayloadBytes,
+            int maxTotalPayloadBytes) => [Raw.Id!.Value];
+
+        public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(
+            IReadOnlyList<long> ids,
+            RetentionReadKind readKind,
+            CancellationToken cancellationToken)
+        {
+            if (ReadDisposition is { } disposition)
+                return ValueTask.FromResult(RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(disposition));
             LastLease = CreateBatchLease<IReadOnlyList<RawTelemetryRecord>>([Raw], cancellationToken);
             return ValueTask.FromResult(RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromHandle(LastLease));
         }
@@ -672,6 +909,37 @@ public sealed class RawHttpTerminalMigrationTests
         internal RetentionRawTerminalResult TerminalResult { get; set; }
         internal Action OnTerminal { get; set; } = null!;
         internal Action OnRelease { get; set; } = null!;
+        private static readonly DateTimeOffset ObservedAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        private static readonly ObservedSession Session = new(
+            SessionId,
+            ObservedSessionStatus.Completed,
+            SessionCompleteness.Full,
+            null,
+            null,
+            ObservedAt,
+            ObservedAt,
+            ObservedAt,
+            SessionRawRetentionState.Expiring,
+            ObservedAt,
+            ObservedAt);
+        private static readonly SessionDetail Detail = new(
+            Session,
+            [],
+            [],
+            [new ObservedSessionEvent(
+                EventId,
+                SessionId,
+                null,
+                SessionSourceSurface.ClaudeCode,
+                null,
+                OwnerProjectionStore.TraceId,
+                "ok",
+                "claude-code-otel",
+                "owner-event",
+                "user.message",
+                ObservedAt,
+                SessionContentState.Available,
+                MatchKind: SessionMatchKind.ExactNative)]);
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => targetMethod?.Name switch
         {
@@ -679,6 +947,10 @@ public sealed class RawHttpTerminalMigrationTests
             nameof(ISessionStore.ListActiveProposalApplyDrafts) => Array.Empty<ProposalApplyDraftMetadata>(),
             nameof(ISessionStore.ListAppliedProposalApplyLinkages) => Array.Empty<ProposalApplyLinkage>(),
             nameof(ISessionStore.ListProposalApplyPending) => Array.Empty<ProposalApplyPendingOperation>(),
+            nameof(ISessionStore.ListMostRecent) => new[] { Session },
+            nameof(ISessionStore.GetDetail) => Detail,
+            nameof(ISessionStore.GetRawRetentionState) => SessionRawRetentionState.Expiring,
+            nameof(ISessionStore.GetHumanEvaluation) => null,
             nameof(ISessionStore.ReadContentAsync) => ReadContent(),
             _ => throw new NotSupportedException(targetMethod?.Name),
         };

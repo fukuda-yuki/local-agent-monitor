@@ -33,7 +33,9 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
     private const int MaximumPayloadBytes = 1_048_576;
     private const int MaximumTotalPayloadBytes = 4_194_304;
 
-    internal async ValueTask<RepositoryMetadataDiagnosticsSnapshot> LoadAsync(CancellationToken cancellationToken)
+    internal async ValueTask<RepositoryMetadataDiagnosticsSnapshot> LoadAsync(
+        RawRazorPageLeaseTracker leases,
+        CancellationToken cancellationToken)
     {
         IReadOnlyList<long> candidateIds;
         try
@@ -71,56 +73,65 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
             return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
         }
 
-        await using var lease = read.Lease;
-        List<RepositoryMetadataDiagnostic> diagnostics;
-        var unavailable = false;
-        using (var reference = lease.AcquireValueReference())
+        var lease = read.Lease;
+        try
         {
-            diagnostics = new List<RepositoryMetadataDiagnostic>(reference.Value.Count);
-            foreach (var record in reference.Value)
+            List<RepositoryMetadataDiagnostic> diagnostics;
+            var unavailable = false;
+            using (var reference = lease.AcquireValueReference())
             {
-                try
+                diagnostics = new List<RepositoryMetadataDiagnostic>(reference.Value.Count);
+                foreach (var record in reference.Value)
                 {
-                    diagnostics.Add(RepositoryMetadataDiagnostics.Build(record.PayloadJson));
-                }
-                catch (JsonException)
-                {
-                    unavailable = true;
+                    try
+                    {
+                        diagnostics.Add(RepositoryMetadataDiagnostics.Build(record.PayloadJson));
+                    }
+                    catch (JsonException)
+                    {
+                        unavailable = true;
+                    }
                 }
             }
+
+            var statusRows = diagnostics
+                .GroupBy(diagnostic => new
+                {
+                    diagnostic.Status,
+                    diagnostic.RepositoryLabelPresent,
+                    diagnostic.UrlFallbackUsed,
+                })
+                .OrderBy(group => group.Key.Status)
+                .Select(group => new RepositoryMetadataStatusSummary(
+                    RepositoryMetadataDiagnostics.StatusWire(group.Key.Status),
+                    group.Count(),
+                    group.Key.RepositoryLabelPresent,
+                    group.Key.UrlFallbackUsed))
+                .ToArray();
+            var inventoryRows = diagnostics
+                .SelectMany(diagnostic => diagnostic.Inventory)
+                .GroupBy(row => new { row.Key, row.Scope, row.Classification })
+                .OrderBy(group => group.Key.Key, StringComparer.Ordinal)
+                .ThenBy(group => group.Key.Scope)
+                .Select(group => new RepositoryMetadataInventorySummary(
+                    group.Key.Key,
+                    group.Sum(row => row.Count),
+                    RepositoryMetadataDiagnostics.ScopeWire(group.Key.Scope),
+                    RepositoryMetadataDiagnostics.ClassificationWire(group.Key.Classification)))
+                .ToArray();
+
+            var snapshot = new RepositoryMetadataDiagnosticsSnapshot(
+                diagnostics.Count,
+                unavailable,
+                statusRows,
+                inventoryRows);
+            leases.AddFixedSafe(lease, () => lease.TryCompleteWithoutRaw());
+            return snapshot;
         }
-        if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
+        catch
         {
-            diagnostics.Clear();
-            return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
+            await lease.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
-
-        var statusRows = diagnostics
-            .GroupBy(diagnostic => new
-            {
-                diagnostic.Status,
-                diagnostic.RepositoryLabelPresent,
-                diagnostic.UrlFallbackUsed,
-            })
-            .OrderBy(group => group.Key.Status)
-            .Select(group => new RepositoryMetadataStatusSummary(
-                RepositoryMetadataDiagnostics.StatusWire(group.Key.Status),
-                group.Count(),
-                group.Key.RepositoryLabelPresent,
-                group.Key.UrlFallbackUsed))
-            .ToArray();
-        var inventoryRows = diagnostics
-            .SelectMany(diagnostic => diagnostic.Inventory)
-            .GroupBy(row => new { row.Key, row.Scope, row.Classification })
-            .OrderBy(group => group.Key.Key, StringComparer.Ordinal)
-            .ThenBy(group => group.Key.Scope)
-            .Select(group => new RepositoryMetadataInventorySummary(
-                group.Key.Key,
-                group.Sum(row => row.Count),
-                RepositoryMetadataDiagnostics.ScopeWire(group.Key.Scope),
-                RepositoryMetadataDiagnostics.ClassificationWire(group.Key.Classification)))
-            .ToArray();
-
-        return new(diagnostics.Count, unavailable, statusRows, inventoryRows);
     }
 }

@@ -863,6 +863,65 @@ public sealed class HistoricalEvidenceProductionTests
         Assert.Equal(HistoricalDescriptorStateV1.Unavailable, Assert.Single(denied.RawLocal.Sessions).DescriptorState);
     }
 
+    [Theory]
+    [InlineData(0, (int)SessionContentTerminalResult.Lost)]
+    [InlineData(0, (int)SessionContentTerminalResult.Busy)]
+    [InlineData(1, (int)SessionContentTerminalResult.Lost)]
+    [InlineData(1, (int)SessionContentTerminalResult.Busy)]
+    public async Task ApplicationService_AnyDescriptorTerminalFailure_PublishesNoExtraction(
+        int failingDescriptorIndex,
+        int terminalValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        var now = new DateTimeOffset(2026, 7, 22, 14, 0, 0, TimeSpan.Zero);
+        using var app = BuildHost(temp.DatabasePath, new MutableTimeProvider(now));
+        var sessionStore = app.Services.GetRequiredService<ISessionStore>();
+        var sessionId = Guid.CreateVersion7();
+        const string traceId = "6123456789abcdef0123456789abcdef";
+        var initial = new ObservedSessionEvent(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.ClaudeCode, null,
+            traceId, "ok", "claude-code-otel", $"{traceId}/6123456789abcdee", "user.message", now,
+            SessionContentState.Available, MatchKind: SessionMatchKind.ExactNative);
+        var corrections = new[]
+        {
+            initial with { EventId = Guid.CreateVersion7(), SourceEventId = $"{traceId}/7123456789abcdee", OccurredAt = now.AddTicks(1) },
+            initial with { EventId = Guid.CreateVersion7(), SourceEventId = $"{traceId}/8123456789abcdee", OccurredAt = now.AddTicks(2) },
+        };
+        var session = new ObservedSession(sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Full,
+            "owner/repository", null, now, now, now, SessionRawRetentionState.Expiring, now, now);
+        WriteTerminalEligibleSession(
+            sessionStore,
+            new SessionDetail(session, [], [], [initial, .. corrections]),
+            corrections.Select(correction => new SessionEventContent(
+                correction.EventId,
+                "application/json",
+                JsonSerializer.Serialize(new { text = $"descriptor-{correction.EventId:N}" }),
+                now,
+                now.AddDays(1))).ToArray());
+        var reader = new TerminalDescriptorContentReader(
+            corrections,
+            now,
+            failingDescriptorIndex,
+            (SessionContentTerminalResult)terminalValue);
+        var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, sessionStore, reader);
+        var datasetStore = new SqliteHistoricalEvidenceDatasetStoreV1(temp.DatabasePath);
+        datasetStore.CreateSchema();
+        var service = new HistoricalEvidenceApplicationServiceV1(source, datasetStore, new MutableTimeProvider(now));
+
+        var exception = await Assert.ThrowsAsync<HistoricalEvidenceValidationException>(() =>
+            service.CreateAsync(
+                HistoricalEvidenceSelectionV1.Create(explicitSessionIds: [sessionId]),
+                CancellationToken.None).AsTask());
+
+        Assert.Equal(HistoricalEvidenceValidationCodeV1.InvalidPersistence, exception.Code);
+        Assert.Equal(failingDescriptorIndex + 1, reader.ReadCount);
+        Assert.Equal(failingDescriptorIndex + 1, reader.ReleaseCount);
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM historical_evidence_datasets;";
+        Assert.Equal(0L, (long)command.ExecuteScalar()!);
+    }
+
     private sealed class RecordingContentReader(SessionContentReadResult result) : IHistoricalSessionContentReaderV1
     {
         internal int ReadCount { get; private set; }
@@ -898,6 +957,44 @@ public sealed class HistoricalEvidenceProductionTests
                 JsonSerializer.Serialize(new { text = values[eventId] }), now, now.AddDays(1));
             return ValueTask.FromResult(new SessionContentReadResult(SessionContentReadDisposition.Granted,
                 GrantedContentLease(content)));
+        }
+    }
+
+    private sealed class TerminalDescriptorContentReader(
+        IReadOnlyList<ObservedSessionEvent> corrections,
+        DateTimeOffset now,
+        int failingDescriptorIndex,
+        SessionContentTerminalResult terminalResult) : IHistoricalSessionContentReaderV1
+    {
+        internal int ReadCount { get; private set; }
+        internal int ReleaseCount { get; private set; }
+
+        public ValueTask<SessionContentReadResult> ReadContentAsync(
+            Guid sessionId,
+            Guid eventId,
+            CancellationToken cancellationToken)
+        {
+            var index = ReadCount++;
+            Assert.Equal(corrections[index].EventId, eventId);
+            var content = new SessionEventContent(
+                eventId,
+                "application/json",
+                JsonSerializer.Serialize(new { text = $"descriptor-{eventId:N}" }),
+                now,
+                now.AddDays(1));
+            return ValueTask.FromResult(new SessionContentReadResult(
+                SessionContentReadDisposition.Granted,
+                new SessionContentReadLease(
+                    () =>
+                    {
+                        ReleaseCount++;
+                        return ValueTask.CompletedTask;
+                    },
+                    () => new SessionContentUseReference(() => content, static () => { }),
+                    () => SessionContentTerminalResult.Sealed,
+                    () => index == failingDescriptorIndex
+                        ? terminalResult
+                        : SessionContentTerminalResult.CompletedWithoutRaw)));
         }
     }
 

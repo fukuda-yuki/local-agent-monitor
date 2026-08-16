@@ -171,7 +171,8 @@ internal sealed class RawReplayTransientStore : IDisposable
         {
             if (disposed) return;
             disposed = true;
-            while (reservations.Count > 0) Monitor.Wait(gate);
+            reservations.Clear();
+            reservedBytes = 0;
             entries.Clear();
             totalBytes = 0;
         }

@@ -247,8 +247,8 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                     }
                     if (lease.TryCompleteWithoutRaw() != SessionContentTerminalResult.CompletedWithoutRaw)
                     {
-                        projected = default;
-                        continue;
+                        throw new HistoricalEvidenceValidationException(
+                            HistoricalEvidenceValidationCodeV1.InvalidPersistence);
                     }
                     if (reference is not null)
                         groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null,

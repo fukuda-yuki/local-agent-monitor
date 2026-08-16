@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Mvc.Filters;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
+internal sealed class RawResponseTerminalFailureException : Exception;
+
 internal static class RawResponsePublication
 {
     internal static bool AuthorizesRawDerivedPublication(RetentionRawTerminalResult result) =>
@@ -19,13 +21,16 @@ internal sealed class RawRazorPageLeaseTracker
 {
     private const int MaximumBufferedEntityBytes = 4 * 1024 * 1024;
     private static readonly object ContextItemKey = new();
-    private readonly List<(IAsyncDisposable Lease, Func<RetentionRawTerminalResult> Seal)> leases = [];
+    private readonly List<(IAsyncDisposable Lease, Func<bool> Authorize)> leases = [];
     private int transferredOrDisposed;
 
     internal bool HasLeases => leases.Count > 0;
 
     internal void Add(IAsyncDisposable lease, Func<RetentionRawTerminalResult> seal) =>
-        leases.Add((lease, seal));
+        leases.Add((lease, () => RawResponsePublication.AuthorizesRawDerivedPublication(seal())));
+
+    internal void AddFixedSafe(IAsyncDisposable lease, Func<RetentionRawTerminalResult> complete) =>
+        leases.Add((lease, () => RawResponsePublication.AuthorizesFixedSafePublication(complete())));
 
     internal void Attach(HttpContext context)
     {
@@ -55,7 +60,7 @@ internal sealed class RawRazorPageLeaseTracker
     }
 
     internal sealed class Attached(
-        IReadOnlyList<(IAsyncDisposable Lease, Func<RetentionRawTerminalResult> Seal)> owned)
+        IReadOnlyList<(IAsyncDisposable Lease, Func<bool> Authorize)> owned)
     {
         internal async Task ExecuteBufferedAsync(HttpContext context, Func<Task> render)
         {
@@ -91,12 +96,15 @@ internal sealed class RawRazorPageLeaseTracker
                 }
 
                 var authorized = true;
-                foreach (var (_, seal) in owned)
+                foreach (var (_, authorize) in owned)
                 {
-                    authorized &= RawResponsePublication.AuthorizesRawDerivedPublication(seal());
+                    authorized &= authorize();
                 }
                 if (!authorized)
                 {
+                    originalResponse.StatusCode = StatusCodes.Status200OK;
+                    originalResponse.ReasonPhrase = null;
+                    originalResponse.Headers.Clear();
                     RawResponsePublication.Abort(context);
                     return;
                 }
