@@ -28,6 +28,42 @@ public sealed class RetentionRawTerminalTests
     }
 
     [Fact]
+    public async Task RawReplayTransientSealUsesTheExistingOneShotTerminalClaim()
+    {
+        await using var fixture = await TerminalFixture.CreateSingleAsync();
+
+        Assert.Equal(
+            RetentionRawTerminalResult.Sealed,
+            fixture.SingleLease.TrySealRawReplayTransientPublication());
+        Assert.Equal(RetentionRawTerminalState.Sealed, fixture.SingleLease.TerminalState);
+        Assert.Equal(1L, fixture.LeaseCount());
+        Assert.Equal(
+            RetentionRawTerminalResult.Lost,
+            fixture.SingleLease.TrySealRawReplayTransientPublication());
+        Assert.Equal(
+            RetentionRawTerminalResult.Lost,
+            fixture.SingleLease.TryCompleteWithoutRaw());
+    }
+
+    [Fact]
+    public async Task RawReplayFileSealUsesTheExistingOneShotTerminalClaim()
+    {
+        await using var fixture = await TerminalFixture.CreateSingleAsync();
+
+        Assert.Equal(
+            RetentionRawTerminalResult.Sealed,
+            fixture.SingleLease.TrySealRawReplayFilePublication());
+        Assert.Equal(RetentionRawTerminalState.Sealed, fixture.SingleLease.TerminalState);
+        Assert.Equal(1L, fixture.LeaseCount());
+        Assert.Equal(
+            RetentionRawTerminalResult.Lost,
+            fixture.SingleLease.TrySealRawReplayFilePublication());
+        Assert.Equal(
+            RetentionRawTerminalResult.Lost,
+            fixture.SingleLease.TrySealRawResponse());
+    }
+
+    [Fact]
     public async Task TerminalClaimPrecedesTransactionAndPublicationScopes()
     {
         await using var fixture = await TerminalFixture.CreateSingleAsync();

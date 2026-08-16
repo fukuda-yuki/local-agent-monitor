@@ -362,7 +362,7 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
-    public void CreateAndPublish_rejects_sensitive_output_names_without_writing_them()
+    public async Task CreateAndPublish_rejects_sensitive_output_names_without_writing_them()
     {
         var service = new RawReplayArchiveService();
         var snapshot = Snapshot(Record(1, Payload("trace-a")));
@@ -373,7 +373,9 @@ public sealed class RawReplayArchiveServiceTests
         try
         {
             var output = Path.Combine(directory, "session-one.zip");
-            var result = service.CreateAndPublish(snapshot, request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() }, output);
+            var result = await new RawReplayAuthorizedService(new Provider(snapshot), service).CreateAndPublishAsync(
+                request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() },
+                output);
 
             Assert.False(result.Success);
             Assert.Equal("output_name_invalid", result.ErrorCode);
@@ -387,7 +389,7 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
-    public void CreateAndPublish_preserves_a_preexisting_unowned_fixed_partial()
+    public async Task CreateAndPublish_preserves_a_preexisting_unowned_fixed_partial()
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -401,8 +403,7 @@ public sealed class RawReplayArchiveServiceTests
             var request = Request();
             var preview = service.Preview(snapshot, request);
 
-            var result = service.CreateAndPublish(
-                snapshot,
+            var result = await new RawReplayAuthorizedService(new Provider(snapshot), service).CreateAndPublishAsync(
                 request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() },
                 output);
 
@@ -417,7 +418,7 @@ public sealed class RawReplayArchiveServiceTests
     }
 
     [Fact]
-    public void CreateAndPublish_does_not_delete_a_staging_file_it_did_not_create()
+    public async Task CreateAndPublish_does_not_delete_a_staging_file_it_did_not_create()
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -431,8 +432,7 @@ public sealed class RawReplayArchiveServiceTests
             var request = Request();
             var preview = service.Preview(snapshot, request);
 
-            var result = service.CreateAndPublish(
-                snapshot,
+            var result = await new RawReplayAuthorizedService(new Provider(snapshot), service).CreateAndPublishAsync(
                 request with { PreviewDigest = preview.PreviewDigest, Consent = Consent() },
                 output);
 
@@ -469,12 +469,14 @@ public sealed class RawReplayArchiveServiceTests
 
             var results = await Task.WhenAll(
                 Task.Factory.StartNew(
-                    () => service.CreateAndPublish(snapshot, confirmed, output),
+                    () => new RawReplayAuthorizedService(new Provider(snapshot), service)
+                        .CreateAndPublishAsync(confirmed, output).AsTask().GetAwaiter().GetResult(),
                     CancellationToken.None,
                     TaskCreationOptions.LongRunning,
                     TaskScheduler.Default),
                 Task.Factory.StartNew(
-                    () => service.CreateAndPublish(snapshot, confirmed, output),
+                    () => new RawReplayAuthorizedService(new Provider(snapshot), service)
+                        .CreateAndPublishAsync(confirmed, output).AsTask().GetAwaiter().GetResult(),
                     CancellationToken.None,
                     TaskCreationOptions.LongRunning,
                     TaskScheduler.Default));
@@ -709,5 +711,19 @@ public sealed class RawReplayArchiveServiceTests
             }
         }
         return output.ToArray();
+    }
+
+    private sealed class Provider(RawReplaySnapshot snapshot) : IRawReplaySnapshotProvider
+    {
+        public ValueTask<RawReplaySnapshotCapture> CaptureAsync(
+            RawReplaySelection selection,
+            bool includeSessionContent,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
+                snapshot,
+                static () => ValueTask.CompletedTask,
+                operation => operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
+                    ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
+                    : RawReplaySnapshotTerminalResult.Sealed)));
     }
 }

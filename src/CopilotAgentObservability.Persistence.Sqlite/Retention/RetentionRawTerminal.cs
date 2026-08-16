@@ -23,6 +23,8 @@ internal enum RetentionRawTerminalState
 internal enum RetentionRawTerminalOperation
 {
     SealRawResponse,
+    SealRawReplayTransientPublication,
+    SealRawReplayFilePublication,
     CompleteWithoutRaw,
 }
 

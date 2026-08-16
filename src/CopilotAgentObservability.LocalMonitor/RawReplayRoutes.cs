@@ -44,7 +44,9 @@ internal static class RawReplayRoutes
     {
         var control = await ReadJsonAsync<RawReplayExportControl>(context, sanitizedOnly);
         if (control is null) return;
-        var preview = await application.ExportPreviewAsync(control, context.RequestAborted);
+        var publication = await application.ExportPreviewAsync(control, context.RequestAborted);
+        if (publication.TerminalFailed) { RawResponsePublication.Abort(context); return; }
+        var preview = publication.Preview;
         if (!preview.Success) { await ErrorAsync(context, Status(preview.ErrorCode!), preview.ErrorCode!); return; }
         await JsonAsync(context, StatusCodes.Status200OK, preview);
     }
@@ -53,7 +55,9 @@ internal static class RawReplayRoutes
     {
         var control = await ReadJsonAsync<RawReplayExportControl>(context, sanitizedOnly);
         if (control is null) return;
-        var result = await application.ExportAsync(control, context.RequestAborted);
+        var publication = await application.ExportAsync(control, context.RequestAborted);
+        if (publication.TerminalFailed) { RawResponsePublication.Abort(context); return; }
+        var result = publication.Result;
         if (result.ErrorCode is not null) { await ErrorAsync(context, Status(result.ErrorCode), result.ErrorCode); return; }
         context.Response.Headers.Location = $"/api/raw-replay/v1/exports/{result.ExportId}";
         await JsonAsync(context, StatusCodes.Status201Created, result);
@@ -90,6 +94,7 @@ internal static class RawReplayRoutes
         var control = await ReadJsonAsync<RawReplayControl>(context, sanitizedOnly);
         if (control is null) return;
         var result = await application.ReplayAsync(control, context.RequestAborted);
+        if (result.TerminalFailed) { RawResponsePublication.Abort(context); return; }
         if (result.ErrorCode is not null) { await ErrorAsync(context, Status(result.ErrorCode), result.ErrorCode); return; }
         context.Response.Headers.Location = $"/api/raw-replay/v1/replays/{Uri.EscapeDataString(control.ReplayId)}";
         await JsonAsync(context, result.IdempotentReplay ? 200 : 201, result);
@@ -98,7 +103,9 @@ internal static class RawReplayRoutes
     private static async Task ReplayResultAsync(HttpContext context, Application application, bool sanitizedOnly, string replayId)
     {
         if (!await AuthorizeReadAsync(context, sanitizedOnly)) return;
-        var result = await application.ReadReplayAsync(replayId, context.RequestAborted);
+        var publication = await application.ReadReplayAsync(replayId, context.RequestAborted);
+        if (publication.TerminalFailed) { RawResponsePublication.Abort(context); return; }
+        var result = publication.Result;
         if (result.ErrorCode is not null) { await ErrorAsync(context, Status(result.ErrorCode), result.ErrorCode); return; }
         await JsonAsync(context, 200, result);
     }
@@ -173,6 +180,7 @@ internal static class RawReplayRoutes
     private sealed class Application : IDisposable
     {
         private readonly RawReplayAuthorizedService exportService;
+        private readonly IRawReplaySnapshotProvider snapshotProvider;
         private readonly RawReplayArchiveService archiveService = new();
         private readonly RetentionRawReplayStore replayStore;
         private readonly RawReplayTransientStore transientStore;
@@ -185,22 +193,58 @@ internal static class RawReplayRoutes
             RawReplayTransientLimits transientLimits)
         {
             exportService = new(provider);
+            snapshotProvider = provider;
             replayStore = new(catalog, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "raw-replays"), timeProvider);
             transientStore = new(timeProvider, transientLimits);
         }
 
-        internal ValueTask<RawReplayPreview> ExportPreviewAsync(RawReplayExportControl control, CancellationToken token) => exportService.PreviewAsync(control, token);
+        internal ValueTask<RawReplayPreviewPublication> ExportPreviewAsync(RawReplayExportControl control, CancellationToken token) =>
+            exportService.PreviewForHttpAsync(control, token);
 
-        internal async ValueTask<ExportResult> ExportAsync(RawReplayExportControl control, CancellationToken token)
+        internal async ValueTask<ExportPublication> ExportAsync(RawReplayExportControl control, CancellationToken token)
         {
-            var created = await exportService.CreateAsync(control, token);
-            if (!created.Success) return new(null, created.ErrorCode, null, null, null);
+            if (RawReplayArchiveService.ValidateCommitControl(control) is { } controlError)
+                return new(new(null, controlError, null, null, null), false);
+            var capture = await snapshotProvider.CaptureAsync(
+                control.Selection,
+                control.IncludeSessionContent,
+                token);
+            if (!capture.Success || capture.Lease is null)
+                return new(new(null, RawReplayAuthorizedService.ProviderError(capture.ErrorCode), null, null, null), false);
+            await using var lease = capture.Lease;
+            var created = archiveService.Create(lease.Snapshot, control);
+            if (!created.Success)
+            {
+                var error = created.ErrorCode!;
+                RawReplayAuthorizedService.DiscardRaw(created, error);
+                return CompleteExportFailure(lease, error);
+            }
             var id = created.ArchiveSha256!;
             var archive = created.ArchiveBytes!;
             var result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
-            return transientStore.Put("export", id, archive, result)
-                ? result
-                : new(null, "archive_too_large", null, null, null);
+            var expiresAt = transientStore.ExpirationFromNow();
+            if (!transientStore.TryReserve("export", id, archive.LongLength, expiresAt, out var reservation))
+            {
+                RawReplayAuthorizedService.DiscardRaw(created, "archive_too_large");
+                return CompleteExportFailure(lease, "archive_too_large");
+            }
+            using (reservation)
+            {
+                if (!lease.TrySealRawReplayTransientPublication(out _))
+                    return new(new(null, null, null, null, null), true);
+                reservation!.Commit(archive, result);
+            }
+            Array.Clear(archive);
+            if (created.ManifestBytes is { } manifest) Array.Clear(manifest);
+            return new(result, false);
+        }
+
+        private static ExportPublication CompleteExportFailure(RawReplaySnapshotLease lease, string errorCode)
+        {
+            var terminal = lease.TryCompleteWithoutRaw();
+            return terminal is RawReplaySnapshotTerminalResult.CompletedWithoutRaw or RawReplaySnapshotTerminalResult.NotRequired
+                ? new(new(null, errorCode, null, null, null), false)
+                : new(new(null, null, null, null, null), true);
         }
 
         internal bool TryGetExport(string id, out ExportResult result)
@@ -242,22 +286,27 @@ internal static class RawReplayRoutes
                 return new(false, "preview_expired", false, null);
             if (pending.ArchiveSha256 != control.ArchiveSha256) return new(false, "preview_changed", false, null);
             var execution = await replayStore.ReplayAsync(control.ReplayId, archive, token);
-            return new(execution.Success, execution.ErrorCode, execution.IdempotentReplay, execution.Result);
+            return execution.ErrorCode is "replay_terminal_lost" or "replay_terminal_busy"
+                ? new(false, null, false, null, true)
+                : new(execution.Success, execution.ErrorCode, execution.IdempotentReplay, execution.Result, false);
         }
 
-        internal async ValueTask<ReplayResultView> ReadReplayAsync(string replayId, CancellationToken token)
+        internal async ValueTask<ReplayPublication> ReadReplayAsync(string replayId, CancellationToken token)
         {
-            if (!ValidReplayId(replayId)) return new(false, "replay_id_invalid", false, null);
+            if (!ValidReplayId(replayId)) return new(new(false, "replay_id_invalid", false, null, false), false);
             var retained = await replayStore.ReadAsync(replayId, token);
             if (retained.Lease is null)
-                return new(false, retained.Disposition switch
+                return new(new(false, retained.Disposition switch
                 {
                     RetainedRawReplayReadDisposition.Busy => "replay_store_busy",
                     RetainedRawReplayReadDisposition.Denied => "replay_store_denied",
                     _ => "replay_not_found",
-                }, false, null);
+                }, false, null, false), false);
             await using var lease = retained.Lease;
-            return new(true, null, true, lease.Receipt);
+            var result = new ReplayResultView(true, null, true, lease.Receipt, false);
+            return lease.TryCompleteWithoutRaw() == RetentionRawTerminalResult.CompletedWithoutRaw
+                ? new(result, false)
+                : new(new(false, null, false, null, true), true);
         }
 
         public void Dispose() => transientStore.Dispose();
@@ -286,9 +335,16 @@ internal static class RawReplayRoutes
 
     private sealed record ExportResult(string? ExportId, string? ErrorCode, string? ArchiveSha256, RawReplayPreview? Preview,
         string? DownloadPath);
+    private sealed record ExportPublication(ExportResult Result, bool TerminalFailed);
     private sealed record PendingReplay(string ArchiveSha256, DateTimeOffset ExpiresAt);
     private sealed record ReplayPreviewResult(string? ErrorCode, string? Warning, string? DataClassification, string? ArchiveSha256,
         string? NormalizationVersion, string? ProjectionVersion, string? DashboardVersion, int RawRecordCount, int SessionContentCount,
         IReadOnlyList<string> SourceVersions, string? PreviewDigest, DateTimeOffset? ExpiresAt = null);
-    private sealed record ReplayResultView(bool Success, string? ErrorCode, bool IdempotentReplay, RawReplayReceipt? Result);
+    private sealed record ReplayResultView(
+        bool Success,
+        string? ErrorCode,
+        bool IdempotentReplay,
+        RawReplayReceipt? Result,
+        [property: System.Text.Json.Serialization.JsonIgnore] bool TerminalFailed = false);
+    private sealed record ReplayPublication(ReplayResultView Result, bool TerminalFailed);
 }

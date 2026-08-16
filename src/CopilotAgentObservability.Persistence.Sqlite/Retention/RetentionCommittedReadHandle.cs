@@ -96,6 +96,12 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     internal RetentionRawTerminalResult TrySealRawResponse() => TryTerminal(RetentionRawTerminalOperation.SealRawResponse);
 
+    internal RetentionRawTerminalResult TrySealRawReplayTransientPublication() =>
+        TryTerminal(RetentionRawTerminalOperation.SealRawReplayTransientPublication);
+
+    internal RetentionRawTerminalResult TrySealRawReplayFilePublication() =>
+        TryTerminal(RetentionRawTerminalOperation.SealRawReplayFilePublication);
+
     internal RetentionRawTerminalResult TryCompleteWithoutRaw() => TryTerminal(RetentionRawTerminalOperation.CompleteWithoutRaw);
 
     private RetentionRawTerminalResult TryTerminal(RetentionRawTerminalOperation operation)
@@ -132,7 +138,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     internal bool TryMoveTerminalAttemptToPending(RetentionRawTerminalOperation operation) =>
         Interlocked.CompareExchange(
             ref terminalState,
-            operation == RetentionRawTerminalOperation.SealRawResponse
+            IsSealing(operation)
                 ? (int)RetentionRawTerminalState.SealedPending
                 : (int)RetentionRawTerminalState.CompletedWithoutRawPending,
             (int)RetentionRawTerminalState.TerminalAttemptInProgress) ==
@@ -140,18 +146,23 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     internal RetentionRawTerminalResult PublishTerminal(RetentionRawTerminalOperation operation)
     {
-        var pending = operation == RetentionRawTerminalOperation.SealRawResponse
+        var pending = IsSealing(operation)
             ? RetentionRawTerminalState.SealedPending
             : RetentionRawTerminalState.CompletedWithoutRawPending;
-        var final = operation == RetentionRawTerminalOperation.SealRawResponse
+        var final = IsSealing(operation)
             ? RetentionRawTerminalState.Sealed
             : RetentionRawTerminalState.CompletedWithoutRaw;
         if (Interlocked.CompareExchange(ref terminalState, (int)final, (int)pending) != (int)pending)
             return RetentionRawTerminalResult.Lost;
-        return operation == RetentionRawTerminalOperation.SealRawResponse
+        return IsSealing(operation)
             ? RetentionRawTerminalResult.Sealed
             : RetentionRawTerminalResult.CompletedWithoutRaw;
     }
+
+    private static bool IsSealing(RetentionRawTerminalOperation operation) =>
+        operation is RetentionRawTerminalOperation.SealRawResponse
+            or RetentionRawTerminalOperation.SealRawReplayTransientPublication
+            or RetentionRawTerminalOperation.SealRawReplayFilePublication;
 
     internal void LoseTerminalAttempt()
     {

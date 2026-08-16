@@ -262,6 +262,68 @@ public sealed class RawReplaySurfaceTests
         }
     }
 
+    [Theory]
+    [InlineData("snapshot_read_denied")]
+    [InlineData("snapshot_store_busy")]
+    public async Task Api_PreAdmissionDeniedAndBusyKeepTheirExact503Tokens(string expectedError)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(new FailingProvider(expectedError)));
+
+        using var response = await host.Client.SendAsync(
+            PostJson("/api/raw-replay/v1/export-previews", ExportControl()));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal($"{{\"error\":\"{expectedError}\"}}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Lost)]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Busy)]
+    public async Task Api_PreviewTerminalFailureAbortsWithoutAResponse(int terminalResultValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = new Provider(Snapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider));
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => host.Client.SendAsync(
+            PostJson("/api/raw-replay/v1/export-previews", ExportControl())));
+    }
+
+    [Theory]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Lost)]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Busy)]
+    public async Task Api_TransientSealFailureAbortsWithoutPublishingTheExport(int terminalResultValue)
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = new Provider(Snapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider));
+        var preview = new RawReplayArchiveService().Preview(Snapshot(), ExportControl());
+        var control = ExportControl() with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => host.Client.SendAsync(
+            PostJson("/api/raw-replay/v1/exports", control)));
+    }
+
+    [Fact]
+    public async Task Api_TransientReservationRefusalCompletesWithoutRawBeforeItsFixedFailure()
+    {
+        using var temp = new MonitorTempDirectory();
+        var provider = new Provider(Snapshot());
+        var limits = new RawReplayTransientLimits(1, 1, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1));
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider, limits));
+        var preview = new RawReplayArchiveService().Preview(Snapshot(), ExportControl());
+        var control = ExportControl() with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
+
+        using var response = await host.Client.SendAsync(PostJson("/api/raw-replay/v1/exports", control));
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("{\"error\":\"archive_too_large\"}", await response.Content.ReadAsStringAsync());
+        Assert.Equal([RawReplaySnapshotTerminalOperation.CompleteWithoutRaw], provider.TerminalOperations);
+    }
+
     [Fact]
     public async Task Api_UsesRawReplayBodyLimitInsteadOfTheIngestionLimit()
     {
@@ -422,6 +484,36 @@ public sealed class RawReplaySurfaceTests
         store.Dispose();
     }
 
+    [Fact]
+    public async Task Transient_reservation_is_prepared_without_holding_the_store_lock_and_commits_once()
+    {
+        var store = new RawReplayTransientStore(
+            TimeProvider.System,
+            new RawReplayTransientLimits(2, 1024, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(10)));
+        try
+        {
+            Assert.True(store.TryReserve(
+                "export",
+                "reserved",
+                3,
+                store.ExpirationFromNow(),
+                out var reservation));
+
+            Assert.Equal(0, await Task.Run(() => store.Count).WaitAsync(TimeSpan.FromSeconds(5)));
+            reservation!.Commit([1, 2, 3], "metadata");
+            reservation.Commit([9, 9, 9], "replacement");
+
+            Assert.Equal(1, store.Count);
+            Assert.True(store.TryGet("export", "reserved", out var bytes, out string metadata));
+            Assert.Equal(new byte[] { 1, 2, 3 }, bytes);
+            Assert.Equal("metadata", metadata);
+        }
+        finally
+        {
+            store.Dispose();
+        }
+    }
+
     private static MonitorHostTestOptions Options(IRawReplaySnapshotProvider provider, RawReplayTransientLimits? transientLimits = null) => new()
     {
         StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
@@ -536,13 +628,27 @@ public sealed class RawReplaySurfaceTests
 
     private static long Scalar(string path, string sql) => Scalar<long>(path, sql);
 
-    private sealed class Provider(RawReplaySnapshot snapshot) : IRawReplaySnapshotProvider
+    private sealed class Provider(
+        RawReplaySnapshot snapshot,
+        RawReplaySnapshotTerminalResult terminalResult = RawReplaySnapshotTerminalResult.Sealed) : IRawReplaySnapshotProvider
     {
         public int CaptureCount { get; private set; }
+        public List<RawReplaySnapshotTerminalOperation> TerminalOperations { get; } = [];
         public ValueTask<RawReplaySnapshotCapture> CaptureAsync(RawReplaySelection selection, bool includeSessionContent, CancellationToken cancellationToken)
         {
             CaptureCount++;
-            return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(snapshot, static () => ValueTask.CompletedTask)));
+            return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
+                snapshot,
+                static () => ValueTask.CompletedTask,
+                operation =>
+                {
+                    TerminalOperations.Add(operation);
+                    return terminalResult == RawReplaySnapshotTerminalResult.Sealed
+                        ? operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
+                            ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
+                            : RawReplaySnapshotTerminalResult.Sealed
+                        : terminalResult;
+                })));
         }
     }
 

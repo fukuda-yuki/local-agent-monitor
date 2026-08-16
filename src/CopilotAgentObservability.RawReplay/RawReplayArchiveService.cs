@@ -14,16 +14,28 @@ public sealed partial class RawReplayArchiveService
     private static readonly string[] AllowedCaptureContentStates = ["available", "not_captured", "redacted", "unknown", "unsupported"];
     private static readonly string[] AllowedSessionContentStates = ["available", "expired_pending_deletion", "not_captured", "redacted", "unsupported"];
     private readonly Func<string, string> temporaryPathFactory;
+    private readonly Func<byte[], RawReplayInspection> inspectArchive;
+    private readonly Action<RawReplayFileStagingCheckpoint>? stagingCheckpoint;
 
     public RawReplayArchiveService()
-        : this(outputPath => $"{outputPath}.{Guid.NewGuid():N}.partial")
+        : this(outputPath => $"{outputPath}.{Guid.NewGuid():N}.partial", null, null)
     {
     }
 
     internal RawReplayArchiveService(Func<string, string> temporaryPathFactory)
+        : this(temporaryPathFactory, null, null)
+    {
+    }
+
+    internal RawReplayArchiveService(
+        Func<string, string> temporaryPathFactory,
+        Func<byte[], RawReplayInspection>? inspectArchive,
+        Action<RawReplayFileStagingCheckpoint>? stagingCheckpoint)
     {
         ArgumentNullException.ThrowIfNull(temporaryPathFactory);
         this.temporaryPathFactory = temporaryPathFactory;
+        this.inspectArchive = inspectArchive ?? Inspect;
+        this.stagingCheckpoint = stagingCheckpoint;
     }
 
     [GeneratedRegex("^(records/record-[0-9]{6}\\.json|session-content/content-[0-9]{6}\\.json)$", RegexOptions.CultureInvariant)]
@@ -154,24 +166,23 @@ public sealed partial class RawReplayArchiveService
         var archiveBytes = output.ToArray();
         if (archiveBytes.LongLength > RawReplayLimits.MaximumArchiveBytes)
             return new(false, "archive_too_large", preview, null, null, null);
-        var inspection = Inspect(archiveBytes);
+        var inspection = inspectArchive(archiveBytes);
         if (!inspection.Success) return new(false, inspection.ErrorCode ?? "publish_validation_failed", preview, null, null, null);
         return new(true, null, preview, manifestBytes, archiveBytes, RawReplayHash.Sha256(archiveBytes));
     }
 
-    public RawReplayResult CreateAndPublish(RawReplaySnapshot snapshot, RawReplayExportControl control, string outputPath)
+    internal RawReplayFileStagingResult StageForPublication(RawReplayResult result, string outputPath)
     {
-        if (!ValidOutputName(outputPath))
-            return new(false, "output_name_invalid", Failure("output_name_invalid"), null, null, null);
-        var result = Create(snapshot, control);
-        if (!result.Success) return result;
+        ArgumentNullException.ThrowIfNull(result);
+        if (!result.Success || result.ArchiveBytes is null)
+            throw new ArgumentException("Only a complete raw replay archive can be staged.", nameof(result));
         string? ownedTemporaryPath = null;
         try
         {
             var fullOutputPath = Path.GetFullPath(outputPath);
-            if (File.Exists(fullOutputPath)) return result with { Success = false, ErrorCode = "output_exists", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+            if (File.Exists(fullOutputPath)) return new(WithoutRaw(result, "output_exists"), null);
             var parent = Path.GetDirectoryName(fullOutputPath);
-            if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+            if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return new(WithoutRaw(result, "publish_failed"), null);
 
             var temporaryPath = Path.GetFullPath(temporaryPathFactory(fullOutputPath));
             var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -181,26 +192,43 @@ public sealed partial class RawReplayArchiveService
                 || string.IsNullOrEmpty(temporaryName)
                 || !temporaryName.StartsWith(Path.GetFileName(fullOutputPath) + ".", pathComparison)
                 || !temporaryName.EndsWith(".partial", pathComparison))
-                return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
+                return new(WithoutRaw(result, "publish_failed"), null);
 
             using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 ownedTemporaryPath = temporaryPath;
+                stagingCheckpoint?.Invoke(RawReplayFileStagingCheckpoint.BeforeWrite);
                 stream.Write(result.ArchiveBytes!);
+                stagingCheckpoint?.Invoke(RawReplayFileStagingCheckpoint.BeforeFlush);
                 stream.Flush(flushToDisk: true);
             }
-            if (!Inspect(File.ReadAllBytes(temporaryPath)).Success) return result with { Success = false, ErrorCode = "publish_validation_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null };
-            File.Move(temporaryPath, fullOutputPath, overwrite: false);
+            if (!inspectArchive(File.ReadAllBytes(temporaryPath)).Success)
+                return new(WithoutRaw(result, "publish_validation_failed"), null);
+            var staged = new RawReplayStagedFile(temporaryPath, fullOutputPath);
             ownedTemporaryPath = null;
-            return result;
+            return new(result, staged);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
-        { return result with { Success = false, ErrorCode = "publish_failed", ArchiveBytes = null, ArchiveSha256 = null, ManifestBytes = null }; }
+        { return new(WithoutRaw(result, "publish_failed"), null); }
         finally
         {
             try { if (ownedTemporaryPath is not null && File.Exists(ownedTemporaryPath)) File.Delete(ownedTemporaryPath); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
         }
+    }
+
+    private static RawReplayResult WithoutRaw(RawReplayResult result, string errorCode)
+    {
+        if (result.ManifestBytes is { } manifest) Array.Clear(manifest);
+        if (result.ArchiveBytes is { } archive) Array.Clear(archive);
+        return result with
+        {
+            Success = false,
+            ErrorCode = errorCode,
+            ArchiveBytes = null,
+            ArchiveSha256 = null,
+            ManifestBytes = null,
+        };
     }
 
     public RawReplayInspection Inspect(byte[] archiveBytes)
@@ -560,5 +588,33 @@ public sealed partial class RawReplayArchiveService
     private sealed record PreparedSnapshot(IReadOnlyList<RawReplayRecord> Records, IReadOnlyList<RawReplaySessionContent> Contents, string? ErrorCode)
     {
         internal static PreparedSnapshot Failure(string code) => new([], [], code);
+    }
+}
+
+internal sealed record RawReplayFileStagingResult(
+    RawReplayResult Result,
+    RawReplayStagedFile? StagedFile);
+
+internal enum RawReplayFileStagingCheckpoint
+{
+    BeforeWrite,
+    BeforeFlush,
+}
+
+internal sealed class RawReplayStagedFile(string stagedPath, string outputPath) : IDisposable
+{
+    private int disposed;
+
+    internal string StagedPath { get; } = stagedPath;
+    internal string OutputPath { get; } = outputPath;
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        try
+        {
+            if (File.Exists(StagedPath)) File.Delete(StagedPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
     }
 }

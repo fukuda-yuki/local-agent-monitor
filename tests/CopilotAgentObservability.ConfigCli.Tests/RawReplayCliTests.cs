@@ -32,6 +32,12 @@ public sealed class RawReplayCliTests
         var inspection = RawReplayJson.DeserializeExact<RawReplayInspection>(System.Text.Encoding.UTF8.GetBytes(resultOut.ToString().Trim()));
         Assert.True(inspection.Success);
         Assert.Equal(2, provider.ReleaseCount);
+        Assert.Equal(
+            [
+                RawReplaySnapshotTerminalOperation.CompleteWithoutRaw,
+                RawReplaySnapshotTerminalOperation.SealFilePublication,
+            ],
+            provider.TerminalOperations);
     }
 
     [Fact]
@@ -45,6 +51,7 @@ public sealed class RawReplayCliTests
         Assert.Equal(2, RawReplayCli.Run(["preview", "--database", fixture.Database, "--request", fixture.Request], output, errors, provider));
         Assert.Contains("sanitized_only_denied", errors.ToString(), StringComparison.Ordinal);
         Assert.Equal(0, provider.CaptureCount);
+        Assert.Empty(provider.TerminalOperations);
     }
 
     [Fact]
@@ -86,6 +93,7 @@ public sealed class RawReplayCliTests
         Assert.Equal(2, RawReplayCli.Run(["preview", "--database", fixture.Database, "--request", fixture.Request], output, errors, provider));
         Assert.Equal("request_invalid", errors.ToString().Trim());
         Assert.Equal(0, provider.CaptureCount);
+        Assert.Empty(provider.TerminalOperations);
     }
 
     [Theory]
@@ -110,6 +118,7 @@ public sealed class RawReplayCliTests
             output, errors, provider));
         Assert.Equal(expectedError, errors.ToString().Trim());
         Assert.Equal(0, provider.CaptureCount);
+        Assert.Empty(provider.TerminalOperations);
         Assert.False(File.Exists(fixture.Bundle));
     }
 
@@ -131,6 +140,7 @@ public sealed class RawReplayCliTests
             output, errors, provider));
         Assert.Equal("output_name_invalid", errors.ToString().Trim());
         Assert.Equal(0, provider.CaptureCount);
+        Assert.Empty(provider.TerminalOperations);
         Assert.False(File.Exists(unsafeOutput));
     }
 
@@ -178,6 +188,109 @@ public sealed class RawReplayCliTests
         Assert.False(File.Exists(fixture.Bundle));
     }
 
+    [Theory]
+    [InlineData("snapshot_read_denied")]
+    [InlineData("snapshot_store_busy")]
+    public void Preview_PreAdmissionDeniedAndBusyKeepTheirExactTokens(string expectedError)
+    {
+        using var fixture = new Fixture();
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control()));
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        Assert.Equal(2, RawReplayCli.Run(
+            ["preview", "--database", fixture.Database, "--request", fixture.Request],
+            output,
+            errors,
+            new FailingProvider(expectedError)));
+        Assert.Equal(expectedError, errors.ToString().Trim());
+        var dto = RawReplayJson.DeserializeExact<RawReplayPreview>(System.Text.Encoding.UTF8.GetBytes(output.ToString().Trim()));
+        Assert.Equal(expectedError, dto.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Lost, "snapshot_read_denied")]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Busy, "snapshot_store_busy")]
+    public void Preview_TerminalLossReplacesTheSafeDtoErrorAndExit(
+        int terminalResultValue,
+        string expectedError)
+    {
+        using var fixture = new Fixture();
+        var provider = new Provider(Snapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control()));
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        Assert.Equal(2, RawReplayCli.Run(
+            ["preview", "--database", fixture.Database, "--request", fixture.Request],
+            output,
+            errors,
+            provider));
+
+        var dto = RawReplayJson.DeserializeExact<RawReplayPreview>(System.Text.Encoding.UTF8.GetBytes(output.ToString().Trim()));
+        Assert.False(dto.Success);
+        Assert.Equal(expectedError, dto.ErrorCode);
+        Assert.Equal(expectedError, errors.ToString().Trim());
+        Assert.Equal([RawReplaySnapshotTerminalOperation.CompleteWithoutRaw], provider.TerminalOperations);
+    }
+
+    [Fact]
+    public void Export_OutputExistsCompletesWithoutRawBeforeReturningItsFixedFailure()
+    {
+        using var fixture = new Fixture();
+        var preview = new RawReplayArchiveService().Preview(Snapshot(), Control());
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control() with
+        {
+            PreviewDigest = preview.PreviewDigest,
+            Consent = new(RawReplayContractVersions.BundleProfile, true, RawReplayConsent.RequiredPhrase),
+        }));
+        File.WriteAllBytes(fixture.Bundle, [9]);
+        var provider = new Provider(Snapshot());
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        Assert.Equal(2, RawReplayCli.Run(
+            ["export", "--database", fixture.Database, "--request", fixture.Request, "--output", fixture.Bundle],
+            output,
+            errors,
+            provider));
+
+        Assert.Equal("output_exists", errors.ToString().Trim());
+        Assert.Equal([RawReplaySnapshotTerminalOperation.CompleteWithoutRaw], provider.TerminalOperations);
+        Assert.Equal(new byte[] { 9 }, File.ReadAllBytes(fixture.Bundle));
+    }
+
+    [Theory]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Lost, "snapshot_read_denied")]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Busy, "snapshot_store_busy")]
+    public void Export_NonSealTerminalFailureReplacesThePendingFailure(
+        int terminalResultValue,
+        string expectedError)
+    {
+        using var fixture = new Fixture();
+        var preview = new RawReplayArchiveService().Preview(Snapshot(), Control());
+        File.WriteAllBytes(fixture.Request, RawReplayJson.Serialize(Control() with
+        {
+            PreviewDigest = preview.PreviewDigest,
+            Consent = new(RawReplayContractVersions.BundleProfile, true, RawReplayConsent.RequiredPhrase),
+        }));
+        File.WriteAllBytes(fixture.Bundle, [9]);
+        var provider = new Provider(Snapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
+        using var output = new StringWriter();
+        using var errors = new StringWriter();
+
+        Assert.Equal(2, RawReplayCli.Run(
+            ["export", "--database", fixture.Database, "--request", fixture.Request, "--output", fixture.Bundle],
+            output,
+            errors,
+            provider));
+        Assert.Equal(expectedError, errors.ToString().Trim());
+        using var dto = System.Text.Json.JsonDocument.Parse(output.ToString());
+        Assert.Equal(expectedError, dto.RootElement.GetProperty("error_code").GetString());
+        Assert.Equal([RawReplaySnapshotTerminalOperation.CompleteWithoutRaw], provider.TerminalOperations);
+        Assert.Equal(new byte[] { 9 }, File.ReadAllBytes(fixture.Bundle));
+    }
+
     [Fact]
     public void CliApplication_dispatches_the_real_raw_replay_result_command()
     {
@@ -215,15 +328,28 @@ public sealed class RawReplayCliTests
             new("copilot-cli", "1", "otlp-json", "adapter-v1", "schema-v1", new string('a', 64), "supported", "available", "not_applied_raw_capture", RawReplayContractVersions.CredentialScanner))],
         [], ["session_content_not_requested"]);
 
-    private sealed class Provider(RawReplaySnapshot snapshot) : IRawReplaySnapshotProvider
+    private sealed class Provider(
+        RawReplaySnapshot snapshot,
+        RawReplaySnapshotTerminalResult terminalResult = RawReplaySnapshotTerminalResult.Sealed) : IRawReplaySnapshotProvider
     {
         public int CaptureCount { get; private set; }
         public int ReleaseCount { get; private set; }
+        public List<RawReplaySnapshotTerminalOperation> TerminalOperations { get; } = [];
         public ValueTask<RawReplaySnapshotCapture> CaptureAsync(RawReplaySelection selection, bool includeSessionContent, CancellationToken cancellationToken)
         {
             CaptureCount++;
             return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null,
-                new RawReplaySnapshotLease(snapshot, () => { ReleaseCount++; return ValueTask.CompletedTask; })));
+                new RawReplaySnapshotLease(
+                    snapshot,
+                    () => { ReleaseCount++; return ValueTask.CompletedTask; },
+                    operation =>
+                    {
+                        TerminalOperations.Add(operation);
+                        return operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
+                            && terminalResult == RawReplaySnapshotTerminalResult.Sealed
+                                ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
+                                : terminalResult;
+                    })));
         }
     }
 

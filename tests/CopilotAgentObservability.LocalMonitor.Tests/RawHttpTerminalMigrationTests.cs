@@ -27,7 +27,7 @@ public sealed class RawHttpTerminalMigrationTests
     [Theory]
     [InlineData("MonitorHost.cs", 5)]
     [InlineData("Sessions/SessionRoutes.cs", 2)]
-    [InlineData("RawReplayRoutes.cs", 0)]
+    [InlineData("RawReplayRoutes.cs", 3)]
     [InlineData("Pages/Index.cshtml.cs", 1)]
     [InlineData("Pages/Traces.cshtml.cs", 1)]
     [InlineData("Pages/TraceDetail.cshtml.cs", 1)]
@@ -42,7 +42,8 @@ public sealed class RawHttpTerminalMigrationTests
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
 
         var terminalCalls = Count(source, ".TrySealRawResponse()")
-            + Count(source, ".TryCompleteWithoutRaw()");
+            + Count(source, ".TryCompleteWithoutRaw()")
+            + Count(source, ".TrySealRawReplayTransientPublication(");
 
         Assert.Equal(expectedTerminalCalls, terminalCalls);
     }

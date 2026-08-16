@@ -130,6 +130,8 @@ public sealed record RawReplaySnapshot(
 public sealed class RawReplaySnapshotLease : IAsyncDisposable
 {
     private readonly Func<ValueTask> release;
+    private readonly Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult>? terminal;
+    private readonly bool terminalNotRequired;
     private int released;
 
     public RawReplaySnapshotLease(RawReplaySnapshot snapshot, Func<ValueTask> release)
@@ -138,10 +140,92 @@ public sealed class RawReplaySnapshotLease : IAsyncDisposable
         this.release = release ?? throw new ArgumentNullException(nameof(release));
     }
 
+    internal RawReplaySnapshotLease(
+        RawReplaySnapshot snapshot,
+        Func<ValueTask> release,
+        Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult> terminal)
+        : this(snapshot, release) =>
+        this.terminal = terminal ?? throw new ArgumentNullException(nameof(terminal));
+
+    internal RawReplaySnapshotLease(
+        RawReplaySnapshot snapshot,
+        Func<ValueTask> release,
+        bool terminalNotRequired)
+        : this(snapshot, release) =>
+        this.terminalNotRequired = terminalNotRequired;
+
     public RawReplaySnapshot Snapshot { get; }
+
+    public bool TrySealRawReplayTransientPublication(out string? errorCode) =>
+        TrySeal(RawReplaySnapshotTerminalOperation.SealTransientPublication, out errorCode);
+
+    public bool TrySealRawReplayFilePublication(
+        string stagedPath,
+        string outputPath,
+        out Action? publicationTicket,
+        out string? errorCode)
+    {
+        publicationTicket = null;
+        var staged = Path.GetFullPath(stagedPath);
+        var output = Path.GetFullPath(outputPath);
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (string.Equals(staged, output, comparison)
+            || !string.Equals(Path.GetDirectoryName(staged), Path.GetDirectoryName(output), comparison))
+            throw new ArgumentException("Raw replay staging and output must be distinct files in the same directory.");
+        if (!TrySeal(RawReplaySnapshotTerminalOperation.SealFilePublication, out errorCode)) return false;
+
+        var ticket = new RawReplayFileMoveTicket(staged, output);
+        publicationTicket = ticket.Move;
+        return true;
+    }
+
+    internal RawReplaySnapshotTerminalResult TryCompleteWithoutRaw() =>
+        terminal?.Invoke(RawReplaySnapshotTerminalOperation.CompleteWithoutRaw)
+        ?? (terminalNotRequired
+            ? RawReplaySnapshotTerminalResult.NotRequired
+            : RawReplaySnapshotTerminalResult.Lost);
 
     public ValueTask DisposeAsync() =>
         Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+
+    private bool TrySeal(RawReplaySnapshotTerminalOperation operation, out string? errorCode)
+    {
+        var result = terminal?.Invoke(operation) ?? RawReplaySnapshotTerminalResult.Lost;
+        errorCode = result switch
+        {
+            RawReplaySnapshotTerminalResult.Sealed => null,
+            RawReplaySnapshotTerminalResult.Busy => "snapshot_store_busy",
+            _ => "snapshot_read_denied",
+        };
+        return result == RawReplaySnapshotTerminalResult.Sealed;
+    }
+
+    private sealed class RawReplayFileMoveTicket(string stagedPath, string outputPath)
+    {
+        private int used;
+
+        internal void Move()
+        {
+            if (Interlocked.Exchange(ref used, 1) != 0) return;
+            File.Move(stagedPath, outputPath, overwrite: false);
+        }
+    }
+}
+
+internal enum RawReplaySnapshotTerminalOperation
+{
+    SealTransientPublication,
+    SealFilePublication,
+    CompleteWithoutRaw,
+}
+
+internal enum RawReplaySnapshotTerminalResult
+{
+    Sealed,
+    CompletedWithoutRaw,
+    Lost,
+    Busy,
+    NotRequired,
 }
 
 public sealed record RawReplaySnapshotCapture(bool Success, string? ErrorCode, RawReplaySnapshotLease? Lease)

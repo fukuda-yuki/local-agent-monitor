@@ -17,11 +17,13 @@ internal sealed class RawReplayTransientStore : IDisposable
 {
     private readonly object gate = new();
     private readonly Dictionary<(string Kind, string Key), Entry> entries = [];
+    private readonly Dictionary<(string Kind, string Key), ReservedEntry> reservations = [];
     private readonly TimeProvider timeProvider;
     private readonly RawReplayTransientLimits limits;
     private readonly ITimer sweepTimer;
     private long nextSequence;
     private long totalBytes;
+    private long reservedBytes;
     private bool disposed;
 
     internal RawReplayTransientStore(TimeProvider timeProvider, RawReplayTransientLimits limits)
@@ -58,6 +60,50 @@ internal sealed class RawReplayTransientStore : IDisposable
     }
 
     internal DateTimeOffset ExpirationFromNow() => timeProvider.GetUtcNow().Add(limits.Lifetime);
+
+    internal bool TryReserve(
+        string kind,
+        string key,
+        long byteLength,
+        DateTimeOffset expiresAt,
+        out RawReplayTransientReservation? reservation)
+    {
+        reservation = null;
+        var itemKey = Key(kind, key);
+        var now = timeProvider.GetUtcNow();
+        lock (gate)
+        {
+            if (disposed || byteLength < 0 || byteLength > limits.MaximumBytes
+                || expiresAt <= now || expiresAt > now.Add(limits.Lifetime)
+                || reservations.ContainsKey(itemKey))
+                return false;
+            PurgeExpired(now);
+            entries.TryGetValue(itemKey, out var replaced);
+            var plannedCount = entries.Count - (replaced is null ? 0 : 1);
+            var plannedBytes = totalBytes - (replaced?.Bytes.LongLength ?? 0);
+            var victims = new List<KeyValuePair<(string Kind, string Key), Entry>>();
+            foreach (var candidate in entries
+                         .Where(entry => entry.Key != itemKey)
+                         .OrderBy(entry => entry.Value.Sequence))
+            {
+                if (plannedCount + reservations.Count < limits.MaximumEntries
+                    && plannedBytes + reservedBytes + byteLength <= limits.MaximumBytes)
+                    break;
+                victims.Add(candidate);
+                plannedCount--;
+                plannedBytes -= candidate.Value.Bytes.LongLength;
+            }
+            if (plannedCount + reservations.Count >= limits.MaximumEntries
+                || plannedBytes + reservedBytes + byteLength > limits.MaximumBytes)
+                return false;
+            if (replaced is not null) Remove(itemKey, replaced);
+            foreach (var victim in victims) Remove(victim.Key, victim.Value);
+            reservations.Add(itemKey, new(byteLength, expiresAt));
+            reservedBytes += byteLength;
+            reservation = new RawReplayTransientReservation(this, itemKey, byteLength, expiresAt);
+            return true;
+        }
+    }
 
     internal bool Put(string kind, string key, byte[] bytes, object metadata)
     {
@@ -125,10 +171,45 @@ internal sealed class RawReplayTransientStore : IDisposable
         {
             if (disposed) return;
             disposed = true;
+            while (reservations.Count > 0) Monitor.Wait(gate);
             entries.Clear();
             totalBytes = 0;
         }
         sweepTimer.Dispose();
+    }
+
+    private void CommitReservation(
+        (string Kind, string Key) itemKey,
+        long byteLength,
+        DateTimeOffset expiresAt,
+        byte[] bytes,
+        object metadata)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        ArgumentNullException.ThrowIfNull(metadata);
+        if (bytes.LongLength != byteLength)
+            throw new ArgumentException("The committed transient bytes must match the exact reservation.", nameof(bytes));
+        lock (gate)
+        {
+            if (!reservations.Remove(itemKey, out var reserved)
+                || reserved.ByteLength != byteLength
+                || reserved.ExpiresAt != expiresAt)
+                throw new InvalidOperationException("The transient reservation is no longer active.");
+            reservedBytes -= byteLength;
+            entries.Add(itemKey, new(bytes.ToArray(), metadata, expiresAt, nextSequence++));
+            totalBytes += byteLength;
+            Monitor.PulseAll(gate);
+        }
+    }
+
+    private void CancelReservation((string Kind, string Key) itemKey, long byteLength)
+    {
+        lock (gate)
+        {
+            if (!reservations.Remove(itemKey)) return;
+            reservedBytes -= byteLength;
+            Monitor.PulseAll(gate);
+        }
     }
 
     private bool Put(
@@ -147,6 +228,7 @@ internal sealed class RawReplayTransientStore : IDisposable
             if (disposed) return false;
             PurgeExpired(now);
             if (bytes.LongLength > limits.MaximumBytes || expiresAt <= now || expiresAt > now.Add(limits.Lifetime)) return false;
+            if (reservations.ContainsKey(itemKey)) return false;
 
             if (entries.Remove(itemKey, out var replaced)) totalBytes -= replaced.Bytes.LongLength;
             var entry = new Entry(bytes.ToArray(), metadata, expiresAt, nextSequence++);
@@ -172,7 +254,8 @@ internal sealed class RawReplayTransientStore : IDisposable
 
     private void EvictOldestUntilBounded()
     {
-        while (entries.Count > limits.MaximumEntries || totalBytes > limits.MaximumBytes)
+        while (entries.Count + reservations.Count > limits.MaximumEntries
+               || totalBytes + reservedBytes > limits.MaximumBytes)
         {
             var oldest = entries.MinBy(static item => item.Value.Sequence);
             Remove(oldest.Key, oldest.Value);
@@ -211,4 +294,26 @@ internal sealed class RawReplayTransientStore : IDisposable
     }
 
     private sealed record Entry(byte[] Bytes, object Metadata, DateTimeOffset ExpiresAt, long Sequence);
+    private sealed record ReservedEntry(long ByteLength, DateTimeOffset ExpiresAt);
+
+    internal sealed class RawReplayTransientReservation(
+        RawReplayTransientStore store,
+        (string Kind, string Key) itemKey,
+        long byteLength,
+        DateTimeOffset expiresAt) : IDisposable
+    {
+        private int completed;
+
+        internal void Commit(byte[] bytes, object metadata)
+        {
+            if (Interlocked.Exchange(ref completed, 1) != 0) return;
+            store.CommitReservation(itemKey, byteLength, expiresAt, bytes, metadata);
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref completed, 1) == 0)
+                store.CancelReservation(itemKey, byteLength);
+        }
+    }
 }

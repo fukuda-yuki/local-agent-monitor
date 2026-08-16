@@ -88,7 +88,10 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 cancellationToken).ConfigureAwait(false);
 
             if (result.Disposition == RetentionReadDisposition.Empty && result.EmptyValue is { } emptyValue)
-                return new(true, null, new RawReplaySnapshotLease(emptyValue, static () => ValueTask.CompletedTask));
+                return new(true, null, new RawReplaySnapshotLease(
+                    emptyValue,
+                    static () => ValueTask.CompletedTask,
+                    terminalNotRequired: true));
 
             if (result.Lease is null)
                 return Failure(result.Disposition switch
@@ -98,7 +101,10 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 });
 
             var lease = result.Lease;
-            return new(true, null, new RawReplaySnapshotLease(lease.Value, lease.DisposeAsync));
+            return new(true, null, new RawReplaySnapshotLease(
+                lease.Value,
+                lease.DisposeAsync,
+                operation => MapTerminal(lease, operation)));
         }
         catch (SelectionLimitException)
         {
@@ -121,6 +127,27 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         {
             return Failure("snapshot_store_unavailable");
         }
+    }
+
+    private static RawReplaySnapshotTerminalResult MapTerminal(
+        RetentionBatchReadLease<RawReplaySnapshot> lease,
+        RawReplaySnapshotTerminalOperation operation)
+    {
+        var result = operation switch
+        {
+            RawReplaySnapshotTerminalOperation.SealTransientPublication =>
+                lease.TrySealRawReplayTransientPublication(),
+            RawReplaySnapshotTerminalOperation.SealFilePublication =>
+                lease.TrySealRawReplayFilePublication(),
+            _ => lease.TryCompleteWithoutRaw(),
+        };
+        return result switch
+        {
+            RetentionRawTerminalResult.Sealed => RawReplaySnapshotTerminalResult.Sealed,
+            RetentionRawTerminalResult.CompletedWithoutRaw => RawReplaySnapshotTerminalResult.CompletedWithoutRaw,
+            RetentionRawTerminalResult.Busy => RawReplaySnapshotTerminalResult.Busy,
+            _ => RawReplaySnapshotTerminalResult.Lost,
+        };
     }
 
     private IReadOnlyList<Candidate> SelectCandidates(

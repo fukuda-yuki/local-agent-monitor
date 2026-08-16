@@ -401,6 +401,10 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
     }
     internal RetentionRawTerminalResult TrySealRawResponse() =>
         committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TrySealRawReplayTransientPublication() =>
+        committedHandle?.TrySealRawReplayTransientPublication() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TrySealRawReplayFilePublication() =>
+        committedHandle?.TrySealRawReplayFilePublication() ?? RetentionRawTerminalResult.Lost;
     internal RetentionRawTerminalResult TryCompleteWithoutRaw() =>
         committedHandle?.TryCompleteWithoutRaw() ?? RetentionRawTerminalResult.Lost;
 
@@ -477,6 +481,10 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
     }
     internal RetentionRawTerminalResult TrySealRawResponse() =>
         committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TrySealRawReplayTransientPublication() =>
+        committedHandle?.TrySealRawReplayTransientPublication() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TrySealRawReplayFilePublication() =>
+        committedHandle?.TrySealRawReplayFilePublication() ?? RetentionRawTerminalResult.Lost;
     internal RetentionRawTerminalResult TryCompleteWithoutRaw() =>
         committedHandle?.TryCompleteWithoutRaw() ?? RetentionRawTerminalResult.Lost;
     public ValueTask DisposeAsync()

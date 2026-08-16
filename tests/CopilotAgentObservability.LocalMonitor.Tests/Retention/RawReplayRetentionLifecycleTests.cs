@@ -105,6 +105,20 @@ public sealed class RawReplayRetentionLifecycleTests
     }
 
     [Fact]
+    public async Task Retained_replay_safe_result_requires_same_handle_completion()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var retained = await fixture.Store.ReadAsync(Fixture.ReplayId, CancellationToken.None);
+        await using var lease = Assert.IsType<RetainedRawReplayLease>(retained.Lease);
+
+        Assert.Equal(RetentionRawTerminalResult.CompletedWithoutRaw, lease.TryCompleteWithoutRaw());
+        Assert.Equal(0L, fixture.Scalar<long>(
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation';",
+            ("$item", fixture.ItemId)));
+        Assert.Equal(RetentionRawTerminalResult.Lost, lease.TryCompleteWithoutRaw());
+    }
+
+    [Fact]
     public async Task Partial_member_unlink_recovers_forward_after_restart_without_recreating_the_member()
     {
         using var fixture = await Fixture.CreateAsync();

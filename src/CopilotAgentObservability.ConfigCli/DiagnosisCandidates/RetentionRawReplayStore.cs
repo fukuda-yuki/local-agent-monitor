@@ -15,9 +15,15 @@ internal sealed record RetainedRawReplayReadResult(RetainedRawReplayReadDisposit
 internal sealed class RetainedRawReplayLease : IAsyncDisposable
 {
     private readonly Func<ValueTask> release;
+    private readonly Func<RetentionRawTerminalResult> completeWithoutRaw;
     private int released;
-    internal RetainedRawReplayLease(RawReplayReceipt receipt, Func<ValueTask> release) => (Receipt, this.release) = (receipt, release);
+    internal RetainedRawReplayLease(
+        RawReplayReceipt receipt,
+        Func<ValueTask> release,
+        Func<RetentionRawTerminalResult> completeWithoutRaw) =>
+        (Receipt, this.release, this.completeWithoutRaw) = (receipt, release, completeWithoutRaw);
     internal RawReplayReceipt Receipt { get; }
+    internal RetentionRawTerminalResult TryCompleteWithoutRaw() => completeWithoutRaw();
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }
 
@@ -43,7 +49,8 @@ internal sealed class RetentionRawReplayStore
         if (existing.Lease is not null)
         {
             await using var lease = existing.Lease;
-            return engine.Replay(replayId, archive, existing: lease.Receipt);
+            var result = engine.Replay(replayId, archive, existing: lease.Receipt);
+            return CompleteRetainedResult(lease, result);
         }
 
         var execution = engine.Replay(replayId, archive);
@@ -62,9 +69,20 @@ internal sealed class RetentionRawReplayStore
             var raced = await ReadAsync(replayId, cancellationToken).ConfigureAwait(false);
             if (raced.Lease is null) return Failure("replay_publish_failed");
             await using var lease = raced.Lease;
-            return engine.Replay(replayId, archive, existing: lease.Receipt);
+            var result = engine.Replay(replayId, archive, existing: lease.Receipt);
+            return CompleteRetainedResult(lease, result);
         }
     }
+
+    private static RawReplayExecutionResult CompleteRetainedResult(
+        RetainedRawReplayLease lease,
+        RawReplayExecutionResult result) =>
+        lease.TryCompleteWithoutRaw() switch
+        {
+            RetentionRawTerminalResult.CompletedWithoutRaw => result,
+            RetentionRawTerminalResult.Busy => Failure("replay_terminal_busy"),
+            _ => Failure("replay_terminal_lost"),
+        };
 
     internal async ValueTask<RetainedRawReplayReadResult> ReadAsync(string replayId, CancellationToken cancellationToken)
     {
@@ -110,7 +128,10 @@ internal sealed class RetentionRawReplayStore
             return new(RetainedRawReplayReadDisposition.Busy, null);
         }
         var lease = result.Lease;
-        return new(RetainedRawReplayReadDisposition.Granted, new(lease.Value.Receipt!, lease.DisposeAsync));
+        return new(RetainedRawReplayReadDisposition.Granted, new(
+            lease.Value.Receipt!,
+            lease.DisposeAsync,
+            lease.TryCompleteWithoutRaw));
     }
 
     private static bool RetainedItemExists(
