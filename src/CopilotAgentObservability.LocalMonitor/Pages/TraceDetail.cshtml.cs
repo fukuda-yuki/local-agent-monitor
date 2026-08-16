@@ -94,16 +94,7 @@ public sealed class TraceDetailModel : PageModel
                             .Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId))
                             .FirstOrDefault(prompt => prompt is not null);
                     }
-                    if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
-                    {
-                        rawRecords = Array.Empty<RawRecordPreview>();
-                        promptLabel = null;
-                        await lease.DisposeAsync();
-                        await leases.DisposeAsync();
-                        RawResponsePublication.Abort(HttpContext);
-                        return new EmptyResult();
-                    }
-                    leases.Add(lease);
+                    leases.Add(lease, lease.TrySealRawResponse);
                 }
             }
 
@@ -135,8 +126,8 @@ public sealed class TraceDetailModel : PageModel
         RawRecords = RawAvailable ? rawRecords : Array.Empty<RawRecordPreview>();
         PromptLabel = RawAvailable ? promptLabel : null;
 
-        Response.Headers["Cache-Control"] = "no-store";
-        leases.TransferTo(Response);
+        if (leases.HasLeases) leases.Attach(HttpContext);
+        else Response.Headers["Cache-Control"] = "no-store";
         return Page();
     }
 

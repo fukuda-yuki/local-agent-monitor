@@ -64,13 +64,7 @@ public sealed class IndexModel : PageModel
                 MonitorOverviewService.FormatUtc(range.End),
                 TopTraceLimit);
             RecentTraces = store.ListRecentMonitorTraces(RecentTraceLimit);
-            if (RawAvailable && !await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted))
-            {
-                promptByTraceId.Clear();
-                await leases.DisposeAsync();
-                RawResponsePublication.Abort(HttpContext);
-                return new EmptyResult();
-            }
+            if (RawAvailable) await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted);
         }
         catch (PersistenceBusyException)
         {
@@ -81,8 +75,8 @@ public sealed class IndexModel : PageModel
 
         if (RawAvailable)
         {
-            Response.Headers["Cache-Control"] = "no-store";
-            leases.TransferTo(Response);
+            if (leases.HasLeases) leases.Attach(HttpContext);
+            else Response.Headers["Cache-Control"] = "no-store";
         }
 
         return Page();
@@ -92,7 +86,7 @@ public sealed class IndexModel : PageModel
     internal string? PromptFor(string? traceId) =>
         traceId is not null && promptByTraceId.TryGetValue(traceId, out var prompt) ? prompt : null;
 
-    private async Task<bool> PopulatePromptsAsync(
+    private async Task PopulatePromptsAsync(
         IMonitorProjectionStore store,
         RawRazorPageLeaseTracker leases,
         CancellationToken cancellationToken)
@@ -114,15 +108,8 @@ public sealed class IndexModel : PageModel
                 promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
                     reference.Value.Select(record => record.PayloadJson), traceId);
             }
-            if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
-            {
-                promptByTraceId.Remove(traceId);
-                await lease.DisposeAsync();
-                return false;
-            }
-            leases.Add(lease);
+            leases.Add(lease, lease.TrySealRawResponse);
         }
-        return true;
     }
 
     private static ContentResult CrossOriginForbidden() => new()

@@ -123,13 +123,7 @@ public sealed class TracesModel : PageModel
 
             if (RawAvailable)
             {
-                if (!await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted))
-                {
-                    promptByTraceId.Clear();
-                    await leases.DisposeAsync();
-                    RawResponsePublication.Abort(HttpContext);
-                    return new EmptyResult();
-                }
+                await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted);
             }
         }
         catch (PersistenceBusyException)
@@ -141,8 +135,8 @@ public sealed class TracesModel : PageModel
 
         if (RawAvailable)
         {
-            Response.Headers["Cache-Control"] = "no-store";
-            leases.TransferTo(Response);
+            if (leases.HasLeases) leases.Attach(HttpContext);
+            else Response.Headers["Cache-Control"] = "no-store";
         }
         return Page();
     }
@@ -151,7 +145,7 @@ public sealed class TracesModel : PageModel
     internal string? PromptFor(string? traceId) =>
         traceId is not null && promptByTraceId.TryGetValue(traceId, out var prompt) ? prompt : null;
 
-    private async Task<bool> PopulatePromptsAsync(
+    private async Task PopulatePromptsAsync(
         IMonitorProjectionStore store,
         RawRazorPageLeaseTracker leases,
         CancellationToken cancellationToken)
@@ -172,15 +166,8 @@ public sealed class TracesModel : PageModel
                 promptByTraceId[row.TraceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
                     reference.Value.Select(record => record.PayloadJson), row.TraceId);
             }
-            if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
-            {
-                promptByTraceId.Remove(row.TraceId);
-                await lease.DisposeAsync();
-                return false;
-            }
-            leases.Add(lease);
+            leases.Add(lease, lease.TrySealRawResponse);
         }
-        return true;
     }
 
     private static ContentResult CrossOriginForbidden() => new()

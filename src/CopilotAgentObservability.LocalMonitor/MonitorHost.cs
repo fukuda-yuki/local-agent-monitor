@@ -160,7 +160,8 @@ internal static class MonitorHost
         var eventBroker = new MonitorEventBroker();
         if (!options.SanitizedOnly)
         {
-            builder.Services.AddRazorPages();
+            builder.Services.AddRazorPages()
+                .AddMvcOptions(mvc => mvc.Filters.Add<RawRazorPageBufferingFilter>());
         }
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<IPricingCatalogProvider>(pricingCatalogProvider);
