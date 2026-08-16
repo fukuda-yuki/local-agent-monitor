@@ -26,20 +26,7 @@ internal static partial class RawEvidenceReader
         var matches = new Dictionary<string, MutableRawTraceEvidence>(StringComparer.Ordinal);
 
         if (IsRawStorePath(rawInputPath))
-        {
-            RawStoreLeaseReader.ReadAll(rawInputPath, records =>
-            {
-                foreach (var record in records)
-                {
-                    using var document = JsonDocument.Parse(record.PayloadJson);
-                    AddRawOtlpEvidence(document.RootElement, rawInputPath, $"db-record={record.Id?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}", matches);
-                }
-
-                return 0;
-            });
-
-            sourceInputs.Add(new SensitiveBundleSourceInput(rawInputPath, ComputeSha256(rawInputPath), "raw-store"));
-        }
+            return RawStoreLeaseReader.ReadEvidence(rawInputPath);
         else
         {
             using var document = JsonDocument.Parse(File.ReadAllText(rawInputPath, Encoding.UTF8));
@@ -53,6 +40,28 @@ internal static partial class RawEvidenceReader
                 pair => new RawTraceEvidence(pair.Value.ErrorMatch, pair.Value.SensitiveMatch),
                 StringComparer.Ordinal),
             sourceInputs);
+    }
+
+    internal static RawEvidenceIndex MapRawStoreRecords(
+        string rawInputPath,
+        IReadOnlyList<RawTelemetryRecord> records)
+    {
+        var matches = new Dictionary<string, MutableRawTraceEvidence>(StringComparer.Ordinal);
+        foreach (var record in records)
+        {
+            using var document = JsonDocument.Parse(record.PayloadJson);
+            AddRawOtlpEvidence(
+                document.RootElement,
+                rawInputPath,
+                $"db-record={record.Id?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}",
+                matches);
+        }
+        return new RawEvidenceIndex(
+            matches.ToDictionary(
+                pair => pair.Key,
+                pair => new RawTraceEvidence(pair.Value.ErrorMatch, pair.Value.SensitiveMatch),
+                StringComparer.Ordinal),
+            [new SensitiveBundleSourceInput(rawInputPath, ComputeSha256(rawInputPath), "raw-store")]);
     }
 
     private static void AddRawOtlpEvidence(JsonElement root, string sourcePath, string? recordRef, Dictionary<string, MutableRawTraceEvidence> matches)

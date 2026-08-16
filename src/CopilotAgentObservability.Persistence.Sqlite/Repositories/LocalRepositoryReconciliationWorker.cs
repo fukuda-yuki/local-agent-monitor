@@ -12,13 +12,15 @@ internal sealed class LocalRepositoryReconciliationWorker
     private readonly ILocalRepositoryRawRecordProcessor processor;
     private readonly TimeProvider timeProvider;
     private readonly ILocalRepositoryReconciliationCheckpoint? checkpoint;
+    private readonly Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting;
 
     internal LocalRepositoryReconciliationWorker(
         SqliteLocalRepositoryReconciliationStore queue,
         LocalRepositoryRawAvailabilityReader rawAvailability,
         ILocalRepositoryRawRecordProcessor processor,
         TimeProvider? timeProvider = null,
-        ILocalRepositoryReconciliationCheckpoint? checkpoint = null)
+        ILocalRepositoryReconciliationCheckpoint? checkpoint = null,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
     {
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
         this.rawAvailability = rawAvailability ?? throw new ArgumentNullException(nameof(rawAvailability));
@@ -26,6 +28,7 @@ internal sealed class LocalRepositoryReconciliationWorker
         this.processor = processor ?? throw new ArgumentNullException(nameof(processor));
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.checkpoint = checkpoint;
+        this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
     }
 
     internal async ValueTask<LocalRepositoryReconciliationWorkOutcome> RunOnceAsync(CancellationToken cancellationToken)
@@ -73,6 +76,7 @@ internal sealed class LocalRepositoryReconciliationWorker
             try
             {
                 using var rawReference = raw.Lease.AcquireValueReference();
+                lastRawAccessObserverForTesting?.Invoke(() => rawReference.Value);
                 prepared = await processor.PrepareAsync(
                     lease,
                     rawReference.Value,

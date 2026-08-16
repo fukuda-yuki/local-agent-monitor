@@ -1054,10 +1054,21 @@ public sealed class LocalRepositoryReconciliationQueueTests
         InsertSpan(connection, firstRaw, 0, "11111111111111111111111111111111");
         InsertSpan(connection, secondRaw, 0, "22222222222222222222222222222222");
         InsertSpan(connection, firstRaw, 1, "11111111111111111111111111111111");
-        var queue = new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, temp.TimeProvider);
+        var observedPayloads = new List<string>();
+        var retainedAccesses = new List<Func<RawTelemetryRecord>>();
+        var queue = new SqliteLocalRepositoryReconciliationStore(
+            temp.DatabasePath,
+            temp.TimeProvider,
+            lastRawAccessObserverForTesting: access =>
+            {
+                retainedAccesses.Add(access);
+                observedPayloads.Add(access().PayloadJson);
+            });
         var reader = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
 
         Assert.Equal(LocalRepositoryQueueTransitionResult.Applied, await queue.DiscoverAsync(reader, CancellationToken.None));
+        Assert.Equal(["{\"resourceSpans\":[]}", "{\"resourceSpans\":[]}"], observedPayloads);
+        Assert.All(retainedAccesses, access => Assert.Throws<ObjectDisposedException>(() => access()));
         Assert.Equal(new[] { firstRaw, secondRaw }, QueryLongs(connection, "SELECT raw_record_id FROM local_repository_reconciliation_queue ORDER BY raw_record_id;"));
         const string payload = "{\"resourceSpans\":[]}";
         var digest = SkillProjectionHashing.InputDigest(payload);

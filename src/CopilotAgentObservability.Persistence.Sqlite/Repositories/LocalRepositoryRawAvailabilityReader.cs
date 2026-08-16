@@ -79,11 +79,16 @@ internal sealed class LocalRepositoryRawAvailabilityReader
 {
     private readonly RawTelemetryStore rawStore;
     private readonly RetentionCatalogContext retentionContext;
+    private readonly Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting;
 
-    internal LocalRepositoryRawAvailabilityReader(RawTelemetryStore rawStore, RetentionCatalogContext retentionContext)
+    internal LocalRepositoryRawAvailabilityReader(
+        RawTelemetryStore rawStore,
+        RetentionCatalogContext retentionContext,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
     {
         this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
         this.retentionContext = retentionContext ?? throw new ArgumentNullException(nameof(retentionContext));
+        this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
         Binding = LocalRepositoryStoreBinding.Create(rawStore.DatabasePath, retentionContext);
     }
 
@@ -139,6 +144,7 @@ internal sealed class LocalRepositoryRawAvailabilityReader
         string digest;
         using (var reference = read.Lease.AcquireValueReference())
         {
+            lastRawAccessObserverForTesting?.Invoke(() => reference.Value);
             digest = SkillProjectionHashing.InputDigest(reference.Value.PayloadJson);
         }
         if (expectedPayloadSha256 is not null && !string.Equals(expectedPayloadSha256, digest, StringComparison.Ordinal))

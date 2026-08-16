@@ -6,7 +6,7 @@ internal static class RawNormalizationInputReader
     {
         if (IsRawStorePath(inputPath))
         {
-            return RawStoreLeaseReader.ReadAll(inputPath, RawMeasurementNormalizer.Normalize);
+            return RawStoreLeaseReader.ReadMeasurements(inputPath);
         }
 
         var payloadJson = File.ReadAllText(inputPath, Encoding.UTF8);

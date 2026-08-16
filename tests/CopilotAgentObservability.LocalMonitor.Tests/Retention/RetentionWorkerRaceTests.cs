@@ -8,6 +8,38 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
+    public async Task AlreadyCancelledTerminalClaimObservesCancellationOnlyAfterWinningCas()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        RetentionCommittedReadHandle? handle = null;
+        var observedStates = new List<RetentionRawTerminalState>();
+        var terminalCalls = 0;
+        handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ => true,
+            terminalCancellationObserverForTesting: () => observedStates.Add(handle!.TerminalState),
+            terminalAuthority: (_, _) =>
+            {
+                Interlocked.Increment(ref terminalCalls);
+                return RetentionRawTerminalResult.Sealed;
+            });
+        handle.AttachTerminalCancellation(cancellation.Token);
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+
+        Assert.Equal(RetentionRawTerminalResult.Lost, handle.TrySealRawResponse());
+        Assert.Equal(RetentionRawTerminalResult.Lost, handle.TryCompleteWithoutRaw());
+
+        Assert.Equal([RetentionRawTerminalState.TerminalAttemptInProgress], observedStates);
+        Assert.Equal(0, Volatile.Read(ref terminalCalls));
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
     public async Task OldExpiryGeneration_AfterRenewalIsStaleWhilePublicationScopeIsContended()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);

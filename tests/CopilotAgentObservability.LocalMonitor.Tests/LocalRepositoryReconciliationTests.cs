@@ -52,6 +52,33 @@ public sealed class LocalRepositoryReconciliationTests
     }
 
     [Fact]
+    public async Task Worker_HoldsItsRawReferenceThroughPreparationAndDisposesItBeforeReturning()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture();
+        var payload = LocalRepositoryAdmissionFixture.SpanPayload(
+            new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/ReferenceLifetime"));
+        var prepared = fixture.Prepare(payload, [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+        Func<RawTelemetryRecord>? retainedAccess = null;
+        var observedPayload = string.Empty;
+
+        var outcome = await fixture.RunPreparedAsync(
+            prepared,
+            lastRawAccessObserverForTesting: access =>
+            {
+                retainedAccess = access;
+                observedPayload = access().PayloadJson;
+            });
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal(payload, observedPayload);
+        Assert.Throws<ObjectDisposedException>(() => retainedAccess!());
+        Assert.True(fixture.DomainRowCount() > 0);
+    }
+
+    [Fact]
     public async Task MalformedPayloadIsParseFailureWithNoDomainRows()
     {
         using var fixture = new LocalRepositoryAdmissionFixture();

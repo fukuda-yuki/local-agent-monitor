@@ -21,6 +21,8 @@ public sealed class SkillProjectionWorkerTests
         var releaseProjection = NewSignal();
         var time = new MutableTimeProvider(ClaimedAt);
         CapturedFrontier? capturedFrontier = null;
+        Func<IReadOnlyList<RawTelemetryRecord>>? retainedAccess = null;
+        var observedRecordCount = 0;
         var publishBoundaryReached = 0;
         var worker = new SkillProjectionWorker(
             store,
@@ -36,7 +38,12 @@ public sealed class SkillProjectionWorkerTests
                     database.Path,
                     retained,
                     ClaimedAt.AddSeconds(20)),
-                frontier => capturedFrontier = frontier));
+                frontier => capturedFrontier = frontier),
+            lastRawAccessObserverForTesting: access =>
+            {
+                retainedAccess = access;
+                observedRecordCount = access().Count;
+            });
 
         var work = worker.RunNextAsync(ClaimedAt);
         var projectionCancelled = false;
@@ -63,6 +70,8 @@ public sealed class SkillProjectionWorkerTests
         var frontier = Assert.IsType<CapturedFrontier>(capturedFrontier);
 
         Assert.True(projectionCancelled);
+        Assert.Equal(2, observedRecordCount);
+        Assert.Throws<ObjectDisposedException>(() => retainedAccess!());
         Assert.Equal(SkillProjectionWorkOutcome.Retrying, outcome);
         Assert.False(frontier.Records.SecondRecordRead);
         Assert.Equal(0, Volatile.Read(ref publishBoundaryReached));

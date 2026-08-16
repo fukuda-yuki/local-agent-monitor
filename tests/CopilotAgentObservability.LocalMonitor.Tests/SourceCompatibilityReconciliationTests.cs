@@ -286,7 +286,15 @@ public sealed class SourceCompatibilityReconciliationTests
                 sourceApplicationVersion: null,
                 VersionPayload("1.0.74")));
 
-        var result = CreateReconciler(database.Path).Reconcile(
+        Func<RawTelemetryRecord>? retainedAccess = null;
+        var observedPayload = string.Empty;
+        var result = CreateReconciler(
+            database.Path,
+            lastRawAccessObserverForTesting: access =>
+            {
+                retainedAccess = access;
+                observedPayload = access().PayloadJson;
+            }).Reconcile(
             Request(
                 "decoder-operation-1",
                 committed.ObservationId,
@@ -295,6 +303,8 @@ public sealed class SourceCompatibilityReconciliationTests
                 "registry-1"));
 
         Assert.Equal(SourceCompatibilityReconciliationOutcome.Changed, result.Outcome);
+        Assert.Contains("1.0.74", observedPayload, StringComparison.Ordinal);
+        Assert.Throws<ObjectDisposedException>(() => retainedAccess!());
         Assert.Equal(1, result.InterpretationRevision);
         Assert.Equal(
             new TraceSourceVersionResolutionRow(
@@ -1275,7 +1285,8 @@ public sealed class SourceCompatibilityReconciliationTests
 
     private static SourceCompatibilityReconciler CreateReconciler(
         string databasePath,
-        Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null) =>
+        Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null) =>
         new(
             databasePath,
             SourceCompatibilityReconciliationAuthority.Create(
@@ -1290,7 +1301,8 @@ public sealed class SourceCompatibilityReconciliationTests
                     Registry("1.0.80")),
             ]),
             new MutableTimeProvider(ObservedAt.AddMinutes(1)),
-            checkpoint);
+            checkpoint,
+            lastRawAccessObserverForTesting);
 
     private static VerifiedSourceFingerprintRegistry Registry(string version) =>
         VerifiedSourceFingerprintRegistry.Create(

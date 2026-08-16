@@ -24,7 +24,16 @@ public sealed class LocalRepositoryRawAvailabilityTests
         rawStore.CreateMonitorSchema();
         const string payload = "{\"resourceSpans\":[]}";
         var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
-        var reader = new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext);
+        Func<RawTelemetryRecord>? retainedAccess = null;
+        var observedPayload = string.Empty;
+        var reader = new LocalRepositoryRawAvailabilityReader(
+            rawStore,
+            temp.RetentionContext,
+            access =>
+            {
+                retainedAccess = access;
+                observedPayload = access().PayloadJson;
+            });
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
 
         await using (var available = await reader.ReadAsync(rawId, digest, RetentionReadKind.Access, CancellationToken.None))
@@ -33,6 +42,8 @@ public sealed class LocalRepositoryRawAvailabilityTests
             Assert.Equal(LocalRepositoryRawAvailability.Available, available.Availability);
             Assert.NotNull(available.Lease);
         }
+        Assert.Equal(payload, observedPayload);
+        Assert.Throws<ObjectDisposedException>(() => retainedAccess!());
         await using var mismatch = await reader.ReadAsync(rawId, new string('a', 64), RetentionReadKind.Access, CancellationToken.None);
         Assert.Equal(LocalRepositoryRawAvailabilityStatus.PayloadDigestMismatch, mismatch.Status);
         Assert.Null(mismatch.Availability);

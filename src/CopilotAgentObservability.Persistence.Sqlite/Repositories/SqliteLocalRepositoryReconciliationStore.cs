@@ -58,12 +58,14 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
     private readonly TimeProvider timeProvider;
     private readonly Func<string> leaseTokenFactory;
     private readonly ILocalRepositoryReconciliationCheckpoint? checkpoint;
+    private readonly Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting;
 
     internal SqliteLocalRepositoryReconciliationStore(
         string databasePath,
         TimeProvider? timeProvider = null,
         Func<string>? leaseTokenFactory = null,
-        ILocalRepositoryReconciliationCheckpoint? checkpoint = null)
+        ILocalRepositoryReconciliationCheckpoint? checkpoint = null,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         binding = LocalRepositoryStoreBinding.Create(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath));
@@ -71,6 +73,7 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.leaseTokenFactory = leaseTokenFactory ?? (() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)));
         this.checkpoint = checkpoint;
+        this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
     }
 
     internal bool IsBoundTo(LocalRepositoryRawAvailabilityReader rawAvailability) =>
@@ -162,6 +165,11 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                 prepared.Add((rawRecordId, read));
             }
             cancellationToken.ThrowIfCancellationRequested();
+            foreach (var input in prepared.Where(static input => input.Result.Lease is not null))
+            {
+                using var rawReference = input.Result.Lease!.AcquireValueReference();
+                lastRawAccessObserverForTesting?.Invoke(() => rawReference.Value);
+            }
             checkpoint?.Reached(LocalRepositoryReconciliationCheckpoint.BeforeDiscoveryPublication);
             cancellationToken.ThrowIfCancellationRequested();
             using var connection = Open();

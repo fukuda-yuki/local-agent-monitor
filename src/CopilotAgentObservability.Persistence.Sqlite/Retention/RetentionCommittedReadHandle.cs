@@ -12,6 +12,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private readonly RetentionGrantPublicationMember[] publicationMembers;
     private readonly RetentionMandatoryLeaseCleanup cleanup;
     private readonly Func<RetentionCommittedReadHandle, RetentionRawTerminalOperation, RetentionRawTerminalResult>? terminalAuthority;
+    private readonly Action? terminalCancellationObserverForTesting;
     private readonly object cancellationGate = new();
     private RetentionExpiryNotification currentNotification;
     private IRetentionReadValueOwner? valueOwner;
@@ -27,7 +28,8 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         TimeProvider timeProvider,
         Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
         Action? beforeWaitingForReleaseForTesting = null,
-        Func<RetentionCommittedReadHandle, RetentionRawTerminalOperation, RetentionRawTerminalResult>? terminalAuthority = null)
+        Func<RetentionCommittedReadHandle, RetentionRawTerminalOperation, RetentionRawTerminalResult>? terminalAuthority = null,
+        Action? terminalCancellationObserverForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -41,6 +43,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         Grants = Array.AsReadOnly(snapshot);
         this.timeProvider = timeProvider;
         this.terminalAuthority = terminalAuthority;
+        this.terminalCancellationObserverForTesting = terminalCancellationObserverForTesting;
         RetentionExpiryNotification? preparedExpiry = null;
         try
         {
@@ -91,6 +94,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         {
             if (terminalCancellationObserved || terminalCancellationDisposed) return;
             terminalCancellationObserved = true;
+            terminalCancellationObserverForTesting?.Invoke();
             terminalCancellationRegistration = terminalCancellationToken.UnsafeRegister(
                 static state => ((RetentionCommittedReadHandle)state!).LoseAsynchronously(),
                 this);
@@ -109,7 +113,6 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     private RetentionRawTerminalResult TryTerminal(RetentionRawTerminalOperation operation)
     {
-        ObserveTerminalCancellation();
         if (Interlocked.CompareExchange(
                 ref terminalState,
                 (int)RetentionRawTerminalState.TerminalAttemptInProgress,
@@ -117,6 +120,8 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
             return TerminalState == RetentionRawTerminalState.Failed
                 ? RetentionRawTerminalResult.Busy
                 : RetentionRawTerminalResult.Lost;
+
+        ObserveTerminalCancellation();
 
         if (!TryCloseValueOwner())
         {

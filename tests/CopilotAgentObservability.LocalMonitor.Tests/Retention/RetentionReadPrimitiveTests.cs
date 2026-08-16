@@ -1182,6 +1182,60 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public void RetentionGrantPublicationSet_ThrowingReleaseObserverReleasesEveryScopeInExactReverseOrder()
+    {
+        var first = CreateGrant("item-a", "1", 1);
+        var second = CreateGrant("item-b", "2", 2);
+        var third = CreateGrant("item-c", "3", 3);
+        var releasedOrdinals = new List<long>();
+        var publications = RetentionGrantPublicationSet.EnterInOrder(
+            [new(first, 10), new(second, 20), new(third, 30)],
+            acquisitionObserverForTesting: null,
+            ordinal =>
+            {
+                releasedOrdinals.Add(ordinal);
+                throw new InvalidOperationException($"release-{ordinal}");
+            });
+
+        var exception = Assert.Throws<AggregateException>(publications.Dispose);
+
+        Assert.Equal([30, 20, 10], releasedOrdinals);
+        Assert.Equal(3, exception.InnerExceptions.Count);
+        AssertPublicationLocksEnterableFromAnotherThread(first, second, third);
+    }
+
+    [Fact]
+    public async Task RetentionGrantPublicationSet_BlockingAcquisitionObserverHoldsNoPublicationLock()
+    {
+        var first = CreateGrant("item-a", "1", 1);
+        var second = CreateGrant("item-b", "2", 2);
+        using var observerEntered = new ManualResetEventSlim();
+        using var allowObserver = new ManualResetEventSlim();
+        var acquisition = Task.Run(() =>
+        {
+            using var publications = RetentionGrantPublicationSet.EnterInOrder(
+                [new(first, 10), new(second, 20)],
+                _ =>
+                {
+                    observerEntered.Set();
+                    Assert.True(allowObserver.Wait(TimeSpan.FromSeconds(5)));
+                },
+                releaseObserverForTesting: null);
+        });
+        try
+        {
+            Assert.True(observerEntered.Wait(TimeSpan.FromSeconds(5)));
+            AssertPublicationLocksEnterableFromAnotherThread(first, second);
+        }
+        finally
+        {
+            allowObserver.Set();
+        }
+
+        await acquisition.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void RetentionGrantPublicationSet_PersistedAndGenericFrontiersShareLockOrderAndKeepSemanticOrder()
     {
         var first = CreateGrant("item-a", "1", 1, leaseExpiresAt: new DateTimeOffset(2026, 8, 1, 0, 1, 0, TimeSpan.Zero));

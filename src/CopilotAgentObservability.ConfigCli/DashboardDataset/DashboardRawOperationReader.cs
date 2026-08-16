@@ -26,13 +26,15 @@ internal static class DashboardRawOperationReader
     {
         if (IsRawStorePath(inputPath))
         {
-            return RawStoreLeaseReader.ReadAll(
-                inputPath,
-                records => records.SelectMany(record => ReadRawJson(record.PayloadJson)).ToArray());
+            return RawStoreLeaseReader.ReadDashboardOperations(inputPath);
         }
 
         return ReadRawJson(File.ReadAllText(inputPath));
     }
+
+    internal static IReadOnlyList<DashboardRawOperation> MapRawStoreRecords(
+        IReadOnlyList<RawTelemetryRecord> records) =>
+        records.SelectMany(record => ReadRawJson(record.PayloadJson)).ToArray();
 
     private static bool IsRawStorePath(string inputPath)
     {

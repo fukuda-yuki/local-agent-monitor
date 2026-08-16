@@ -370,13 +370,14 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
 
         var scopes = new RetentionReadGrant.LeasePublication[members.Length];
         var acquiredLockOrder = new List<int>(members.Length);
+        foreach (var semanticIndex in lockOrder)
+            acquisitionObserverForTesting?.Invoke(members[semanticIndex].FrontierOrdinal);
         try
         {
             foreach (var semanticIndex in lockOrder)
             {
                 scopes[semanticIndex] = members[semanticIndex].Grant.EnterLeasePublication();
                 acquiredLockOrder.Add(semanticIndex);
-                acquisitionObserverForTesting?.Invoke(members[semanticIndex].FrontierOrdinal);
             }
         }
         catch
@@ -529,12 +530,21 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
         IReadOnlyList<int> acquiredLockOrder,
         Action<long>? releaseObserverForTesting)
     {
+        List<Exception>? observerFailures = null;
         for (var index = acquiredLockOrder.Count - 1; index >= 0; index--)
         {
             var semanticIndex = acquiredLockOrder[index];
             acquiredScopes[semanticIndex].Dispose();
-            releaseObserverForTesting?.Invoke(ordinals[semanticIndex]);
+            try
+            {
+                releaseObserverForTesting?.Invoke(ordinals[semanticIndex]);
+            }
+            catch (Exception exception)
+            {
+                (observerFailures ??= []).Add(exception);
+            }
         }
+        if (observerFailures is not null) throw new AggregateException(observerFailures);
     }
 
     private static (RetentionGrantPublicationMember[] Members, int[] LockOrder) ValidateAndOrder(

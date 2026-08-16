@@ -696,7 +696,8 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
 
     internal async Task<LocalRepositoryReconciliationWorkOutcome> RunPreparedAsync(
         PreparedInput prepared,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
     {
         current = prepared;
         var processor = CreateProcessor();
@@ -705,7 +706,8 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
             new LocalRepositoryRawAvailabilityReader(rawStore, temp.RetentionContext),
             processor,
             temp.TimeProvider,
-            reconciliationCheckpoint);
+            reconciliationCheckpoint,
+            lastRawAccessObserverForTesting);
         return await worker.RunOnceAsync(cancellationToken);
     }
 

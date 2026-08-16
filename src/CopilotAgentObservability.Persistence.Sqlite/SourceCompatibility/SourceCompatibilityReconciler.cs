@@ -16,6 +16,7 @@ internal sealed class SourceCompatibilityReconciler
     private readonly SourceCompatibilityReconciliationAuthority authority;
     private readonly TimeProvider timeProvider;
     private readonly Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint;
+    private readonly Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting;
 
     internal SourceCompatibilityReconciler(
         string databasePath,
@@ -32,7 +33,8 @@ internal sealed class SourceCompatibilityReconciler
         string databasePath,
         SourceCompatibilityReconciliationAuthority authority,
         TimeProvider timeProvider,
-        Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null)
+        Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null,
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(authority);
@@ -41,6 +43,7 @@ internal sealed class SourceCompatibilityReconciler
         this.authority = authority;
         this.timeProvider = timeProvider;
         this.checkpoint = checkpoint;
+        this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
     }
 
     internal SourceCompatibilityReconciliationResult Reconcile(
@@ -127,6 +130,7 @@ internal sealed class SourceCompatibilityReconciler
             }
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission);
             using var retainedRecordReference = lease.AcquireValueReference();
+            lastRawAccessObserverForTesting?.Invoke(() => retainedRecordReference.Value);
             return Commit(request, fingerprint, registry, retainedRecordReference.Value, grant);
         }
         finally

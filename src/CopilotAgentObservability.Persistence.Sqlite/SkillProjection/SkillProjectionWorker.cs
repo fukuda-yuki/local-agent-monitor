@@ -9,6 +9,7 @@ internal sealed class SkillProjectionWorker
     private readonly SqliteSkillProjectionStore store;
     private readonly Action<SkillProjectionQueueLease>? beforePublish;
     private readonly TimeProvider? timeProvider;
+    private readonly Action<Func<IReadOnlyList<RawTelemetryRecord>>>? lastRawAccessObserverForTesting;
     private readonly Func<
         SkillProjectionQueueLease,
         CancellationToken,
@@ -21,12 +22,14 @@ internal sealed class SkillProjectionWorker
         Func<
             SkillProjectionQueueLease,
             CancellationToken,
-            ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>>>? readFrontier = null)
+            ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>>>? readFrontier = null,
+        Action<Func<IReadOnlyList<RawTelemetryRecord>>>? lastRawAccessObserverForTesting = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.beforePublish = beforePublish;
         this.timeProvider = timeProvider;
         this.readFrontier = readFrontier ?? store.ReadFrontierAsync;
+        this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
     }
 
     internal async Task<SkillProjectionWorkOutcome> RunNextAsync(
@@ -110,6 +113,7 @@ internal sealed class SkillProjectionWorker
         }
         finally
         {
+            lastRawAccessObserverForTesting?.Invoke(() => recordsReference.Value);
             heartbeatCancellation.Cancel();
             leasesHeld = await heartbeat.ConfigureAwait(false);
         }
