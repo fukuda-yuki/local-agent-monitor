@@ -13,6 +13,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 internal sealed class MutableTimeProvider : TimeProvider
 {
     private DateTimeOffset now;
+    private int utcNowCallCount;
     private long timestamp;
     private readonly object timerGate = new();
     private readonly List<MutableTimer> timers = [];
@@ -25,7 +26,15 @@ internal sealed class MutableTimeProvider : TimeProvider
     internal TimeSpan TimestampAdvancePerRead { get; set; }
     internal Action? TimerCreated { get; set; }
 
-    public override DateTimeOffset GetUtcNow() => now;
+    internal int UtcNowCallCount => Volatile.Read(ref utcNowCallCount);
+
+    public override DateTimeOffset GetUtcNow()
+    {
+        Interlocked.Increment(ref utcNowCallCount);
+        return now;
+    }
+
+    internal void ResetUtcNowCallCount() => Volatile.Write(ref utcNowCallCount, 0);
 
     public override long GetTimestamp()
     {

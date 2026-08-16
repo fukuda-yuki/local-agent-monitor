@@ -44,6 +44,7 @@ internal enum SkillProjectionCheckpoint
 {
     AfterHeartbeatTransactionBeganBeforePublicationScopes,
     AfterPublishTransactionBeganBeforeClockSample,
+    AfterPublishGrantProof,
     AfterFinishOwnedTransactionBeganBeforeClockSample,
     BeforeRetentionRenewalPublication,
 }
@@ -61,11 +62,15 @@ internal sealed class SqliteSkillProjectionStore
     private readonly RawTelemetryStore rawStore;
     private readonly TimeProvider timeProvider;
     private readonly ISkillProjectionCheckpoint? checkpoint;
+    private readonly Action<long>? publicationScopeAcquiredForTesting;
+    private readonly Action<long>? publicationScopeReleasedForTesting;
 
     internal SqliteSkillProjectionStore(
         string databasePath,
         RawTelemetryStore rawStore,
-        ISkillProjectionCheckpoint? checkpoint = null)
+        ISkillProjectionCheckpoint? checkpoint = null,
+        Action<long>? publicationScopeAcquiredForTesting = null,
+        Action<long>? publicationScopeReleasedForTesting = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
@@ -77,6 +82,8 @@ internal sealed class SqliteSkillProjectionStore
         this.databasePath = databasePath;
         timeProvider = rawStore.Clock;
         this.checkpoint = checkpoint;
+        this.publicationScopeAcquiredForTesting = publicationScopeAcquiredForTesting;
+        this.publicationScopeReleasedForTesting = publicationScopeReleasedForTesting;
     }
 
     internal SkillProjectionQueueLease? ClaimNext(DateTimeOffset claimedAt)
@@ -356,6 +363,25 @@ internal sealed class SqliteSkillProjectionStore
         ArgumentNullException.ThrowIfNull(retentionLease);
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        var persistedInputs = ReadInputs(connection, transaction, lease.GenerationId);
+        var persistedRawRecordIds = persistedInputs
+            .Select(static input => input.RawRecordId)
+            .ToArray();
+        if (!RetentionCatalogStore.SkillProjectionOperationLeaseFrontierMatches(
+                retentionLease.Grants,
+                persistedRawRecordIds))
+        {
+            var rejectedAt = timeProvider.GetUtcNow();
+            return FinishRetry(connection, transaction, lease, rejectedAt, "retention_lease_lost");
+        }
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            retentionLease.Grants
+                .Select((grant, index) => new RetentionGrantPublicationMember(
+                    grant,
+                    persistedInputs[index].Ordinal))
+                .ToArray(),
+            publicationScopeAcquiredForTesting,
+            publicationScopeReleasedForTesting);
         checkpoint?.Reached(
             SkillProjectionCheckpoint.AfterPublishTransactionBeganBeforeClockSample);
         var transactionAt = timeProvider.GetUtcNow();
@@ -365,7 +391,6 @@ internal sealed class SqliteSkillProjectionStore
             return SkillProjectionWorkOutcome.StaleOwner;
         }
 
-        var persistedInputs = ReadInputs(connection, transaction, lease.GenerationId);
         if (persistedInputs.Any(static input =>
                 input.EvidenceKind == SkillProjectionInputEvidenceKind.DeletedBeforeDigestV10))
             return FinishTerminal(
@@ -403,11 +428,15 @@ internal sealed class SqliteSkillProjectionStore
                 connection,
                 transaction,
                 retentionLease.Grants,
-                persistedInputs.Select(static input => input.RawRecordId).ToArray(),
-                transactionAt))
+                persistedRawRecordIds,
+                publications,
+                transactionAt,
+                () => checkpoint?.Reached(SkillProjectionCheckpoint.AfterPublishGrantProof)))
         {
             return FinishRetry(connection, transaction, lease, transactionAt, "retention_lease_lost");
         }
+        if (!publications.AreCommittedHandlesPublished())
+            return FinishRetry(connection, transaction, lease, transactionAt, "retention_lease_lost");
 
         foreach (var projectedInput in projectedInputs)
             InsertProjection(connection, transaction, lease.GenerationId, projectedInput, transactionAt);

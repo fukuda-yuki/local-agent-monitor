@@ -167,13 +167,25 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
             using var connection = Open();
             using var transaction = connection.BeginTransaction(deferred: false);
             cancellationToken.ThrowIfCancellationRequested();
-            var at = timeProvider.GetUtcNow().ToUniversalTime();
             var current = ReadDiscoveryFrontier(connection, transaction);
             if (!frontier.SpanIds.SequenceEqual(current.SpanIds) || !frontier.RawRecordIds.SequenceEqual(current.RawRecordIds))
             {
                 transaction.Rollback();
                 return LocalRepositoryQueueTransitionResult.StaleOwner;
             }
+            var publicationMembers = prepared
+                .Select((input, index) => (input, index))
+                .Where(static item =>
+                    item.input.Result.Status == LocalRepositoryRawAvailabilityStatus.Success
+                    && item.input.Result.Availability == LocalRepositoryRawAvailability.Available
+                    && item.input.Result.Lease is not null)
+                .Select(static item => new RetentionGrantPublicationMember(
+                    item.input.Result.Lease!.Grant,
+                    item.index))
+                .ToArray();
+            using var publications = RetentionGrantPublicationSet.EnterInOrder(publicationMembers);
+            var at = timeProvider.GetUtcNow().ToUniversalTime();
+            var publicationIndex = 0;
             foreach (var input in prepared)
             {
                 var rawRecordId = input.RawRecordId;
@@ -188,7 +200,13 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                 string state;
                 if (input.Result.Status == LocalRepositoryRawAvailabilityStatus.Success && input.Result.Availability == LocalRepositoryRawAvailability.Available && input.Result.Lease?.Grant is { } grant)
                 {
-                    if (!RetentionCatalogStore.ValidateLocalRepositoryOperationLease(connection, transaction, grant, rawRecordId, at))
+                    if (!RetentionCatalogStore.ValidateLocalRepositoryOperationLease(
+                            connection,
+                            transaction,
+                            grant,
+                            rawRecordId,
+                            publications.ScopeFor(publicationIndex++, grant),
+                            at))
                     {
                         transaction.Rollback();
                         return LocalRepositoryQueueTransitionResult.StaleOwner;
@@ -224,6 +242,11 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                     transaction.Rollback();
                     return LocalRepositoryQueueTransitionResult.Corrupt;
                 }
+            }
+            if (!publications.AreCommittedHandlesPublished())
+            {
+                transaction.Rollback();
+                return LocalRepositoryQueueTransitionResult.StaleOwner;
             }
             transaction.Commit();
             return LocalRepositoryQueueTransitionResult.Applied;

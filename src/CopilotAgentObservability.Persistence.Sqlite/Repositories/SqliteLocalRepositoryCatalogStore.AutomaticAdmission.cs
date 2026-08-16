@@ -118,15 +118,6 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             throw new InvalidOperationException("local_repository_store_binding_mismatch");
 
         var processingAt = timeProvider.GetUtcNow().ToUniversalTime();
-        if (!RetentionCatalogStore.ValidateLocalRepositoryOperationLease(
-                connection,
-                transaction,
-                grant,
-                suppliedRawRecordId,
-                processingAt))
-        {
-            throw new InvalidOperationException("local_repository_retention_authority_lost");
-        }
 
         if (terminalReason is not null || preparedProvenance is null || parsed is null)
         {
@@ -195,7 +186,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
 
         if (join.Links.Count == 0)
         {
-            _ = EnsurePublicationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
+            checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePublication);
             CompleteQueueOnly(transaction, connection, queueLease, grant, suppliedRawRecordId, cancellationToken, waitForSession: false);
             return;
         }
@@ -239,7 +230,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             return;
         }
 
-        _ = EnsurePublicationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePublication);
 
         InsertRepositories(connection, transaction, plan.NewOwners);
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterRepositories);
@@ -258,9 +249,14 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         if (assignment.Status != LocalRepositoryAssignmentReconcileStatus.Applied)
             throw new InvalidOperationException("local_repository_assignment_publication_rejected");
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.AfterAssignments);
-        var completionAt = ValidateFinalizationAuthority(connection, transaction, grant, suppliedRawRecordId, cancellationToken);
-        RequireApplied(queue.TryComplete(connection, transaction, queueLease, completionAt));
-        transaction.Commit();
+        CompleteQueueOnly(
+            transaction,
+            connection,
+            queueLease,
+            grant,
+            suppliedRawRecordId,
+            cancellationToken,
+            waitForSession: false);
     }
 
     private sealed class PreparedAutomaticAdmission(
@@ -651,22 +647,12 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         }
     }
 
-    private DateTimeOffset EnsurePublicationAuthority(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        RetentionReadGrant grant,
-        long rawRecordId,
-        CancellationToken cancellationToken)
-    {
-        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePublication);
-        return ValidatePublicationAuthority(connection, transaction, grant, rawRecordId, cancellationToken);
-    }
-
     private DateTimeOffset ValidatePublicationAuthority(
         SqliteConnection connection,
         SqliteTransaction transaction,
         RetentionReadGrant grant,
         long rawRecordId,
+        RetentionGrantPublicationSet publications,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -676,7 +662,9 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             transaction,
             grant,
             rawRecordId,
-            publicationAt))
+            publications.ScopeFor(0, grant),
+            publicationAt)
+            || !publications.AreCommittedHandlesPublished())
         {
             throw new InvalidOperationException("local_repository_retention_authority_lost");
         }
@@ -688,10 +676,17 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         SqliteTransaction transaction,
         RetentionReadGrant grant,
         long rawRecordId,
+        RetentionGrantPublicationSet publications,
         CancellationToken cancellationToken)
     {
         checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforeQueueCompletion);
-        return ValidatePublicationAuthority(connection, transaction, grant, rawRecordId, cancellationToken);
+        return ValidatePublicationAuthority(
+            connection,
+            transaction,
+            grant,
+            rawRecordId,
+            publications,
+            cancellationToken);
     }
 
     private void CompleteTerminal(
@@ -703,7 +698,15 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         string reason,
         CancellationToken cancellationToken)
     {
-        var at = ValidateFinalizationAuthority(connection, transaction, grant, rawRecordId, cancellationToken);
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            [new RetentionGrantPublicationMember(grant, 0)]);
+        var at = ValidateFinalizationAuthority(
+            connection,
+            transaction,
+            grant,
+            rawRecordId,
+            publications,
+            cancellationToken);
         RequireApplied(queue.TryFailTerminal(connection, transaction, lease, at, reason));
         transaction.Commit();
     }
@@ -717,7 +720,15 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
         CancellationToken cancellationToken,
         bool waitForSession)
     {
-        var at = ValidateFinalizationAuthority(connection, transaction, grant, rawRecordId, cancellationToken);
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            [new RetentionGrantPublicationMember(grant, 0)]);
+        var at = ValidateFinalizationAuthority(
+            connection,
+            transaction,
+            grant,
+            rawRecordId,
+            publications,
+            cancellationToken);
         var result = waitForSession
             ? queue.TryWaitForSession(connection, transaction, lease, at)
             : queue.TryComplete(connection, transaction, lease, at);

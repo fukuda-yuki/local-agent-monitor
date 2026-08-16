@@ -465,7 +465,7 @@ public sealed partial class RetentionCatalogStore
         }
     }
 
-    private static bool GrantMatchesRawRecord(RetentionReadGrant grant, long rawRecordId) =>
+    internal static bool GrantMatchesRawRecord(RetentionReadGrant grant, long rawRecordId) =>
         grant.LeaseKind == RetentionLeaseKind.Operation
         && grant.OwnershipKey.StoreKind == RetentionStoreKind.RawRecord
         && TryExactNumericSourceId(grant.OwnershipKey.SourceItemId, out var admittedRawRecordId)

@@ -15,6 +15,21 @@ public sealed partial class RetentionCatalogStore
         DateTimeOffset at) =>
         ValidateSourceCompatibilityOperationLease(connection, transaction, grant, rawRecordId, at);
 
+    internal static bool ValidateLocalRepositoryOperationLease(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionReadGrant grant,
+        long rawRecordId,
+        RetentionReadGrant.LeasePublication publication,
+        DateTimeOffset at) =>
+        ValidateSourceCompatibilityOperationLease(
+            connection,
+            transaction,
+            grant,
+            rawRecordId,
+            publication,
+            at);
+
     internal static LocalRepositoryRetentionFact LocalRepositoryAvailabilityFact(RetentionCatalogContext context, long rawRecordId)
     {
         ArgumentNullException.ThrowIfNull(context);

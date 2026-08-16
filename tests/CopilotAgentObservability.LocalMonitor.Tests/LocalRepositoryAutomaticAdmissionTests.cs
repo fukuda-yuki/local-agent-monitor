@@ -12,6 +12,27 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalRepositoryAutomaticAdmissionTests
 {
     [Fact]
+    public async Task SingleMemberPublicationFencePublishesRows()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture();
+        var payload = LocalRepositoryAdmissionFixture.SpanPayload(
+            new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/Widget.git"));
+
+        var outcome = await fixture.RunAsync(
+            payload,
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observations;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observation_contexts;"));
+    }
+
+    [Fact]
     public async Task MissingLocator_CreatesOneObservedOwnerAndAutomaticAssignmentAtomically()
     {
         using var fixture = new LocalRepositoryAdmissionFixture();

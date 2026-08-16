@@ -448,6 +448,174 @@ public sealed class SkillProjectionGenerationTests
                 ("$trusted_at", expectedTime)));
     }
 
+    [Fact]
+    public async Task Publish_CompositeHandleLostBetweenMemberProofs_RetriesWithoutPublishingRows()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("lost-publication-frontier-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch(
+            "lost-publication-frontier-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var time = new MutableTimeProvider(ObservedAt.AddSeconds(2));
+        var checkpoint = new SkillPublishPublicationCheckpoint(loseHandle: true);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(
+            store.ClaimNext(ObservedAt.AddSeconds(1)));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        Assert.Equal(2, retentionLease.Grants.Count);
+        checkpoint.Configure(retentionLease.Grants);
+        var projected = retentionLease.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+
+        var outcome = store.Publish(
+            lease,
+            projected,
+            retentionLease,
+            ObservedAt.AddSeconds(2));
+
+        Assert.Equal(SkillProjectionWorkOutcome.Retrying, outcome);
+        using var verification = Open(database.Path);
+        Assert.Equal(0, ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal(0, ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventories;"));
+        Assert.Equal(0, ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_inventory_names;"));
+        Assert.Equal("retry_pending", ScalarText(
+            verification,
+            "SELECT lifecycle FROM skill_projection_generations WHERE generation_id=$generation_id;",
+            ("$generation_id", lease.GenerationId)));
+        Assert.Equal("pending", ScalarText(
+            verification,
+            "SELECT state FROM skill_projection_queue WHERE generation_id=$generation_id;",
+            ("$generation_id", lease.GenerationId)));
+        Assert.Equal("retention_lease_lost", ScalarText(
+            verification,
+            "SELECT error_code FROM skill_projection_queue WHERE generation_id=$generation_id;",
+            ("$generation_id", lease.GenerationId)));
+    }
+
+    [Fact]
+    public async Task Publish_CompositeFrontierUsesOneClockSampleWhileEveryPublicationScopeIsHeld()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("scoped-publication-frontier-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch(
+            "scoped-publication-frontier-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var time = new MutableTimeProvider(ObservedAt.AddSeconds(2));
+        var checkpoint = new SkillPublishPublicationCheckpoint(loseHandle: false);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(
+            store.ClaimNext(ObservedAt.AddSeconds(1)));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        checkpoint.Configure(retentionLease.Grants);
+        var projected = retentionLease.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+        time.ResetUtcNowCallCount();
+
+        var outcome = store.Publish(
+            lease,
+            projected,
+            retentionLease,
+            ObservedAt.AddDays(1));
+
+        Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+        Assert.Equal(1, time.UtcNowCallCount);
+        Assert.True(checkpoint.AllPublicationScopesWereHeld);
+        Assert.NotNull(checkpoint.ConcurrentProbes);
+        await checkpoint.ConcurrentProbes.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task Publish_AcquiresCanonicalFrontierAndReleasesInExactReverseOrder()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("ordered-publication-frontier-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch(
+            "ordered-publication-frontier-2",
+            ObservedAt.AddMilliseconds(1),
+            SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var acquired = new List<long>();
+        var released = new List<long>();
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(
+                database.Path,
+                retention,
+                new MutableTimeProvider(ObservedAt.AddSeconds(2))),
+            publicationScopeAcquiredForTesting: acquired.Add,
+            publicationScopeReleasedForTesting: released.Add);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(
+            store.ClaimNext(ObservedAt.AddSeconds(1)));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        Assert.Equal(2, retentionLease.Grants.Count);
+        var projected = retentionLease.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+        var expectedAcquisition = StringComparer.Ordinal.Compare(
+                retentionLease.Grants[0].ItemId,
+                retentionLease.Grants[1].ItemId) < 0
+            ? new long[] { lease.Inputs[0].Ordinal, lease.Inputs[1].Ordinal }
+            : new long[] { lease.Inputs[1].Ordinal, lease.Inputs[0].Ordinal };
+
+        var outcome = store.Publish(
+            lease,
+            projected,
+            retentionLease,
+            ObservedAt.AddSeconds(2));
+
+        Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+        Assert.Equal(expectedAcquisition, acquired);
+        Assert.Equal(expectedAcquisition.Reverse(), released);
+    }
+
     [Theory]
     [InlineData("retry")]
     [InlineData("input-unavailable")]
@@ -3074,6 +3242,52 @@ public sealed class SkillProjectionGenerationTests
             Assert.True(transactionStarted.Task.Wait(TimeSpan.FromSeconds(5)));
             Assert.True(grantBindingAttempted.Task.Wait(TimeSpan.FromSeconds(5)));
             Assert.False(completed.Task.IsCompleted);
+        }
+    }
+
+    private sealed class SkillPublishPublicationCheckpoint(bool loseHandle)
+        : ISkillProjectionCheckpoint
+    {
+        private IReadOnlyList<RetentionReadGrant> grants = [];
+        private int proofCount;
+
+        internal bool AllPublicationScopesWereHeld { get; private set; }
+        internal Task? ConcurrentProbes { get; private set; }
+
+        internal void Configure(IReadOnlyList<RetentionReadGrant> configuredGrants) =>
+            grants = configuredGrants;
+
+        public void Reached(SkillProjectionCheckpoint checkpoint)
+        {
+            if (grants.Count == 0)
+                throw new InvalidOperationException("publish checkpoint was not configured");
+
+            if (loseHandle)
+            {
+                if (checkpoint != SkillProjectionCheckpoint.AfterPublishGrantProof
+                    || Interlocked.Increment(ref proofCount) != 1)
+                    return;
+                using var publication = grants[0].EnterLeasePublication();
+                publication.CommittedHandle?.LoseAsynchronously();
+                return;
+            }
+
+            if (checkpoint != SkillProjectionCheckpoint.AfterPublishTransactionBeganBeforeClockSample)
+                return;
+
+            var probes = grants.Select(grant => Task.Run(() =>
+            {
+                using var command = new SqliteCommand
+                {
+                    CommandText =
+                        "SELECT $retention_read_source_token,$retention_read_item_id,$retention_read_revision,$retention_read_lease_kind,$retention_read_lease_owner,$retention_read_lease_generation,$retention_read_lease_expires_at;",
+                };
+                return grant.TryBindAdmissionSelectorCapability(command);
+            })).ToArray();
+            var concurrentProbes = Task.WhenAll(probes);
+            ConcurrentProbes = concurrentProbes;
+            var results = concurrentProbes.GetAwaiter().GetResult();
+            AllPublicationScopesWereHeld = results.All(static entered => !entered);
         }
     }
 

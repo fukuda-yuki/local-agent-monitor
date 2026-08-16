@@ -189,10 +189,17 @@ internal sealed class SourceCompatibilityReconciler
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            retentionGrant is null
+                ? []
+                : [new RetentionGrantPublicationMember(retentionGrant, 0)]);
+        var committedAt = timeProvider.GetUtcNow();
         if (ReadReceipt(connection, transaction, request.OperationKey) is { } existing)
         {
             if (!string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))
                 throw new InvalidOperationException("source_compatibility_operation_conflict");
+            if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+                throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
             transaction.Commit();
             return existing.Result;
         }
@@ -219,7 +226,6 @@ internal sealed class SourceCompatibilityReconciler
                 StringComparison.Ordinal))
             throw new InvalidOperationException("source_compatibility_retained_input_mismatch");
         ValidateTrigger(request, current);
-        var committedAt = timeProvider.GetUtcNow();
         SourceCompatibilityInterpretation derived;
         if (request.Trigger == SourceCompatibilityReconciliationTrigger.DecoderRevision)
         {
@@ -230,6 +236,7 @@ internal sealed class SourceCompatibilityReconciler
                     transaction,
                     retentionGrant,
                     current.RawRecordId,
+                    publications.ScopeFor(0, retentionGrant),
                     committedAt))
             {
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
@@ -277,6 +284,8 @@ internal sealed class SourceCompatibilityReconciler
                 noChange,
                 committedAt);
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.BeforeCommit);
+            if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+                throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
             transaction.Commit();
             return noChange;
         }
@@ -331,6 +340,8 @@ internal sealed class SourceCompatibilityReconciler
             changed,
             committedAt);
         checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.BeforeCommit);
+        if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+            throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
         transaction.Commit();
         return changed;
     }

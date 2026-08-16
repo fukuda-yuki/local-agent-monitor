@@ -457,6 +457,12 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
         return scopes[index];
     }
 
+    internal bool AreCommittedHandlesPublished()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        return scopes.All(static scope => scope.CommittedHandle?.IsPublished == true);
+    }
+
     internal void AdvanceExpiry(int index, DateTimeOffset expiry)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
