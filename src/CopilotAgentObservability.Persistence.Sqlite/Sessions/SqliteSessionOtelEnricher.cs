@@ -39,16 +39,17 @@ public sealed class SqliteSessionOtelEnricher
         var state = store.GetProjectionState(ProjectorKey);
         var rows = ReadRows(state?.ProjectionCursor ?? 0, limit);
         var rawResult = rawStore.ReadRawRecordsAsync(rows.Select(row => row.RawRecordId).ToArray(), RetentionReadKind.Operation, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        if (rawResult.Disposition == RetentionReadDisposition.Busy)
-        {
-            return 0;
-        }
         if (rawResult.Lease is null)
         {
             return 0;
         }
         try
         {
+            if (rawResult.Disposition is not null)
+            {
+                _ = rawResult.CompletePostGrantFailure();
+                return 0;
+            }
             PreparedProjectedSpan[] retainedRows;
             using (var reference = rawResult.Lease.AcquireValueReference())
             {

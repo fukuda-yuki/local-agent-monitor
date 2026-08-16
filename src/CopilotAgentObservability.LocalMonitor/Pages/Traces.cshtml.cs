@@ -158,9 +158,19 @@ public sealed class TracesModel : PageModel
             }
 
             var result = await store.ListRawRecordsByTraceIdAsync(row.TraceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, cancellationToken);
-            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
-            if (result.Lease is null) { promptByTraceId[row.TraceId] = null; continue; }
+            if (result.Lease is null)
+            {
+                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                promptByTraceId[row.TraceId] = null;
+                continue;
+            }
             var lease = result.Lease;
+            if (result.Disposition is not null)
+            {
+                promptByTraceId[row.TraceId] = null;
+                leases.AddFixedSafe(lease, result.CompletePostGrantFailure);
+                continue;
+            }
             using (var reference = lease.AcquireValueReference())
             {
                 promptByTraceId[row.TraceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(

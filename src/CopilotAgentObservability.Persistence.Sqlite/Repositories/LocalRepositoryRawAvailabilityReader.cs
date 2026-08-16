@@ -115,9 +115,10 @@ internal sealed class LocalRepositoryRawAvailabilityReader
         {
             return LocalRepositoryRawAvailabilityResult.Corrupt();
         }
-        if (read.Disposition == RetentionReadDisposition.Busy) return LocalRepositoryRawAvailabilityResult.Busy();
         if (read.Lease is null)
         {
+            if (read.Disposition == RetentionReadDisposition.Busy)
+                return LocalRepositoryRawAvailabilityResult.Busy();
             return RetentionCatalogStore.LocalRepositoryAvailabilityFact(retentionContext, rawRecordId) switch
             {
                 LocalRepositoryRetentionFact.Expired => LocalRepositoryRawAvailabilityResult.Expired(),
@@ -125,6 +126,15 @@ internal sealed class LocalRepositoryRawAvailabilityReader
                 LocalRepositoryRetentionFact.Busy => LocalRepositoryRawAvailabilityResult.Busy(),
                 _ => LocalRepositoryRawAvailabilityResult.Corrupt(),
             };
+        }
+        if (read.Disposition is { } postGrantDisposition)
+        {
+            await using var lease = read.Lease;
+            var terminal = read.CompletePostGrantFailure();
+            return postGrantDisposition == RetentionReadDisposition.Busy
+                    || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                ? LocalRepositoryRawAvailabilityResult.Busy()
+                : LocalRepositoryRawAvailabilityResult.Corrupt();
         }
         string digest;
         using (var reference = read.Lease.AcquireValueReference())

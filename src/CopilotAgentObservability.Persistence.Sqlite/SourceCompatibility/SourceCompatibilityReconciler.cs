@@ -120,6 +120,11 @@ internal sealed class SourceCompatibilityReconciler
         }
         try
         {
+            if (read.Disposition is not null)
+            {
+                _ = read.CompletePostGrantFailure();
+                throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
+            }
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission);
             using var retainedRecordReference = lease.AcquireValueReference();
             return Commit(request, fingerprint, registry, retainedRecordReference.Value, grant);

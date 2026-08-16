@@ -608,9 +608,20 @@ internal static class SessionRoutes
         foreach (var traceId in traceIds)
         {
             var result = await projectionStore.ListRawRecordsByTraceIdAsync(traceId, 200, RetentionReadKind.Access, cancellationToken);
-            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
-            if (result.Lease is null) continue;
+            if (result.Lease is null)
+            {
+                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                continue;
+            }
             await using var lease = result.Lease;
+            if (result.Disposition is { } postGrantDisposition)
+            {
+                if (!RawResponsePublication.AuthorizesFixedSafePublication(result.CompletePostGrantFailure()))
+                    throw new RawResponseTerminalFailureException();
+                if (postGrantDisposition == RetentionReadDisposition.Busy)
+                    throw new PersistenceBusyException();
+                continue;
+            }
             SourceCompatibilityRow[] mapped;
             using (var reference = lease.AcquireValueReference())
             {

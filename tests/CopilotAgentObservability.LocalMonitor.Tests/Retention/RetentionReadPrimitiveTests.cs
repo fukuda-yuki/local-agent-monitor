@@ -1517,7 +1517,7 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
-    public async Task ReadAsync_SelectorNullAfterLeaseAcquisitionReturnsConsumptionUnavailableAndReleasesLease()
+    public async Task ReadAsync_SelectorNullAfterLeaseAcquisitionReturnsConsumptionUnavailableHandleForTerminalCompletion()
     {
         var path = CopyFixture();
         try
@@ -1534,7 +1534,10 @@ public sealed class RetentionReadPrimitiveTests
                 CancellationToken.None);
 
             Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, result.Disposition);
-            Assert.Null(result.Lease);
+            var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
+            Assert.Throws<InvalidOperationException>(() => lease.AcquireValueReference());
+            Assert.Equal(RetentionRawTerminalResult.CompletedWithoutRaw, lease.TryCompleteWithoutRaw());
+            await lease.DisposeAsync();
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
@@ -1550,7 +1553,7 @@ public sealed class RetentionReadPrimitiveTests
     [InlineData(ReadPrimitivePath.Single, "sqlite_contention", "Busy")]
     [InlineData(ReadPrimitivePath.FixedBatch, "sqlite_contention", "Busy")]
     [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite_contention", "Busy")]
-    public async Task ReadPrimitive_PostGrantDataFailureReturnsClosedDispositionAndReleasesLease(
+    public async Task ReadPrimitive_PostGrantDataFailureReturnsHandleWithoutRawForTerminalCompletion(
         ReadPrimitivePath primitivePath,
         string failure,
         string expectedDisposition)
@@ -1590,8 +1593,28 @@ public sealed class RetentionReadPrimitiveTests
             };
 
             Assert.Equal(expectedDisposition, disposition?.ToString());
-            Assert.Null(lease);
+            var retained = Assert.IsAssignableFrom<IAsyncDisposable>(lease);
+            var terminal = retained switch
+            {
+                RetentionReadLease<string> single => CompleteSingle(single),
+                RetentionBatchReadLease<string> batch => CompleteBatch(batch),
+                _ => throw new InvalidOperationException(retained.GetType().FullName),
+            };
+            Assert.Equal(RetentionRawTerminalResult.CompletedWithoutRaw, terminal);
+            await retained.DisposeAsync();
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+
+            static RetentionRawTerminalResult CompleteSingle(RetentionReadLease<string> retained)
+            {
+                Assert.Throws<InvalidOperationException>(() => retained.AcquireValueReference());
+                return retained.TryCompleteWithoutRaw();
+            }
+
+            static RetentionRawTerminalResult CompleteBatch(RetentionBatchReadLease<string> retained)
+            {
+                Assert.Throws<InvalidOperationException>(() => retained.AcquireValueReference());
+                return retained.TryCompleteWithoutRaw();
+            }
 
             static (RetentionReadDisposition? Disposition, IAsyncDisposable? Lease) SingleResult(
                 RetentionReadResult<string> result) => (result.Disposition, result.Lease);
@@ -2455,7 +2478,7 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
-    public async Task ReadAsync_SelectorReturningNullIsConsumptionUnavailableWithoutItemMutation()
+    public async Task ReadAsync_SelectorReturningNullRetainsTerminalHandleWithoutItemMutation()
     {
         var path = CopyFixture();
         try
@@ -2473,7 +2496,10 @@ public sealed class RetentionReadPrimitiveTests
                 CancellationToken.None);
 
             Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, result.Disposition);
-            Assert.Null(result.Lease);
+            var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
+            Assert.Throws<InvalidOperationException>(() => lease.AcquireValueReference());
+            Assert.Equal(RetentionRawTerminalResult.CompletedWithoutRaw, lease.TryCompleteWithoutRaw());
+            await lease.DisposeAsync();
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
             Assert.Equal(before, FullRowDump(path, "retention_items", "item_id", item.ItemId));
         }

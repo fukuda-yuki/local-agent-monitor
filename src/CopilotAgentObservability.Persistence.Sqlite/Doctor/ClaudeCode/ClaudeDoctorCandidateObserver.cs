@@ -87,6 +87,11 @@ internal sealed class ClaudeDoctorCandidateObserver
 
         try
         {
+            if (rawResult.Disposition is not null)
+            {
+                _ = rawResult.CompletePostGrantFailure();
+                return;
+            }
             PreparedObservation[] observations;
             using (var reference = rawResult.Lease.AcquireValueReference())
             {

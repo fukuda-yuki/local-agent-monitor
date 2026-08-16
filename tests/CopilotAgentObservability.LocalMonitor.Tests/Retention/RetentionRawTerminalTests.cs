@@ -150,17 +150,21 @@ public sealed class RetentionRawTerminalTests
         }
     }
 
-    [Fact]
-    public async Task OwnerClosureRefusesNewReferencesWhileReferenceRemainsOutstanding()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TerminalClaimWhileReferenceRemainsOutstandingFailsLost(bool completeWithoutRaw)
     {
         await using var fixture = await TerminalFixture.CreateSingleAsync();
         var use = fixture.SingleLease.AcquireValueReference();
         try
         {
+            Func<RetentionRawTerminalResult> terminal = completeWithoutRaw
+                ? fixture.SingleLease.TryCompleteWithoutRaw
+                : fixture.SingleLease.TrySealRawResponse;
             Assert.Equal(
-                RetentionRawTerminalResult.Sealed,
-                await Task.Run(fixture.SingleLease.TrySealRawResponse)
-                    .WaitAsync(TimeSpan.FromSeconds(5)));
+                RetentionRawTerminalResult.Lost,
+                await Task.Run(terminal).WaitAsync(TimeSpan.FromSeconds(5)));
 
             Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
             Assert.Equal("buffered", use.Value);
@@ -368,24 +372,40 @@ public sealed class RetentionRawTerminalTests
     {
         await using var fixture = await TerminalFixture.CreateSingleAsync();
         var use = fixture.SingleLease.AcquireValueReference();
-        try
-        {
-            Assert.Equal("buffered", use.Value);
-            Assert.Equal(
-                RetentionRawTerminalResult.Sealed,
-                await Task.Run(fixture.SingleLease.TrySealRawResponse)
-                    .WaitAsync(TimeSpan.FromSeconds(5)));
-            Assert.False(fixture.SingleLease.IsValueBufferCleared);
-        }
-        finally
-        {
-            use.Dispose();
-        }
+        Assert.Equal("buffered", use.Value);
+        Assert.False(fixture.SingleLease.IsValueBufferCleared);
+        use.Dispose();
+        Assert.Equal(
+            RetentionRawTerminalResult.Sealed,
+            await Task.Run(fixture.SingleLease.TrySealRawResponse)
+                .WaitAsync(TimeSpan.FromSeconds(5)));
 
         Assert.True(SpinWait.SpinUntil(
             () => fixture.SingleLease.IsValueBufferCleared,
             TimeSpan.FromSeconds(5)));
         Assert.Throws<ObjectDisposedException>(() => _ = use.Value);
+        Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SuccessfulTerminalRefusesPreviouslyAcquiredReference(bool completeWithoutRaw)
+    {
+        await using var fixture = await TerminalFixture.CreateSingleAsync();
+        var reference = fixture.SingleLease.AcquireValueReference();
+        reference.Dispose();
+
+        var terminal = completeWithoutRaw
+            ? fixture.SingleLease.TryCompleteWithoutRaw()
+            : fixture.SingleLease.TrySealRawResponse();
+
+        Assert.Equal(
+            completeWithoutRaw
+                ? RetentionRawTerminalResult.CompletedWithoutRaw
+                : RetentionRawTerminalResult.Sealed,
+            terminal);
+        Assert.Throws<ObjectDisposedException>(() => _ = reference.Value);
         Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
     }
 

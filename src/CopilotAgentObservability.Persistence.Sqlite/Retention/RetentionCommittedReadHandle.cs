@@ -78,9 +78,12 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         if (Interlocked.CompareExchange(ref valueOwner, owner, null) is { } existing
             && !ReferenceEquals(existing, owner))
             throw new InvalidOperationException("A committed handle cannot own multiple value buffers.");
-        terminalCancellationToken = cancellationToken;
+        AttachTerminalCancellation(cancellationToken);
         if (!AllowsUse) owner.Close();
     }
+
+    internal void AttachTerminalCancellation(CancellationToken cancellationToken) =>
+        terminalCancellationToken = cancellationToken;
 
     internal void ObserveTerminalCancellation()
     {
@@ -115,7 +118,11 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
                 ? RetentionRawTerminalResult.Busy
                 : RetentionRawTerminalResult.Lost;
 
-        CloseValueOwner();
+        if (!TryCloseValueOwner())
+        {
+            LoseTerminalAttempt();
+            return RetentionRawTerminalResult.Lost;
+        }
         if (!IsPublished)
         {
             LoseTerminalAttempt();
@@ -128,6 +135,8 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         }
         return terminalAuthority(this, operation);
     }
+
+    private bool TryCloseValueOwner() => Volatile.Read(ref valueOwner)?.TryClose() ?? true;
 
     internal bool IsTerminalAttemptInProgress =>
         TerminalState == RetentionRawTerminalState.TerminalAttemptInProgress;

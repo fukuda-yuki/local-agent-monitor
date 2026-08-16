@@ -463,6 +463,11 @@ internal sealed class ClaudeDoctorFactCollector
 
         try
         {
+            if (rawResult.Disposition is not null)
+            {
+                _ = rawResult.CompletePostGrantFailure();
+                return UnreadableWindow;
+            }
             ClaudeDoctorVerificationWindow window;
             using (var reference = rawResult.Lease.AcquireValueReference())
             {

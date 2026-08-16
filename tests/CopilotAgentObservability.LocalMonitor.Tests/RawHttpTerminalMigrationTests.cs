@@ -149,6 +149,63 @@ public sealed class RawHttpTerminalMigrationTests
     }
 
     [Theory]
+    [InlineData((int)RetentionReadDisposition.ConsumptionUnavailable, (int)RetentionRawTerminalResult.Lost)]
+    [InlineData((int)RetentionReadDisposition.ConsumptionUnavailable, (int)RetentionRawTerminalResult.Busy)]
+    [InlineData((int)RetentionReadDisposition.Busy, (int)RetentionRawTerminalResult.Lost)]
+    [InlineData((int)RetentionReadDisposition.Busy, (int)RetentionRawTerminalResult.Busy)]
+    public async Task RawRecordRoute_PostGrantFailureWithUnsuccessfulTerminalAbortsWithZeroResponse(
+        int dispositionValue,
+        int terminalValue)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var abortFeature = new RecordingLifetimeFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        features.Set<IHttpRequestLifetimeFeature>(abortFeature);
+
+        var store = await ExecuteHttpOwnerAsync(
+            "raw-record",
+            features,
+            (RetentionRawTerminalResult)terminalValue,
+            () => AssertZeroResponse(responseFeature),
+            () => { },
+            (RetentionReadDisposition)dispositionValue);
+
+        Assert.Equal(1, abortFeature.AbortCount);
+        AssertZeroResponse(responseFeature);
+        Assert.Equal(1, store.TerminalCount);
+        Assert.Equal(1, store.ReleaseCount);
+    }
+
+    [Theory]
+    [InlineData((int)RetentionReadDisposition.ConsumptionUnavailable, StatusCodes.Status404NotFound, "raw_record_not_found")]
+    [InlineData((int)RetentionReadDisposition.Busy, StatusCodes.Status503ServiceUnavailable, "persistence_busy")]
+    public async Task RawRecordRoute_PostGrantFailurePublishesFixedSafeResultOnlyAfterCompletion(
+        int dispositionValue,
+        int expectedStatus,
+        string expectedToken)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+
+        var store = await ExecuteHttpOwnerAsync(
+            "raw-record",
+            features,
+            RetentionRawTerminalResult.CompletedWithoutRaw,
+            () => AssertZeroResponse(responseFeature),
+            () => { },
+            (RetentionReadDisposition)dispositionValue);
+
+        Assert.Equal(expectedStatus, responseFeature.StatusCode);
+        Assert.Contains(expectedToken, Encoding.UTF8.GetString(((MemoryStream)responseFeature.Body).ToArray()), StringComparison.Ordinal);
+        Assert.Equal(1, store.TerminalCount);
+        Assert.Equal(1, store.ReleaseCount);
+    }
+
+    [Theory]
     [MemberData(nameof(SafeProjectionTerminalFailures))]
     public async Task SafeProjectionRoute_PostGrantTerminalFailure_AbortsWithZeroResponse(
         string owner,
@@ -435,6 +492,70 @@ public sealed class RawHttpTerminalMigrationTests
         Assert.True(events.IndexOf("release-2") > firstSend);
     }
 
+    [Fact]
+    public Task RazorEntitySpool_PublishesRawPageLargerThanFourMiB() =>
+        AssertLargeEntityPublishesAsync(4 * 1024 * 1024 + 1);
+
+    [Fact]
+    public async Task RawRecordRoute_PublishesThirtyMiBRawPayload()
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        var payload = new string('x', 30 * 1024 * 1024);
+
+        await ExecuteHttpOwnerAsync(
+            "raw-record",
+            features,
+            RetentionRawTerminalResult.Sealed,
+            () => { },
+            () => { },
+            rawPayloadJson: payload);
+
+        Assert.Equal(StatusCodes.Status200OK, responseFeature.StatusCode);
+        Assert.True(responseFeature.Body.Length > payload.Length);
+    }
+
+    [Fact]
+    public async Task SessionContentRoute_PublishesEightMiBContent()
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        var content = new string('x', 8 * 1024 * 1024);
+
+        await ExecuteHttpOwnerAsync(
+            "session-content",
+            features,
+            RetentionRawTerminalResult.Sealed,
+            () => { },
+            () => { },
+            sessionContentJson: content);
+
+        Assert.Equal(StatusCodes.Status200OK, responseFeature.StatusCode);
+        Assert.True(responseFeature.Body.Length > content.Length);
+    }
+
+    private static async Task AssertLargeEntityPublishesAsync(int byteCount)
+    {
+        var responseFeature = new RecordingResponseFeature();
+        var features = new FeatureCollection();
+        features.Set<IHttpResponseFeature>(responseFeature);
+        features.Set<IHttpResponseBodyFeature>(new StreamResponseBodyFeature(responseFeature.Body));
+        var context = new DefaultHttpContext(features);
+        var tracker = new RawRazorPageLeaseTracker();
+        tracker.Add(new RecordingAsyncDisposable(() => { }), () => RetentionRawTerminalResult.Sealed);
+        tracker.Attach(context);
+        Assert.True(RawRazorPageLeaseTracker.TryTake(context, out var attached));
+        var entity = new string('x', byteCount);
+
+        await attached.ExecuteBufferedAsync(context, () => context.Response.WriteAsync(entity));
+
+        Assert.Equal(byteCount, responseFeature.Body.Length);
+    }
+
     [Theory]
     [InlineData("overview-page")]
     [InlineData("trace-list-page")]
@@ -530,23 +651,31 @@ public sealed class RawHttpTerminalMigrationTests
         Assert.Equal(0, responseFeature.Body.Length);
     }
 
-    private static async Task ExecuteHttpOwnerAsync(
+    private static async Task<OwnerProjectionStore> ExecuteHttpOwnerAsync(
         string owner,
         IFeatureCollection features,
         RetentionRawTerminalResult terminalResult,
         Action onTerminal,
-        Action onRelease)
+        Action onRelease,
+        RetentionReadDisposition? postGrantDisposition = null,
+        string? rawPayloadJson = null,
+        string? sessionContentJson = null)
     {
         using var temp = new MonitorTempDirectory();
         temp.CreateRawStore(RawTelemetryStoreConnectionOptions.MonitorWriter).CreateMonitorSchema();
         new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider).CreateSchema();
-        var projectionStore = new OwnerProjectionStore(terminalResult, onTerminal, onRelease);
+        var projectionStore = new OwnerProjectionStore(terminalResult, onTerminal, onRelease)
+        {
+            PostGrantDisposition = postGrantDisposition,
+            RawPayloadJson = rawPayloadJson,
+        };
         var analysisStore = new OwnerAnalysisStore(terminalResult, onTerminal, onRelease);
         var sessionStore = DispatchProxy.Create<ISessionStore, OwnerSessionStoreProxy>();
         var sessionProxy = Assert.IsAssignableFrom<OwnerSessionStoreProxy>(sessionStore);
         sessionProxy.TerminalResult = terminalResult;
         sessionProxy.OnTerminal = onTerminal;
         sessionProxy.OnRelease = onRelease;
+        sessionProxy.ContentJson = sessionContentJson ?? "buffered-raw-entity";
         var options = new MonitorOptions(
             temp.DatabasePath,
             "http://127.0.0.1:0",
@@ -608,6 +737,7 @@ public sealed class RawHttpTerminalMigrationTests
         context.SetEndpoint(endpoint);
 
         await endpoint.RequestDelegate!(context);
+        return projectionStore;
     }
 
     private static async Task<OwnerProjectionStore> ExecuteSafeProjectionRouteAsync(
@@ -716,6 +846,8 @@ public sealed class RawHttpTerminalMigrationTests
         internal int ReleaseCount { get; private set; }
         internal RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? LastLease { get; private set; }
         internal RetentionReadDisposition? ReadDisposition { get; init; }
+        internal RetentionReadDisposition? PostGrantDisposition { get; init; }
+        internal string? RawPayloadJson { get; init; }
 
         public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => new([Trace], false);
         public override IReadOnlyList<MonitorTraceRow> ListTopTokenTraces(string startInclusive, string endExclusive, int limit) => [Trace];
@@ -733,9 +865,24 @@ public sealed class RawHttpTerminalMigrationTests
         public override ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(
             long id,
             RetentionReadKind readKind,
-            CancellationToken cancellationToken) =>
-            ValueTask.FromResult(RetentionReadResult<RawTelemetryRecord>.FromHandle(
-                CreateLease(Raw, cancellationToken)));
+            CancellationToken cancellationToken)
+        {
+            if (PostGrantDisposition is { } disposition)
+            {
+                var (grant, handle) = CreateHandle();
+                return ValueTask.FromResult(RetentionReadResult<RawTelemetryRecord>.FromPostGrantDisposition(
+                    disposition,
+                    new RetentionReadLease<RawTelemetryRecord>(
+                        RetentionRevisionFence.Create(),
+                        grant,
+                        handle,
+                        cancellationToken)));
+            }
+            return ValueTask.FromResult(RetentionReadResult<RawTelemetryRecord>.FromHandle(
+                CreateLease(
+                    RawPayloadJson is null ? Raw : Raw with { PayloadJson = RawPayloadJson },
+                    cancellationToken)));
+        }
 
         public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(
             string traceId,
@@ -909,6 +1056,7 @@ public sealed class RawHttpTerminalMigrationTests
         internal RetentionRawTerminalResult TerminalResult { get; set; }
         internal Action OnTerminal { get; set; } = null!;
         internal Action OnRelease { get; set; } = null!;
+        internal string ContentJson { get; set; } = "buffered-raw-entity";
         private static readonly DateTimeOffset ObservedAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         private static readonly ObservedSession Session = new(
             SessionId,
@@ -960,7 +1108,7 @@ public sealed class RawHttpTerminalMigrationTests
             var content = new SessionEventContent(
                 EventId,
                 "prompt",
-                "buffered-raw-entity",
+                ContentJson,
                 DateTimeOffset.UnixEpoch,
                 DateTimeOffset.UnixEpoch.AddHours(1));
             var referenceOpen = false;
@@ -979,9 +1127,12 @@ public sealed class RawHttpTerminalMigrationTests
                 {
                     Assert.False(referenceOpen);
                     OnTerminal();
-                    return TerminalResult == RetentionRawTerminalResult.Lost
-                        ? SessionContentTerminalResult.Lost
-                        : SessionContentTerminalResult.Busy;
+                    return TerminalResult switch
+                    {
+                        RetentionRawTerminalResult.Sealed => SessionContentTerminalResult.Sealed,
+                        RetentionRawTerminalResult.Lost => SessionContentTerminalResult.Lost,
+                        _ => SessionContentTerminalResult.Busy,
+                    };
                 },
                 () => throw new NotSupportedException());
             return ValueTask.FromResult(new SessionContentReadResult(SessionContentReadDisposition.Granted, lease));

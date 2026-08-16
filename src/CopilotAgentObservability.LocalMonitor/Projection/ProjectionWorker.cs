@@ -112,14 +112,12 @@ internal sealed class ProjectionWorker : BackgroundService
             }
 
             var recordsResult = await store.ListUnprocessedForProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
-            if (recordsResult.Disposition == RetentionReadDisposition.Busy)
-            {
-                throw new PersistenceBusyException();
-            }
             await using (var recordsLease = recordsResult.Lease)
             {
                 if (recordsLease is null)
                 {
+                    if (recordsResult.Disposition == RetentionReadDisposition.Busy)
+                        throw new PersistenceBusyException();
                     if (recordsResult.EmptyValue is null)
                     {
                         if (anyProjected)
@@ -130,6 +128,13 @@ internal sealed class ProjectionWorker : BackgroundService
                     }
                     var emptyStatus = store.GetProjectionStatus();
                     health.SetProjectionStatus(emptyStatus.Backlog, emptyStatus.OldestUnprocessedReceivedAt);
+                }
+                else if (recordsResult.Disposition is { } postGrantDisposition)
+                {
+                    var terminal = recordsResult.CompletePostGrantFailure();
+                    if (postGrantDisposition == RetentionReadDisposition.Busy
+                        || terminal != RetentionRawTerminalResult.CompletedWithoutRaw)
+                        throw new PersistenceBusyException();
                 }
                 else
                 {
@@ -214,13 +219,11 @@ internal sealed class ProjectionWorker : BackgroundService
             }
             // Phase 2: span projection (runs after trace projection in the same pass).
             var spanRecordsResult = await store.ListUnprocessedForSpanProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
-            if (spanRecordsResult.Disposition == RetentionReadDisposition.Busy)
-            {
-                throw new PersistenceBusyException();
-            }
             await using var spanRecordsLease = spanRecordsResult.Lease;
             if (spanRecordsLease is null)
             {
+                if (spanRecordsResult.Disposition == RetentionReadDisposition.Busy)
+                    throw new PersistenceBusyException();
                 if (spanRecordsResult.EmptyValue is not null)
                 {
                     var emptySpanStatus = store.GetSpanProjectionStatus();
@@ -230,6 +233,16 @@ internal sealed class ProjectionWorker : BackgroundService
                 {
                     eventBroker?.PublishProjectionChanged();
                 }
+                return;
+            }
+            if (spanRecordsResult.Disposition is { } spanPostGrantDisposition)
+            {
+                var terminal = spanRecordsResult.CompletePostGrantFailure();
+                if (spanPostGrantDisposition == RetentionReadDisposition.Busy
+                    || terminal != RetentionRawTerminalResult.CompletedWithoutRaw)
+                    throw new PersistenceBusyException();
+                if (anyProjected)
+                    eventBroker?.PublishProjectionChanged();
                 return;
             }
             using var spanRecordsReference = spanRecordsLease.AcquireValueReference();

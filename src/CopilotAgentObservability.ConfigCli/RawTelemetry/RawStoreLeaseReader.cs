@@ -23,6 +23,11 @@ internal static class RawStoreLeaseReader
             throw new InvalidDataException("raw_store_unavailable");
 
         await using var lease = result.Lease;
+        if (result.Disposition is not null)
+        {
+            _ = result.CompletePostGrantFailure();
+            throw new InvalidDataException("raw_store_unavailable");
+        }
         T value;
         using (var reference = lease.AcquireValueReference())
         {

@@ -457,9 +457,20 @@ internal static class MonitorHost
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
         {
             var result = await projectionStore.ListRawRecordsByTraceIdAsync(row.TraceId, 200, RetentionReadKind.Access, cancellationToken);
-            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
-            if (result.Lease is null) return SourceProjectionStateBuilder.Build([], FindSessionForTrace(sessionStore, row.TraceId));
+            if (result.Lease is null)
+            {
+                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                return SourceProjectionStateBuilder.Build([], FindSessionForTrace(sessionStore, row.TraceId));
+            }
             await using var lease = result.Lease;
+            if (result.Disposition is { } postGrantDisposition)
+            {
+                if (!RawResponsePublication.AuthorizesFixedSafePublication(result.CompletePostGrantFailure()))
+                    throw new RawResponseTerminalFailureException();
+                if (postGrantDisposition == RetentionReadDisposition.Busy)
+                    throw new PersistenceBusyException();
+                return SourceProjectionStateBuilder.Build([], FindSessionForTrace(sessionStore, row.TraceId));
+            }
             SourceCompatibilityRow[] observations;
             using (var reference = lease.AcquireValueReference())
             {
@@ -1236,6 +1247,16 @@ internal static class MonitorHost
                 }
 
                 await using var rawLease = rawRead.Lease;
+                if (rawRead.Disposition is not null)
+                {
+                    if (!RawResponsePublication.AuthorizesFixedSafePublication(rawRead.CompletePostGrantFailure()))
+                    {
+                        RawResponsePublication.Abort(context);
+                        return;
+                    }
+                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "analysis_run_not_found", "No analysis run exists for that trace.");
+                    return;
+                }
                 string entity;
                 using (var reference = rawLease.AcquireValueReference())
                 {
@@ -1296,19 +1317,30 @@ internal static class MonitorHost
                     return;
                 }
 
-                if (result.Disposition == RetentionReadDisposition.Busy)
-                {
-                    await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
-                    return;
-                }
                 if (result.Lease is null)
                 {
-                    await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
+                    if (result.Disposition == RetentionReadDisposition.Busy)
+                        await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    else
+                        await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
                     return;
                 }
 
                 await using (var lease = result.Lease)
                 {
+                    if (result.Disposition is { } postGrantDisposition)
+                    {
+                        if (!RawResponsePublication.AuthorizesFixedSafePublication(result.CompletePostGrantFailure()))
+                        {
+                            RawResponsePublication.Abort(context);
+                            return;
+                        }
+                        if (postGrantDisposition == RetentionReadDisposition.Busy)
+                            await WriteFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                        else
+                            await WriteFailureAsync(context, StatusCodes.Status404NotFound, "raw_record_not_found", "No raw record exists for that id.");
+                        return;
+                    }
                     string entity;
                     using (var reference = lease.AcquireValueReference())
                     {
@@ -1356,19 +1388,30 @@ internal static class MonitorHost
                     return;
                 }
 
-                if (rawResult?.Disposition == RetentionReadDisposition.Busy)
-                {
-                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
-                    return;
-                }
                 if (spanRow is null || rawResult?.Lease is null)
                 {
-                    await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "span_not_found", "No span exists for that trace and span id.");
+                    if (rawResult?.Disposition == RetentionReadDisposition.Busy)
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    else
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "span_not_found", "No span exists for that trace and span id.");
                     return;
                 }
 
                 // Best-effort formatted extraction; the raw span JSON always works.
                 await using var spanLease = rawResult.Lease;
+                if (rawResult.Disposition is { } postGrantDisposition)
+                {
+                    if (!RawResponsePublication.AuthorizesFixedSafePublication(rawResult.CompletePostGrantFailure()))
+                    {
+                        RawResponsePublication.Abort(context);
+                        return;
+                    }
+                    if (postGrantDisposition == RetentionReadDisposition.Busy)
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                    else
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status404NotFound, "span_not_found", "No span exists for that trace and span id.");
+                    return;
+                }
                 string entity;
                 using (var reference = spanLease.AcquireValueReference())
                 {
@@ -1461,15 +1504,29 @@ internal static class MonitorHost
                     return;
                 }
 
-                if (result.Disposition == RetentionReadDisposition.Busy)
-                {
-                    await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
-                    return;
-                }
                 await using var promptLease = result.Lease;
                 string entity;
                 if (promptLease is null)
                 {
+                    if (result.Disposition == RetentionReadDisposition.Busy)
+                    {
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                        return;
+                    }
+                    entity = JsonSerializer.Serialize(new { trace_id = traceId, prompt_label = (string?)null });
+                }
+                else if (result.Disposition is { } postGrantDisposition)
+                {
+                    if (!RawResponsePublication.AuthorizesFixedSafePublication(result.CompletePostGrantFailure()))
+                    {
+                        RawResponsePublication.Abort(context);
+                        return;
+                    }
+                    if (postGrantDisposition == RetentionReadDisposition.Busy)
+                    {
+                        await WriteNoStoreFailureAsync(context, StatusCodes.Status503ServiceUnavailable, "persistence_busy", "The local monitor raw store is busy.");
+                        return;
+                    }
                     entity = JsonSerializer.Serialize(new { trace_id = traceId, prompt_label = (string?)null });
                 }
                 else

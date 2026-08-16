@@ -76,6 +76,11 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
         var lease = read.Lease;
         try
         {
+            if (read.Disposition is not null)
+            {
+                leases.AddFixedSafe(lease, read.CompletePostGrantFailure);
+                return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
+            }
             List<RepositoryMetadataDiagnostic> diagnostics;
             var unavailable = false;
             using (var reference = lease.AcquireValueReference())

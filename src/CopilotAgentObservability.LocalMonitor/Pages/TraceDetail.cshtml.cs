@@ -83,8 +83,15 @@ public sealed class TraceDetailModel : PageModel
             if (RawAvailable)
             {
                 var result = await store.ListRawRecordsByTraceIdAsync(traceId, RawPreviewRecordLimit, RetentionReadKind.Access, HttpContext.RequestAborted);
-                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
-                if (result.Lease is not null)
+                if (result.Lease is null)
+                {
+                    if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                }
+                else if (result.Disposition is not null)
+                {
+                    leases.AddFixedSafe(result.Lease, result.CompletePostGrantFailure);
+                }
+                else
                 {
                     var lease = result.Lease;
                     using (var reference = lease.AcquireValueReference())

@@ -41,17 +41,20 @@ internal sealed class SkillProjectionWorker
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var projectionToken = projectionCancellation.Token;
         var read = await readFrontier(queueLease, projectionToken).ConfigureAwait(false);
-        if (read.Disposition == RetentionReadDisposition.Busy)
-            return store.RecordRetry(
-                queueLease,
-                CurrentTime(now, elapsed),
-                "retention_busy");
         if (read.Lease is null)
-            return store.RecordInputUnavailable(
-                queueLease,
-                CurrentTime(now, elapsed));
+            return read.Disposition == RetentionReadDisposition.Busy
+                ? store.RecordRetry(queueLease, CurrentTime(now, elapsed), "retention_busy")
+                : store.RecordInputUnavailable(queueLease, CurrentTime(now, elapsed));
 
         await using var retentionLease = read.Lease;
+        if (read.Disposition is { } postGrantDisposition)
+        {
+            var terminal = read.CompletePostGrantFailure();
+            return postGrantDisposition == RetentionReadDisposition.Busy
+                    || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                ? store.RecordRetry(queueLease, CurrentTime(now, elapsed), "retention_busy")
+                : store.RecordInputUnavailable(queueLease, CurrentTime(now, elapsed));
+        }
         using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = MaintainLeasesAsync(
             queueLease,

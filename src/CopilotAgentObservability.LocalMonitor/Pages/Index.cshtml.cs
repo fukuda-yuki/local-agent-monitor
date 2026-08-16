@@ -100,9 +100,19 @@ public sealed class IndexModel : PageModel
         foreach (var traceId in traceIds)
         {
             var result = await store.ListRawRecordsByTraceIdAsync(traceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, cancellationToken);
-            if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
-            if (result.Lease is null) { promptByTraceId[traceId] = null; continue; }
+            if (result.Lease is null)
+            {
+                if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
+                promptByTraceId[traceId] = null;
+                continue;
+            }
             var lease = result.Lease;
+            if (result.Disposition is not null)
+            {
+                promptByTraceId[traceId] = null;
+                leases.AddFixedSafe(lease, result.CompletePostGrantFailure);
+                continue;
+            }
             using (var reference = lease.AcquireValueReference())
             {
                 promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(

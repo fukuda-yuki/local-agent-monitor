@@ -112,6 +112,17 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 });
 
             var lease = result.Lease;
+            if (result.Disposition is { } postGrantDisposition)
+            {
+                await using (lease.ConfigureAwait(false))
+                {
+                    var terminal = result.CompletePostGrantFailure();
+                    return Failure(postGrantDisposition == RetentionReadDisposition.Busy
+                            || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                        ? "snapshot_store_busy"
+                        : "snapshot_read_denied");
+                }
+            }
             return new(true, null, new RawReplaySnapshotLease(
                 () =>
                 {

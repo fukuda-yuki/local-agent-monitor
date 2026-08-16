@@ -535,8 +535,10 @@ public sealed partial class RetentionCatalogStore
             if (value is null)
             {
                 transaction.Rollback();
-                await handle.DisposeAsync().ConfigureAwait(false);
-                return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+                return RetainSinglePostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
             }
             RetentionReadResult<T>? published = null;
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
@@ -565,8 +567,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
+            return RetainSinglePostGrantFailure<T>(handle, RetentionReadDisposition.Busy, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -575,8 +576,10 @@ public sealed partial class RetentionCatalogStore
         }
         catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+            return RetainSinglePostGrantFailure<T>(
+                handle,
+                RetentionReadDisposition.ConsumptionUnavailable,
+                cancellationToken);
         }
         catch
         {
@@ -623,8 +626,10 @@ public sealed partial class RetentionCatalogStore
             if (value is null)
             {
                 transaction.Rollback();
-                await handle.DisposeAsync().ConfigureAwait(false);
-                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+                return RetainBatchPostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
             }
             RetentionBatchReadResult<T>? published = null;
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
@@ -653,8 +658,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
+            return RetainBatchPostGrantFailure<T>(handle, RetentionReadDisposition.Busy, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -663,8 +667,10 @@ public sealed partial class RetentionCatalogStore
         }
         catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+            return RetainBatchPostGrantFailure<T>(
+                handle,
+                RetentionReadDisposition.ConsumptionUnavailable,
+                cancellationToken);
         }
         catch
         {
@@ -703,8 +709,10 @@ public sealed partial class RetentionCatalogStore
             if (value is null)
             {
                 transaction.Rollback();
-                await handle.DisposeAsync().ConfigureAwait(false);
-                return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+                return RetainBatchPostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
             }
             RetentionBatchReadResult<T>? published = null;
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
@@ -733,8 +741,7 @@ public sealed partial class RetentionCatalogStore
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
+            return RetainBatchPostGrantFailure<T>(handle, RetentionReadDisposition.Busy, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -743,8 +750,10 @@ public sealed partial class RetentionCatalogStore
         }
         catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
-            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+            return RetainBatchPostGrantFailure<T>(
+                handle,
+                RetentionReadDisposition.ConsumptionUnavailable,
+                cancellationToken);
         }
         catch
         {
@@ -759,6 +768,30 @@ public sealed partial class RetentionCatalogStore
             grants
                 .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
                 .ToArray());
+
+    private static RetentionReadResult<T> RetainSinglePostGrantFailure<T>(
+        RetentionCommittedReadHandle handle,
+        RetentionReadDisposition disposition,
+        CancellationToken cancellationToken) =>
+        RetentionReadResult<T>.FromPostGrantDisposition(
+            disposition,
+            new RetentionReadLease<T>(
+                RetentionRevisionFence.Create(),
+                handle.Grants[0],
+                handle,
+                cancellationToken));
+
+    private static RetentionBatchReadResult<T> RetainBatchPostGrantFailure<T>(
+        RetentionCommittedReadHandle handle,
+        RetentionReadDisposition disposition,
+        CancellationToken cancellationToken) =>
+        RetentionBatchReadResult<T>.FromPostGrantDisposition(
+            disposition,
+            new RetentionBatchReadLease<T>(
+                RetentionRevisionFence.Create(),
+                handle.Grants,
+                handle,
+                cancellationToken));
 
     private static bool IsPostGrantConsumptionContradiction(Exception exception) =>
         exception is SqliteException

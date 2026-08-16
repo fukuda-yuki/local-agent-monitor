@@ -230,8 +230,25 @@ internal sealed class RetentionReadResult<T>
     public RetentionReadDisposition? Disposition { get; }
     public RetentionReadLease<T>? Lease { get; }
 
+    internal RetentionRawTerminalResult CompletePostGrantFailure()
+    {
+        if (Disposition is not (RetentionReadDisposition.ConsumptionUnavailable or RetentionReadDisposition.Busy)
+            || Lease is null)
+            throw new InvalidOperationException("The read result does not carry a post-grant failure handle.");
+        return Lease.TryCompleteWithoutRaw();
+    }
+
     internal static RetentionReadResult<T> FromHandle(RetentionReadLease<T> lease) =>
         new(null, lease ?? throw new ArgumentNullException(nameof(lease)));
+
+    internal static RetentionReadResult<T> FromPostGrantDisposition(
+        RetentionReadDisposition disposition,
+        RetentionReadLease<T> lease)
+    {
+        if (disposition is not (RetentionReadDisposition.ConsumptionUnavailable or RetentionReadDisposition.Busy))
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        return new(disposition, lease ?? throw new ArgumentNullException(nameof(lease)));
+    }
 
     internal static RetentionReadResult<T> FromDisposition(RetentionReadDisposition disposition)
     {
@@ -262,8 +279,25 @@ internal sealed class RetentionBatchReadResult<T>
     public RetentionBatchReadLease<T>? Lease { get; }
     public T? EmptyValue { get; }
 
+    internal RetentionRawTerminalResult CompletePostGrantFailure()
+    {
+        if (Disposition is not (RetentionReadDisposition.ConsumptionUnavailable or RetentionReadDisposition.Busy)
+            || Lease is null)
+            throw new InvalidOperationException("The read result does not carry a post-grant failure handle.");
+        return Lease.TryCompleteWithoutRaw();
+    }
+
     internal static RetentionBatchReadResult<T> FromHandle(RetentionBatchReadLease<T> lease) =>
         new(null, lease ?? throw new ArgumentNullException(nameof(lease)), default);
+
+    internal static RetentionBatchReadResult<T> FromPostGrantDisposition(
+        RetentionReadDisposition disposition,
+        RetentionBatchReadLease<T> lease)
+    {
+        if (disposition is not (RetentionReadDisposition.ConsumptionUnavailable or RetentionReadDisposition.Busy))
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        return new(disposition, lease ?? throw new ArgumentNullException(nameof(lease)), default);
+    }
 
     internal static RetentionBatchReadResult<T> Empty(T value)
     {
@@ -355,7 +389,7 @@ internal sealed class RetentionRevisionFenceRejectedException : InvalidOperation
 internal sealed class RetentionReadLease<T> : IAsyncDisposable
 {
     private readonly Func<RetentionReadGrant, ValueTask> release;
-    private readonly RetentionReadValueOwner<T> valueOwner;
+    private readonly RetentionReadValueOwner<T>? valueOwner;
     private readonly RetentionCommittedReadHandle? committedHandle;
     private int released;
 
@@ -387,16 +421,30 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
         committedHandle.AttachValueOwner(valueOwner, cancellationToken);
     }
 
+    internal RetentionReadLease(
+        RetentionRevisionFence revisionFence,
+        RetentionReadGrant grant,
+        RetentionCommittedReadHandle committedHandle,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(committedHandle);
+        RevisionFence = revisionFence;
+        Grant = grant;
+        this.committedHandle = committedHandle;
+        release = _ => committedHandle.DisposeAsync();
+        committedHandle.AttachTerminalCancellation(cancellationToken);
+    }
+
     internal RetentionRevisionFence RevisionFence { get; }
     internal RetentionReadGrant Grant { get; }
     internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;
-    internal bool IsValueBufferCleared => valueOwner.IsCleared;
+    internal bool IsValueBufferCleared => valueOwner?.IsCleared ?? true;
     internal RetentionReadValueReference<T> AcquireValueReference()
     {
         committedHandle?.ObserveTerminalCancellation();
         if (committedHandle is not null && !committedHandle.AllowsUse)
             throw new InvalidOperationException("The retention handle is no longer usable.");
-        return valueOwner.Acquire();
+        return (valueOwner ?? throw new InvalidOperationException("The retention handle carries no value.")).Acquire();
     }
     internal RetentionRawTerminalResult TrySealRawResponse() =>
         committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
@@ -410,7 +458,7 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref released, 1) != 0) return ValueTask.CompletedTask;
-        valueOwner.Close();
+        valueOwner?.Close();
         return release(Grant);
     }
 }
@@ -418,7 +466,7 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
 internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
 {
     private readonly Func<ValueTask> release;
-    private readonly RetentionReadValueOwner<T> valueOwner;
+    private readonly RetentionReadValueOwner<T>? valueOwner;
     private readonly RetentionCommittedReadHandle? committedHandle;
     private int released;
 
@@ -466,16 +514,31 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
         committedHandle.AttachValueOwner(valueOwner, cancellationToken);
     }
 
+    internal RetentionBatchReadLease(
+        RetentionRevisionFence revisionFence,
+        IReadOnlyList<RetentionReadGrant> grants,
+        RetentionCommittedReadHandle committedHandle,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(grants);
+        ArgumentNullException.ThrowIfNull(committedHandle);
+        Grants = Array.AsReadOnly(grants.ToArray());
+        RevisionFence = revisionFence;
+        this.committedHandle = committedHandle;
+        release = committedHandle.DisposeAsync;
+        committedHandle.AttachTerminalCancellation(cancellationToken);
+    }
+
     internal RetentionRevisionFence RevisionFence { get; }
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
     internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;
-    internal bool IsValueBufferCleared => valueOwner.IsCleared;
+    internal bool IsValueBufferCleared => valueOwner?.IsCleared ?? true;
     internal RetentionReadValueReference<T> AcquireValueReference()
     {
         committedHandle?.ObserveTerminalCancellation();
         if (committedHandle is not null && !committedHandle.AllowsUse)
             throw new InvalidOperationException("The retention handle is no longer usable.");
-        return valueOwner.Acquire();
+        return (valueOwner ?? throw new InvalidOperationException("The retention handle carries no value.")).Acquire();
     }
     internal RetentionRawTerminalResult TrySealRawResponse() =>
         committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
@@ -488,7 +551,7 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref released, 1) != 0) return ValueTask.CompletedTask;
-        valueOwner.Close();
+        valueOwner?.Close();
         return release();
     }
 

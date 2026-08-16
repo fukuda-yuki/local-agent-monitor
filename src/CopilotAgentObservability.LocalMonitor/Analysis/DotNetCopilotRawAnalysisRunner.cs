@@ -394,14 +394,11 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
             selectedSpan,
             conversationTraceInputs);
         var rawResult = await projectionStore.ReadRawRecordsAsync(rawRecordIds, RetentionReadKind.Operation, cancellationToken);
-        if (rawResult.Disposition == RetentionReadDisposition.Busy)
-        {
-            throw new PersistenceBusyException();
-        }
-
         var rawLease = rawResult.Lease;
         if (rawLease is null)
         {
+            if (rawResult.Disposition == RetentionReadDisposition.Busy)
+                throw new PersistenceBusyException();
             if (rawRecordIds.Count != 0 || rawResult.Disposition != RetentionReadDisposition.Empty)
                 throw new AnalysisOwnershipException();
             return Materialize(rawResult.EmptyValue ?? []);
@@ -409,6 +406,14 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
 
         try
         {
+            if (rawResult.Disposition is { } postGrantDisposition)
+            {
+                var terminal = rawResult.CompletePostGrantFailure();
+                if (postGrantDisposition == RetentionReadDisposition.Busy
+                    || terminal == RetentionRawTerminalResult.Busy)
+                    throw new PersistenceBusyException();
+                throw new AnalysisOwnershipException();
+            }
             MonitorAnalysisToolData data;
             using (var reference = rawLease.AcquireValueReference())
             {

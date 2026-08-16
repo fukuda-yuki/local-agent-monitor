@@ -51,6 +51,7 @@ internal sealed class RetentionRawTerminalBusyException : Exception;
 internal interface IRetentionReadValueOwner
 {
     void Close();
+    bool TryClose();
 }
 
 internal sealed class RetentionReadValueOwner<T> : IRetentionReadValueOwner
@@ -115,10 +116,16 @@ internal sealed class RetentionReadValueOwner<T> : IRetentionReadValueOwner
 
     public void Close()
     {
+        TryClose();
+    }
+
+    public bool TryClose()
+    {
         lock (gate)
         {
             closed = true;
             ClearIfDrained();
+            return references == 0;
         }
     }
 

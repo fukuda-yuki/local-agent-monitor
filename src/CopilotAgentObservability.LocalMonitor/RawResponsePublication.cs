@@ -19,7 +19,6 @@ internal static class RawResponsePublication
 
 internal sealed class RawRazorPageLeaseTracker
 {
-    private const int MaximumBufferedEntityBytes = 4 * 1024 * 1024;
     private static readonly object ContextItemKey = new();
     private readonly List<(IAsyncDisposable Lease, Func<bool> Authorize)> leases = [];
     private int transferredOrDisposed;
@@ -64,7 +63,7 @@ internal sealed class RawRazorPageLeaseTracker
     {
         internal async Task ExecuteBufferedAsync(HttpContext context, Func<Task> render)
         {
-            await using var buffer = new BoundedMemoryStream(MaximumBufferedEntityBytes);
+            await using var buffer = new MemoryStream();
             var features = context.Features;
             var originalResponse = features.GetRequiredFeature<IHttpResponseFeature>();
             var destination = context.Response.Body;
@@ -129,32 +128,6 @@ internal sealed class RawRazorPageLeaseTracker
         }
     }
 
-    private sealed class BoundedMemoryStream(int maximumBytes) : MemoryStream
-    {
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            EnsureCapacity(count);
-            base.Write(buffer, offset, count);
-        }
-
-        public override void Write(ReadOnlySpan<byte> buffer)
-        {
-            EnsureCapacity(buffer.Length);
-            base.Write(buffer);
-        }
-
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            EnsureCapacity(buffer.Length);
-            return base.WriteAsync(buffer, cancellationToken);
-        }
-
-        private void EnsureCapacity(int count)
-        {
-            if (Position > maximumBytes - count)
-                throw new InvalidOperationException("The raw Razor entity exceeded its bounded response buffer.");
-        }
-    }
 }
 
 internal sealed class RawRazorPageBufferingFilter : IAsyncResultFilter

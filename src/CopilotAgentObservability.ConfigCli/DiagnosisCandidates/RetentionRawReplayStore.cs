@@ -158,6 +158,19 @@ internal sealed class RetentionRawReplayStore
             return new(RetainedRawReplayReadDisposition.Busy, null);
         }
         var lease = result.Lease;
+        if (result.Disposition is { } postGrantDisposition)
+        {
+            await using (lease.ConfigureAwait(false))
+            {
+                var terminal = result.CompletePostGrantFailure();
+                return new(
+                    postGrantDisposition == RetentionReadDisposition.Busy
+                        || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                        ? RetainedRawReplayReadDisposition.Busy
+                        : RetainedRawReplayReadDisposition.Denied,
+                    null);
+            }
+        }
         return new(RetainedRawReplayReadDisposition.Granted, new(
             () =>
             {

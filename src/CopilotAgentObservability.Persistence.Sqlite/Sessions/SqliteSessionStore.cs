@@ -1350,17 +1350,28 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             return new SessionEventContent(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), ParseTimestamp(reader.GetString(3)), ParseTimestamp(reader.GetString(4)));
         }, cancellationToken).ConfigureAwait(false);
 
-        if (result.Lease is { } lease)
+        if (result.Lease is { } lease && result.Disposition is { } postGrantDisposition)
+        {
+            await using (lease.ConfigureAwait(false))
+            {
+                var terminal = result.CompletePostGrantFailure();
+                return postGrantDisposition == RetentionReadDisposition.Busy
+                        || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                    ? new(SessionContentReadDisposition.Busy, null)
+                    : new(SessionContentReadDisposition.Denied, null);
+            }
+        }
+        if (result.Lease is { } grantedLease)
         {
             return new(SessionContentReadDisposition.Granted, new SessionContentReadLease(
-                lease.DisposeAsync,
+                grantedLease.DisposeAsync,
                 () =>
                 {
-                    var reference = lease.AcquireValueReference();
+                    var reference = grantedLease.AcquireValueReference();
                     return new SessionContentUseReference(() => reference.Value, reference.Dispose);
                 },
-                () => MapTerminal(lease.TrySealRawResponse()),
-                () => MapTerminal(lease.TryCompleteWithoutRaw())));
+                () => MapTerminal(grantedLease.TrySealRawResponse()),
+                () => MapTerminal(grantedLease.TryCompleteWithoutRaw())));
         }
         return result.Disposition == RetentionReadDisposition.Busy
             ? new(SessionContentReadDisposition.Busy, null)

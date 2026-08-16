@@ -179,6 +179,18 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         }
 
         await using var rawLease = rawResult.Lease;
+        if (rawResult.Disposition is { } postGrantDisposition)
+        {
+            var terminal = rawResult.CompletePostGrantFailure();
+            return Empty(
+                postGrantDisposition == RetentionReadDisposition.Busy
+                    || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                    ? StoreBusy()
+                    : status,
+                partition,
+                selection.VerificationId,
+                timeProvider.GetUtcNow());
+        }
         EvidencePreparation preparation;
         using (var reference = rawLease.AcquireValueReference())
         {
