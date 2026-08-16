@@ -468,7 +468,7 @@ internal static class MonitorHost
                     .Cast<SourceCompatibilityRow>()
                     .ToArray();
             }
-            if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+            if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
             {
                 observations = [];
                 throw new PersistenceBusyException();
@@ -1228,7 +1228,7 @@ internal static class MonitorHost
                 {
                     entity = JsonSerializer.Serialize(ToRunDto(run, reference.Value));
                 }
-                if (!RawResponsePublication.IsSuccessful(rawLease.TrySealRawResponse()))
+                if (!RawResponsePublication.AuthorizesRawDerivedPublication(rawLease.TrySealRawResponse()))
                 {
                     entity = string.Empty;
                     RawResponsePublication.Abort(context);
@@ -1302,7 +1302,7 @@ internal static class MonitorHost
                         var encodedPayload = HtmlEncoder.Default.Encode(reference.Value.PayloadJson);
                         entity = $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>";
                     }
-                    if (!RawResponsePublication.IsSuccessful(lease.TrySealRawResponse()))
+                    if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
                     {
                         entity = string.Empty;
                         RawResponsePublication.Abort(context);
@@ -1412,7 +1412,7 @@ internal static class MonitorHost
                     raw_span_json = detail?.RawSpanJson,
                     });
                 }
-                if (!RawResponsePublication.IsSuccessful(spanLease.TrySealRawResponse()))
+                if (!RawResponsePublication.AuthorizesRawDerivedPublication(spanLease.TrySealRawResponse()))
                 {
                     entity = string.Empty;
                     RawResponsePublication.Abort(context);
@@ -1467,7 +1467,7 @@ internal static class MonitorHost
                             reference.Value.Select(record => record.PayloadJson), traceId);
                         entity = JsonSerializer.Serialize(new { trace_id = traceId, prompt_label = label });
                     }
-                    if (!RawResponsePublication.IsSuccessful(promptLease.TrySealRawResponse()))
+                    if (!RawResponsePublication.AuthorizesRawDerivedPublication(promptLease.TrySealRawResponse()))
                     {
                         entity = string.Empty;
                         RawResponsePublication.Abort(context);

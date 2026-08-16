@@ -85,7 +85,11 @@ public sealed partial class RetentionCatalogStore
             rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterPublish);
             return published;
         }
-        catch (Exception exception) when (exception is SqliteException or RetentionRawTerminalBusyException)
+        catch (Exception exception) when (exception is not (
+            OperationCanceledException or
+            OutOfMemoryException or
+            StackOverflowException or
+            AccessViolationException))
         {
             handle.FailTerminalAttempt();
             return RetentionRawTerminalResult.Busy;

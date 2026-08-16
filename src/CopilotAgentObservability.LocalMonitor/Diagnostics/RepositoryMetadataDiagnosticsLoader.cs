@@ -89,7 +89,7 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
                 }
             }
         }
-        if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+        if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
         {
             diagnostics.Clear();
             return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);

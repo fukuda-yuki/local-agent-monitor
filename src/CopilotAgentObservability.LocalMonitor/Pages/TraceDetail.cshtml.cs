@@ -94,7 +94,7 @@ public sealed class TraceDetailModel : PageModel
                             .Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId))
                             .FirstOrDefault(prompt => prompt is not null);
                     }
-                    if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+                    if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
                     {
                         rawRecords = Array.Empty<RawRecordPreview>();
                         promptLabel = null;

@@ -172,7 +172,7 @@ public sealed class TracesModel : PageModel
                 promptByTraceId[row.TraceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
                     reference.Value.Select(record => record.PayloadJson), row.TraceId);
             }
-            if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+            if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
             {
                 promptByTraceId.Remove(row.TraceId);
                 await lease.DisposeAsync();

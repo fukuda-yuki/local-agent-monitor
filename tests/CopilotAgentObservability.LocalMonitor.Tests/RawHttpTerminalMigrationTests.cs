@@ -3,9 +3,27 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using System.Reflection;
 
 public sealed class RawHttpTerminalMigrationTests
 {
+    [Theory]
+    [InlineData("AuthorizesRawDerivedPublication", (int)RetentionRawTerminalResult.Sealed, true)]
+    [InlineData("AuthorizesRawDerivedPublication", (int)RetentionRawTerminalResult.CompletedWithoutRaw, false)]
+    [InlineData("AuthorizesFixedSafePublication", (int)RetentionRawTerminalResult.CompletedWithoutRaw, true)]
+    [InlineData("AuthorizesFixedSafePublication", (int)RetentionRawTerminalResult.Sealed, false)]
+    public void TerminalResult_AuthorizesOnlyItsNamedPublication(
+        string predicateName,
+        int terminalValue,
+        bool expected)
+    {
+        var predicate = Assert.IsAssignableFrom<MethodInfo>(typeof(RawResponsePublication).GetMethod(
+            predicateName,
+            BindingFlags.Static | BindingFlags.NonPublic));
+
+        Assert.Equal(expected, predicate.Invoke(null, [(RetentionRawTerminalResult)terminalValue]));
+    }
+
     public static TheoryData<string, int> TerminalFailures
     {
         get
@@ -62,7 +80,7 @@ public sealed class RawHttpTerminalMigrationTests
         var context = new DefaultHttpContext(features);
         var entity = "buffered-raw-entity";
 
-        Assert.False(RawResponsePublication.IsSuccessful(terminal));
+        Assert.False(RawResponsePublication.AuthorizesRawDerivedPublication(terminal));
         entity = string.Empty;
         RawResponsePublication.Abort(context);
 

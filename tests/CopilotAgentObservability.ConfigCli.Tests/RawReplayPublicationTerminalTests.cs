@@ -1,9 +1,25 @@
 using CopilotAgentObservability.RawReplay;
+using System.Reflection;
 
 namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class RawReplayPublicationTerminalTests
 {
+    [Theory]
+    [InlineData("TrySealRawReplayTransientPublication")]
+    [InlineData("TrySealRawReplayFilePublication")]
+    public void ReplayTerminals_AreNotOnThePublicAssemblySurface(string methodName)
+    {
+        Assert.Null(typeof(RawReplaySnapshotLease).GetMethod(
+            methodName,
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        var terminal = Assert.Single(
+            typeof(RawReplaySnapshotLease)
+                .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly),
+            method => method.Name == methodName);
+        Assert.True(terminal.IsAssembly);
+    }
+
     [Fact]
     public async Task TransientSealPermitsExactlyOnePublicationCommit()
     {

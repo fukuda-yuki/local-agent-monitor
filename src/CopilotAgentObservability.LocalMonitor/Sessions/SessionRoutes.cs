@@ -612,7 +612,7 @@ internal static class SessionRoutes
                     .Cast<SourceCompatibilityRow>()
                     .ToArray();
             }
-            if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+            if (!RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw()))
             {
                 mapped = [];
                 throw new PersistenceBusyException();

@@ -304,7 +304,7 @@ internal static class RawReplayRoutes
                 }, false, null, false), false);
             await using var lease = retained.Lease;
             var result = new ReplayResultView(true, null, true, lease.Receipt, false);
-            return lease.TryCompleteWithoutRaw() == RetentionRawTerminalResult.CompletedWithoutRaw
+            return RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw())
                 ? new(result, false)
                 : new(new(false, null, false, null, true), true);
         }

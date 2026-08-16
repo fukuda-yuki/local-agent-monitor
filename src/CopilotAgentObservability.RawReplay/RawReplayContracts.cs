@@ -156,10 +156,10 @@ public sealed class RawReplaySnapshotLease : IAsyncDisposable
 
     public RawReplaySnapshot Snapshot { get; }
 
-    public bool TrySealRawReplayTransientPublication(out string? errorCode) =>
+    internal bool TrySealRawReplayTransientPublication(out string? errorCode) =>
         TrySeal(RawReplaySnapshotTerminalOperation.SealTransientPublication, out errorCode);
 
-    public bool TrySealRawReplayFilePublication(
+    internal bool TrySealRawReplayFilePublication(
         string stagedPath,
         string outputPath,
         out Action? publicationTicket,

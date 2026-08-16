@@ -114,7 +114,7 @@ public sealed class IndexModel : PageModel
                 promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
                     reference.Value.Select(record => record.PayloadJson), traceId);
             }
-            if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+            if (!RawResponsePublication.AuthorizesRawDerivedPublication(lease.TrySealRawResponse()))
             {
                 promptByTraceId.Remove(traceId);
                 await lease.DisposeAsync();

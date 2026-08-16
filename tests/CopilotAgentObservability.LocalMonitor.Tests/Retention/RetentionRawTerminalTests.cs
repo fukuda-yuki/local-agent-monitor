@@ -246,6 +246,39 @@ public sealed class RetentionRawTerminalTests
         Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
     }
 
+    [Theory]
+    [InlineData((int)RetentionRawTerminalCheckpoint.AfterClaimBeforeTransaction)]
+    [InlineData((int)RetentionRawTerminalCheckpoint.AfterStateMoveBeforeCommit)]
+    public async Task NonSqliteTransactionFailureIsBusyAndIrreversiblyFailed(
+        int failurePointValue)
+    {
+        await using var fixture = await TerminalFixture.CreateSingleAsync();
+        var failurePoint = (RetentionRawTerminalCheckpoint)failurePointValue;
+        fixture.Checkpoint.ThrowAt(failurePoint, new InvalidOperationException("injected terminal failure"));
+
+        Assert.Equal(RetentionRawTerminalResult.Busy, fixture.SingleLease.TryCompleteWithoutRaw());
+        Assert.Equal(RetentionRawTerminalState.Failed, fixture.SingleLease.TerminalState);
+        Assert.Equal(1L, fixture.LeaseCount());
+        Assert.Equal(RetentionRawTerminalResult.Busy, fixture.SingleLease.TrySealRawResponse());
+        Assert.Equal(
+            RetentionOperationRenewalDisposition.LeaseLost,
+            fixture.Store.RenewOperationLease(fixture.SingleLease.Grant));
+        Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
+    }
+
+    [Fact]
+    public async Task CancellationInsideTerminalTransactionIsLostRatherThanBusy()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var fixture = await TerminalFixture.CreateSingleAsync(cancellation.Token);
+        fixture.Checkpoint.On(
+            RetentionRawTerminalCheckpoint.AfterStateMoveBeforeCommit,
+            cancellation.Cancel);
+
+        Assert.Equal(RetentionRawTerminalResult.Lost, fixture.SingleLease.TrySealRawResponse());
+        Assert.Equal(RetentionRawTerminalState.Lost, fixture.SingleLease.TerminalState);
+    }
+
     [Fact]
     public async Task RenewalCommittedBeforeClaimIsVisibleToTerminalProof()
     {
@@ -622,26 +655,32 @@ public sealed class RetentionRawTerminalTests
     {
         private readonly object gate = new();
         private readonly Dictionary<RetentionRawTerminalCheckpoint, Action> actions = [];
-        private RetentionRawTerminalCheckpoint? failurePoint;
+        private readonly Dictionary<RetentionRawTerminalCheckpoint, Exception> failures = [];
 
         private List<RetentionRawTerminalCheckpoint> observed = [];
         internal IReadOnlyList<RetentionRawTerminalCheckpoint> Observed { get { lock (gate) return observed.ToArray(); } }
         internal bool Contains(RetentionRawTerminalCheckpoint checkpoint) { lock (gate) return observed.Contains(checkpoint); }
         internal void Clear() { lock (gate) observed.Clear(); }
         internal void On(RetentionRawTerminalCheckpoint checkpoint, Action action) { lock (gate) actions[checkpoint] = action; }
-        internal void FailAt(RetentionRawTerminalCheckpoint checkpoint) { lock (gate) failurePoint = checkpoint; }
+        internal void FailAt(RetentionRawTerminalCheckpoint checkpoint) =>
+            ThrowAt(checkpoint, new RetentionRawTerminalBusyException());
+        internal void ThrowAt(RetentionRawTerminalCheckpoint checkpoint, Exception exception)
+        {
+            lock (gate) failures[checkpoint] = exception;
+        }
 
         public void Reached(RetentionRawTerminalCheckpoint checkpoint)
         {
             Action? action;
+            Exception? failure;
             bool fail;
             lock (gate)
             {
                 observed.Add(checkpoint);
-                fail = failurePoint == checkpoint;
+                fail = failures.TryGetValue(checkpoint, out failure);
                 actions.TryGetValue(checkpoint, out action);
             }
-            if (fail) throw new RetentionRawTerminalBusyException();
+            if (fail) throw failure!;
             action?.Invoke();
         }
     }

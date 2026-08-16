@@ -4,8 +4,11 @@ namespace CopilotAgentObservability.LocalMonitor;
 
 internal static class RawResponsePublication
 {
-    internal static bool IsSuccessful(RetentionRawTerminalResult result) =>
-        result is RetentionRawTerminalResult.Sealed or RetentionRawTerminalResult.CompletedWithoutRaw;
+    internal static bool AuthorizesRawDerivedPublication(RetentionRawTerminalResult result) =>
+        result == RetentionRawTerminalResult.Sealed;
+
+    internal static bool AuthorizesFixedSafePublication(RetentionRawTerminalResult result) =>
+        result == RetentionRawTerminalResult.CompletedWithoutRaw;
 
     internal static void Abort(HttpContext context) => context.Abort();
 }
