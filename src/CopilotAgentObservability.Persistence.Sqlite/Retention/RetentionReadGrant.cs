@@ -28,6 +28,7 @@ internal sealed class RetentionReadGrant
 
     private readonly object leasePublicationGate = new();
     private readonly byte[] sourceToken;
+    private readonly Action? publicationAcquiredForTesting;
     private DateTimeOffset publishedLeaseExpiresAt;
     private RetentionCommittedReadHandle? committedHandle;
 
@@ -39,7 +40,8 @@ internal sealed class RetentionReadGrant
         string leaseOwner,
         long leaseGeneration,
         DateTimeOffset leaseExpiresAt,
-        byte[] sourceToken)
+        byte[] sourceToken,
+        Action? publicationAcquiredForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(ownershipKey);
         ArgumentNullException.ThrowIfNull(itemId);
@@ -55,6 +57,7 @@ internal sealed class RetentionReadGrant
         LeaseExpiresAt = leaseExpiresAt;
         publishedLeaseExpiresAt = leaseExpiresAt;
         this.sourceToken = sourceToken.ToArray();
+        this.publicationAcquiredForTesting = publicationAcquiredForTesting;
     }
 
     internal RetentionOwnershipKey OwnershipKey { get; }
@@ -120,13 +123,31 @@ internal sealed class RetentionReadGrant
         {
             ArgumentNullException.ThrowIfNull(owner);
             Monitor.Enter(owner.leasePublicationGate);
-            this.owner = owner;
+            try
+            {
+                owner.publicationAcquiredForTesting?.Invoke();
+                this.owner = owner;
+            }
+            catch
+            {
+                Monitor.Exit(owner.leasePublicationGate);
+                throw;
+            }
         }
 
         internal static LeasePublication FromEnteredGate(RetentionReadGrant owner)
         {
             ArgumentNullException.ThrowIfNull(owner);
-            return new LeasePublication { owner = owner };
+            try
+            {
+                owner.publicationAcquiredForTesting?.Invoke();
+                return new LeasePublication { owner = owner };
+            }
+            catch
+            {
+                Monitor.Exit(owner.leasePublicationGate);
+                throw;
+            }
         }
 
         private LeasePublication() { }
@@ -425,6 +446,15 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         return scopes[index].LeaseExpiresAt;
+    }
+
+    internal RetentionReadGrant.LeasePublication ScopeFor(int index, RetentionReadGrant grant)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(grant);
+        if (index < 0 || index >= scopes.Count || !ReferenceEquals(grants[index], grant))
+            throw new ArgumentOutOfRangeException(nameof(index));
+        return scopes[index];
     }
 
     internal void AdvanceExpiry(int index, DateTimeOffset expiry)

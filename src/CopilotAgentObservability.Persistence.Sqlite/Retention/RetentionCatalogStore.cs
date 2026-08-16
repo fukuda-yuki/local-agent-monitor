@@ -535,7 +535,7 @@ public sealed partial class RetentionCatalogStore
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
-                if (AreGrantsUsable(connection, transaction, handle.Grants, afterSelectionAt)
+                if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
                     && handle.IsPublished)
                 {
                     transaction.Commit();
@@ -559,6 +559,16 @@ public sealed partial class RetentionCatalogStore
         {
             await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
+        }
+        catch (OperationCanceledException)
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
         }
         catch
         {
@@ -612,7 +622,7 @@ public sealed partial class RetentionCatalogStore
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
-                if (AreGrantsUsable(connection, transaction, handle.Grants, afterSelectionAt)
+                if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
                     && handle.IsPublished)
                 {
                     transaction.Commit();
@@ -636,6 +646,16 @@ public sealed partial class RetentionCatalogStore
         {
             await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
+        }
+        catch (OperationCanceledException)
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
         }
         catch
         {
@@ -681,7 +701,7 @@ public sealed partial class RetentionCatalogStore
             using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
-                if (AreGrantsUsable(connection, transaction, handle.Grants, afterSelectionAt)
+                if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
                     && handle.IsPublished)
                 {
                     transaction.Commit();
@@ -706,6 +726,16 @@ public sealed partial class RetentionCatalogStore
             await handle.DisposeAsync().ConfigureAwait(false);
             return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.Busy);
         }
+        catch (OperationCanceledException)
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception exception) when (IsPostGrantConsumptionContradiction(exception))
+        {
+            await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.ConsumptionUnavailable);
+        }
         catch
         {
             await handle.DisposeAsync().ConfigureAwait(false);
@@ -720,6 +750,10 @@ public sealed partial class RetentionCatalogStore
                 .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
                 .ToArray());
 
+    private static bool IsPostGrantConsumptionContradiction(Exception exception) =>
+        exception is SqliteException
+            or FormatException;
+
     private bool ProveGrantsUsable(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -727,18 +761,27 @@ public sealed partial class RetentionCatalogStore
     {
         using var publications = EnterConsumptionPublicationScopes(grants);
         var at = timeProvider.GetUtcNow();
-        return AreGrantsUsable(connection, transaction, grants, at);
+        return AreGrantsUsable(connection, transaction, grants, publications, at);
     }
 
     private static bool AreGrantsUsable(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyList<RetentionReadGrant> grants,
+        RetentionGrantPublicationSet publications,
         DateTimeOffset at)
     {
         var usable = true;
-        foreach (var grant in grants)
-            usable &= IsGrantUsable(connection, transaction, grant, at);
+        for (var index = 0; index < grants.Count; index++)
+        {
+            var grant = grants[index];
+            usable &= IsGrantUsable(
+                connection,
+                transaction,
+                grant,
+                publications.ScopeFor(index, grant),
+                at);
+        }
         return usable;
     }
 

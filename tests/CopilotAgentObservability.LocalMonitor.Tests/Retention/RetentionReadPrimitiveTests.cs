@@ -1429,6 +1429,34 @@ public sealed class RetentionReadPrimitiveTests
         Assert.Equal([73], releasedOrdinals);
     }
 
+    [Fact]
+    public void GrantProof_WithPublicationSetHeldAcquiresEachPublicationLockExactlyOnce()
+    {
+        var at = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var expiry = at.AddMinutes(2);
+        var acquisitions = 0;
+        var first = CreateGrant("item-z", "1", 1, leaseExpiresAt: expiry, publicationAcquired: () => acquisitions++);
+        var second = CreateGrant("item-a", "2", 2, leaseExpiresAt: expiry, publicationAcquired: () => acquisitions++);
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        Execute(connection, "CREATE TABLE retention_store_instances(id INTEGER PRIMARY KEY, store_instance_id TEXT NOT NULL);");
+        Execute(connection, "CREATE TABLE raw_records(id INTEGER PRIMARY KEY, retention_owner_token BLOB NOT NULL);");
+        Execute(connection, "CREATE TABLE retention_leases(item_id TEXT NOT NULL, lease_kind TEXT NOT NULL, owner TEXT NOT NULL, generation INTEGER NOT NULL, expires_at TEXT NOT NULL);");
+        Execute(connection, "INSERT INTO retention_store_instances VALUES(1, 'store');");
+        Execute(connection, "INSERT INTO raw_records VALUES(1, X'0101010101010101010101010101010101010101010101010101010101010101'), (2, X'0202020202020202020202020202020202020202020202020202020202020202');");
+        Execute(connection, $"INSERT INTO retention_leases VALUES('item-z', 'operation', 'owner-1', 11, '{expiry:O}'), ('item-a', 'operation', 'owner-2', 11, '{expiry:O}');");
+        using var transaction = connection.BeginTransaction();
+        using var publications = RetentionGrantPublicationSet.EnterInOrder([new(first, 0), new(second, 1)]);
+
+        Assert.Equal(
+            RetentionOperationRenewalDisposition.NotDue,
+            RetentionCatalogStore.TryPrepareOperationLeaseRenewal(connection, transaction, first, publications, 0, at));
+        Assert.Equal(
+            RetentionOperationRenewalDisposition.NotDue,
+            RetentionCatalogStore.TryPrepareOperationLeaseRenewal(connection, transaction, second, publications, 1, at));
+        Assert.Equal(publications.Count, acquisitions);
+    }
+
     [Theory]
     [InlineData("store_instance_id")]
     [InlineData("item_id")]
@@ -1502,6 +1530,101 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, result.Disposition);
             Assert.Null(result.Lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single, "format", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "format", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "format", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.Single, "sqlite_non_contention", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "sqlite_non_contention", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite_non_contention", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.Single, "sqlite_contention", "Busy")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "sqlite_contention", "Busy")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite_contention", "Busy")]
+    public async Task ReadPrimitive_PostGrantDataFailureReturnsClosedDispositionAndReleasesLease(
+        ReadPrimitivePath primitivePath,
+        string failure,
+        string expectedDisposition)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+            ValueTask<string?> Fail() => throw failure switch
+            {
+                "format" => new FormatException("synthetic_malformed_persisted_timestamp"),
+                "sqlite_non_contention" => new SqliteException("synthetic_query_failure", 10),
+                "sqlite_contention" => new SqliteException("synthetic_busy", 5),
+                _ => new InvalidOperationException(failure),
+            };
+            var (disposition, lease) = primitivePath switch
+            {
+                ReadPrimitivePath.Single => SingleResult(await store.ReadAsync<string>(
+                    request,
+                    (_, _, _, _) => Fail(),
+                    CancellationToken.None)),
+                ReadPrimitivePath.FixedBatch => BatchResult(await store.ReadBatchAsync<string>(
+                    [request],
+                    (_, _, _, _) => Fail(),
+                    CancellationToken.None)),
+                ReadPrimitivePath.SelectedBatch => BatchResult(await store.ReadSelectedBatchAsync<string>(
+                    (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([request]),
+                    (_, _, _, _) => Fail(),
+                    CancellationToken.None)),
+                _ => throw new InvalidOperationException(primitivePath.ToString()),
+            };
+
+            Assert.Equal(expectedDisposition, disposition?.ToString());
+            Assert.Null(lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+
+            static (RetentionReadDisposition? Disposition, IAsyncDisposable? Lease) SingleResult(
+                RetentionReadResult<string> result) => (result.Disposition, result.Lease);
+            static (RetentionReadDisposition? Disposition, IAsyncDisposable? Lease) BatchResult(
+                RetentionBatchReadResult<string> result) => (result.Disposition, result.Lease);
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single)]
+    [InlineData(ReadPrimitivePath.FixedBatch)]
+    [InlineData(ReadPrimitivePath.SelectedBatch)]
+    public async Task ReadPrimitive_PostGrantCancellationPropagatesAndReleasesLease(ReadPrimitivePath primitivePath)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            using var cancellation = new CancellationTokenSource();
+
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            {
+                if (primitivePath == ReadPrimitivePath.Single)
+                    await store.ReadAsync<string>(request, (_, _, _, _) => throw new OperationCanceledException(cancellation.Token), cancellation.Token);
+                else if (primitivePath == ReadPrimitivePath.FixedBatch)
+                    await store.ReadBatchAsync<string>([request], (_, _, _, _) => throw new OperationCanceledException(cancellation.Token), cancellation.Token);
+                else
+                    await store.ReadSelectedBatchAsync<string>(
+                        (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([request]),
+                        (_, _, _, _) => throw new OperationCanceledException(cancellation.Token),
+                        cancellation.Token);
+            });
             Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
@@ -2720,7 +2843,8 @@ public sealed class RetentionReadPrimitiveTests
         RetentionLeaseKind leaseKind = RetentionLeaseKind.Operation,
         string? owner = null,
         long generation = 11,
-        DateTimeOffset? leaseExpiresAt = null) =>
+        DateTimeOffset? leaseExpiresAt = null,
+        Action? publicationAcquired = null) =>
         new(
             new RetentionOwnershipKey(storeInstanceId, RetentionStoreKind.RawRecord, sourceItemId),
             itemId,
@@ -2729,7 +2853,8 @@ public sealed class RetentionReadPrimitiveTests
             owner ?? $"owner-{sourceItemId}",
             generation,
             leaseExpiresAt ?? new DateTimeOffset(2026, 8, 1, 0, 2, 0, TimeSpan.Zero),
-            Enumerable.Repeat(tokenByte, 32).ToArray());
+            Enumerable.Repeat(tokenByte, 32).ToArray(),
+            publicationAcquired);
 
     private static IReadOnlyList<RetentionReadGrant> ObserveAcquisitionOrder(
         params RetentionGrantPublicationMember[] members)

@@ -42,9 +42,15 @@ public sealed partial class RetentionCatalogStore
                     transaction.Rollback();
                     return RetentionHandlePublicationDisposition.LeaseLost;
                 }
-                foreach (var grant in handle.Grants)
+                for (var index = 0; index < handle.Grants.Count; index++)
                 {
-                    if (!IsGrantUsable(connection, transaction, grant, publicationAt))
+                    var grant = handle.Grants[index];
+                    if (!IsGrantUsable(
+                            connection,
+                            transaction,
+                            grant,
+                            publications.ScopeFor(index, grant),
+                            publicationAt))
                     {
                         transaction.Rollback();
                         return RetentionHandlePublicationDisposition.LeaseLost;
@@ -143,9 +149,21 @@ public sealed partial class RetentionCatalogStore
         RetentionReadGrant grant,
         DateTimeOffset at)
     {
+        using var publication = grant.EnterLeasePublication();
+        return IsGrantUsable(connection, transaction, grant, publication, at);
+    }
+
+    internal static bool IsGrantUsable(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionReadGrant grant,
+        RetentionReadGrant.LeasePublication publication,
+        DateTimeOffset at)
+    {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(grant);
+        ArgumentNullException.ThrowIfNull(publication);
         var key = grant.OwnershipKey;
         if (grant.LeaseKind is not (RetentionLeaseKind.Access or RetentionLeaseKind.Operation)) return false;
         if (!string.Equals(key.StoreInstanceId, StoreId(connection, transaction), StringComparison.Ordinal)) return false;
@@ -183,7 +201,6 @@ public sealed partial class RetentionCatalogStore
                 return false;
         }
 
-        using var publication = grant.EnterLeasePublication();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
@@ -236,7 +253,12 @@ public sealed partial class RetentionCatalogStore
             return RetentionOperationRenewalDisposition.LeaseLost;
         if (grant.LeaseKind != RetentionLeaseKind.Operation)
             return RetentionOperationRenewalDisposition.LeaseLost;
-        if (!IsGrantUsable(connection, transaction, grant, at))
+        if (!IsGrantUsable(
+                connection,
+                transaction,
+                grant,
+                publications.ScopeFor(publicationIndex, grant),
+                at))
             return RetentionOperationRenewalDisposition.LeaseLost;
         var publishedExpiry = publications.LeaseExpiresAt(publicationIndex);
         if (publishedExpiry - at > RetentionV1Constants.LeaseRenewalDeadline)
@@ -264,6 +286,8 @@ public sealed partial class RetentionCatalogStore
         SqliteConnection connection,
         SqliteTransaction transaction,
         RetentionReadGrant grant,
+        RetentionGrantPublicationSet publications,
+        int publicationIndex,
         DateTimeOffset previousExpiry,
         DateTimeOffset expiry,
         DateTimeOffset at)
@@ -289,7 +313,12 @@ public sealed partial class RetentionCatalogStore
         command.Parameters.AddWithValue("$at", Timestamp(at));
         if (command.ExecuteNonQuery() == 1)
             return RetentionOperationRenewalDisposition.Renewed;
-        return IsGrantUsable(connection, transaction, grant, at)
+        return IsGrantUsable(
+                connection,
+                transaction,
+                grant,
+                publications.ScopeFor(publicationIndex, grant),
+                at)
             ? RetentionOperationRenewalDisposition.NonrenewableGrantStillUsable
             : RetentionOperationRenewalDisposition.LeaseLost;
     }
@@ -321,6 +350,8 @@ public sealed partial class RetentionCatalogStore
                     connection,
                     transaction,
                     grant,
+                    publications,
+                    0,
                     publications.LeaseExpiresAt(0),
                     expiry,
                     transactionAt);
@@ -413,6 +444,8 @@ public sealed partial class RetentionCatalogStore
                         connection,
                         transaction,
                         grants[index],
+                        publications,
+                        index,
                         publications.LeaseExpiresAt(index),
                         expiry,
                         at) == RetentionOperationRenewalDisposition.Renewed)
