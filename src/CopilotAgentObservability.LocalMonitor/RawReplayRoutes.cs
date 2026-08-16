@@ -212,22 +212,34 @@ internal static class RawReplayRoutes
             if (!capture.Success || capture.Lease is null)
                 return new(new(null, RawReplayAuthorizedService.ProviderError(capture.ErrorCode), null, null, null), false);
             await using var lease = capture.Lease;
-            var created = archiveService.Create(lease.Snapshot, control);
-            if (!created.Success)
+            RawReplayResult created;
+            string id = null!;
+            byte[] archive = null!;
+            ExportResult result = null!;
+            RawReplayTransientStore.RawReplayTransientReservation? reservation = null;
+            string? completionError = null;
+            using (var reference = lease.AcquireSnapshotReference())
             {
-                var error = created.ErrorCode!;
-                RawReplayAuthorizedService.DiscardRaw(created, error);
-                return CompleteExportFailure(lease, error);
+                created = archiveService.Create(reference.Snapshot, control);
+                if (!created.Success)
+                {
+                    completionError = created.ErrorCode!;
+                    RawReplayAuthorizedService.DiscardRaw(created, completionError);
+                }
+                else
+                {
+                    id = created.ArchiveSha256!;
+                    archive = created.ArchiveBytes!;
+                    result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
+                    var expiresAt = transientStore.ExpirationFromNow();
+                    if (!transientStore.TryReserve("export", id, archive.LongLength, expiresAt, out reservation))
+                    {
+                        completionError = "archive_too_large";
+                        RawReplayAuthorizedService.DiscardRaw(created, completionError);
+                    }
+                }
             }
-            var id = created.ArchiveSha256!;
-            var archive = created.ArchiveBytes!;
-            var result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
-            var expiresAt = transientStore.ExpirationFromNow();
-            if (!transientStore.TryReserve("export", id, archive.LongLength, expiresAt, out var reservation))
-            {
-                RawReplayAuthorizedService.DiscardRaw(created, "archive_too_large");
-                return CompleteExportFailure(lease, "archive_too_large");
-            }
+            if (completionError is not null) return CompleteExportFailure(lease, completionError);
             using (reservation)
             {
                 if (!lease.TrySealRawReplayTransientPublication(out _))
@@ -303,7 +315,11 @@ internal static class RawReplayRoutes
                     _ => "replay_not_found",
                 }, false, null, false), false);
             await using var lease = retained.Lease;
-            var result = new ReplayResultView(true, null, true, lease.Receipt, false);
+            ReplayResultView result;
+            using (var reference = lease.AcquireReceiptReference())
+            {
+                result = new ReplayResultView(true, null, true, reference.Receipt, false);
+            }
             return RawResponsePublication.AuthorizesFixedSafePublication(lease.TryCompleteWithoutRaw())
                 ? new(result, false)
                 : new(new(false, null, false, null, true), true);

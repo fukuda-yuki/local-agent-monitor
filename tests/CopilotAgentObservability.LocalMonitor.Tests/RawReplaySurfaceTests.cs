@@ -632,16 +632,19 @@ public sealed class RawReplaySurfaceTests
         RawReplaySnapshot snapshot,
         RawReplaySnapshotTerminalResult terminalResult = RawReplaySnapshotTerminalResult.Sealed) : IRawReplaySnapshotProvider
     {
+        private bool referenceReleased;
+
         public int CaptureCount { get; private set; }
         public List<RawReplaySnapshotTerminalOperation> TerminalOperations { get; } = [];
         public ValueTask<RawReplaySnapshotCapture> CaptureAsync(RawReplaySelection selection, bool includeSessionContent, CancellationToken cancellationToken)
         {
             CaptureCount++;
             return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
-                snapshot,
+                AcquireReference,
                 static () => ValueTask.CompletedTask,
                 operation =>
                 {
+                    Assert.True(referenceReleased);
                     TerminalOperations.Add(operation);
                     return terminalResult == RawReplaySnapshotTerminalResult.Sealed
                         ? operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
@@ -649,6 +652,12 @@ public sealed class RawReplaySurfaceTests
                             : RawReplaySnapshotTerminalResult.Sealed
                         : terminalResult;
                 })));
+        }
+
+        private RawReplaySnapshotUseReference AcquireReference()
+        {
+            referenceReleased = false;
+            return new(() => snapshot, () => referenceReleased = true);
         }
     }
 

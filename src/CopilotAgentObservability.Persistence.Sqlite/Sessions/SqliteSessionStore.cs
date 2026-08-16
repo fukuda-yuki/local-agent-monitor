@@ -1352,18 +1352,12 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
 
         if (result.Lease is { } lease)
         {
-            SessionEventContent content;
-            using (var reference = lease.AcquireValueReference())
-            {
-                content = reference.Value;
-            }
             return new(SessionContentReadDisposition.Granted, new SessionContentReadLease(
-                content,
                 lease.DisposeAsync,
                 () =>
                 {
                     var reference = lease.AcquireValueReference();
-                    return new SessionContentUseReference(reference.Value, reference.Dispose);
+                    return new SessionContentUseReference(() => reference.Value, reference.Dispose);
                 },
                 () => MapTerminal(lease.TrySealRawResponse()),
                 () => MapTerminal(lease.TryCompleteWithoutRaw())));

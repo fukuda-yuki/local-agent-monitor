@@ -29,7 +29,11 @@ public sealed class RawReplayAuthorizedService(IRawReplaySnapshotProvider snapsh
         if (!capture.Success || capture.Lease is null)
             return new(FailurePreview(ProviderError(capture.ErrorCode)), false);
         await using var lease = capture.Lease;
-        var preview = service.Preview(lease.Snapshot, control);
+        RawReplayPreview preview;
+        using (var reference = lease.AcquireSnapshotReference())
+        {
+            preview = service.Preview(reference.Snapshot, control);
+        }
         var terminal = lease.TryCompleteWithoutRaw();
         return terminal is RawReplaySnapshotTerminalResult.CompletedWithoutRaw or RawReplaySnapshotTerminalResult.NotRequired
             ? new(preview, false)
@@ -47,12 +51,18 @@ public sealed class RawReplayAuthorizedService(IRawReplaySnapshotProvider snapsh
         var capture = await snapshotProvider.CaptureAsync(control.Selection, control.IncludeSessionContent, cancellationToken).ConfigureAwait(false);
         if (!capture.Success || capture.Lease is null) return FailureResult(ProviderError(capture.ErrorCode));
         await using var lease = capture.Lease;
-        var result = service.Create(lease.Snapshot, control);
+        RawReplayResult result;
+        RawReplayFileStagingResult? staging = null;
+        using (var reference = lease.AcquireSnapshotReference())
+        {
+            result = service.Create(reference.Snapshot, control);
+            if (result.Success)
+                staging = service.StageForPublication(result, outputPath);
+        }
         if (!result.Success) return CompleteFailure(lease, result);
-
-        var staging = service.StageForPublication(result, outputPath);
-        if (staging.StagedFile is null) return CompleteFailure(lease, staging.Result);
-        using var staged = staging.StagedFile;
+        var completedStaging = staging!;
+        if (completedStaging.StagedFile is null) return CompleteFailure(lease, completedStaging.Result);
+        using var staged = completedStaging.StagedFile;
         if (!lease.TrySealRawReplayFilePublication(
                 staged.StagedPath,
                 staged.OutputPath,

@@ -31,7 +31,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
 
         Assert.True(result.Success, result.ErrorCode);
         Assert.Equal(
-            ["archive_inspected", "write", "flush", "staged_inspected", "seal", "move_observed"],
+            ["archive_inspected", "write", "flush", "staged_inspected", "reference_released", "seal", "move_observed"],
             [.. events, File.Exists(output) ? "move_observed" : "move_missing"]);
     }
 
@@ -156,20 +156,29 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         RawReplaySnapshot snapshot,
         List<RawReplaySnapshotTerminalOperation> terminalOperations) : IRawReplaySnapshotProvider
     {
+        private bool referenceReleased;
+
         public ValueTask<RawReplaySnapshotCapture> CaptureAsync(
             RawReplaySelection selection,
             bool includeSessionContent,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
-                snapshot,
+                AcquireReference,
                 static () => ValueTask.CompletedTask,
                 operation =>
                 {
+                    Assert.True(referenceReleased);
                     terminalOperations.Add(operation);
                     return operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
                         ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
                         : RawReplaySnapshotTerminalResult.Sealed;
                 })));
+
+        private RawReplaySnapshotUseReference AcquireReference()
+        {
+            referenceReleased = false;
+            return new(() => snapshot, () => referenceReleased = true);
+        }
     }
 
     private sealed class OrderedProvider(
@@ -181,7 +190,7 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
             bool includeSessionContent,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
-                snapshot,
+                () => new RawReplaySnapshotUseReference(() => snapshot, () => events.Add("reference_released")),
                 static () => ValueTask.CompletedTask,
                 operation =>
                 {

@@ -7,6 +7,21 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SqliteSessionStoreTests
 {
+    [Fact]
+    public void SessionContentReadLease_PublicSurfaceExposesNoRawValue()
+    {
+        Assert.Null(typeof(SessionContentReadLease).GetProperty(
+            "Content",
+            System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.DeclaredOnly));
+        Assert.DoesNotContain(
+            typeof(SessionContentReadLease).GetConstructors(
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance),
+            constructor => constructor.GetParameters().Any(
+                parameter => parameter.ParameterType == typeof(SessionEventContent)));
+    }
+
     private static SqliteSessionStore CreateRawStore(string databasePath, TimeProvider? timeProvider = null)
     {
         var clock = timeProvider ?? new SessionStoreTimeProvider(DateTimeOffset.UnixEpoch);
@@ -1315,7 +1330,10 @@ public sealed class SqliteSessionStoreTests
         var available = await store.ReadContentAsync(sessionId, eventId, CancellationToken.None);
         Assert.Equal(SessionContentReadDisposition.Granted, available.Disposition);
         await using var lease = available.Lease!;
-        Assert.Equal(batch.Content[0], lease.Content);
+        var reference = lease.AcquireContentReference();
+        Assert.Equal(batch.Content[0], reference.Content);
+        reference.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reference.Content);
         Assert.Equal(SessionContentReadDisposition.NotFound, (await store.ReadContentAsync(Guid.CreateVersion7(), eventId, CancellationToken.None)).Disposition);
         Assert.Equal(SessionContentReadDisposition.NotFound, (await store.ReadContentAsync(sessionId, Guid.CreateVersion7(), CancellationToken.None)).Disposition);
 
@@ -1324,6 +1342,34 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(SessionContentReadDisposition.Denied, expired.Disposition);
         using var connection = database.Open();
         Assert.Equal(1L, Scalar<long>(connection, "SELECT COUNT(*) FROM session_event_content;"));
+    }
+
+    [Fact]
+    public async Task ReadContentAsync_AfterValueOwnerCancellationRejectsEveryNewContentAccess()
+    {
+        using var database = new SessionTestDatabase();
+        using var cancellation = new CancellationTokenSource();
+        var now = DateTimeOffset.Parse("2026-07-11T00:00:00Z");
+        var time = new MutableTimeProvider(now);
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path, time);
+        var store = new SqliteSessionStore(database.Path, context, time);
+        store.CreateSchema();
+        var batch = CreateBatch(now, "cancelled-content-owner");
+        store.Write(batch);
+        var result = await store.ReadContentAsync(
+            batch.Detail.Session.SessionId,
+            batch.Detail.Events[0].EventId,
+            cancellation.Token);
+        var lease = Assert.IsType<SessionContentReadLease>(result.Lease);
+        var reference = lease.AcquireContentReference();
+        Assert.Equal(batch.Content[0], reference.Content);
+        reference.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reference.Content);
+
+        cancellation.Cancel();
+
+        Assert.Throws<InvalidOperationException>(() => lease.AcquireContentReference());
+        await lease.DisposeAsync();
     }
 
     [Fact]
@@ -1460,7 +1506,10 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(SessionContentReadDisposition.Granted, result.Disposition);
         await using (var lease = Assert.IsType<SessionContentReadLease>(result.Lease))
         {
-            Assert.Equal(batch.Content[0], lease.Content);
+            using (var reference = lease.AcquireContentReference())
+            {
+                Assert.Equal(batch.Content[0], reference.Content);
+            }
             using var activeLeaseVerification = database.Open();
             Assert.Equal(1L, CountSessionContentAccessLease(activeLeaseVerification, eventId));
         }

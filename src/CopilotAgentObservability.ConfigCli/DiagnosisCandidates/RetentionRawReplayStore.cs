@@ -14,17 +14,39 @@ internal sealed record RetainedRawReplayReadResult(RetainedRawReplayReadDisposit
 
 internal sealed class RetainedRawReplayLease : IAsyncDisposable
 {
+    private readonly Func<RetainedRawReplayUseReference> acquire;
     private readonly Func<ValueTask> release;
     private readonly Func<RetentionRawTerminalResult> completeWithoutRaw;
     private int released;
     internal RetainedRawReplayLease(
-        RawReplayReceipt receipt,
+        Func<RetainedRawReplayUseReference> acquire,
         Func<ValueTask> release,
         Func<RetentionRawTerminalResult> completeWithoutRaw) =>
-        (Receipt, this.release, this.completeWithoutRaw) = (receipt, release, completeWithoutRaw);
-    internal RawReplayReceipt Receipt { get; }
+        (this.acquire, this.release, this.completeWithoutRaw) = (acquire, release, completeWithoutRaw);
+    internal RetainedRawReplayUseReference AcquireReceiptReference() => acquire();
     internal RetentionRawTerminalResult TryCompleteWithoutRaw() => completeWithoutRaw();
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+}
+
+internal sealed class RetainedRawReplayUseReference : IDisposable
+{
+    private Func<RawReplayReceipt>? read;
+    private Action? releaseReference;
+
+    internal RetainedRawReplayUseReference(Func<RawReplayReceipt> read, Action release)
+    {
+        this.read = read ?? throw new ArgumentNullException(nameof(read));
+        releaseReference = release ?? throw new ArgumentNullException(nameof(release));
+    }
+
+    internal RawReplayReceipt Receipt =>
+        (Volatile.Read(ref read) ?? throw new ObjectDisposedException(nameof(RetainedRawReplayUseReference)))();
+
+    public void Dispose()
+    {
+        Interlocked.Exchange(ref read, null);
+        Interlocked.Exchange(ref releaseReference, null)?.Invoke();
+    }
 }
 
 internal sealed class RetentionRawReplayStore
@@ -49,7 +71,11 @@ internal sealed class RetentionRawReplayStore
         if (existing.Lease is not null)
         {
             await using var lease = existing.Lease;
-            var result = engine.Replay(replayId, archive, existing: lease.Receipt);
+            RawReplayExecutionResult result;
+            using (var reference = lease.AcquireReceiptReference())
+            {
+                result = engine.Replay(replayId, archive, existing: reference.Receipt);
+            }
             return CompleteRetainedResult(lease, result);
         }
 
@@ -69,7 +95,11 @@ internal sealed class RetentionRawReplayStore
             var raced = await ReadAsync(replayId, cancellationToken).ConfigureAwait(false);
             if (raced.Lease is null) return Failure("replay_publish_failed");
             await using var lease = raced.Lease;
-            var result = engine.Replay(replayId, archive, existing: lease.Receipt);
+            RawReplayExecutionResult result;
+            using (var reference = lease.AcquireReceiptReference())
+            {
+                result = engine.Replay(replayId, archive, existing: reference.Receipt);
+            }
             return CompleteRetainedResult(lease, result);
         }
     }
@@ -129,7 +159,11 @@ internal sealed class RetentionRawReplayStore
         }
         var lease = result.Lease;
         return new(RetainedRawReplayReadDisposition.Granted, new(
-            lease.Value.Receipt!,
+            () =>
+            {
+                var reference = lease.AcquireValueReference();
+                return new RetainedRawReplayUseReference(() => reference.Value.Receipt!, reference.Dispose);
+            },
             lease.DisposeAsync,
             lease.TryCompleteWithoutRaw));
     }

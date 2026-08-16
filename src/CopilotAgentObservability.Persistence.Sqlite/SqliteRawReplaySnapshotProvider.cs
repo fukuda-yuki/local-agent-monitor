@@ -88,10 +88,21 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 cancellationToken).ConfigureAwait(false);
 
             if (result.Disposition == RetentionReadDisposition.Empty && result.EmptyValue is { } emptyValue)
+            {
+                var owner = new RetentionReadValueOwner<RawReplaySnapshot>(emptyValue);
                 return new(true, null, new RawReplaySnapshotLease(
-                    emptyValue,
-                    static () => ValueTask.CompletedTask,
+                    () =>
+                    {
+                        var reference = owner.Acquire();
+                        return new RawReplaySnapshotUseReference(() => reference.Value, reference.Dispose);
+                    },
+                    () =>
+                    {
+                        owner.Close();
+                        return ValueTask.CompletedTask;
+                    },
                     terminalNotRequired: true));
+            }
 
             if (result.Lease is null)
                 return Failure(result.Disposition switch
@@ -102,7 +113,11 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
 
             var lease = result.Lease;
             return new(true, null, new RawReplaySnapshotLease(
-                lease.Value,
+                () =>
+                {
+                    var reference = lease.AcquireValueReference();
+                    return new RawReplaySnapshotUseReference(() => reference.Value, reference.Dispose);
+                },
                 lease.DisposeAsync,
                 operation => MapTerminal(lease, operation)));
         }

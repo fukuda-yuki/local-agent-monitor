@@ -31,9 +31,15 @@ public sealed class RetentionRawReplayStoreTests
         var retained = await store.ReadAsync("replay-one", CancellationToken.None);
         Assert.Equal(RetainedRawReplayReadDisposition.Granted, retained.Disposition);
         await using var lease = Assert.IsType<RetainedRawReplayLease>(retained.Lease);
-        Assert.Equal(first.Result.ArchiveSha256, lease.Receipt.ArchiveSha256);
+        using (var reference = lease.AcquireReceiptReference())
+        {
+            Assert.Equal(first.Result.ArchiveSha256, reference.Receipt.ArchiveSha256);
+            reference.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => reference.Receipt);
+        }
         Assert.Equal(1, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
         await lease.DisposeAsync();
+        Assert.Throws<InvalidOperationException>(() => lease.AcquireReceiptReference());
         Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
     }
 
@@ -72,38 +78,42 @@ public sealed class RetentionRawReplayStoreTests
 
         Assert.Equal(RetainedRawReplayReadDisposition.Granted, retained.Disposition);
         var lease = Assert.IsType<RetainedRawReplayLease>(retained.Lease);
-        Assert.Equal(
-            RawReplayJson.SerializeCanonical(captured.Result!),
-            RawReplayJson.SerializeCanonical(lease.Receipt));
+        using (var reference = lease.AcquireReceiptReference())
+        {
+            Assert.Equal(
+                RawReplayJson.SerializeCanonical(captured.Result!),
+                RawReplayJson.SerializeCanonical(reference.Receipt));
         Assert.Equal(1, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
         AssertExactPinnedRawReplayReadPublicSurface();
 
         const BindingFlags publicInstance = BindingFlags.Public | BindingFlags.Instance;
-        var surfaces = new List<string>
-        {
-            retained.ToString(),
-            lease.ToString() ?? string.Empty,
-            lease.Receipt.ToString(),
-            RawReplayJson.Text(lease.Receipt),
-        };
-        surfaces.AddRange(typeof(RetainedRawReplayReadResult).GetProperties(publicInstance)
-            .Select(property => property.GetValue(retained)?.ToString() ?? string.Empty));
-        surfaces.AddRange(typeof(RetainedRawReplayLease).GetProperties(publicInstance)
-            .Select(property => property.GetValue(lease)?.ToString() ?? string.Empty));
-        var forbidden = ForbiddenRepresentations(
-            sourceToken,
-            rawValue,
-            captureId,
-            fixture.Root,
-            fixture.BundleParent,
-            privateLocator,
-            Path.Combine(privateLocator, "manifest.json"),
-            Path.Combine(privateLocator, "input", "archive.zip"));
-        foreach (var surface in surfaces)
-            foreach (var value in forbidden)
-                Assert.DoesNotContain(value, surface, StringComparison.OrdinalIgnoreCase);
+            var surfaces = new List<string>
+            {
+                retained.ToString(),
+                lease.ToString() ?? string.Empty,
+                reference.Receipt.ToString(),
+                RawReplayJson.Text(reference.Receipt),
+            };
+            surfaces.AddRange(typeof(RetainedRawReplayReadResult).GetProperties(publicInstance)
+                .Select(property => property.GetValue(retained)?.ToString() ?? string.Empty));
+            surfaces.AddRange(typeof(RetainedRawReplayLease).GetProperties(publicInstance)
+                .Select(property => property.GetValue(lease)?.ToString() ?? string.Empty));
+            var forbidden = ForbiddenRepresentations(
+                sourceToken,
+                rawValue,
+                captureId,
+                fixture.Root,
+                fixture.BundleParent,
+                privateLocator,
+                Path.Combine(privateLocator, "manifest.json"),
+                Path.Combine(privateLocator, "input", "archive.zip"));
+            foreach (var surface in surfaces)
+                foreach (var value in forbidden)
+                    Assert.DoesNotContain(value, surface, StringComparison.OrdinalIgnoreCase);
+        }
 
         await lease.DisposeAsync();
+        Assert.Throws<InvalidOperationException>(() => lease.AcquireReceiptReference());
 
         Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
         Assert.Equal(beforeCatalog, fixture.BundleCatalogState(captureId));

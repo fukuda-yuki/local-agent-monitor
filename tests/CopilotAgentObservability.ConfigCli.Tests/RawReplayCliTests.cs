@@ -340,7 +340,7 @@ public sealed class RawReplayCliTests
             CaptureCount++;
             return ValueTask.FromResult(new RawReplaySnapshotCapture(true, null,
                 new RawReplaySnapshotLease(
-                    snapshot,
+                    () => new RawReplaySnapshotUseReference(() => snapshot, static () => { }),
                     () => { ReleaseCount++; return ValueTask.CompletedTask; },
                     operation =>
                     {

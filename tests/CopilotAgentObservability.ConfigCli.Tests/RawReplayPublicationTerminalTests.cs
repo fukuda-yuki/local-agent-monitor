@@ -5,6 +5,31 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class RawReplayPublicationTerminalTests
 {
+    [Fact]
+    public void ReplayLease_PublicSurfaceExposesNeitherRawValueNorPublicationAuthority()
+    {
+        Assert.Null(typeof(RawReplaySnapshotLease).GetProperty(
+            "Snapshot",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.Null(typeof(RawReplaySnapshotCapture).GetProperty(
+            "Snapshot",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.DoesNotContain(
+            typeof(RawReplaySnapshotLease).GetConstructors(BindingFlags.Public | BindingFlags.Instance),
+            constructor => constructor.GetParameters().Any(parameter => parameter.ParameterType == typeof(RawReplaySnapshot)));
+    }
+
+    [Fact]
+    public void SnapshotReference_AfterDisposeExposesNoStoredRawValue()
+    {
+        var reference = new RawReplaySnapshotUseReference(() => Snapshot(), static () => { });
+        Assert.Equal("snapshot", reference.Snapshot.SnapshotId);
+
+        reference.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => reference.Snapshot);
+    }
+
     [Theory]
     [InlineData("TrySealRawReplayTransientPublication")]
     [InlineData("TrySealRawReplayFilePublication")]
@@ -84,7 +109,7 @@ public sealed class RawReplayPublicationTerminalTests
 
     private static RawReplaySnapshotLease Lease(
         Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult> terminal) =>
-        new(Snapshot(), static () => ValueTask.CompletedTask, terminal);
+        new(() => new RawReplaySnapshotUseReference(() => Snapshot(), static () => { }), static () => ValueTask.CompletedTask, terminal);
 
     private static RawReplaySnapshot Snapshot() =>
         new("snapshot", DateTimeOffset.UnixEpoch, "monitor", [], [], []);

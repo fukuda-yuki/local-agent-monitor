@@ -280,7 +280,8 @@ public sealed class SubagentLifecycleSessionEventTests
         Assert.Equal(SessionContentReadDisposition.Granted, result.Disposition);
         Assert.NotNull(result.Lease);
         await using var lease = result.Lease!;
-        return lease.Content;
+        using var reference = lease.AcquireContentReference();
+        return reference.Content;
     }
 
     private static async Task AssertContentNotFoundAsync(

@@ -13,6 +13,30 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     private static readonly DateTimeOffset Now = new(2026, 7, 23, 1, 2, 3, TimeSpan.Zero);
 
     [Fact]
+    public async Task CaptureAsync_AfterValueOwnerCancellationRejectsEveryNewSnapshotAccess()
+    {
+        using var temp = new TempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var store = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        store.CreateMonitorSchema();
+        var rawRecordId = store.Insert(new RawTelemetryRecord(
+            null, RawTelemetrySources.RawOtlp, "trace-cancelled-owner", Now, null, "{\"resourceSpans\":[]}"));
+        var capture = await new SqliteRawReplaySnapshotProvider(temp.DatabasePath, context, new FixedTimeProvider(Now))
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: [rawRecordId]), false, cancellation.Token);
+        var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
+        var reference = lease.AcquireSnapshotReference();
+        Assert.Equal(rawRecordId, Assert.Single(reference.Snapshot.Records).RawRecordId);
+        reference.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reference.Snapshot);
+
+        cancellation.Cancel();
+
+        Assert.Throws<InvalidOperationException>(() => lease.AcquireSnapshotReference());
+        await lease.DisposeAsync();
+    }
+
+    [Fact]
     public async Task CaptureAsync_SelectsExactRawRowsAndHoldsOneCompositeOperationLease()
     {
         using var temp = new TempDirectory();
@@ -29,7 +53,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
 
         Assert.True(capture.Success, capture.ErrorCode);
         var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        var record = Assert.Single(lease.Snapshot.Records);
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        var record = Assert.Single(snapshotReference.Snapshot.Records);
         Assert.Equal(second, record.RawRecordId);
         Assert.Equal("trace-b", record.TraceId);
         Assert.Equal(Now.AddMinutes(-1), record.ReceivedAt);
@@ -60,13 +85,17 @@ public sealed class SqliteRawReplaySnapshotProviderTests
 
         Assert.True(capture.Success, capture.ErrorCode);
         await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        Assert.Equal(selected, Assert.Single(lease.Snapshot.Records).RawRecordId);
+        using (var reference = lease.AcquireSnapshotReference())
+        {
+            Assert.Equal(selected, Assert.Single(reference.Snapshot.Records).RawRecordId);
+        }
 
         var disjoint = await provider.CaptureAsync(new RawReplaySelection(
             RawRecordIds: [other], TraceIds: ["trace-exact"]), false, CancellationToken.None);
         Assert.True(disjoint.Success, disjoint.ErrorCode);
         await using var disjointLease = Assert.IsType<RawReplaySnapshotLease>(disjoint.Lease);
-        Assert.Empty(disjointLease.Snapshot.Records);
+        using var disjointReference = disjointLease.AcquireSnapshotReference();
+        Assert.Empty(disjointReference.Snapshot.Records);
     }
 
     [Fact]
@@ -126,7 +155,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
         Assert.True(result.Success, result.ErrorCode);
         Assert.Null(result.ErrorCode);
         var lease = Assert.IsType<RawReplaySnapshotLease>(result.Lease);
-        Assert.Equal(fixture.CanonicalIds, lease.Snapshot.Records.Select(static record => record.RawRecordId));
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        Assert.Equal(fixture.CanonicalIds, snapshotReference.Snapshot.Records.Select(static record => record.RawRecordId));
         Assert.Equal(1, checkpoint.InvocationCount);
         var acquisitionAudit = ReadLeaseAcquisitionAudit(temp.DatabasePath);
         Assert.Equal(
@@ -367,8 +397,9 @@ public sealed class SqliteRawReplaySnapshotProviderTests
 
         Assert.True(capture.Success, capture.ErrorCode);
         await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        Assert.Equal(rawId, Assert.Single(lease.Snapshot.Records).RawRecordId);
-        var content = Assert.Single(lease.Snapshot.SessionContents);
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        Assert.Equal(rawId, Assert.Single(snapshotReference.Snapshot.Records).RawRecordId);
+        var content = Assert.Single(snapshotReference.Snapshot.SessionContents);
         Assert.Equal(eventId.ToString("D"), content.EventId);
         Assert.Equal(Now, content.OccurredAt);
         Assert.Equal("adapter-v1", content.AdapterVersion);
@@ -465,7 +496,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
             .CaptureAsync(selection, includeSessionContent: false, CancellationToken.None);
         Assert.True(capture.Success, capture.ErrorCode);
         await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        Assert.Equal(rawId, Assert.Single(lease.Snapshot.Records).RawRecordId);
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        Assert.Equal(rawId, Assert.Single(snapshotReference.Snapshot.Records).RawRecordId);
     }
 
     [Theory]
@@ -510,7 +542,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
             .CaptureAsync(selection, includeSessionContent: true, CancellationToken.None);
         Assert.True(capture.Success, capture.ErrorCode);
         await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        Assert.Equal(eventId.ToString("D"), Assert.Single(lease.Snapshot.SessionContents).EventId);
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        Assert.Equal(eventId.ToString("D"), Assert.Single(snapshotReference.Snapshot.SessionContents).EventId);
     }
 
     [Theory]
@@ -549,7 +582,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
             .CaptureAsync(selection, includeSessionContent: false, CancellationToken.None);
         Assert.True(capture.Success, capture.ErrorCode);
         await using var lease = Assert.IsType<RawReplaySnapshotLease>(capture.Lease);
-        Assert.Equal(ids, lease.Snapshot.Records.Select(static record => record.RawRecordId));
+        using var snapshotReference = lease.AcquireSnapshotReference();
+        Assert.Equal(ids, snapshotReference.Snapshot.Records.Select(static record => record.RawRecordId));
     }
 
     private static void SeedTraceAndSession(string path, long rawRecordId, Guid sessionId, string traceId)

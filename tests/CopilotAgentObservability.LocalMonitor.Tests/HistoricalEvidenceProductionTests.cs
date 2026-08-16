@@ -902,9 +902,8 @@ public sealed class HistoricalEvidenceProductionTests
     }
 
     private static SessionContentReadLease GrantedContentLease(SessionEventContent content) => new(
-        content,
         () => ValueTask.CompletedTask,
-        () => new SessionContentUseReference(content, static () => { }),
+        () => new SessionContentUseReference(() => content, static () => { }),
         () => SessionContentTerminalResult.Sealed,
         () => SessionContentTerminalResult.CompletedWithoutRaw);
 

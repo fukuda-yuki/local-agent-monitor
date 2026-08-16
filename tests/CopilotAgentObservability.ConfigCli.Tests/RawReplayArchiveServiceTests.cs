@@ -720,7 +720,7 @@ public sealed class RawReplayArchiveServiceTests
             bool includeSessionContent,
             CancellationToken cancellationToken) =>
             ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
-                snapshot,
+                () => new RawReplaySnapshotUseReference(() => snapshot, static () => { }),
                 static () => ValueTask.CompletedTask,
                 operation => operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
                     ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw

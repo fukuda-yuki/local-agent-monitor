@@ -398,53 +398,53 @@ public enum SessionContentReadDisposition { Granted, NotFound, Denied, Busy }
 public sealed class SessionContentReadLease : IAsyncDisposable
 {
     private readonly Func<ValueTask> release;
-    private readonly Func<SessionContentUseReference>? acquire;
-    private readonly Func<SessionContentTerminalResult>? sealRawResponse;
-    private readonly Func<SessionContentTerminalResult>? completeWithoutRaw;
+    private readonly Func<SessionContentUseReference> acquire;
+    private readonly Func<SessionContentTerminalResult> sealRawResponse;
+    private readonly Func<SessionContentTerminalResult> completeWithoutRaw;
     private int released;
 
-    public SessionContentReadLease(SessionEventContent content, Func<ValueTask> release)
-    {
-        Content = content ?? throw new ArgumentNullException(nameof(content));
-        this.release = release ?? throw new ArgumentNullException(nameof(release));
-    }
-
     internal SessionContentReadLease(
-        SessionEventContent content,
         Func<ValueTask> release,
         Func<SessionContentUseReference> acquire,
         Func<SessionContentTerminalResult> sealRawResponse,
         Func<SessionContentTerminalResult> completeWithoutRaw)
-        : this(content, release)
     {
+        this.release = release ?? throw new ArgumentNullException(nameof(release));
         this.acquire = acquire ?? throw new ArgumentNullException(nameof(acquire));
         this.sealRawResponse = sealRawResponse ?? throw new ArgumentNullException(nameof(sealRawResponse));
         this.completeWithoutRaw = completeWithoutRaw ?? throw new ArgumentNullException(nameof(completeWithoutRaw));
     }
 
-    public SessionEventContent Content { get; }
+    internal SessionContentUseReference AcquireContentReference() => acquire();
 
-    internal SessionContentUseReference AcquireContentReference() =>
-        acquire?.Invoke() ?? new SessionContentUseReference(Content, static () => { });
+    internal SessionContentTerminalResult TrySealRawResponse() => sealRawResponse();
 
-    internal SessionContentTerminalResult TrySealRawResponse() =>
-        sealRawResponse?.Invoke() ?? SessionContentTerminalResult.Lost;
-
-    internal SessionContentTerminalResult TryCompleteWithoutRaw() =>
-        completeWithoutRaw?.Invoke() ?? SessionContentTerminalResult.Lost;
+    internal SessionContentTerminalResult TryCompleteWithoutRaw() => completeWithoutRaw();
 
     public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
 }
 
 internal enum SessionContentTerminalResult { Sealed, CompletedWithoutRaw, Lost, Busy }
 
-internal sealed class SessionContentUseReference(SessionEventContent content, Action release) : IDisposable
+internal sealed class SessionContentUseReference : IDisposable
 {
-    private Action? releaseReference = release;
+    private Func<SessionEventContent>? read;
+    private Action? releaseReference;
 
-    internal SessionEventContent Content { get; } = content;
+    internal SessionContentUseReference(Func<SessionEventContent> read, Action release)
+    {
+        this.read = read ?? throw new ArgumentNullException(nameof(read));
+        releaseReference = release ?? throw new ArgumentNullException(nameof(release));
+    }
 
-    public void Dispose() => Interlocked.Exchange(ref releaseReference, null)?.Invoke();
+    internal SessionEventContent Content =>
+        (Volatile.Read(ref read) ?? throw new ObjectDisposedException(nameof(SessionContentUseReference)))();
+
+    public void Dispose()
+    {
+        Interlocked.Exchange(ref read, null);
+        Interlocked.Exchange(ref releaseReference, null)?.Invoke();
+    }
 }
 
 public sealed record SessionContentReadResult(SessionContentReadDisposition Disposition, SessionContentReadLease? Lease);

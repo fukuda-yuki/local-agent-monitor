@@ -53,8 +53,11 @@ public sealed class SkillInvokedSessionEventTests
         Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
         Assert.NotNull(content.Lease);
         await using var lease = content.Lease!;
-        Assert.Equal("application/json", lease.Content.ContentKind);
-        Assert.Equal(FilteredSkillPayload, lease.Content.ContentJson);
+        using (var reference = lease.AcquireContentReference())
+        {
+            Assert.Equal("application/json", reference.Content.ContentKind);
+            Assert.Equal(FilteredSkillPayload, reference.Content.ContentJson);
+        }
         Assert.Equal(0, store.GetProjectionState("session-normalizer")?.UnsupportedEventVersionCount ?? 0);
     }
 
@@ -208,13 +211,16 @@ public sealed class SkillInvokedSessionEventTests
                 Assert.Equal(SessionContentReadDisposition.Granted, content.Disposition);
                 Assert.NotNull(content.Lease);
                 await using var lease = content.Lease!;
-                persisted.Add(new(
-                    item.SourceEventId,
-                    item.Type,
-                    item.OccurredAt,
-                    item.ContentState,
-                    lease.Content.ContentKind,
-                    lease.Content.ContentJson));
+                using (var reference = lease.AcquireContentReference())
+                {
+                    persisted.Add(new(
+                        item.SourceEventId,
+                        item.Type,
+                        item.OccurredAt,
+                        item.ContentState,
+                        reference.Content.ContentKind,
+                        reference.Content.ContentJson));
+                }
             }
         }
 
@@ -232,7 +238,8 @@ public sealed class SkillInvokedSessionEventTests
         Assert.Equal(SessionContentReadDisposition.Granted, result.Disposition);
         Assert.NotNull(result.Lease);
         await using var lease = result.Lease!;
-        return lease.Content;
+        using var reference = lease.AcquireContentReference();
+        return reference.Content;
     }
 
     private static MonitorTempDirectory CreateTempDirectory() => new()

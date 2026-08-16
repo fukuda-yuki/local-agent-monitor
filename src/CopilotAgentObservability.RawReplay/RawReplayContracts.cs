@@ -129,32 +129,33 @@ public sealed record RawReplaySnapshot(
 
 public sealed class RawReplaySnapshotLease : IAsyncDisposable
 {
+    private readonly Func<RawReplaySnapshotUseReference> acquire;
     private readonly Func<ValueTask> release;
     private readonly Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult>? terminal;
     private readonly bool terminalNotRequired;
     private int released;
 
-    public RawReplaySnapshotLease(RawReplaySnapshot snapshot, Func<ValueTask> release)
+    internal RawReplaySnapshotLease(
+        Func<RawReplaySnapshotUseReference> acquire,
+        Func<ValueTask> release,
+        Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult> terminal)
     {
-        Snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+        this.acquire = acquire ?? throw new ArgumentNullException(nameof(acquire));
         this.release = release ?? throw new ArgumentNullException(nameof(release));
+        this.terminal = terminal ?? throw new ArgumentNullException(nameof(terminal));
     }
 
     internal RawReplaySnapshotLease(
-        RawReplaySnapshot snapshot,
-        Func<ValueTask> release,
-        Func<RawReplaySnapshotTerminalOperation, RawReplaySnapshotTerminalResult> terminal)
-        : this(snapshot, release) =>
-        this.terminal = terminal ?? throw new ArgumentNullException(nameof(terminal));
-
-    internal RawReplaySnapshotLease(
-        RawReplaySnapshot snapshot,
+        Func<RawReplaySnapshotUseReference> acquire,
         Func<ValueTask> release,
         bool terminalNotRequired)
-        : this(snapshot, release) =>
+    {
+        this.acquire = acquire ?? throw new ArgumentNullException(nameof(acquire));
+        this.release = release ?? throw new ArgumentNullException(nameof(release));
         this.terminalNotRequired = terminalNotRequired;
+    }
 
-    public RawReplaySnapshot Snapshot { get; }
+    internal RawReplaySnapshotUseReference AcquireSnapshotReference() => acquire();
 
     internal bool TrySealRawReplayTransientPublication(out string? errorCode) =>
         TrySeal(RawReplaySnapshotTerminalOperation.SealTransientPublication, out errorCode);
@@ -212,6 +213,27 @@ public sealed class RawReplaySnapshotLease : IAsyncDisposable
     }
 }
 
+internal sealed class RawReplaySnapshotUseReference : IDisposable
+{
+    private Func<RawReplaySnapshot>? read;
+    private Action? releaseReference;
+
+    internal RawReplaySnapshotUseReference(Func<RawReplaySnapshot> read, Action release)
+    {
+        this.read = read ?? throw new ArgumentNullException(nameof(read));
+        releaseReference = release ?? throw new ArgumentNullException(nameof(release));
+    }
+
+    internal RawReplaySnapshot Snapshot =>
+        (Volatile.Read(ref read) ?? throw new ObjectDisposedException(nameof(RawReplaySnapshotUseReference)))();
+
+    public void Dispose()
+    {
+        Interlocked.Exchange(ref read, null);
+        Interlocked.Exchange(ref releaseReference, null)?.Invoke();
+    }
+}
+
 internal enum RawReplaySnapshotTerminalOperation
 {
     SealTransientPublication,
@@ -229,9 +251,7 @@ internal enum RawReplaySnapshotTerminalResult
 }
 
 public sealed record RawReplaySnapshotCapture(bool Success, string? ErrorCode, RawReplaySnapshotLease? Lease)
-{
-    public RawReplaySnapshot? Snapshot => Lease?.Snapshot;
-}
+;
 
 public interface IRawReplaySnapshotProvider
 {
