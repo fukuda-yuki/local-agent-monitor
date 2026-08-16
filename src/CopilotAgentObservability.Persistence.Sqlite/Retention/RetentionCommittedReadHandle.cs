@@ -549,138 +549,143 @@ internal sealed class RetentionMandatoryLeaseCleanup
     private readonly IReadOnlyList<RetentionReadGrant> grants;
     private readonly Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease;
     private readonly Action? beforeWaitingForReleaseForTesting;
-    private readonly Func<Action, bool>? queueReleaseForTesting;
+    private readonly SemaphoreSlim dispatcherSignal = new(0, 1);
     private readonly ITimer retry;
+    private readonly Task dispatcher;
     private ReleaseAttempt? active;
     private int pending;
+    private int retryWaiting;
+    private int dispatcherDelayRequired;
     private int completed;
 
     internal RetentionMandatoryLeaseCleanup(
         IReadOnlyList<RetentionReadGrant> grants,
         TimeProvider timeProvider,
         Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
-        Action? beforeWaitingForReleaseForTesting,
-        Func<Action, bool>? queueReleaseForTesting = null)
+        Action? beforeWaitingForReleaseForTesting)
     {
         this.grants = grants;
         this.exactRelease = exactRelease;
         this.beforeWaitingForReleaseForTesting = beforeWaitingForReleaseForTesting;
-        this.queueReleaseForTesting = queueReleaseForTesting;
         retry = timeProvider.CreateTimer(
-            static state => ((RetentionMandatoryLeaseCleanup)state!).SignalRelease(),
+            static state => ((RetentionMandatoryLeaseCleanup)state!).RetryDue(),
             this,
             Timeout.InfiniteTimeSpan,
             Timeout.InfiniteTimeSpan);
+        dispatcher = DispatchAsync();
     }
 
     internal void ReleaseOrOwn()
     {
-        while (Volatile.Read(ref completed) == 0)
+        if (Volatile.Read(ref completed) != 0) return;
+        var attempt = RequestRelease();
+        if (attempt.TryStart())
         {
-            var attempt = Volatile.Read(ref active);
-            if (attempt is not null)
-            {
-                beforeWaitingForReleaseForTesting?.Invoke();
-                if (attempt.TryStart())
-                {
-                    TryRelease(attempt, retryOnFailure: true);
-                    return;
-                }
-                if (attempt.WaitForOutcome() != ReleaseAttemptOutcome.NotStarted) return;
-                continue;
-            }
-
-            Volatile.Write(ref pending, 1);
-            attempt = new ReleaseAttempt();
-            if (Interlocked.CompareExchange(ref active, attempt, null) is not null) continue;
-            AssertStarted(attempt);
-            TryRelease(attempt, retryOnFailure: true);
+            TryRelease(attempt);
             return;
         }
+
+        beforeWaitingForReleaseForTesting?.Invoke();
+        attempt.WaitForOutcome(RetryDelay);
     }
 
     internal async ValueTask ReleaseOrOwnAsync()
     {
-        while (Volatile.Read(ref completed) == 0)
+        if (Volatile.Read(ref completed) != 0)
         {
-            Volatile.Write(ref pending, 1);
-            var attempt = Volatile.Read(ref active);
-            if (attempt is null)
-            {
-                TryQueueRelease();
-                attempt = Volatile.Read(ref active);
-                if (attempt is null)
-                {
-                    await Task.Yield();
-                    continue;
-                }
-            }
-
-            beforeWaitingForReleaseForTesting?.Invoke();
-            if (await attempt.WaitForOutcomeAsync().ConfigureAwait(false) != ReleaseAttemptOutcome.NotStarted)
-                return;
+            await dispatcher.ConfigureAwait(false);
+            return;
         }
+        var attempt = RequestRelease();
+        beforeWaitingForReleaseForTesting?.Invoke();
+        if (await attempt.WaitForOutcomeAsync().ConfigureAwait(false) == ReleaseAttemptOutcome.Released)
+            await dispatcher.ConfigureAwait(false);
     }
 
     internal void Own() => SignalRelease();
 
     internal void Abandon()
     {
-        if (Interlocked.Exchange(ref completed, 1) == 0)
-            retry.Dispose();
+        if (Interlocked.Exchange(ref completed, 1) != 0) return;
+        DisposeRetry();
+        SignalDispatcher();
     }
 
     public override string ToString() => nameof(RetentionMandatoryLeaseCleanup);
 
     private void SignalRelease()
     {
+        if (Volatile.Read(ref completed) != 0) return;
         Volatile.Write(ref pending, 1);
-        TryQueueRelease();
+        Volatile.Write(ref retryWaiting, 0);
+        SignalDispatcher();
     }
 
-    private bool TryQueueRelease()
+    private void RetryDue()
     {
-        if (Volatile.Read(ref completed) != 0 || Volatile.Read(ref pending) == 0) return true;
-        var attempt = new ReleaseAttempt();
-        try
+        Volatile.Write(ref retryWaiting, 0);
+        SignalRelease();
+    }
+
+    private ReleaseAttempt RequestRelease()
+    {
+        Volatile.Write(ref pending, 1);
+        Volatile.Write(ref retryWaiting, 0);
+        while (true)
         {
-            if (Volatile.Read(ref completed) != 0
-                || Interlocked.CompareExchange(ref active, attempt, null) is not null)
-                return true;
-            var queued = queueReleaseForTesting is null
-                ? ThreadPool.UnsafeQueueUserWorkItem(
-                    static state => state.Cleanup.TryRelease(state.Attempt, retryOnFailure: true),
-                    (Cleanup: this, Attempt: attempt),
-                    preferLocal: false)
-                : queueReleaseForTesting(() => TryRelease(attempt, retryOnFailure: true));
-            if (!queued)
+            var attempt = Volatile.Read(ref active);
+            if (attempt is not null)
             {
-                if (!attempt.TryCancelBeforeStart()) return true;
-                Interlocked.CompareExchange(ref active, null, attempt);
-                attempt.Complete(ReleaseAttemptOutcome.NotStarted);
-                return false;
+                SignalDispatcher();
+                return attempt;
             }
-            return true;
-        }
-        catch
-        {
-            if (!attempt.TryCancelBeforeStart()) return true;
-            Interlocked.CompareExchange(ref active, null, attempt);
-            attempt.Complete(ReleaseAttemptOutcome.NotStarted);
-            return false;
+
+            attempt = new ReleaseAttempt();
+            if (Interlocked.CompareExchange(ref active, attempt, null) is not null) continue;
+            SignalDispatcher();
+            return attempt;
         }
     }
 
-    private void TryRelease(ReleaseAttempt attempt, bool retryOnFailure)
+    private async Task DispatchAsync()
     {
-        if (!attempt.IsStarted && !attempt.TryStart()) return;
+        while (true)
+        {
+            await dispatcherSignal.WaitAsync().ConfigureAwait(false);
+            if (Volatile.Read(ref completed) != 0) return;
+            if (Interlocked.Exchange(ref dispatcherDelayRequired, 0) != 0)
+            {
+                await Task.Delay(RetryDelay).ConfigureAwait(false);
+                if (Volatile.Read(ref completed) != 0) return;
+                Volatile.Write(ref retryWaiting, 0);
+            }
+            else if (Volatile.Read(ref retryWaiting) != 0)
+            {
+                continue;
+            }
+
+            if (Volatile.Read(ref pending) == 0) continue;
+            var attempt = Volatile.Read(ref active);
+            if (attempt is null)
+            {
+                attempt = new ReleaseAttempt();
+                if (Interlocked.CompareExchange(ref active, attempt, null) is { } existing)
+                    attempt = existing;
+            }
+            if (!attempt.TryStart()) continue;
+            TryRelease(attempt);
+        }
+    }
+
+    private void TryRelease(ReleaseAttempt attempt)
+    {
         Volatile.Write(ref pending, 0);
         var released = false;
         try
         {
             released = exactRelease(grants);
         }
-        // Cleanup must not propagate release failures; the scheduled retry owns recovery.
+        // Release failures stay inside the standing dispatcher; callback callers never regain cleanup authority.
         catch { }
 
         if (released)
@@ -690,7 +695,7 @@ internal sealed class RetentionMandatoryLeaseCleanup
             released
                 ? ReleaseAttemptOutcome.Released
                 : ReleaseAttemptOutcome.RetainedForRetry);
-        if (!released && retryOnFailure)
+        if (!released)
         {
             Volatile.Write(ref pending, 1);
             ScheduleRetry();
@@ -700,29 +705,37 @@ internal sealed class RetentionMandatoryLeaseCleanup
     private void ScheduleRetry()
     {
         if (Volatile.Read(ref completed) != 0) return;
+        Volatile.Write(ref retryWaiting, 1);
         try
         {
             if (retry.Change(RetryDelay, Timeout.InfiniteTimeSpan)) return;
         }
         catch { }
-        TryQueueRelease();
-    }
-
-    private static void AssertStarted(ReleaseAttempt attempt)
-    {
-        if (!attempt.TryStart()) throw new InvalidOperationException("A newly owned release attempt must be startable.");
+        Volatile.Write(ref dispatcherDelayRequired, 1);
+        SignalDispatcher();
     }
 
     private void Complete()
     {
         if (Interlocked.Exchange(ref completed, 1) != 0) return;
+        DisposeRetry();
+        SignalDispatcher();
+    }
+
+    private void SignalDispatcher()
+    {
+        try { dispatcherSignal.Release(); }
+        catch (SemaphoreFullException) { }
+    }
+
+    private void DisposeRetry()
+    {
         try { retry.Dispose(); }
         catch { }
     }
 
     private enum ReleaseAttemptOutcome
     {
-        NotStarted,
         Released,
         RetainedForRetry,
     }
@@ -731,21 +744,15 @@ internal sealed class RetentionMandatoryLeaseCleanup
     {
         private const int Waiting = 0;
         private const int Started = 1;
-        private const int Cancelled = 2;
         private readonly TaskCompletionSource<ReleaseAttemptOutcome> completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int state;
 
-        internal bool IsStarted => Volatile.Read(ref state) == Started;
-
         internal bool TryStart() => Interlocked.CompareExchange(ref state, Started, Waiting) == Waiting;
-
-        internal bool TryCancelBeforeStart() =>
-            Interlocked.CompareExchange(ref state, Cancelled, Waiting) == Waiting;
 
         internal void Complete(ReleaseAttemptOutcome outcome) => completion.TrySetResult(outcome);
 
-        internal ReleaseAttemptOutcome WaitForOutcome() => completion.Task.GetAwaiter().GetResult();
+        internal void WaitForOutcome(TimeSpan timeout) => completion.Task.Wait(timeout);
 
         internal Task<ReleaseAttemptOutcome> WaitForOutcomeAsync() => completion.Task;
     }

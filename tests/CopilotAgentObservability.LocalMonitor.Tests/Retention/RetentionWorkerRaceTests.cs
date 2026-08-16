@@ -298,7 +298,7 @@ public sealed class RetentionWorkerRaceTests
     }
 
     [Fact]
-    public void MandatoryCleanup_TimerCallbackQueueRejectionReturnsWithoutSpinning()
+    public void MandatoryCleanup_TimerCallbackReturnsWithoutSpinningWhenRetryRearmFails()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
         var time = new ManualNotificationTimeProvider(now);
@@ -307,8 +307,7 @@ public sealed class RetentionWorkerRaceTests
             [CreateGrant("first", 0x11, now.AddMinutes(2))],
             time,
             _ => Interlocked.Increment(ref attempts) > 1,
-            beforeWaitingForReleaseForTesting: null,
-            queueReleaseForTesting: _ => false);
+            beforeWaitingForReleaseForTesting: null);
         cleanup.ReleaseOrOwn();
         var retry = Assert.Single(time.Timers);
         retry.ThrowOnChange = true;
@@ -333,6 +332,148 @@ public sealed class RetentionWorkerRaceTests
         {
             cleanup.Abandon();
             Assert.True(callback.Join(TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_StandingDispatcherRetainsExactLeaseReleaseOwnership()
+    {
+        using var fixture = CreateFixture();
+        var expiry = fixture.Time.GetUtcNow().AddMinutes(2);
+        InsertOperationLease(fixture.Path, fixture.ItemId, expiry);
+        var time = new ManualNotificationTimeProvider(fixture.Time.GetUtcNow());
+        var attempts = 0;
+        var grant = new RetentionReadGrant(
+            new(fixture.Context.StoreInstanceId, RetentionStoreKind.RawRecord, "1"),
+            fixture.ItemId,
+            1,
+            RetentionLeaseKind.Operation,
+            "reader",
+            1,
+            expiry,
+            Enumerable.Repeat((byte)0x11, 32).ToArray());
+        var cleanup = new RetentionMandatoryLeaseCleanup(
+            [grant],
+            time,
+            _ =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1) return false;
+                Execute(
+                    fixture.Path,
+                    "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+                    ("$item", fixture.ItemId));
+                return true;
+            },
+            beforeWaitingForReleaseForTesting: null);
+
+        await cleanup.ReleaseOrOwnAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1L, Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId));
+        Assert.True(Assert.Single(time.Timers).IsScheduled);
+        time.Timers[0].Fire();
+        await WaitUntilAsync(() => Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId) == 0L);
+        await cleanup.ReleaseOrOwnAsync();
+
+        Assert.Equal(0L, Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId));
+        Assert.Equal(2, Volatile.Read(ref attempts));
+    }
+
+    [Fact]
+    public async Task MandatoryCleanup_TimerRearmFailureStillRetainsExactLeaseReleaseOwnership()
+    {
+        using var fixture = CreateFixture();
+        var expiry = fixture.Time.GetUtcNow().AddMinutes(2);
+        InsertOperationLease(fixture.Path, fixture.ItemId, expiry);
+        var time = new ManualNotificationTimeProvider(fixture.Time.GetUtcNow());
+        var attempts = 0;
+        var grant = new RetentionReadGrant(
+            new(fixture.Context.StoreInstanceId, RetentionStoreKind.RawRecord, "1"),
+            fixture.ItemId,
+            1,
+            RetentionLeaseKind.Operation,
+            "reader",
+            1,
+            expiry,
+            Enumerable.Repeat((byte)0x11, 32).ToArray());
+        var cleanup = new RetentionMandatoryLeaseCleanup(
+            [grant],
+            time,
+            _ =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1) return false;
+                Execute(
+                    fixture.Path,
+                    "DELETE FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+                    ("$item", fixture.ItemId));
+                return true;
+            },
+            beforeWaitingForReleaseForTesting: null);
+        Assert.False(Assert.Single(time.Timers).IsScheduled);
+        time.Timers[0].ThrowOnChange = true;
+
+        await cleanup.ReleaseOrOwnAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId) == 0L);
+        await cleanup.ReleaseOrOwnAsync();
+
+        Assert.Equal(0L, Number(
+            fixture.Path,
+            "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
+            fixture.ItemId));
+        Assert.Equal(2, Volatile.Read(ref attempts));
+    }
+
+    [Fact]
+    public void MandatoryCleanup_SynchronousHandoffDoesNotWaitForAnActiveRelease()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        using var releaseEntered = new ManualResetEventSlim();
+        using var allowRelease = new ManualResetEventSlim();
+        using var handoffReturned = new ManualResetEventSlim();
+        var cleanup = new RetentionMandatoryLeaseCleanup(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                releaseEntered.Set();
+                allowRelease.Wait();
+                return true;
+            },
+            beforeWaitingForReleaseForTesting: null);
+        cleanup.Own();
+        Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+        var handoff = new Thread(() =>
+        {
+            cleanup.ReleaseOrOwn();
+            handoffReturned.Set();
+        })
+        {
+            IsBackground = true,
+        };
+
+        try
+        {
+            handoff.Start();
+            Assert.True(
+                handoffReturned.Wait(TimeSpan.FromSeconds(1)),
+                "Synchronous cleanup handoff waited without a bound for the active release.");
+        }
+        finally
+        {
+            allowRelease.Set();
+            Assert.True(handoff.Join(TimeSpan.FromSeconds(5)));
+            cleanup.Abandon();
         }
     }
 
@@ -455,6 +596,31 @@ public sealed class RetentionWorkerRaceTests
     }
 
     [Fact]
+    public async Task DisposeAsync_ConcurrentFinalReleaseRunsExactlyOnce()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var releases = 0;
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                Interlocked.Increment(ref releases);
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+
+        var disposals = Enumerable.Range(0, 8)
+            .Select(_ => handle.DisposeAsync().AsTask())
+            .ToArray();
+
+        await Task.WhenAll(disposals).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, Volatile.Read(ref releases));
+    }
+
+    [Fact]
     public async Task HiddenHandle_PartiallyRenewedCompositeExpiresAtEarliestPublishedMemberExpiry()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
@@ -498,22 +664,33 @@ public sealed class RetentionWorkerRaceTests
             CreateGrant("second", 0x22, now.AddMinutes(2)),
         };
         var attempts = new List<string[]>();
+        var secondAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var handle = new RetentionCommittedReadHandle(
             grants,
             time,
             frontier =>
             {
-                attempts.Add(frontier.Select(grant => grant.ItemId).ToArray());
-                return attempts.Count > 1;
+                int count;
+                lock (attempts)
+                {
+                    attempts.Add(frontier.Select(grant => grant.ItemId).ToArray());
+                    count = attempts.Count;
+                }
+                if (count == 2) secondAttempt.TrySetResult();
+                return count > 1;
             });
 
         await handle.DisposeAsync();
 
-        Assert.Equal(["first", "second"], Assert.Single(attempts));
+        lock (attempts)
+            Assert.Equal(["first", "second"], Assert.Single(attempts));
         time.Advance(TimeSpan.FromMilliseconds(10));
-        await WaitUntilAsync(() => attempts.Count == 2);
-        Assert.Equal(2, attempts.Count);
-        Assert.All(attempts, attempt => Assert.Equal(["first", "second"], attempt));
+        await secondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        lock (attempts)
+        {
+            Assert.Equal(2, attempts.Count);
+            Assert.All(attempts, attempt => Assert.Equal(["first", "second"], attempt));
+        }
     }
 
     [Fact]
