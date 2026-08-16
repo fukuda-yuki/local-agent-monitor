@@ -49,12 +49,19 @@ public sealed class SqliteSessionOtelEnricher
         }
         try
         {
-            ProjectedSpan[] retainedRows;
+            PreparedProjectedSpan[] retainedRows;
             using (var reference = rawResult.Lease.AcquireValueReference())
             {
                 var payloadByRawRecordId = reference.Value.ToDictionary(record => record.Id!.Value, record => record.PayloadJson);
                 retainedRows = rows
-                    .Select(sourceRow => sourceRow with { PayloadJson = payloadByRawRecordId.GetValueOrDefault(sourceRow.RawRecordId) })
+                    .Select(sourceRow =>
+                    {
+                        var payloadJson = payloadByRawRecordId.GetValueOrDefault(sourceRow.RawRecordId);
+                        var binding = payloadJson is null
+                            ? null
+                            : claudeExactBindingRule.Resolve(payloadJson, sourceRow.TraceId, sourceRow.SpanId);
+                        return new PreparedProjectedSpan(sourceRow, binding);
+                    })
                     .ToArray();
             }
             checkpoint?.Invoke("before_raw_terminal");
@@ -62,15 +69,15 @@ public sealed class SqliteSessionOtelEnricher
                 return 0;
             foreach (var row in retainedRows)
             {
-                if (row.IsClaudeCode)
+                if (row.Row.IsClaudeCode)
                 {
-                    ProcessClaude(row);
+                    ProcessClaude(row.Row, row.Binding);
                 }
                 else
                 {
-                    Process(row);
+                    Process(row.Row, row.Binding);
                 }
-                store.UpsertProjectionState(new(ProjectorKey, row.Id, state?.UnsupportedEventVersionCount ?? 0, timeProvider.GetUtcNow()));
+                store.UpsertProjectionState(new(ProjectorKey, row.Row.Id, state?.UnsupportedEventVersionCount ?? 0, timeProvider.GetUtcNow()));
             }
         }
         finally { rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
@@ -87,11 +94,8 @@ public sealed class SqliteSessionOtelEnricher
         return (long)command.ExecuteScalar()!;
     }
 
-    private void Process(ProjectedSpan row)
+    private void Process(ProjectedSpan row, ClaudeExactBindingMatch? claudeBinding)
     {
-        var claudeBinding = row.PayloadJson is null
-            ? null
-            : claudeExactBindingRule.Resolve(row.PayloadJson, row.TraceId, row.SpanId);
         var traceSessionId = FindSessionByTraceId(row.TraceId);
         var conversationSessionId = string.IsNullOrEmpty(row.ConversationId) ? null : FindUnambiguousSessionByNativeId(row.ConversationId);
         var sessionId = claudeBinding?.SessionId ?? traceSessionId ?? conversationSessionId ?? Guid.CreateVersion7();
@@ -154,15 +158,12 @@ public sealed class SqliteSessionOtelEnricher
     // promotion (gated only by ProjectedSpan.IsClaudeCode for ProcessClaude);
     // a span still labeled raw-otlp (or without an observation row at all)
     // binds here on byte-identical session.id evidence.
-    private void ProcessClaude(ProjectedSpan row)
+    private void ProcessClaude(ProjectedSpan row, ClaudeExactBindingMatch? binding)
     {
         const string sourceAdapter = "claude-code-otel";
         var sourceEventId = $"{row.TraceId}/{row.SpanId}";
         var replay = FindEventBySourceIdentity(sourceAdapter, sourceEventId);
 
-        var binding = row.PayloadJson is null
-            ? null
-            : claudeExactBindingRule.Resolve(row.PayloadJson, row.TraceId, row.SpanId);
         var traceSessionId = FindUnboundClaudeSessionByTraceId(row.TraceId, sourceEventId);
         var sessionId = binding?.SessionId ?? replay?.SessionId ?? traceSessionId ?? Guid.CreateVersion7();
         var matchKind = binding is not null
@@ -450,6 +451,10 @@ public sealed class SqliteSessionOtelEnricher
         public bool IsClaudeCode => string.Equals(SourceSurface, "claude-code", StringComparison.Ordinal)
             && string.Equals(SourceAdapter, "claude-code-otel", StringComparison.Ordinal);
     }
+
+    private sealed record PreparedProjectedSpan(
+        ProjectedSpan Row,
+        ClaudeExactBindingMatch? Binding);
 
     private sealed record ExistingSourceEvent(Guid SessionId, Guid? RunId);
 }

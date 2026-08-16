@@ -145,7 +145,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
-            Assert.Equal("materialized-after-publication", lease.Value);
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal("materialized-after-publication", reference.Value);
         }
         finally { Delete(path); }
     }
@@ -579,8 +580,9 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(result.Lease);
-            Assert.Equal(ReadIds(path), lease.Value.Select(record => record.Id!.Value));
-            Assert.All(lease.Value, record => Assert.NotEmpty(record.PayloadJson));
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal(ReadIds(path), reference.Value.Select(record => record.Id!.Value));
+            Assert.All(reference.Value, record => Assert.NotEmpty(record.PayloadJson));
         }
         finally { Delete(path); }
     }
@@ -678,8 +680,9 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(result.Lease);
-            Assert.Equal(id, lease.Value.Id);
-            Assert.NotEmpty(lease.Value.PayloadJson);
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal(id, reference.Value.Id);
+            Assert.NotEmpty(reference.Value.PayloadJson);
         }
         finally { Delete(path); }
     }
@@ -699,7 +702,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(result.Lease);
-            Assert.Equal(ids, lease.Value.Select(record => record.Id!.Value));
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal(ids, reference.Value.Select(record => record.Id!.Value));
         }
         finally { Delete(path); }
     }
@@ -746,7 +750,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
-            Assert.NotEmpty(lease.Value);
+            using var reference = lease.AcquireValueReference();
+            Assert.NotEmpty(reference.Value);
             Assert.NotNull(lease.RevisionFence);
         }
         finally { Delete(path); }
@@ -2130,7 +2135,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             await using var lease = Assert.IsType<RetentionReadLease<string>>(result.Lease);
-            Assert.NotEmpty(lease.Value);
+            using var reference = lease.AcquireValueReference();
+            Assert.NotEmpty(reference.Value);
 
             Assert.Equal(itemBefore, FullRowDump(path, "retention_items", "item_id", item.ItemId));
             Assert.Equal(sourceBefore, FullRowDump(path, "raw_records", "id", 601L));
@@ -2171,7 +2177,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
-            Assert.Equal("values=2", lease.Value);
+            using (var reference = lease.AcquireValueReference())
+                Assert.Equal("values=2", reference.Value);
             await lease.DisposeAsync();
 
             Assert.Equal(pinnedBefore, FullRowDump(path, "retention_items", "item_id", pinnedItem.ItemId));
@@ -2258,7 +2265,8 @@ public sealed class RetentionReadPrimitiveTests
 
             Assert.Null(result.Disposition);
             var lease = Assert.IsType<RetentionBatchReadLease<string>>(result.Lease);
-            Assert.Equal("values=2", lease.Value);
+            using (var reference = lease.AcquireValueReference())
+                Assert.Equal("values=2", reference.Value);
             await lease.DisposeAsync();
 
             Assert.Equal(pinnedBefore, FullRowDump(path, "retention_items", "item_id", pinnedItem.ItemId));

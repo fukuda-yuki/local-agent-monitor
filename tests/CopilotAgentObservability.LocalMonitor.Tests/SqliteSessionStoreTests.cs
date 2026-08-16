@@ -1436,7 +1436,8 @@ public sealed class SqliteSessionStoreTests
         }, CancellationToken.None);
 
         Assert.Null(result.Disposition);
-        Assert.True(Assert.IsType<RetentionReadLease<bool>>(result.Lease).Value);
+        using (var reference = Assert.IsType<RetentionReadLease<bool>>(result.Lease).AcquireValueReference())
+            Assert.True(reference.Value);
         await result.Lease.DisposeAsync();
 
         static async ValueTask<int> CountRowsAsync(SqliteCommand command, CancellationToken cancellationToken)

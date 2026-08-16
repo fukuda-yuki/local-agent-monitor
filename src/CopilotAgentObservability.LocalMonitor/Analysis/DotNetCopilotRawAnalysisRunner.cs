@@ -415,9 +415,9 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
                 data = Materialize(reference.Value);
             }
             beforeRawTerminal?.Invoke();
-            return rawLease.TryCompleteWithoutRaw() switch
+            return rawLease.TrySealRawResponse() switch
             {
-                RetentionRawTerminalResult.CompletedWithoutRaw => data,
+                RetentionRawTerminalResult.Sealed => data,
                 RetentionRawTerminalResult.Busy => throw new PersistenceBusyException(),
                 _ => throw new AnalysisOwnershipException(),
             };

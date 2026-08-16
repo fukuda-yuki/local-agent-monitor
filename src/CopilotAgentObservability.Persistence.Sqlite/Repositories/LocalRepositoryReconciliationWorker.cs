@@ -72,9 +72,10 @@ internal sealed class LocalRepositoryReconciliationWorker
             var heartbeatDrained = false;
             try
             {
+                using var rawReference = raw.Lease.AcquireValueReference();
                 prepared = await processor.PrepareAsync(
                     lease,
-                    raw.Lease.Value,
+                    rawReference.Value,
                     raw.Lease,
                     attemptCancellation.Token).ConfigureAwait(false);
                 attemptCancellation.Token.ThrowIfCancellationRequested();

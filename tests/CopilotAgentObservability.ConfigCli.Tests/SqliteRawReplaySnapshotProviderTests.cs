@@ -470,7 +470,8 @@ public sealed class SqliteRawReplaySnapshotProviderTests
 
         Assert.Null(result.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<int[]>>(result.Lease);
-        Assert.Equal(0, Assert.Single(lease.Value));
+        using var reference = lease.AcquireValueReference();
+        Assert.Equal(0, Assert.Single(reference.Value));
     }
 
     [Theory]

@@ -11,7 +11,12 @@ internal static class RawTelemetryStoreTestReads
         var leasedStore = new RawTelemetryStore(store.DatabasePath, context);
         var result = leasedStore.ListRecordsAsync(RetentionReadKind.Access, CancellationToken.None)
             .AsTask().GetAwaiter().GetResult();
-        try { return result.Lease?.Value.ToArray() ?? []; }
+        try
+        {
+            if (result.Lease is null) return [];
+            using var reference = result.Lease.AcquireValueReference();
+            return reference.Value.ToArray();
+        }
         finally { result.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 }

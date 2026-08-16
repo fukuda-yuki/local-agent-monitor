@@ -60,7 +60,8 @@ internal sealed class SkillProjectionWorker
             elapsed,
             projectionCancellation,
             heartbeatCancellation.Token);
-        var records = retentionLease.Value;
+        using var recordsReference = retentionLease.AcquireValueReference();
+        var records = recordsReference.Value;
         string? terminalErrorCode = null;
         var leasesHeld = false;
         var projected = new List<SkillProjectionProjectedInput>(records.Count);

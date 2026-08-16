@@ -163,7 +163,6 @@ public sealed class RetentionRawTerminalTests
                     .WaitAsync(TimeSpan.FromSeconds(5)));
 
             Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
-            Assert.Throws<InvalidOperationException>(() => _ = fixture.SingleLease.Value);
             Assert.Equal("buffered", use.Value);
         }
         finally
@@ -173,18 +172,22 @@ public sealed class RetentionRawTerminalTests
     }
 
     [Fact]
-    public async Task LegacyValueAccessDoesNotActivateTerminalCancellation()
+    public async Task OutstandingValueReferenceKeepsBufferAliveAfterCancellation()
     {
         using var cancellation = new CancellationTokenSource();
         await using var fixture = await TerminalFixture.CreateSingleAsync(cancellation.Token);
+        using var reference = fixture.SingleLease.AcquireValueReference();
 
-        Assert.Equal("buffered", fixture.SingleLease.Value);
+        Assert.Equal("buffered", reference.Value);
         cancellation.Cancel();
-        await Task.Delay(100);
 
-        Assert.Equal("buffered", fixture.SingleLease.Value);
-        Assert.Equal(RetentionRawTerminalState.Open, fixture.SingleLease.TerminalState);
-        Assert.Equal(1L, fixture.LeaseCount());
+        Assert.True(SpinWait.SpinUntil(
+            () => fixture.SingleLease.TerminalState == RetentionRawTerminalState.Lost
+                && fixture.LeaseCount() == 0,
+            TimeSpan.FromSeconds(5)));
+
+        Assert.Equal("buffered", reference.Value);
+        Assert.False(fixture.SingleLease.IsValueBufferCleared);
     }
 
     [Fact]
@@ -383,7 +386,7 @@ public sealed class RetentionRawTerminalTests
             () => fixture.SingleLease.IsValueBufferCleared,
             TimeSpan.FromSeconds(5)));
         Assert.Throws<ObjectDisposedException>(() => _ = use.Value);
-        Assert.Throws<InvalidOperationException>(() => _ = fixture.SingleLease.Value);
+        Assert.Throws<InvalidOperationException>(() => fixture.SingleLease.AcquireValueReference());
     }
 
     [Fact]

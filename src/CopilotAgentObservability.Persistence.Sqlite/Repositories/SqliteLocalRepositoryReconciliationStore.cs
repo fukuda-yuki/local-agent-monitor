@@ -211,7 +211,8 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                         transaction.Rollback();
                         return LocalRepositoryQueueTransitionResult.StaleOwner;
                     }
-                    digest = SkillProjectionHashing.InputDigest(input.Result.Lease.Value.PayloadJson);
+                    using var rawReference = input.Result.Lease.AcquireValueReference();
+                    digest = SkillProjectionHashing.InputDigest(rawReference.Value.PayloadJson);
                     evidenceKind = "payload_sha256";
                     fingerprint = LocalRepositoryIdentityHashing.ReconciliationFingerprint(LocalRepositoryReconciliationEvidence.PayloadSha256(rawRecordId, digest));
                     state = "pending";

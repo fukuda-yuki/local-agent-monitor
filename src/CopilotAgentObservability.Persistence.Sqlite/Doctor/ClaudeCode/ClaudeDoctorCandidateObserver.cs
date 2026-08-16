@@ -87,7 +87,7 @@ internal sealed class ClaudeDoctorCandidateObserver
 
         try
         {
-            ClaudeOtelRecord[] records;
+            PreparedObservation[] observations;
             using (var reference = rawResult.Lease.AcquireValueReference())
             {
                 var recordsById = reference.Value
@@ -97,26 +97,28 @@ internal sealed class ClaudeDoctorCandidateObserver
                 {
                     return;
                 }
-                records = candidates.Select(candidate =>
+                var prepared = new List<PreparedObservation>();
+                foreach (var candidate in candidates)
                 {
                     var raw = recordsById[candidate.RawRecordId];
-                    return new ClaudeOtelRecord(
+                    var record = new ClaudeOtelRecord(
                         raw.Id!.Value,
                         candidate.ObservationId,
                         candidate.ReceivedAt,
                         raw.PayloadJson);
-                }).ToArray();
+                    prepared.AddRange(PrepareRecord(
+                        references,
+                        completenessReferences,
+                        record));
+                }
+                observations = prepared.ToArray();
             }
             beforeRawTerminal?.Invoke();
             if (rawResult.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
                 return;
-            foreach (var record in records)
+            foreach (var observation in observations)
             {
-                ObserveRecord(
-                    verification,
-                    references,
-                    completenessReferences,
-                    record);
+                Observe(verification, observation);
             }
         }
         finally
@@ -125,99 +127,100 @@ internal sealed class ClaudeDoctorCandidateObserver
         }
     }
 
-    private void ObserveRecord(
-        DoctorVerification verification,
+    private IReadOnlyList<PreparedObservation> PrepareRecord(
         ISet<string> references,
         ISet<string> completenessReferences,
         ClaudeOtelRecord record)
     {
-            var spans = ReadPayloadSpans(record.PayloadJson);
-            var projectedSpans = ReadProjectedSpans(record.RawRecordId);
+        var observations = new List<PreparedObservation>();
+        var spans = ReadPayloadSpans(record.PayloadJson);
+        var projectedSpans = ReadProjectedSpans(record.RawRecordId);
 
-            foreach (var span in spans)
+        foreach (var span in spans)
+        {
+            if (!IsValidIdentity(span.TraceId, span.SpanId))
             {
-                if (!IsValidIdentity(span.TraceId, span.SpanId))
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                var identity = EvidenceIdentity(span.TraceId!, span.SpanId!);
-                Observe(
-                    verification,
-                    references,
-                    DoctorEvidenceKind.Ingest,
-                    $"claude-otel-ingest-{identity}",
-                    record.ReceivedAt,
-                    span.TraceId!,
-                    record.ObservationId);
-                Observe(
-                    verification,
-                    references,
-                    DoctorEvidenceKind.RawPersistence,
-                    $"claude-otel-raw-{identity}",
-                    record.ReceivedAt,
-                    span.TraceId!,
-                    record.ObservationId);
+            var identity = EvidenceIdentity(span.TraceId!, span.SpanId!);
+            PrepareObservation(
+                observations,
+                references,
+                DoctorEvidenceKind.Ingest,
+                $"claude-otel-ingest-{identity}",
+                record.ReceivedAt,
+                span.TraceId!,
+                record.ObservationId);
+            PrepareObservation(
+                observations,
+                references,
+                DoctorEvidenceKind.RawPersistence,
+                $"claude-otel-raw-{identity}",
+                record.ReceivedAt,
+                span.TraceId!,
+                record.ObservationId);
 
-                var binding = exactBindingRule.Resolve(record.PayloadJson, span.TraceId!, span.SpanId!);
-                if (binding is null)
-                {
-                    continue;
-                }
+            var binding = exactBindingRule.Resolve(record.PayloadJson, span.TraceId!, span.SpanId!);
+            if (binding is null)
+            {
+                continue;
+            }
 
-                var sessionGuid = binding.SessionId.ToString("D");
-                Observe(
-                    verification,
+            var sessionGuid = binding.SessionId.ToString("D");
+            PrepareObservation(
+                observations,
+                references,
+                DoctorEvidenceKind.ExactSessionBinding,
+                $"claude-otel-binding-{span.TraceId!}-{sessionGuid}",
+                record.ReceivedAt,
+                span.TraceId!,
+                record.ObservationId,
+                sessionGuid);
+
+            if (!HasPartialOrBetterCompleteness(binding.SessionId)
+                || ReadAgreedContentState(span.TraceId!) is null)
+            {
+                continue;
+            }
+
+            var completenessReference = $"claude-otel-completeness-{sessionGuid}";
+            if (completenessReferences.Add(completenessReference))
+            {
+                PrepareObservation(
+                    observations,
                     references,
-                    DoctorEvidenceKind.ExactSessionBinding,
-                    $"claude-otel-binding-{span.TraceId!}-{sessionGuid}",
+                    DoctorEvidenceKind.CompletenessContent,
+                    completenessReference,
                     record.ReceivedAt,
                     span.TraceId!,
                     record.ObservationId,
                     sessionGuid);
-
-                if (!HasPartialOrBetterCompleteness(binding.SessionId)
-                    || ReadAgreedContentState(span.TraceId!) is null)
-                {
-                    continue;
-                }
-
-                var completenessReference = $"claude-otel-completeness-{sessionGuid}";
-                if (completenessReferences.Add(completenessReference))
-                {
-                    Observe(
-                        verification,
-                        references,
-                        DoctorEvidenceKind.CompletenessContent,
-                        completenessReference,
-                        record.ReceivedAt,
-                        span.TraceId!,
-                        record.ObservationId,
-                        sessionGuid);
-                }
             }
+        }
 
-            foreach (var span in projectedSpans)
+        foreach (var span in projectedSpans)
+        {
+            if (!IsValidIdentity(span.TraceId, span.SpanId))
             {
-                if (!IsValidIdentity(span.TraceId, span.SpanId))
-                {
-                    continue;
-                }
-
-                var identity = EvidenceIdentity(span.TraceId!, span.SpanId!);
-                Observe(
-                    verification,
-                    references,
-                    DoctorEvidenceKind.Projection,
-                    $"claude-otel-projection-{identity}",
-                    record.ReceivedAt,
-                    span.TraceId!,
-                    record.ObservationId);
+                continue;
             }
+
+            var identity = EvidenceIdentity(span.TraceId!, span.SpanId!);
+            PrepareObservation(
+                observations,
+                references,
+                DoctorEvidenceKind.Projection,
+                $"claude-otel-projection-{identity}",
+                record.ReceivedAt,
+                span.TraceId!,
+                record.ObservationId);
+        }
+        return observations;
     }
 
-    private void Observe(
-        DoctorVerification verification,
+    private static void PrepareObservation(
+        ICollection<PreparedObservation> observations,
         ISet<string> references,
         DoctorEvidenceKind kind,
         string evidenceRef,
@@ -231,15 +234,22 @@ internal sealed class ClaudeDoctorCandidateObserver
             return;
         }
 
+        observations.Add(new(kind, evidenceRef, observedAt, traceId, observationId, sessionId));
+    }
+
+    private void Observe(
+        DoctorVerification verification,
+        PreparedObservation observation)
+    {
         var result = doctorApplication.ObserveCandidate(new(
             Guid.CreateVersion7().ToString("D"),
             verification.VerificationId,
             SourceSurface,
             SourceAdapter,
             DoctorEvidenceClass.RealSource,
-            kind,
-            evidenceRef,
-            observedAt,
+            observation.Kind,
+            observation.EvidenceRef,
+            observation.ObservedAt,
             verification.ExpiresAt));
         if (!result.Success)
         {
@@ -248,22 +258,22 @@ internal sealed class ClaudeDoctorCandidateObserver
 
         navigationStore.Record(
             verification.VerificationId,
-            evidenceRef,
+            observation.EvidenceRef,
             FirstTraceNavigationTargetKind.Trace,
-            traceId);
-        if (sessionId is not null)
+            observation.TraceId);
+        if (observation.SessionId is not null)
         {
             navigationStore.Record(
                 verification.VerificationId,
-                evidenceRef,
+                observation.EvidenceRef,
                 FirstTraceNavigationTargetKind.Session,
-                sessionId);
+                observation.SessionId);
         }
         navigationStore.Record(
             verification.VerificationId,
-            evidenceRef,
+            observation.EvidenceRef,
             FirstTraceNavigationTargetKind.SourceDiagnostic,
-            observationId);
+            observation.ObservationId);
     }
 
     private IReadOnlyList<ClaudeOtelCandidate> ReadEligibleRecords(DoctorVerification verification)
@@ -416,6 +426,14 @@ internal sealed class ClaudeDoctorCandidateObserver
         string ObservationId,
         DateTimeOffset ReceivedAt,
         string PayloadJson);
+
+    private sealed record PreparedObservation(
+        DoctorEvidenceKind Kind,
+        string EvidenceRef,
+        DateTimeOffset ObservedAt,
+        string TraceId,
+        string ObservationId,
+        string? SessionId);
 
     private sealed record OtelSpanReference(string? TraceId, string? SpanId);
 }

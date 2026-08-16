@@ -141,10 +141,11 @@ public sealed class SkillProjectionWorkerTests
         var read = await store.ReadFrontierAsync(queueLease, cancellationToken);
         var retained = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(
             read.Lease);
-        Assert.Equal(2, retained.Value.Count);
+        using var retainedReference = retained.AcquireValueReference();
+        Assert.Equal(2, retainedReference.Value.Count);
         configureLease?.Invoke(retained);
         var records = new BlockingRawRecordList(
-            retained.Value,
+            retainedReference.Value,
             projectionStarted,
             releaseProjection,
             cancellationToken);

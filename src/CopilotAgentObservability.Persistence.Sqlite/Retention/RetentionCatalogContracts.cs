@@ -387,7 +387,6 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
         committedHandle.AttachValueOwner(valueOwner, cancellationToken);
     }
 
-    internal T Value => valueOwner.Value;
     internal RetentionRevisionFence RevisionFence { get; }
     internal RetentionReadGrant Grant { get; }
     internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;
@@ -467,7 +466,6 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
         committedHandle.AttachValueOwner(valueOwner, cancellationToken);
     }
 
-    internal T Value => valueOwner.Value;
     internal RetentionRevisionFence RevisionFence { get; }
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
     internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;

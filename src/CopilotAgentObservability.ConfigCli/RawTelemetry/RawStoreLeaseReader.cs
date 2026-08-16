@@ -28,7 +28,7 @@ internal static class RawStoreLeaseReader
         {
             value = reader(reference.Value);
         }
-        return lease.TryCompleteWithoutRaw() == RetentionRawTerminalResult.CompletedWithoutRaw
+        return lease.TrySealRawResponse() == RetentionRawTerminalResult.Sealed
             ? value
             : throw new InvalidDataException("raw_store_unavailable");
     }

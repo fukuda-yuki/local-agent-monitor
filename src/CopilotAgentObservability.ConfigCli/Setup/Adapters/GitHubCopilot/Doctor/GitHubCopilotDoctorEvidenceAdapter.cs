@@ -189,7 +189,8 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
         if (preparation.FixedResult is not null)
             return preparation.FixedResult;
-        var raw = preparation.Raw!;
+        var traceId = preparation.TraceId;
+        var receivedAt = preparation.ReceivedAt!.Value;
         var compatibility = preparation.Compatibility!;
         var binding = preparation.Binding;
         var disposition = preparation.Disposition;
@@ -200,7 +201,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             if (retainedRaw.ReceivedAt < verification.StartedAt || retainedRaw.ReceivedAt >= verification.ExpiresAt ||
                 !string.Equals(retainedRaw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
                 !HasExpectedRawProvenance(retainedRaw, partition))
-                return new(empty, null, null, null, null, null);
+                return new(empty, null, null, null, null, null, null);
 
             var retainedCompatibility = new SqliteSourceCompatibilityStore(
                 databasePath,
@@ -209,7 +210,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                 !string.Equals(retainedCompatibility.SourceSurface, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
                 !string.Equals(retainedCompatibility.SourceAdapter, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
                 retainedCompatibility.CompatibilityState == SourceCompatibilityState.AdapterFailure)
-                return new(empty, null, null, null, null, null);
+                return new(empty, null, null, null, null, null, null);
 
             var retainedBinding = ResolveBinding(
                 databasePath,
@@ -220,7 +221,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             if (retainedBinding is not null && !WithinVerificationWindow(retainedBinding.ObservedAt, verification))
                 retainedBinding = null;
             if (partition.RequiresBinding && retainedBinding is null)
-                return new(empty with { SessionUnbound = true }, null, null, null, null, null);
+                return new(empty with { SessionUnbound = true }, null, null, null, null, null, null);
 
             var retainedDisposition = rawStore.GetProjectionDisposition(selection.RawRecordId);
             if (retainedDisposition is not null && !WithinVerificationWindow(retainedDisposition.UpdatedAt, verification))
@@ -240,7 +241,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
             }
             else if (!partition.RequiresBinding && selection.NativeSession is null && retainedDisposition?.State == ProjectionDispositionState.Completed)
                 retainedEvidence.Add(new(DoctorEvidenceKind.CompletenessContent, retainedDisposition.UpdatedAt, Identity: null));
-            return new(null, retainedRaw, retainedCompatibility, retainedBinding, retainedDisposition, retainedEvidence);
+            return new(
+                null,
+                retainedRaw.TraceId,
+                retainedRaw.ReceivedAt,
+                retainedCompatibility,
+                retainedBinding,
+                retainedDisposition,
+                retainedEvidence);
         }
 
         var evidenceRefs = new List<string>(evidence.Count);
@@ -266,7 +274,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                     selection.VerificationId,
                     evidenceRef,
                     descriptor.Kind,
-                    raw.TraceId,
+                    traceId,
                     compatibility.ObservationId,
                     binding);
                 continue;
@@ -301,14 +309,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
                     observationResult = service.Status(selection.VerificationId);
                     continue;
                 }
-                return Empty(observationResult, partition, selection.VerificationId, raw.ReceivedAt);
+                return Empty(observationResult, partition, selection.VerificationId, receivedAt);
             }
             RecordNavigationTargets(
                 navigationStore,
                 selection.VerificationId,
                 evidenceRef,
                 descriptor.Kind,
-                raw.TraceId,
+                traceId,
                 compatibility.ObservationId,
                 binding);
         }
@@ -316,7 +324,7 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         var snapshot = Snapshot(
             partition,
             selection.VerificationId,
-            raw.ReceivedAt,
+            receivedAt,
             compatibility,
             disposition,
             binding);
@@ -795,7 +803,8 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
 
     private sealed record EvidencePreparation(
         GitHubCopilotDoctorEvidenceResult? FixedResult,
-        RawTelemetryRecord? Raw,
+        string? TraceId,
+        DateTimeOffset? ReceivedAt,
         SourceCompatibilityRow? Compatibility,
         BindingResolution? Binding,
         ProjectionDisposition? Disposition,

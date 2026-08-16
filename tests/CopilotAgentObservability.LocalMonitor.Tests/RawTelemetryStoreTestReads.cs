@@ -21,7 +21,12 @@ internal static class RawTelemetryStoreTestReads
     public static RawTelemetryRecord? GetRawRecordById(this RawTelemetryStore store, long id)
     {
         var result = store.GetRawRecordByIdAsync(id, RetentionReadKind.Access, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        try { return result.Lease?.Value; }
+        try
+        {
+            if (result.Lease is null) return null;
+            using var reference = result.Lease.AcquireValueReference();
+            return reference.Value;
+        }
         finally { result.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
@@ -34,7 +39,12 @@ internal static class RawTelemetryStoreTestReads
     private static IReadOnlyList<RawTelemetryRecord> ReadLease(ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> pending)
     {
         var result = pending.AsTask().GetAwaiter().GetResult();
-        try { return result.Lease?.Value.ToArray() ?? []; }
+        try
+        {
+            if (result.Lease is null) return [];
+            using var reference = result.Lease.AcquireValueReference();
+            return reference.Value.ToArray();
+        }
         finally { result.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 

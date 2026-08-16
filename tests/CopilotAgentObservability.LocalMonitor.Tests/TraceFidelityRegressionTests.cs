@@ -102,8 +102,9 @@ public class TraceFidelityRegressionTests
         var rawResult = await projectionStore.GetRawRecordByIdAsync(committed.RawRecordId, RetentionReadKind.Access, CancellationToken.None);
         RawTelemetryRecord persistedRaw;
         await using (var rawLease = Assert.IsType<RetentionReadLease<RawTelemetryRecord>>(rawResult.Lease))
+        using (var rawReference = rawLease.AcquireValueReference())
         {
-            persistedRaw = rawLease.Value;
+            persistedRaw = rawReference.Value;
         }
         var persistedObservation = Assert.IsType<SourceCompatibilityRow>(
             compatibilityStore.GetByRawRecordId(committed.RawRecordId));
@@ -120,7 +121,8 @@ public class TraceFidelityRegressionTests
         var traceId = Assert.IsType<string>(persistedRaw.TraceId);
         var traceRawResult = await projectionStore.ListRawRecordsByTraceIdAsync(traceId, limit: 10, RetentionReadKind.Access, CancellationToken.None);
         await using var traceRawLease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(traceRawResult.Lease);
-        Assert.Single(traceRawLease.Value);
+        using var traceRawReference = traceRawLease.AcquireValueReference();
+        Assert.Single(traceRawReference.Value);
         var trace = Assert.IsType<MonitorTraceRow>(projectionStore.GetMonitorTrace(traceId));
         var spans = projectionStore.GetSpansForTrace(traceId);
         var graph = AgentExecutionGraphBuilder.Build(spans);

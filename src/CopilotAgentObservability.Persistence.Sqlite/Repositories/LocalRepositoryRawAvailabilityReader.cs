@@ -126,7 +126,11 @@ internal sealed class LocalRepositoryRawAvailabilityReader
                 _ => LocalRepositoryRawAvailabilityResult.Corrupt(),
             };
         }
-        var digest = SkillProjectionHashing.InputDigest(read.Lease.Value.PayloadJson);
+        string digest;
+        using (var reference = read.Lease.AcquireValueReference())
+        {
+            digest = SkillProjectionHashing.InputDigest(reference.Value.PayloadJson);
+        }
         if (expectedPayloadSha256 is not null && !string.Equals(expectedPayloadSha256, digest, StringComparison.Ordinal))
         {
             await read.Lease.DisposeAsync().ConfigureAwait(false);

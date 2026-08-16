@@ -121,7 +121,8 @@ internal sealed class SourceCompatibilityReconciler
         try
         {
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission);
-            return Commit(request, fingerprint, registry, lease.Value, grant);
+            using var retainedRecordReference = lease.AcquireValueReference();
+            return Commit(request, fingerprint, registry, retainedRecordReference.Value, grant);
         }
         finally
         {

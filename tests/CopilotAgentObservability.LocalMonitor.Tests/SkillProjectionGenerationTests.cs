@@ -317,7 +317,8 @@ public sealed class SkillProjectionGenerationTests
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -390,7 +391,8 @@ public sealed class SkillProjectionGenerationTests
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -473,7 +475,8 @@ public sealed class SkillProjectionGenerationTests
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         Assert.Equal(2, retentionLease.Grants.Count);
         checkpoint.Configure(retentionLease.Grants);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -534,7 +537,8 @@ public sealed class SkillProjectionGenerationTests
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         checkpoint.Configure(retentionLease.Grants);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -588,7 +592,8 @@ public sealed class SkillProjectionGenerationTests
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         Assert.Equal(2, retentionLease.Grants.Count);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -1933,7 +1938,8 @@ public sealed class SkillProjectionGenerationTests
         await using (var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease))
         {
-            var projected = retentionLease.Value
+            using var retentionReference = retentionLease.AcquireValueReference();
+            var projected = retentionReference.Value
                 .Select((record, index) => new SkillProjectionProjectedInput(
                     record.Id!.Value,
                     record,
@@ -2148,7 +2154,8 @@ public sealed class SkillProjectionGenerationTests
         string unrelatedOperationBefore;
         await using (retentionLease)
         {
-            var record = Assert.Single(retentionLease.Value);
+            using var retentionReference = retentionLease.AcquireValueReference();
+            var record = Assert.Single(retentionReference.Value);
             var grant = Assert.Single(retentionLease.Grants);
             var queuedInput = Assert.Single(queueLease.Inputs);
             Assert.Equal(primary.RawRecordId, record.Id);
@@ -2462,7 +2469,8 @@ public sealed class SkillProjectionGenerationTests
         var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -2520,7 +2528,8 @@ public sealed class SkillProjectionGenerationTests
         await using var retentionLease =
             Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
         Assert.Equal(2, retentionLease.Grants.Count);
-        var projected = retentionLease.Value
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
             .Select((record, index) => new SkillProjectionProjectedInput(
                 record.Id!.Value,
                 record,
@@ -2549,7 +2558,7 @@ public sealed class SkillProjectionGenerationTests
         };
         await using var forgedLease =
             new RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>(
-                retentionLease.Value,
+                retentionReference.Value,
                 RetentionRevisionFence.Create(),
                 grants,
                 static _ => ValueTask.CompletedTask);

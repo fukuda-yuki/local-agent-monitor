@@ -477,9 +477,10 @@ public class MonitorAnalysisStoreTests
 
         Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
-        Assert.Equal("raw result", lease.Value.ResultMarkdown);
-        Assert.Null(lease.Value.ErrorMessage);
-        var entry = Assert.Single(lease.Value.Events);
+        using var reference = lease.AcquireValueReference();
+        Assert.Equal("raw result", reference.Value.ResultMarkdown);
+        Assert.Null(reference.Value.ErrorMessage);
+        var entry = Assert.Single(reference.Value.Events);
         Assert.Equal("first raw event", entry.Message);
     }
 
@@ -546,7 +547,8 @@ public class MonitorAnalysisStoreTests
 
         Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<string>>(read.Lease);
-        Assert.Equal("verified", lease.Value);
+        using var reference = lease.AcquireValueReference();
+        Assert.Equal("verified", reference.Value);
     }
 
     [Fact]
@@ -599,8 +601,9 @@ public class MonitorAnalysisStoreTests
         {
             await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
             Assert.Same(lease, read.Lease);
-            Assert.Equal("PINNED_ANALYSIS_RESULT_RAW_MARKER", lease.Value.ResultMarkdown);
-            Assert.Equal("PINNED_ANALYSIS_EVENT_RAW_MARKER", Assert.Single(lease.Value.Events).Message);
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal("PINNED_ANALYSIS_RESULT_RAW_MARKER", reference.Value.ResultMarkdown);
+            Assert.Equal("PINNED_ANALYSIS_EVENT_RAW_MARKER", Assert.Single(reference.Value.Events).Message);
 
             var outsideValueBoundary = string.Join('|', read, lease, lease.Grant);
             Assert.DoesNotContain("PINNED_ANALYSIS_RESULT_RAW_MARKER", outsideValueBoundary, StringComparison.Ordinal);
@@ -637,8 +640,9 @@ public class MonitorAnalysisStoreTests
 
         Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
-        Assert.False(lease.Value.Events is IList<AnalysisRunRawEvent> { IsReadOnly: false });
-        Assert.Equal(new[] { "first raw event" }, lease.Value.Events.Select(@event => @event.Message));
+        using var reference = lease.AcquireValueReference();
+        Assert.False(reference.Value.Events is IList<AnalysisRunRawEvent> { IsReadOnly: false });
+        Assert.Equal(new[] { "first raw event" }, reference.Value.Events.Select(@event => @event.Message));
     }
 
     [Fact]
@@ -719,9 +723,10 @@ public class MonitorAnalysisStoreTests
 
         Assert.Null(read.Disposition);
         await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(read.Lease);
-        Assert.Equal("pre-result", lease.Value.ResultMarkdown);
-        Assert.Null(lease.Value.ErrorMessage);
-        Assert.Equal(new[] { "pre-event" }, lease.Value.Events.Select(@event => @event.Message));
+        using var reference = lease.AcquireValueReference();
+        Assert.Equal("pre-result", reference.Value.ResultMarkdown);
+        Assert.Null(reference.Value.ErrorMessage);
+        Assert.Equal(new[] { "pre-event" }, reference.Value.Events.Select(@event => @event.Message));
     }
 
     [Fact]
@@ -766,15 +771,17 @@ public class MonitorAnalysisStoreTests
         Assert.Null(snapshot.Disposition);
         {
             await using var lease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(snapshot.Lease);
-            Assert.Equal("pre-result", lease.Value.ResultMarkdown);
-            Assert.Equal(new[] { "pre-event" }, lease.Value.Events.Select(@event => @event.Message));
+            using var reference = lease.AcquireValueReference();
+            Assert.Equal("pre-result", reference.Value.ResultMarkdown);
+            Assert.Equal(new[] { "pre-event" }, reference.Value.Events.Select(@event => @event.Message));
         }
 
         new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider)
             .AppendEvent(run.RunId, run.OperationToken, fence, "progress", "post-event", requestedAt.AddMinutes(3));
         var later = await reader.ReadRawSnapshotAsync(run.RunId, CancellationToken.None);
         await using var laterLease = Assert.IsType<RetentionReadLease<AnalysisRunRawSnapshot>>(later.Lease);
-        Assert.Equal(new[] { "pre-event", "post-event" }, laterLease.Value.Events.Select(@event => @event.Message));
+        using var laterReference = laterLease.AcquireValueReference();
+        Assert.Equal(new[] { "pre-event", "post-event" }, laterReference.Value.Events.Select(@event => @event.Message));
     }
 
     private static int CountRetentionItems(string databasePath, long runId)
