@@ -72,18 +72,27 @@ internal sealed class RepositoryMetadataDiagnosticsLoader(IMonitorProjectionStor
         }
 
         await using var lease = read.Lease;
-        var diagnostics = new List<RepositoryMetadataDiagnostic>(lease.Value.Count);
+        List<RepositoryMetadataDiagnostic> diagnostics;
         var unavailable = false;
-        foreach (var record in lease.Value)
+        using (var reference = lease.AcquireValueReference())
         {
-            try
+            diagnostics = new List<RepositoryMetadataDiagnostic>(reference.Value.Count);
+            foreach (var record in reference.Value)
             {
-                diagnostics.Add(RepositoryMetadataDiagnostics.Build(record.PayloadJson));
+                try
+                {
+                    diagnostics.Add(RepositoryMetadataDiagnostics.Build(record.PayloadJson));
+                }
+                catch (JsonException)
+                {
+                    unavailable = true;
+                }
             }
-            catch (JsonException)
-            {
-                unavailable = true;
-            }
+        }
+        if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+        {
+            diagnostics.Clear();
+            return RepositoryMetadataDiagnosticsSnapshot.Empty(unavailable: true);
         }
 
         var statusRows = diagnostics

@@ -459,11 +459,20 @@ internal static class MonitorHost
             if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
             if (result.Lease is null) return SourceProjectionStateBuilder.Build([], FindSessionForTrace(sessionStore, row.TraceId));
             await using var lease = result.Lease;
-            var observations = lease.Value
-                .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
-                .Where(observation => observation is not null)
-                .Cast<SourceCompatibilityRow>()
-                .ToArray();
+            SourceCompatibilityRow[] observations;
+            using (var reference = lease.AcquireValueReference())
+            {
+                observations = reference.Value
+                    .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+                    .Where(observation => observation is not null)
+                    .Cast<SourceCompatibilityRow>()
+                    .ToArray();
+            }
+            if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+            {
+                observations = [];
+                throw new PersistenceBusyException();
+            }
             var session = FindSessionForTrace(sessionStore, row.TraceId);
             return SourceProjectionStateBuilder.Build(observations, session);
         }
@@ -1214,8 +1223,21 @@ internal static class MonitorHost
                 }
 
                 await using var rawLease = rawRead.Lease;
+                string entity;
+                using (var reference = rawLease.AcquireValueReference())
+                {
+                    entity = JsonSerializer.Serialize(ToRunDto(run, reference.Value));
+                }
+                if (!RawResponsePublication.IsSuccessful(rawLease.TrySealRawResponse()))
+                {
+                    entity = string.Empty;
+                    RawResponsePublication.Abort(context);
+                    return;
+                }
                 context.Response.Headers["Cache-Control"] = "no-store";
-                await WriteJsonAsync(context, ToRunDto(run, rawLease.Value));
+                context.Response.StatusCode = StatusCodes.Status200OK;
+                context.Response.ContentType = JsonContentType;
+                await context.Response.WriteAsync(entity);
             });
 
             app.MapGet("/traces/{traceId}/analysis/runs/{runId:long}/safe-summary", async (string traceId, long runId, HttpContext context) =>
@@ -1274,12 +1296,22 @@ internal static class MonitorHost
 
                 await using (var lease = result.Lease)
                 {
+                    string entity;
+                    using (var reference = lease.AcquireValueReference())
+                    {
+                        var encodedPayload = HtmlEncoder.Default.Encode(reference.Value.PayloadJson);
+                        entity = $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>";
+                    }
+                    if (!RawResponsePublication.IsSuccessful(lease.TrySealRawResponse()))
+                    {
+                        entity = string.Empty;
+                        RawResponsePublication.Abort(context);
+                        return;
+                    }
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     context.Response.Headers["Cache-Control"] = "no-store";
                     context.Response.ContentType = "text/html; charset=utf-8";
-                    var encodedPayload = HtmlEncoder.Default.Encode(lease.Value.PayloadJson);
-                    await context.Response.WriteAsync(
-                        $"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Raw record {rawRecordId}</title></head><body><pre>{encodedPayload}</pre></body></html>");
+                    await context.Response.WriteAsync(entity);
                 }
             });
 
@@ -1324,11 +1356,12 @@ internal static class MonitorHost
 
                 // Best-effort formatted extraction; the raw span JSON always works.
                 await using var spanLease = rawResult.Lease;
-                var detail = SpanDetailExtractor.Extract(spanLease.Value.PayloadJson, traceId, spanId);
-
-                context.Response.Headers["Cache-Control"] = "no-store";
-                await WriteJsonAsync(context, new
+                string entity;
+                using (var reference = spanLease.AcquireValueReference())
                 {
+                    var detail = SpanDetailExtractor.Extract(reference.Value.PayloadJson, traceId, spanId);
+                    entity = JsonSerializer.Serialize(new
+                    {
                     trace_id = traceId,
                     span_id = spanId,
                     span = new
@@ -1377,7 +1410,18 @@ internal static class MonitorHost
                         : (object?)null,
                     error_message = detail?.ErrorMessage,
                     raw_span_json = detail?.RawSpanJson,
-                });
+                    });
+                }
+                if (!RawResponsePublication.IsSuccessful(spanLease.TrySealRawResponse()))
+                {
+                    entity = string.Empty;
+                    RawResponsePublication.Abort(context);
+                    return;
+                }
+                context.Response.Headers["Cache-Control"] = "no-store";
+                context.Response.StatusCode = StatusCodes.Status200OK;
+                context.Response.ContentType = JsonContentType;
+                await context.Response.WriteAsync(entity);
             });
 
             // A raw prompt-label surface (D039), alongside the raw-detail view above.
@@ -1410,11 +1454,31 @@ internal static class MonitorHost
                     return;
                 }
                 await using var promptLease = result.Lease;
-                var label = MonitorPromptExtractor.ExtractFirstPromptLabel(
-                    (promptLease?.Value ?? []).Select(record => record.PayloadJson), traceId);
+                string entity;
+                if (promptLease is null)
+                {
+                    entity = JsonSerializer.Serialize(new { trace_id = traceId, prompt_label = (string?)null });
+                }
+                else
+                {
+                    using (var reference = promptLease.AcquireValueReference())
+                    {
+                        var label = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                            reference.Value.Select(record => record.PayloadJson), traceId);
+                        entity = JsonSerializer.Serialize(new { trace_id = traceId, prompt_label = label });
+                    }
+                    if (!RawResponsePublication.IsSuccessful(promptLease.TrySealRawResponse()))
+                    {
+                        entity = string.Empty;
+                        RawResponsePublication.Abort(context);
+                        return;
+                    }
+                }
 
                 context.Response.Headers["Cache-Control"] = "no-store";
-                await WriteJsonAsync(context, new { trace_id = traceId, prompt_label = label });
+                context.Response.StatusCode = StatusCodes.Status200OK;
+                context.Response.ContentType = JsonContentType;
+                await context.Response.WriteAsync(entity);
             });
         }
 

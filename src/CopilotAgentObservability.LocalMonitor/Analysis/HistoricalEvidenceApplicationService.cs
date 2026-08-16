@@ -237,10 +237,19 @@ internal sealed class SqliteHistoricalEvidenceSnapshotSourceV1 : IHistoricalEvid
                     if (read.Disposition != SessionContentReadDisposition.Granted || read.Lease is null) continue;
                     await using var lease = read.Lease;
                     var reference = TryExactReference(item);
-                    var descriptor = ReadDescriptor(lease.Content.ContentJson);
-                    var projected = descriptor is null
-                        ? (HistoricalDescriptorStateV1.Unavailable, (string?)null)
-                        : HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(false, [descriptor]);
+                    (HistoricalDescriptorStateV1, string?) projected;
+                    using (var contentReference = lease.AcquireContentReference())
+                    {
+                        var descriptor = ReadDescriptor(contentReference.Content.ContentJson);
+                        projected = descriptor is null
+                            ? (HistoricalDescriptorStateV1.Unavailable, (string?)null)
+                            : HistoricalEvidenceExtractorV1.ProjectDescriptorCandidates(false, [descriptor]);
+                    }
+                    if (lease.TryCompleteWithoutRaw() != SessionContentTerminalResult.CompletedWithoutRaw)
+                    {
+                        projected = default;
+                        continue;
+                    }
                     if (reference is not null)
                         groups.Add(new(HistoricalEvidenceGroupKindV1.UserCorrection, [reference], null, null, null, null, null, null, null,
                             projected.Item2, DescriptorCandidateState: projected.Item1));

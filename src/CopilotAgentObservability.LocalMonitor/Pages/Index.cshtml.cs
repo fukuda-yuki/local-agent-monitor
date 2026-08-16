@@ -47,13 +47,14 @@ public sealed class IndexModel : PageModel
             // The overview becomes a raw-bearing surface when it shows prompt
             // labels (D032): keep raw out of the browser cache and refuse a
             // cross-site / foreign-origin browser read.
-            Response.Headers["Cache-Control"] = "no-store";
             if (MonitorHost.IsCrossSiteRequest(HttpContext))
             {
+                Response.Headers["Cache-Control"] = "no-store";
                 return CrossOriginForbidden();
             }
         }
 
+        var leases = new RawRazorPageLeaseTracker();
         try
         {
             Overview = overviewService.BuildOverview("today");
@@ -63,15 +64,25 @@ public sealed class IndexModel : PageModel
                 MonitorOverviewService.FormatUtc(range.End),
                 TopTraceLimit);
             RecentTraces = store.ListRecentMonitorTraces(RecentTraceLimit);
+            if (RawAvailable && !await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted))
+            {
+                promptByTraceId.Clear();
+                await leases.DisposeAsync();
+                RawResponsePublication.Abort(HttpContext);
+                return new EmptyResult();
+            }
         }
         catch (PersistenceBusyException)
         {
+            await leases.DisposeAsync();
+            Response.Headers["Cache-Control"] = "no-store";
             return PersistenceBusy();
         }
 
         if (RawAvailable)
         {
-            await PopulatePromptsAsync(store, HttpContext.RequestAborted);
+            Response.Headers["Cache-Control"] = "no-store";
+            leases.TransferTo(Response);
         }
 
         return Page();
@@ -81,7 +92,10 @@ public sealed class IndexModel : PageModel
     internal string? PromptFor(string? traceId) =>
         traceId is not null && promptByTraceId.TryGetValue(traceId, out var prompt) ? prompt : null;
 
-    private async Task PopulatePromptsAsync(IMonitorProjectionStore store, CancellationToken cancellationToken)
+    private async Task<bool> PopulatePromptsAsync(
+        IMonitorProjectionStore store,
+        RawRazorPageLeaseTracker leases,
+        CancellationToken cancellationToken)
     {
         var traceIds = TopTraces
             .Select(trace => trace.TraceId)
@@ -94,9 +108,21 @@ public sealed class IndexModel : PageModel
             var result = await store.ListRawRecordsByTraceIdAsync(traceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, cancellationToken);
             if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
             if (result.Lease is null) { promptByTraceId[traceId] = null; continue; }
-            await using var lease = result.Lease;
-            promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(lease.Value.Select(record => record.PayloadJson), traceId);
+            var lease = result.Lease;
+            using (var reference = lease.AcquireValueReference())
+            {
+                promptByTraceId[traceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                    reference.Value.Select(record => record.PayloadJson), traceId);
+            }
+            if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+            {
+                promptByTraceId.Remove(traceId);
+                await lease.DisposeAsync();
+                return false;
+            }
+            leases.Add(lease);
         }
+        return true;
     }
 
     private static ContentResult CrossOriginForbidden() => new()

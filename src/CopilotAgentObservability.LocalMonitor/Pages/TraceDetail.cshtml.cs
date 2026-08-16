@@ -52,14 +52,11 @@ public sealed class TraceDetailModel : PageModel
         var options = HttpContext.RequestServices.GetRequiredService<MonitorOptions>();
         RawAvailable = !options.SanitizedOnly;
 
-        // Raw / PII must not be left in the browser cache after process exit or a
-        // --sanitized-only restart.
-        Response.Headers["Cache-Control"] = "no-store";
-
         // Same-origin only: a cross-site / foreign-origin browser read is refused
         // so another origin cannot use the user's browser to exfiltrate raw / PII.
         if (MonitorHost.IsCrossSiteRequest(HttpContext))
         {
+            Response.Headers["Cache-Control"] = "no-store";
             return new ContentResult
             {
                 StatusCode = StatusCodes.Status403Forbidden,
@@ -74,6 +71,7 @@ public sealed class TraceDetailModel : PageModel
         MonitorTraceRow? trace;
         IReadOnlyList<RawRecordPreview> rawRecords = Array.Empty<RawRecordPreview>();
         string? promptLabel = null;
+        var leases = new RawRazorPageLeaseTracker();
         try
         {
             trace = store.GetMonitorTrace(traceId);
@@ -88,9 +86,24 @@ public sealed class TraceDetailModel : PageModel
                 if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
                 if (result.Lease is not null)
                 {
-                    await using var lease = result.Lease;
-                    rawRecords = lease.Value.Select(ToPreview).ToList();
-                    promptLabel = lease.Value.Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId)).FirstOrDefault(prompt => prompt is not null);
+                    var lease = result.Lease;
+                    using (var reference = lease.AcquireValueReference())
+                    {
+                        rawRecords = reference.Value.Select(ToPreview).ToList();
+                        promptLabel = reference.Value
+                            .Select(record => MonitorPromptExtractor.ExtractPromptLabel(record.PayloadJson, traceId))
+                            .FirstOrDefault(prompt => prompt is not null);
+                    }
+                    if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+                    {
+                        rawRecords = Array.Empty<RawRecordPreview>();
+                        promptLabel = null;
+                        await lease.DisposeAsync();
+                        await leases.DisposeAsync();
+                        RawResponsePublication.Abort(HttpContext);
+                        return new EmptyResult();
+                    }
+                    leases.Add(lease);
                 }
             }
 
@@ -108,6 +121,8 @@ public sealed class TraceDetailModel : PageModel
         }
         catch (PersistenceBusyException)
         {
+            await leases.DisposeAsync();
+            Response.Headers["Cache-Control"] = "no-store";
             return new ContentResult
             {
                 StatusCode = StatusCodes.Status503ServiceUnavailable,
@@ -120,6 +135,8 @@ public sealed class TraceDetailModel : PageModel
         RawRecords = RawAvailable ? rawRecords : Array.Empty<RawRecordPreview>();
         PromptLabel = RawAvailable ? promptLabel : null;
 
+        Response.Headers["Cache-Control"] = "no-store";
+        leases.TransferTo(Response);
         return Page();
     }
 

@@ -1351,11 +1351,35 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }, cancellationToken).ConfigureAwait(false);
 
         if (result.Lease is { } lease)
-            return new(SessionContentReadDisposition.Granted, new SessionContentReadLease(lease.Value, lease.DisposeAsync));
+        {
+            SessionEventContent content;
+            using (var reference = lease.AcquireValueReference())
+            {
+                content = reference.Value;
+            }
+            return new(SessionContentReadDisposition.Granted, new SessionContentReadLease(
+                content,
+                lease.DisposeAsync,
+                () =>
+                {
+                    var reference = lease.AcquireValueReference();
+                    return new SessionContentUseReference(reference.Value, reference.Dispose);
+                },
+                () => MapTerminal(lease.TrySealRawResponse()),
+                () => MapTerminal(lease.TryCompleteWithoutRaw())));
+        }
         return result.Disposition == RetentionReadDisposition.Busy
             ? new(SessionContentReadDisposition.Busy, null)
             : new(SessionContentReadDisposition.Denied, null);
     }
+
+    private static SessionContentTerminalResult MapTerminal(RetentionRawTerminalResult result) => result switch
+    {
+        RetentionRawTerminalResult.Sealed => SessionContentTerminalResult.Sealed,
+        RetentionRawTerminalResult.CompletedWithoutRaw => SessionContentTerminalResult.CompletedWithoutRaw,
+        RetentionRawTerminalResult.Busy => SessionContentTerminalResult.Busy,
+        _ => SessionContentTerminalResult.Lost,
+    };
 
     internal static void ConfigureContentReadMaterializationCommand(
         SqliteCommand command,

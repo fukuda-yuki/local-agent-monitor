@@ -383,46 +383,66 @@ internal static class SessionRoutes
     {
         app.MapGet("/sessions/{sessionId}/events/{eventId}/content", async (string sessionId, string eventId, HttpContext context) =>
         {
-            context.Response.Headers.CacheControl = "no-store";
             if (MonitorHost.IsCrossSiteRequest(context))
             {
-                await Failure(context, 403, "cross_origin_forbidden");
+                await RawContentFailure(context, 403, "cross_origin_forbidden");
                 return;
             }
             if (!Guid.TryParseExact(sessionId, "D", out var sessionGuid)
                 || !Guid.TryParseExact(eventId, "D", out var eventGuid))
             {
-                await Failure(context, 404, "session_event_content_not_found");
+                await RawContentFailure(context, 404, "session_event_content_not_found");
                 return;
             }
             var read = await store.ReadContentAsync(sessionGuid, eventGuid, context.RequestAborted);
             if (read.Disposition == SessionContentReadDisposition.NotFound)
             {
-                await Failure(context, 404, "session_event_content_not_found");
+                await RawContentFailure(context, 404, "session_event_content_not_found");
                 return;
             }
             if (read.Disposition == SessionContentReadDisposition.Busy)
             {
-                await Failure(context, 503, "session_store_busy");
+                await RawContentFailure(context, 503, "session_store_busy");
                 return;
             }
             if (read.Disposition == SessionContentReadDisposition.Denied)
             {
+                context.Response.Headers.CacheControl = "no-store";
                 context.Response.StatusCode = 410;
                 await JsonBody(context, new { error = "raw_content_expired", content_state = "expired_pending_deletion" });
                 return;
             }
             await using var lease = read.Lease!;
-            var content = lease.Content;
-            await Json(context, new
+            string entity;
+            using (var reference = lease.AcquireContentReference())
             {
-                event_id = content.EventId,
-                content_kind = content.ContentKind,
-                content = content.ContentJson,
-                captured_at = content.CapturedAt,
-                expires_at = content.ExpiresAt,
-            });
+                var content = reference.Content;
+                entity = JsonSerializer.Serialize(new
+                {
+                    event_id = content.EventId,
+                    content_kind = content.ContentKind,
+                    content = content.ContentJson,
+                    captured_at = content.CapturedAt,
+                    expires_at = content.ExpiresAt,
+                });
+            }
+            if (lease.TrySealRawResponse() != SessionContentTerminalResult.Sealed)
+            {
+                entity = string.Empty;
+                RawResponsePublication.Abort(context);
+                return;
+            }
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync(entity);
         });
+    }
+
+    private static Task RawContentFailure(HttpContext context, int status, string error)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        return Failure(context, status, error);
     }
 
     internal static bool IsRawContentPath(PathString path)
@@ -583,10 +603,21 @@ internal static class SessionRoutes
             if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
             if (result.Lease is null) continue;
             await using var lease = result.Lease;
-            observations.AddRange(lease.Value
-                .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
-                .Where(observation => observation is not null)
-                .Cast<SourceCompatibilityRow>());
+            SourceCompatibilityRow[] mapped;
+            using (var reference = lease.AcquireValueReference())
+            {
+                mapped = reference.Value
+                    .Select(record => record.Id is { } id ? compatibilityStore.GetByRawRecordId(id) : null)
+                    .Where(observation => observation is not null)
+                    .Cast<SourceCompatibilityRow>()
+                    .ToArray();
+            }
+            if (lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+            {
+                mapped = [];
+                throw new PersistenceBusyException();
+            }
+            observations.AddRange(mapped);
         }
         var distinctObservations = observations.GroupBy(observation => observation.Id).Select(group => group.First()).ToArray();
         return SourceProjectionStateBuilder.Build(distinctObservations, detail);

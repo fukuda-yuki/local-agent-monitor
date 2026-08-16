@@ -11,9 +11,37 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 /// </summary>
 internal abstract class ProjectionStoreTestDouble : IMonitorProjectionStore
 {
-    protected static RetentionBatchReadResult<T> Granted<T>(T records) =>
-        RetentionBatchReadResult<T>.FromHandle(
-            new RetentionBatchReadLease<T>(records, RetentionRevisionFence.Create(), () => ValueTask.CompletedTask));
+    protected static RetentionBatchReadResult<T> Granted<T>(T records)
+    {
+        var now = TimeProvider.System.GetUtcNow();
+        var ownershipKey = new RetentionOwnershipKey("test-store", RetentionStoreKind.RawRecord, Guid.NewGuid().ToString("N"));
+        var grant = new RetentionReadGrant(
+            ownershipKey,
+            Guid.NewGuid().ToString("N"),
+            1,
+            RetentionLeaseKind.Access,
+            Guid.NewGuid().ToString("N"),
+            1,
+            now.AddMinutes(2),
+            new byte[32]);
+        var handle = new RetentionCommittedReadHandle(
+            [grant],
+            TimeProvider.System,
+            _ => true,
+            terminalAuthority: static (committed, operation) =>
+            {
+                if (!committed.TryMoveTerminalAttemptToPending(operation)) return RetentionRawTerminalResult.Lost;
+                return committed.PublishTerminal(operation);
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        return RetentionBatchReadResult<T>.FromHandle(new RetentionBatchReadLease<T>(
+            records,
+            RetentionRevisionFence.Create(),
+            [grant],
+            handle,
+            CancellationToken.None));
+    }
 
     protected static RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>> NotFoundBatch() =>
         RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.FromDisposition(RetentionReadDisposition.LifecycleDenied);

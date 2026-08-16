@@ -656,9 +656,8 @@ public sealed class HistoricalEvidenceProductionTests
             [new SessionEventContent(eventId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1))]);
         var reader = new RecordingContentReader(new(
             SessionContentReadDisposition.Granted,
-            new SessionContentReadLease(
-                new SessionEventContent(eventId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1)),
-                () => ValueTask.CompletedTask)));
+            GrantedContentLease(
+                new SessionEventContent(eventId, "application/json", "{\"text\":\"Use focused tests\"}", now, now.AddDays(1)))));
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, store, reader);
 
         var sanitized = await HistoricalEvidenceExtractorV1.ExtractAsync(
@@ -811,7 +810,7 @@ public sealed class HistoricalEvidenceProductionTests
         WriteTerminalEligibleSession(realStore, new SessionDetail(session, [], [], [initial, @event]), []);
         var authority = DispatchProxy.Create<ISessionStore, NotCapturedRetentionProxy>();
         var reader = new RecordingContentReader(new(SessionContentReadDisposition.Granted,
-            new SessionContentReadLease(new SessionEventContent(eventId, "application/json", "{\"text\":\"must not read\"}", now, now.AddDays(1)), () => ValueTask.CompletedTask)));
+            GrantedContentLease(new SessionEventContent(eventId, "application/json", "{\"text\":\"must not read\"}", now, now.AddDays(1)))));
         var source = new SqliteHistoricalEvidenceSnapshotSourceV1(temp.DatabasePath, authority, reader);
 
         var extraction = await HistoricalEvidenceExtractorV1.ExtractAsync(
@@ -885,8 +884,8 @@ public sealed class HistoricalEvidenceProductionTests
             if (Disposition != SessionContentReadDisposition.Granted)
                 return ValueTask.FromResult(new SessionContentReadResult(Disposition, null));
             return ValueTask.FromResult(new SessionContentReadResult(Disposition,
-                new SessionContentReadLease(new SessionEventContent(eventId, "application/json",
-                    JsonSerializer.Serialize(new { text = descriptor }), now, now.AddDays(1)), () => ValueTask.CompletedTask)));
+                GrantedContentLease(new SessionEventContent(eventId, "application/json",
+                    JsonSerializer.Serialize(new { text = descriptor }), now, now.AddDays(1)))));
         }
     }
 
@@ -898,9 +897,16 @@ public sealed class HistoricalEvidenceProductionTests
             var content = new SessionEventContent(eventId, "application/json",
                 JsonSerializer.Serialize(new { text = values[eventId] }), now, now.AddDays(1));
             return ValueTask.FromResult(new SessionContentReadResult(SessionContentReadDisposition.Granted,
-                new SessionContentReadLease(content, () => ValueTask.CompletedTask)));
+                GrantedContentLease(content)));
         }
     }
+
+    private static SessionContentReadLease GrantedContentLease(SessionEventContent content) => new(
+        content,
+        () => ValueTask.CompletedTask,
+        () => new SessionContentUseReference(content, static () => { }),
+        () => SessionContentTerminalResult.Sealed,
+        () => SessionContentTerminalResult.CompletedWithoutRaw);
 
     // D079 (PO124-A, docs/decisions.md Session-terminal-outcome decision; docs/specifications/interfaces/canvas-session-workspace.md):
     // session status, completeness, and ended_at are unconditionally reduced from persisted terminal facts on

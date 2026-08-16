@@ -81,9 +81,9 @@ public sealed class TracesModel : PageModel
             // The trace list becomes a raw-bearing surface when it shows prompt
             // labels (D032): keep raw out of the browser cache and refuse a
             // cross-site / foreign-origin browser read.
-            Response.Headers["Cache-Control"] = "no-store";
             if (MonitorHost.IsCrossSiteRequest(HttpContext))
             {
+                Response.Headers["Cache-Control"] = "no-store";
                 return CrossOriginForbidden();
             }
         }
@@ -97,6 +97,7 @@ public sealed class TracesModel : PageModel
             endExclusive = MonitorOverviewService.FormatUtc(range.End);
         }
 
+        var leases = new RawRazorPageLeaseTracker();
         try
         {
             Result = store.ListMonitorTracesFiltered(new MonitorTraceListQuery(
@@ -122,14 +123,27 @@ public sealed class TracesModel : PageModel
 
             if (RawAvailable)
             {
-                await PopulatePromptsAsync(store, HttpContext.RequestAborted);
+                if (!await PopulatePromptsAsync(store, leases, HttpContext.RequestAborted))
+                {
+                    promptByTraceId.Clear();
+                    await leases.DisposeAsync();
+                    RawResponsePublication.Abort(HttpContext);
+                    return new EmptyResult();
+                }
             }
         }
         catch (PersistenceBusyException)
         {
+            await leases.DisposeAsync();
+            Response.Headers["Cache-Control"] = "no-store";
             return PersistenceBusy();
         }
 
+        if (RawAvailable)
+        {
+            Response.Headers["Cache-Control"] = "no-store";
+            leases.TransferTo(Response);
+        }
         return Page();
     }
 
@@ -137,7 +151,10 @@ public sealed class TracesModel : PageModel
     internal string? PromptFor(string? traceId) =>
         traceId is not null && promptByTraceId.TryGetValue(traceId, out var prompt) ? prompt : null;
 
-    private async Task PopulatePromptsAsync(IMonitorProjectionStore store, CancellationToken cancellationToken)
+    private async Task<bool> PopulatePromptsAsync(
+        IMonitorProjectionStore store,
+        RawRazorPageLeaseTracker leases,
+        CancellationToken cancellationToken)
     {
         foreach (var row in Result.Items)
         {
@@ -149,9 +166,21 @@ public sealed class TracesModel : PageModel
             var result = await store.ListRawRecordsByTraceIdAsync(row.TraceId, MonitorPromptExtractor.RecordScanLimit, RetentionReadKind.Access, cancellationToken);
             if (result.Disposition == RetentionReadDisposition.Busy) throw new PersistenceBusyException();
             if (result.Lease is null) { promptByTraceId[row.TraceId] = null; continue; }
-            await using var lease = result.Lease;
-            promptByTraceId[row.TraceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(lease.Value.Select(record => record.PayloadJson), row.TraceId);
+            var lease = result.Lease;
+            using (var reference = lease.AcquireValueReference())
+            {
+                promptByTraceId[row.TraceId] = MonitorPromptExtractor.ExtractFirstPromptLabel(
+                    reference.Value.Select(record => record.PayloadJson), row.TraceId);
+            }
+            if (lease.TrySealRawResponse() != RetentionRawTerminalResult.Sealed)
+            {
+                promptByTraceId.Remove(row.TraceId);
+                await lease.DisposeAsync();
+                return false;
+            }
+            leases.Add(lease);
         }
+        return true;
     }
 
     private static ContentResult CrossOriginForbidden() => new()
