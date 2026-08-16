@@ -4,6 +4,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 using CopilotAgentObservability.Telemetry.Sessions;
+using Microsoft.Data.Sqlite;
 using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.Doctor.Tests.Persistence;
@@ -218,7 +219,19 @@ public sealed class ClaudeDoctorCandidateObserverTests
         Assert.Empty(Candidates(fixture, verification));
     }
 
-    private static ObserverFixture CreateFixture()
+    [Fact]
+    public void RunOnce_RawGrantLostAfterMaterialization_PersistsNoCandidates()
+    {
+        using var fixture = CreateFixture(loseRawBeforeTerminal: true);
+        var verification = fixture.StartVerification();
+        fixture.SeedOtel(Payload(TraceId, SpanId, NativeSessionMarker), Start.AddSeconds(1));
+
+        fixture.Observer.RunOnce();
+
+        Assert.Empty(Candidates(fixture, verification));
+    }
+
+    private static ObserverFixture CreateFixture(bool loseRawBeforeTerminal = false)
     {
         var database = new DoctorTestDatabase();
         var time = new DoctorTestTimeProvider(Start);
@@ -229,7 +242,29 @@ public sealed class ClaudeDoctorCandidateObserverTests
         sessionStore.CreateSchema();
         var application = SqliteDoctorApplicationService.Create(
             new SqliteDoctorVerificationStore(database.Path, time));
-        return new ObserverFixture(database, time, sessionStore, application, new ClaudeDoctorCandidateObserver(database.Path, application, new RawTelemetryStore(database.Path, retentionContext, time), time));
+        return new ObserverFixture(
+            database,
+            time,
+            retentionContext,
+            sessionStore,
+            application,
+            new ClaudeDoctorCandidateObserver(
+                database.Path,
+                application,
+                new RawTelemetryStore(database.Path, retentionContext, time),
+                time,
+                loseRawBeforeTerminal
+                    ? () => DeleteOperationLeases(database.Path)
+                    : null));
+    }
+
+    private static void DeleteOperationLeases(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM retention_leases WHERE lease_kind='operation';";
+        command.ExecuteNonQuery();
     }
 
     private static IReadOnlyList<DoctorEvidenceCandidate> Candidates(
@@ -326,6 +361,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
     private sealed class ObserverFixture(
         DoctorTestDatabase database,
         DoctorTestTimeProvider time,
+        RetentionCatalogContext retentionContext,
         SqliteSessionStore sessionStore,
         SqliteDoctorApplicationService application,
         ClaudeDoctorCandidateObserver observer) : IDisposable
@@ -419,7 +455,7 @@ public sealed class ClaudeDoctorCandidateObserverTests
                 RawTelemetryStoreConnectionOptions.MonitorWriter)
                 .Commit(ValidatedIngestionBatch.Create(raw, observation));
             var persisted = raw with { Id = committed.RawRecordId };
-            var store = new RawTelemetryStore(database.Path, RawTelemetryStoreConnectionOptions.MonitorWriter);
+            var store = new RawTelemetryStore(database.Path, retentionContext, Time, RawTelemetryStoreConnectionOptions.MonitorWriter);
             store.ApplyProjection(
                 committed.RawRecordId,
                 persisted.Source,

@@ -3,6 +3,7 @@ using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Telemetry;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -669,14 +670,14 @@ public class AgentExecutionGraphEndpointTests
     private sealed class BusyProjectionStore : ProjectionStoreTestDouble
     {
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) => throw new NotSupportedException();
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => throw new NotSupportedException();
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => throw new NotSupportedException();
         public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => throw new NotSupportedException();
         public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
         public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => throw new NotSupportedException();
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => throw new NotSupportedException();
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => throw new NotSupportedException();
         public override MonitorProjectionStatus GetProjectionStatus() => throw new NotSupportedException();
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) => throw new NotSupportedException();
-        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => throw new NotSupportedException();
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => throw new NotSupportedException();
         public override MonitorProjectionStatus GetSpanProjectionStatus() => throw new NotSupportedException();
         public override MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => throw new NotSupportedException();
         public override MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => throw new NotSupportedException();

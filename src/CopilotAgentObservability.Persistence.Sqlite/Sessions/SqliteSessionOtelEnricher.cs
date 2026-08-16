@@ -43,13 +43,25 @@ public sealed class SqliteSessionOtelEnricher
         {
             return 0;
         }
+        if (rawResult.Lease is null)
+        {
+            return 0;
+        }
         try
         {
-            var payloadByRawRecordId = rawResult.Lease?.Value.ToDictionary(record => record.Id!.Value, record => record.PayloadJson)
-                ?? new Dictionary<long, string>();
-            foreach (var sourceRow in rows)
+            ProjectedSpan[] retainedRows;
+            using (var reference = rawResult.Lease.AcquireValueReference())
             {
-                var row = sourceRow with { PayloadJson = payloadByRawRecordId.GetValueOrDefault(sourceRow.RawRecordId) };
+                var payloadByRawRecordId = reference.Value.ToDictionary(record => record.Id!.Value, record => record.PayloadJson);
+                retainedRows = rows
+                    .Select(sourceRow => sourceRow with { PayloadJson = payloadByRawRecordId.GetValueOrDefault(sourceRow.RawRecordId) })
+                    .ToArray();
+            }
+            checkpoint?.Invoke("before_raw_terminal");
+            if (rawResult.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+                return 0;
+            foreach (var row in retainedRows)
+            {
                 if (row.IsClaudeCode)
                 {
                     ProcessClaude(row);

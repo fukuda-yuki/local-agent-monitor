@@ -472,6 +472,28 @@ public sealed class ClaudeDoctorFactCollectorTests
     }
 
     [Fact]
+    public void Collect_RawGrantLostAfterMaterialization_UsesUnreadableWindow()
+    {
+        using var database = new TestDatabase();
+        var verification = database.StartVerification();
+        database.InsertAcceptedRecord(Now.AddSeconds(1), ValidPayload());
+        var platform = CreatePlatform(database, supportedVersion: true);
+        var collector = new ClaudeDoctorFactCollector(
+            platform,
+            new TestHttpProbe(LiveResponse),
+            platform.Clock,
+            InvocationDirectory,
+            ManagedSettingsPath,
+            database.LoseOperationLeases);
+
+        var inputs = collector.Collect(database.Path, Origin, verification);
+
+        Assert.Equal(
+            ClaudeDoctorVerificationWindowReadability.Unreadable,
+            Assert.IsType<ClaudeDoctorVerificationWindow>(inputs.VerificationWindow).Readability);
+    }
+
+    [Fact]
     public void Collect_ReportsRejectedIngestAndProjectionFailure()
     {
         using var database = new TestDatabase();
@@ -1006,6 +1028,14 @@ public sealed class ClaudeDoctorFactCollectorTests
                 payload));
             InsertSourceObservation(id, "supported", receivedAt, null, "none", "available");
             return id;
+        }
+
+        public void LoseOperationLeases()
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM retention_leases WHERE lease_kind='operation';";
+            command.ExecuteNonQuery();
         }
 
         public void InsertRejectedObservation(DateTimeOffset observedAt) =>

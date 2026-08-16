@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -306,7 +307,7 @@ public class MonitorSummaryEndpointTests
 
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForProjection(int limit) => [];
 
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => false;
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
 
         public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
 
@@ -314,13 +315,13 @@ public class MonitorSummaryEndpointTests
 
         public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
 
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => false;
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
 
         public override MonitorProjectionStatus GetProjectionStatus() => new(0, null);
 
         public IReadOnlyList<RawTelemetryRecord> ListUnprocessedForSpanProjection(int limit) => [];
 
-        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => false;
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
 
         public override MonitorProjectionStatus GetSpanProjectionStatus() => new(0, null);
 

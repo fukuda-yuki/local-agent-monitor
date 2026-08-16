@@ -21,6 +21,7 @@ internal sealed class ClaudeDoctorCandidateObserver
     private readonly SqliteFirstTraceNavigationStore navigationStore;
     private readonly TimeProvider timeProvider;
     private readonly RawTelemetryStore rawStore;
+    private readonly Action? beforeRawTerminal;
 
     public ClaudeDoctorCandidateObserver(string databasePath, RetentionCatalogContext retentionContext, TimeProvider? timeProvider = null)
         : this(
@@ -36,7 +37,8 @@ internal sealed class ClaudeDoctorCandidateObserver
         string databasePath,
         SqliteDoctorApplicationService doctorApplication,
         RawTelemetryStore rawStore,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        Action? beforeRawTerminal = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(doctorApplication);
@@ -46,6 +48,7 @@ internal sealed class ClaudeDoctorCandidateObserver
         exactBindingRule = new(databasePath);
         navigationStore = new(databasePath);
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.beforeRawTerminal = beforeRawTerminal;
     }
 
     public void RunOnce()
@@ -84,25 +87,36 @@ internal sealed class ClaudeDoctorCandidateObserver
 
         try
         {
-            var recordsById = rawResult.Lease.Value
-                .Where(record => record.Id is not null)
-                .ToDictionary(record => record.Id!.Value);
-            foreach (var candidate in candidates)
+            ClaudeOtelRecord[] records;
+            using (var reference = rawResult.Lease.AcquireValueReference())
             {
-                if (!recordsById.TryGetValue(candidate.RawRecordId, out var raw))
+                var recordsById = reference.Value
+                    .Where(record => record.Id is not null)
+                    .ToDictionary(record => record.Id!.Value);
+                if (candidates.Any(candidate => !recordsById.ContainsKey(candidate.RawRecordId)))
                 {
                     return;
                 }
-
+                records = candidates.Select(candidate =>
+                {
+                    var raw = recordsById[candidate.RawRecordId];
+                    return new ClaudeOtelRecord(
+                        raw.Id!.Value,
+                        candidate.ObservationId,
+                        candidate.ReceivedAt,
+                        raw.PayloadJson);
+                }).ToArray();
+            }
+            beforeRawTerminal?.Invoke();
+            if (rawResult.Lease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+                return;
+            foreach (var record in records)
+            {
                 ObserveRecord(
                     verification,
                     references,
                     completenessReferences,
-                    new ClaudeOtelRecord(
-                        raw.Id!.Value,
-                        candidate.ObservationId,
-                        candidate.ReceivedAt,
-                        raw.PayloadJson));
+                    record);
             }
         }
         finally

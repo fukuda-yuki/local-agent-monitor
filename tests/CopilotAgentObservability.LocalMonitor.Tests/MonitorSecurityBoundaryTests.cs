@@ -523,8 +523,8 @@ public class MonitorSecurityBoundaryTests
         public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
             inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
 
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
-            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, retentionLease);
 
         public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => inner.GetProjectionDisposition(rawRecordId);
 
@@ -534,8 +534,8 @@ public class MonitorSecurityBoundaryTests
         public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
             inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
 
-        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) =>
-            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+        public override bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision, retentionLease);
 
         public override MonitorProjectionStatus GetProjectionStatus()
         {
@@ -547,8 +547,8 @@ public class MonitorSecurityBoundaryTests
         public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
             inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
 
-        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
-            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt, retentionLease);
 
         public override MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
 

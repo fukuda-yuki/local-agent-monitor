@@ -7,11 +7,22 @@ internal enum RawTelemetryStoreWritePhase
     AfterTraceSourceAttribution,
 }
 
+internal enum MonitorProjectionPublicationCheckpoint
+{
+    AfterTransactionBeganBeforePublicationScopes,
+    AfterPublicationScopesAcquiredBeforeClockSample,
+    AfterClockSampleBeforeProof,
+    AfterGrantProof,
+    BeforeCommit,
+    AfterCommit,
+}
+
 internal sealed partial class RawTelemetryStore
 {
     private readonly string databasePath;
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
     private readonly Action<RawTelemetryStoreWritePhase>? writeFailureInjector;
+    private readonly Action<MonitorProjectionPublicationCheckpoint>? projectionPublicationCheckpoint;
     private readonly Retention.RetentionCatalogContext? retentionContext;
 
     internal string DatabasePath => databasePath;
@@ -31,7 +42,8 @@ internal sealed partial class RawTelemetryStore
         Retention.RetentionCatalogContext retentionContext,
         TimeProvider? timeProvider = null,
         RawTelemetryStoreConnectionOptions? connectionOptions = null,
-        Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null)
+        Action<RawTelemetryStoreWritePhase>? writeFailureInjector = null,
+        Action<MonitorProjectionPublicationCheckpoint>? projectionPublicationCheckpoint = null)
     {
         ArgumentNullException.ThrowIfNull(retentionContext);
         if (!string.Equals(Path.GetFullPath(databasePath), retentionContext.DatabasePath, StringComparison.OrdinalIgnoreCase))
@@ -42,6 +54,7 @@ internal sealed partial class RawTelemetryStore
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
         this.writeFailureInjector = writeFailureInjector;
+        this.projectionPublicationCheckpoint = projectionPublicationCheckpoint;
     }
 
     public const int MonitorSchemaVersion = MonitorSchemaMigrator.BaseSchemaVersion;
@@ -148,8 +161,9 @@ internal sealed partial class RawTelemetryStore
         string source,
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
-        DateTimeOffset projectedAt) =>
-        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision: null);
+        DateTimeOffset projectedAt,
+        Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision: null, retentionLease);
 
     public bool ApplyProjection(
         long rawRecordId,
@@ -157,8 +171,9 @@ internal sealed partial class RawTelemetryStore
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt,
-        int expectedDispositionRevision) =>
-        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+        int expectedDispositionRevision,
+        Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+        ApplyProjectionCore(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision, retentionLease);
 
     private bool ApplyProjectionCore(
         long rawRecordId,
@@ -166,13 +181,35 @@ internal sealed partial class RawTelemetryStore
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt,
-        int? expectedDispositionRevision)
+        int? expectedDispositionRevision,
+        Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease)
     {
+        ArgumentNullException.ThrowIfNull(retentionLease);
         var receivedAtText = FormatTimestamp(receivedAt);
         var projectedAtText = FormatTimestamp(projectedAt);
 
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes);
+        using var publications = Retention.RetentionGrantPublicationSet.EnterInOrder(
+            retentionLease.Grants
+                .Select((grant, index) => new Retention.RetentionGrantPublicationMember(grant, index))
+                .ToArray());
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterPublicationScopesAcquiredBeforeClockSample);
+        var publicationAt = timeProvider.GetUtcNow();
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterClockSampleBeforeProof);
+        if (!Retention.RetentionCatalogStore.ValidateMonitorProjectionOperationLeases(
+                connection,
+                transaction,
+                retentionLease.Grants,
+                publications,
+                rawRecordId,
+                publicationAt,
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
+        {
+            transaction.Rollback();
+            return false;
+        }
 
         if (expectedDispositionRevision is { } expectedRevision &&
             !HasPendingDisposition(connection, transaction, rawRecordId, expectedRevision))
@@ -275,7 +312,9 @@ internal sealed partial class RawTelemetryStore
             }
         }
 
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.BeforeCommit);
         transaction.Commit();
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;
     }
 
@@ -616,12 +655,34 @@ internal sealed partial class RawTelemetryStore
     public bool ApplySpanProjection(
         long rawRecordId,
         IReadOnlyList<MonitorSpanProjection> spans,
-        DateTimeOffset projectedAt)
+        DateTimeOffset projectedAt,
+        Retention.RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease)
     {
+        ArgumentNullException.ThrowIfNull(retentionLease);
         var projectedAtText = FormatTimestamp(projectedAt);
 
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes);
+        using var publications = Retention.RetentionGrantPublicationSet.EnterInOrder(
+            retentionLease.Grants
+                .Select((grant, index) => new Retention.RetentionGrantPublicationMember(grant, index))
+                .ToArray());
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterPublicationScopesAcquiredBeforeClockSample);
+        var publicationAt = timeProvider.GetUtcNow();
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterClockSampleBeforeProof);
+        if (!Retention.RetentionCatalogStore.ValidateMonitorProjectionOperationLeases(
+                connection,
+                transaction,
+                retentionLease.Grants,
+                publications,
+                rawRecordId,
+                publicationAt,
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
+        {
+            transaction.Rollback();
+            return false;
+        }
 
         // Idempotency check: only proceed if the ingestion row exists and span_projected_at is null.
         string? spanProjectedAt;
@@ -799,7 +860,9 @@ internal sealed partial class RawTelemetryStore
             stamp.ExecuteNonQuery();
         }
 
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.BeforeCommit);
         transaction.Commit();
+        projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;
     }
 

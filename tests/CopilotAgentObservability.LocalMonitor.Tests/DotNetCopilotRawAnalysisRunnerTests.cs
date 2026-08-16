@@ -161,7 +161,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         using var temp = new MonitorTempDirectory { TimeProvider = new MutableTimeProvider(RequestedAt.AddMinutes(1)) };
         var analysisStore = new SqliteMonitorAnalysisStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
         analysisStore.CreateSchema();
-        var start = analysisStore.StartRun("trace", 9, "span", MonitorAnalysisFocus.Errors, RequestedAt);
+        var start = analysisStore.StartRun("trace", null, "span", MonitorAnalysisFocus.Errors, RequestedAt);
         var raw = temp.CreateRawStore();
         raw.CreateSchema();
         var parent = Path.Combine(temp.Path, "sdk-parent");
@@ -169,7 +169,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         var executor = new FakeExecutor();
         var catalog = new RetentionCatalogStore(temp.RetentionContext);
         var runner = new DotNetCopilotRawAnalysisRunner(analysisStore, new RawTelemetryStoreProjectionStore(raw), configuration, new AnalysisSdkDirectoryOwner(catalog, temp.TimeProvider), executor, temp.TimeProvider);
-        var context = new MonitorAnalysisContext(start.RunId, "trace", 9, "span", MonitorAnalysisFocus.Errors, OperationToken: start.OperationToken);
+        var context = new MonitorAnalysisContext(start.RunId, "trace", null, "span", MonitorAnalysisFocus.Errors, OperationToken: start.OperationToken);
 
         await runner.RunAsync(context, CancellationToken.None);
 
@@ -195,7 +195,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         var context = new MonitorAnalysisContext(
             7,
             "trace",
-            9,
+            null,
             "span",
             MonitorAnalysisFocus.InstructionDiagnosis,
             OperationToken: new MonitorAnalysisOperationToken([1]));
@@ -216,8 +216,8 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         return new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw), configuration, owner, executor, temp.TimeProvider);
     }
 
-    private static MonitorAnalysisContext Context() => new(7, "trace", 9, "span", MonitorAnalysisFocus.Errors, OperationToken: new MonitorAnalysisOperationToken([1]));
-    private static MonitorAnalysisRun Run(string? RequestedAtText = null, string TraceId = "trace", MonitorAnalysisFocus Focus = MonitorAnalysisFocus.Errors) => new(7, TraceId, 9, "span", Focus, MonitorAnalysisStatus.Queued, RequestedAtText ?? RequestedAt.ToString("O"), null, null);
+    private static MonitorAnalysisContext Context() => new(7, "trace", null, "span", MonitorAnalysisFocus.Errors, OperationToken: new MonitorAnalysisOperationToken([1]));
+    private static MonitorAnalysisRun Run(string? RequestedAtText = null, string TraceId = "trace", MonitorAnalysisFocus Focus = MonitorAnalysisFocus.Errors) => new(7, TraceId, null, "span", Focus, MonitorAnalysisStatus.Queued, RequestedAtText ?? RequestedAt.ToString("O"), null, null);
 
     private sealed class FakeOwner : IAnalysisSdkDirectoryOwner
     {

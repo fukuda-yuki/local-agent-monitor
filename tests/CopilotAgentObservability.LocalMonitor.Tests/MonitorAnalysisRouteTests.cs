@@ -13,6 +13,15 @@ public class MonitorAnalysisRouteTests
 {
     private const string TraceId = "trace-analysis-route";
 
+    private static void Execute(string databasePath, string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
     [Fact]
     public async Task SanitizedOnly_RemovesRawAnalysisSurfaces()
     {
@@ -122,7 +131,7 @@ public class MonitorAnalysisRouteTests
         Assert.Equal(new[] { -1, 0 }, conversationContext.Traces.Select(trace => trace.RelativePosition).ToArray());
 
         var rawRecordId = projectionStore.GetSpansForTrace("trace-ie")[0].RawRecordId;
-        Assert.Equal(1L, CountOperationLeases(temp.DatabasePath, rawRecordId));
+        Assert.Equal(0L, CountOperationLeases(temp.DatabasePath, rawRecordId));
         Assert.Contains("trace-ie", JsonSerializer.Serialize(data.RawTrace));
 
         await data.DisposeAsync();
@@ -131,11 +140,32 @@ public class MonitorAnalysisRouteTests
     }
 
     [Fact]
+    public async Task MonitorAnalysisToolData_CreateAsync_LostRawGrantPublishesNoToolData()
+    {
+        using var temp = new MonitorTempDirectory();
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, time);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        SeedEvidenceTrace(store, "trace-lost", conversationId: null, startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
+        var projectionStore = new RawTelemetryStoreProjectionStore(store);
+        var context = new MonitorAnalysisContext(1, "trace-lost", null, null, MonitorAnalysisFocus.InstructionDiagnosis);
+
+        await Assert.ThrowsAsync<AnalysisOwnershipException>(async () =>
+            await MonitorAnalysisToolData.CreateAsync(
+                projectionStore,
+                context,
+                CancellationToken.None,
+                () => Execute(temp.DatabasePath, "DELETE FROM retention_leases WHERE lease_kind='operation';")));
+    }
+
+    [Fact]
     public async Task MonitorAnalysisToolData_CreateAsync_NoConversationId_ProducesNullConversation()
     {
         using var temp = new MonitorTempDirectory();
-        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
-        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, time);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedEvidenceTrace(store, "trace-nc", conversationId: null, startTime: "2026-07-01T00:02:00.000+00:00", withError: true);
         var projectionStore = new RawTelemetryStoreProjectionStore(store);
@@ -152,8 +182,9 @@ public class MonitorAnalysisRouteTests
     public async Task MonitorAnalysisToolData_CreateAsync_LoadsOnlyBoundedConversationWindow()
     {
         using var temp = new MonitorTempDirectory();
-        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
-        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, time);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         for (var index = 0; index < 7; index++)
         {
@@ -182,8 +213,9 @@ public class MonitorAnalysisRouteTests
     public async Task MonitorAnalysisToolData_CreateAsync_ExistingFocusDoesNotLoadConversationContext()
     {
         using var temp = new MonitorTempDirectory();
-        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath);
-        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var time = new MutableTimeProvider(DateTimeOffset.UnixEpoch.AddMinutes(4));
+        var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, time);
+        var store = new RawTelemetryStore(temp.DatabasePath, retentionContext, time, RawTelemetryStoreConnectionOptions.MonitorWriter);
         store.CreateMonitorSchema();
         SeedEvidenceTrace(store, "trace-current", conversationId: "conv-existing", startTime: "2026-07-01T00:02:00.000+00:00", withError: false);
         SeedEvidenceTrace(store, "trace-sibling", conversationId: "conv-existing", startTime: "2026-07-01T00:01:00.000+00:00", withError: false);
@@ -569,8 +601,8 @@ public class MonitorAnalysisRouteTests
         public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
             inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
 
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) =>
-            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, retentionLease);
 
         public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
             inner.GetProjectionDisposition(rawRecordId);
@@ -581,8 +613,8 @@ public class MonitorAnalysisRouteTests
         public bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) =>
             inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
 
-        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) =>
-            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision);
+        public bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, expectedDispositionRevision, retentionLease);
 
         public MonitorProjectionStatus GetProjectionStatus() =>
             inner.GetProjectionStatus();
@@ -590,8 +622,8 @@ public class MonitorAnalysisRouteTests
         public ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
             inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
 
-        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
-            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+        public bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt, retentionLease);
 
         public MonitorProjectionStatus GetSpanProjectionStatus() =>
             inner.GetSpanProjectionStatus();

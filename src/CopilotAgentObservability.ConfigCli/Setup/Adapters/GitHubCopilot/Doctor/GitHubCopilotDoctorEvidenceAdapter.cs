@@ -30,7 +30,8 @@ internal sealed record GitHubCopilotDoctorEvidenceResult(
 internal sealed record GitHubCopilotDoctorEvidenceStorePolicy(
     int BusyTimeoutMilliseconds = 5_000,
     int RetryCount = 0,
-    int? FaultAfterSuccessfulCandidatePersists = null);
+    int? FaultAfterSuccessfulCandidatePersists = null,
+    Action? BeforeRawTerminal = null);
 
 internal static class GitHubCopilotDoctorEvidenceAdapter
 {
@@ -178,65 +179,68 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         }
 
         await using var rawLease = rawResult.Lease;
-        var raw = rawLease.Value;
-        if (raw is null || raw.ReceivedAt < verification.StartedAt || raw.ReceivedAt >= verification.ExpiresAt ||
-            !string.Equals(raw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
-            !HasExpectedRawProvenance(raw, partition))
+        EvidencePreparation preparation;
+        using (var reference = rawLease.AcquireValueReference())
         {
-            return empty;
+            preparation = Prepare(reference.Value);
         }
+        storePolicy.BeforeRawTerminal?.Invoke();
+        if (rawLease.TryCompleteWithoutRaw() != RetentionRawTerminalResult.CompletedWithoutRaw)
+            return Empty(StoreBusy(), partition, selection.VerificationId, timeProvider.GetUtcNow());
+        if (preparation.FixedResult is not null)
+            return preparation.FixedResult;
+        var raw = preparation.Raw!;
+        var compatibility = preparation.Compatibility!;
+        var binding = preparation.Binding;
+        var disposition = preparation.Disposition;
+        var evidence = preparation.Evidence!;
 
-        var compatibility = new SqliteSourceCompatibilityStore(
-            databasePath,
-            connectionOptions).GetByRawRecordId(selection.RawRecordId);
-        if (compatibility is null ||
-            !string.Equals(compatibility.SourceSurface, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
-            !string.Equals(compatibility.SourceAdapter, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
-            compatibility.CompatibilityState == SourceCompatibilityState.AdapterFailure)
+        EvidencePreparation Prepare(RawTelemetryRecord retainedRaw)
         {
-            return empty;
-        }
+            if (retainedRaw.ReceivedAt < verification.StartedAt || retainedRaw.ReceivedAt >= verification.ExpiresAt ||
+                !string.Equals(retainedRaw.Source, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
+                !HasExpectedRawProvenance(retainedRaw, partition))
+                return new(empty, null, null, null, null, null);
 
-        var binding = ResolveBinding(
-            databasePath,
-            selection.NativeSession,
-            partition,
-            raw.TraceId,
-            storePolicy.BusyTimeoutMilliseconds);
-        if (binding is not null && !WithinVerificationWindow(binding.ObservedAt, verification))
-        {
-            binding = null;
-        }
-        if (partition.RequiresBinding && binding is null)
-        {
-            return empty with { SessionUnbound = true };
-        }
+            var retainedCompatibility = new SqliteSourceCompatibilityStore(
+                databasePath,
+                connectionOptions).GetByRawRecordId(selection.RawRecordId);
+            if (retainedCompatibility is null ||
+                !string.Equals(retainedCompatibility.SourceSurface, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
+                !string.Equals(retainedCompatibility.SourceAdapter, RawTelemetrySources.RawOtlp, StringComparison.Ordinal) ||
+                retainedCompatibility.CompatibilityState == SourceCompatibilityState.AdapterFailure)
+                return new(empty, null, null, null, null, null);
 
-        var disposition = rawStore.GetProjectionDisposition(selection.RawRecordId);
-        if (disposition is not null && !WithinVerificationWindow(disposition.UpdatedAt, verification))
-        {
-            disposition = null;
-        }
+            var retainedBinding = ResolveBinding(
+                databasePath,
+                selection.NativeSession,
+                partition,
+                retainedRaw.TraceId,
+                storePolicy.BusyTimeoutMilliseconds);
+            if (retainedBinding is not null && !WithinVerificationWindow(retainedBinding.ObservedAt, verification))
+                retainedBinding = null;
+            if (partition.RequiresBinding && retainedBinding is null)
+                return new(empty with { SessionUnbound = true }, null, null, null, null, null);
 
-        var evidence = new List<EvidenceDescriptor>
-        {
-            new(DoctorEvidenceKind.Ingest, raw.ReceivedAt, Identity: null),
-            new(DoctorEvidenceKind.RawPersistence, raw.ReceivedAt, Identity: null),
-        };
-        if (disposition is not null)
-        {
-            evidence.Add(new(DoctorEvidenceKind.Projection, disposition.UpdatedAt, Identity: null));
-        }
-        if (binding is not null)
-        {
-            evidence.Add(new(DoctorEvidenceKind.ExactSessionBinding, binding.ObservedAt, binding.Identity));
-            evidence.Add(new(DoctorEvidenceKind.CompletenessContent, binding.ObservedAt, binding.Identity));
-        }
-        else if (!partition.RequiresBinding &&
-            selection.NativeSession is null &&
-            disposition?.State == ProjectionDispositionState.Completed)
-        {
-            evidence.Add(new(DoctorEvidenceKind.CompletenessContent, disposition.UpdatedAt, Identity: null));
+            var retainedDisposition = rawStore.GetProjectionDisposition(selection.RawRecordId);
+            if (retainedDisposition is not null && !WithinVerificationWindow(retainedDisposition.UpdatedAt, verification))
+                retainedDisposition = null;
+
+            var retainedEvidence = new List<EvidenceDescriptor>
+            {
+                new(DoctorEvidenceKind.Ingest, retainedRaw.ReceivedAt, Identity: null),
+                new(DoctorEvidenceKind.RawPersistence, retainedRaw.ReceivedAt, Identity: null),
+            };
+            if (retainedDisposition is not null)
+                retainedEvidence.Add(new(DoctorEvidenceKind.Projection, retainedDisposition.UpdatedAt, Identity: null));
+            if (retainedBinding is not null)
+            {
+                retainedEvidence.Add(new(DoctorEvidenceKind.ExactSessionBinding, retainedBinding.ObservedAt, retainedBinding.Identity));
+                retainedEvidence.Add(new(DoctorEvidenceKind.CompletenessContent, retainedBinding.ObservedAt, retainedBinding.Identity));
+            }
+            else if (!partition.RequiresBinding && selection.NativeSession is null && retainedDisposition?.State == ProjectionDispositionState.Completed)
+                retainedEvidence.Add(new(DoctorEvidenceKind.CompletenessContent, retainedDisposition.UpdatedAt, Identity: null));
+            return new(null, retainedRaw, retainedCompatibility, retainedBinding, retainedDisposition, retainedEvidence);
         }
 
         var evidenceRefs = new List<string>(evidence.Count);
@@ -788,6 +792,14 @@ internal static class GitHubCopilotDoctorEvidenceAdapter
         DoctorEvidenceKind Kind,
         DateTimeOffset ObservedAt,
         string? Identity);
+
+    private sealed record EvidencePreparation(
+        GitHubCopilotDoctorEvidenceResult? FixedResult,
+        RawTelemetryRecord? Raw,
+        SourceCompatibilityRow? Compatibility,
+        BindingResolution? Binding,
+        ProjectionDisposition? Disposition,
+        IReadOnlyList<EvidenceDescriptor>? Evidence);
 
     private sealed record BindingResolution(
         SessionDetail Detail,

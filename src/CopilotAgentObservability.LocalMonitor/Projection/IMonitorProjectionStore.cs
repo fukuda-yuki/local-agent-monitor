@@ -22,7 +22,8 @@ internal interface IMonitorProjectionStore
         string source,
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
-        DateTimeOffset projectedAt);
+        DateTimeOffset projectedAt,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease);
 
     ProjectionDisposition? GetProjectionDisposition(long rawRecordId);
 
@@ -36,7 +37,8 @@ internal interface IMonitorProjectionStore
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt,
-        int expectedDispositionRevision);
+        int expectedDispositionRevision,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease);
 
     MonitorProjectionStatus GetProjectionStatus();
 
@@ -45,7 +47,8 @@ internal interface IMonitorProjectionStore
     bool ApplySpanProjection(
         long rawRecordId,
         IReadOnlyList<MonitorSpanProjection> spans,
-        DateTimeOffset projectedAt);
+        DateTimeOffset projectedAt,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease);
 
     MonitorProjectionStatus GetSpanProjectionStatus();
 
@@ -104,8 +107,9 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         string source,
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
-        DateTimeOffset projectedAt) =>
-        Guard(() => store.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt));
+        DateTimeOffset projectedAt,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+        Guard(() => store.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, retentionLease));
 
     public ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
         Guard(() => store.GetProjectionDisposition(rawRecordId));
@@ -122,14 +126,16 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
         DateTimeOffset receivedAt,
         MonitorRecordProjection projection,
         DateTimeOffset projectedAt,
-        int expectedDispositionRevision) =>
+        int expectedDispositionRevision,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
         Guard(() => store.ApplyProjection(
             rawRecordId,
             source,
             receivedAt,
             projection,
             projectedAt,
-            expectedDispositionRevision));
+            expectedDispositionRevision,
+            retentionLease));
 
     public MonitorProjectionStatus GetProjectionStatus() =>
         Guard(store.GetProjectionStatus);
@@ -140,8 +146,9 @@ internal sealed class RawTelemetryStoreProjectionStore : IMonitorProjectionStore
     public bool ApplySpanProjection(
         long rawRecordId,
         IReadOnlyList<MonitorSpanProjection> spans,
-        DateTimeOffset projectedAt) =>
-        Guard(() => store.ApplySpanProjection(rawRecordId, spans, projectedAt));
+        DateTimeOffset projectedAt,
+        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+        Guard(() => store.ApplySpanProjection(rawRecordId, spans, projectedAt, retentionLease));
 
     public MonitorProjectionStatus GetSpanProjectionStatus() =>
         Guard(store.GetSpanProjectionStatus);

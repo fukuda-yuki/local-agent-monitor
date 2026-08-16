@@ -40,19 +40,22 @@ internal sealed class ClaudeDoctorFactCollector
     private readonly ISetupClock clock;
     private readonly string invocationDirectory;
     private readonly string managedFilePath;
+    private readonly Action? beforeRawTerminal;
 
     public ClaudeDoctorFactCollector(
         ISetupPlatform platform,
         ISetupHttpProbe? httpProbe = null,
         ISetupClock? clock = null,
         string? invocationDirectory = null,
-        string? managedFilePath = null)
+        string? managedFilePath = null,
+        Action? beforeRawTerminal = null)
     {
         this.platform = platform ?? throw new ArgumentNullException(nameof(platform));
         this.httpProbe = httpProbe ?? platform.HttpProbe;
         this.clock = clock ?? platform.Clock;
         this.invocationDirectory = invocationDirectory ?? Environment.CurrentDirectory;
         this.managedFilePath = managedFilePath ?? DefaultManagedFilePath(platform);
+        this.beforeRawTerminal = beforeRawTerminal;
     }
 
     public ClaudeDoctorFactInputs Collect(
@@ -448,15 +451,40 @@ internal sealed class ClaudeDoctorFactCollector
             return UnreadableWindow;
         }
 
-        try
+        if (rawResult.Lease is null)
         {
-            var rawById = (rawResult.Lease?.Value ?? rawResult.EmptyValue ?? [])
+            var emptyRawById = (rawResult.EmptyValue ?? [])
                 .Where(record => record.Id is not null)
                 .ToDictionary(record => record.Id!.Value);
-            if (eligible.Any(item => !rawById.ContainsKey(item.Id)))
+            return eligible.Any(item => !emptyRawById.ContainsKey(item.Id))
+                ? UnreadableWindow
+                : BuildWindow(emptyRawById);
+        }
+
+        try
+        {
+            ClaudeDoctorVerificationWindow window;
+            using (var reference = rawResult.Lease.AcquireValueReference())
             {
-                return UnreadableWindow;
+                var rawById = reference.Value
+                    .Where(record => record.Id is not null)
+                    .ToDictionary(record => record.Id!.Value);
+                window = eligible.Any(item => !rawById.ContainsKey(item.Id))
+                    ? UnreadableWindow
+                    : BuildWindow(rawById);
             }
+            beforeRawTerminal?.Invoke();
+            return rawResult.Lease.TryCompleteWithoutRaw() == RetentionRawTerminalResult.CompletedWithoutRaw
+                ? window
+                : UnreadableWindow;
+        }
+        finally
+        {
+            rawResult.Lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+
+        ClaudeDoctorVerificationWindow BuildWindow(IReadOnlyDictionary<long, RawTelemetryRecord> rawById)
+        {
             var records = eligible
                 .Select(item => new WindowRecord(item.Id, item.ReceivedAt, rawById[item.Id].PayloadJson))
                 .ToArray();
@@ -479,10 +507,6 @@ internal sealed class ClaudeDoctorFactCollector
                 bindingCandidates.Length != 0,
                 completeness,
                 content);
-        }
-        finally
-        {
-            rawResult.Lease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 

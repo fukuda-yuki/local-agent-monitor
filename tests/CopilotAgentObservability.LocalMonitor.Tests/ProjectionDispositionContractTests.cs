@@ -233,38 +233,38 @@ public sealed class ProjectionDispositionContractTests
     }
 
     [Fact]
-    public async Task ProjectionWorker_CaughtErrorUsesOnlyItsOwnedRevisionWhenAnotherWorkerReclaimsAndCompletes()
+    public async Task ProjectionWorker_CaughtErrorRecordsOwnedRevisionBeforeRetryReclaimsAndCompletes()
     {
         using var temp = new MonitorTempDirectory();
         var committed = Commit(temp.DatabasePath, "{\"corrupt_concurrent_projection\":");
         var store = ProjectionStore(temp.DatabasePath);
-        using var firstClaimed = new Barrier(participantCount: 2);
-        using var secondClaimed = new Barrier(participantCount: 2);
-        using var firstFailureAttempted = new Barrier(participantCount: 2);
         var interleavedStore = new InterleavedProjectionStore(
-            new RawTelemetryStoreProjectionStore(store),
-            firstClaimed,
-            secondClaimed,
-            firstFailureAttempted);
+            new RawTelemetryStoreProjectionStore(store));
         var firstWorker = new ProjectionWorker(
             interleavedStore,
             ReadyHealth(),
             timeProvider: new MutableTimeProvider(ObservedAt.AddMinutes(1)));
+        await firstWorker.RunProjectionPassAsync();
+
+        Assert.Equal(new[] { 1 }, interleavedStore.BeginExpectedRevisions);
+        Assert.Equal(2, interleavedStore.FailureExpectedRevision);
+        Assert.True(interleavedStore.FailureRecorded);
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Failed, 3, ObservedAt.AddMinutes(1));
+
+        using (var connection = Open(temp.DatabasePath))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE raw_records SET payload_json=$payload;";
+            command.Parameters.AddWithValue("$payload", ValidPayload("concurrent-complete"));
+            command.ExecuteNonQuery();
+        }
         var secondWorker = new ProjectionWorker(
-            interleavedStore,
+            new RawTelemetryStoreProjectionStore(store),
             ReadyHealth(),
             timeProvider: new MutableTimeProvider(ObservedAt.AddMinutes(2)));
+        await secondWorker.RunProjectionPassAsync();
 
-        var firstPass = Task.Run(() => firstWorker.RunProjectionPassAsync());
-        firstClaimed.SignalAndWait();
-        var secondPass = Task.Run(() => secondWorker.RunProjectionPassAsync());
-        await Task.WhenAll(firstPass, secondPass);
-
-        Assert.Equal(new[] { 1, 2 }, interleavedStore.BeginExpectedRevisions);
-        Assert.Equal(2, interleavedStore.FailureExpectedRevision);
-        Assert.False(interleavedStore.FailureRecorded);
-        Assert.True(interleavedStore.CompletionRecorded);
-        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Completed, 4, ObservedAt.AddMinutes(2));
+        AssertDisposition(store.GetProjectionDisposition(committed.RawRecordId), ProjectionDispositionState.Completed, 5, ObservedAt.AddMinutes(2));
         Assert.Single(store.ListMonitorIngestions(afterRawRecordId: 0, limit: 10).Items);
     }
 
@@ -421,22 +421,10 @@ public sealed class ProjectionDispositionContractTests
     private sealed class InterleavedProjectionStore : ProjectionStoreTestDouble
     {
         private readonly IMonitorProjectionStore inner;
-        private readonly Barrier firstClaimed;
-        private readonly Barrier secondClaimed;
-        private readonly Barrier firstFailureAttempted;
-        private int listCallCount;
-        private int beginCallCount;
 
-        public InterleavedProjectionStore(
-            IMonitorProjectionStore inner,
-            Barrier firstClaimed,
-            Barrier secondClaimed,
-            Barrier firstFailureAttempted)
+        public InterleavedProjectionStore(IMonitorProjectionStore inner)
         {
             this.inner = inner;
-            this.firstClaimed = firstClaimed;
-            this.secondClaimed = secondClaimed;
-            this.firstFailureAttempted = firstFailureAttempted;
         }
 
         public List<int> BeginExpectedRevisions { get; } = [];
@@ -445,64 +433,8 @@ public sealed class ProjectionDispositionContractTests
 
         public bool FailureRecorded { get; private set; }
 
-        public bool CompletionRecorded { get; private set; }
-
         public override async ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken)
-        {
-            var result = await inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
-            if (result.Lease is null) return result;
-            await using var lease = result.Lease;
-            var records = lease.Value;
-            if (Interlocked.Increment(ref listCallCount) == 1)
-            {
-                return Granted<IReadOnlyList<RawTelemetryRecord>>(records);
-            }
-
-            return Granted<IReadOnlyList<RawTelemetryRecord>>(records
-                .Select(record => record with { PayloadJson = ValidPayload("concurrent-complete") })
-                .ToArray());
-        }
-
-        public override bool ApplyProjection(
-            long rawRecordId,
-            string source,
-            DateTimeOffset receivedAt,
-            MonitorRecordProjection projection,
-            DateTimeOffset projectedAt) =>
-            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
-
-        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
-            inner.GetProjectionDisposition(rawRecordId);
-
-        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
-        {
-            var call = Interlocked.Increment(ref beginCallCount);
-            lock (BeginExpectedRevisions)
-            {
-                BeginExpectedRevisions.Add(expectedRevision);
-            }
-
-            var claimed = inner.TryBeginProjection(rawRecordId, expectedRevision, updatedAt);
-            Assert.True(claimed);
-            if (call == 1)
-            {
-                firstClaimed.SignalAndWait();
-                secondClaimed.SignalAndWait();
-            }
-            else
-            {
-                secondClaimed.SignalAndWait();
-            }
-            return claimed;
-        }
-
-        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
-        {
-            FailureExpectedRevision = expectedRevision;
-            FailureRecorded = inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
-            firstFailureAttempted.SignalAndWait();
-            return FailureRecorded;
-        }
+            => await inner.ListUnprocessedForProjectionAsync(limit, cancellationToken);
 
         public override bool ApplyProjection(
             long rawRecordId,
@@ -510,17 +442,29 @@ public sealed class ProjectionDispositionContractTests
             DateTimeOffset receivedAt,
             MonitorRecordProjection projection,
             DateTimeOffset projectedAt,
-            int expectedDispositionRevision)
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, retentionLease);
+
+        public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
+            inner.GetProjectionDisposition(rawRecordId);
+
+        public override bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
         {
-            firstFailureAttempted.SignalAndWait();
-            CompletionRecorded = inner.ApplyProjection(
-                rawRecordId,
-                source,
-                receivedAt,
-                projection,
-                projectedAt,
-                expectedDispositionRevision);
-            return CompletionRecorded;
+            lock (BeginExpectedRevisions)
+            {
+                BeginExpectedRevisions.Add(expectedRevision);
+            }
+
+            var claimed = inner.TryBeginProjection(rawRecordId, expectedRevision, updatedAt);
+            Assert.True(claimed);
+            return claimed;
+        }
+
+        public override bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt)
+        {
+            FailureExpectedRevision = expectedRevision;
+            FailureRecorded = inner.RecordProjectionFailure(rawRecordId, expectedRevision, updatedAt);
+            return FailureRecorded;
         }
 
         public override MonitorProjectionStatus GetProjectionStatus() => inner.GetProjectionStatus();
@@ -528,8 +472,8 @@ public sealed class ProjectionDispositionContractTests
         public override ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) =>
             inner.ListUnprocessedForSpanProjectionAsync(limit, cancellationToken);
 
-        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) =>
-            inner.ApplySpanProjection(rawRecordId, spans, projectedAt);
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            inner.ApplySpanProjection(rawRecordId, spans, projectedAt, retentionLease);
 
         public override MonitorProjectionStatus GetSpanProjectionStatus() => inner.GetSpanProjectionStatus();
 

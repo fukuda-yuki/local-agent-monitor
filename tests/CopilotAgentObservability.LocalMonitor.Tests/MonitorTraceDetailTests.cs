@@ -1,6 +1,7 @@
 using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Pages;
 using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
@@ -385,7 +386,8 @@ public class MonitorTraceDetailTests
             string source,
             DateTimeOffset receivedAt,
             MonitorRecordProjection projection,
-            DateTimeOffset projectedAt) =>
+            DateTimeOffset projectedAt,
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
             throw new NotSupportedException();
 
         public override ProjectionDisposition? GetProjectionDisposition(long rawRecordId) =>
@@ -403,7 +405,8 @@ public class MonitorTraceDetailTests
             DateTimeOffset receivedAt,
             MonitorRecordProjection projection,
             DateTimeOffset projectedAt,
-            int expectedDispositionRevision) =>
+            int expectedDispositionRevision,
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
             throw new NotSupportedException();
 
         public override MonitorProjectionStatus GetProjectionStatus() =>
@@ -415,7 +418,8 @@ public class MonitorTraceDetailTests
         public override bool ApplySpanProjection(
             long rawRecordId,
             IReadOnlyList<MonitorSpanProjection> spans,
-            DateTimeOffset projectedAt) =>
+            DateTimeOffset projectedAt,
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
             throw new NotSupportedException();
 
         public override MonitorProjectionStatus GetSpanProjectionStatus() =>

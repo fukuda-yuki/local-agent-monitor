@@ -52,14 +52,14 @@ internal abstract class ProjectionStoreTestDouble : IMonitorProjectionStore
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForProjectionAsync(int limit, CancellationToken cancellationToken) =>
         ValueTask.FromResult(NotFoundBatch());
 
-    public virtual bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt) => false;
+    public virtual bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
     public virtual ProjectionDisposition? GetProjectionDisposition(long rawRecordId) => null;
     public virtual bool TryBeginProjection(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
     public virtual bool RecordProjectionFailure(long rawRecordId, int expectedRevision, DateTimeOffset updatedAt) => false;
-    public virtual bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision) => false;
+    public virtual bool ApplyProjection(long rawRecordId, string source, DateTimeOffset receivedAt, MonitorRecordProjection projection, DateTimeOffset projectedAt, int expectedDispositionRevision, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
     public virtual MonitorProjectionStatus GetProjectionStatus() => new(0, null);
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListUnprocessedForSpanProjectionAsync(int limit, CancellationToken cancellationToken) => ValueTask.FromResult(NotFoundBatch());
-    public virtual bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt) => false;
+    public virtual bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) => false;
     public virtual MonitorProjectionStatus GetSpanProjectionStatus() => new(0, null);
     public virtual MonitorProjectionPage<MonitorIngestionRow> ListMonitorIngestions(long afterRawRecordId, int limit) => new([], false);
     public virtual MonitorProjectionPage<MonitorTraceRow> ListMonitorTraces(long afterId, int limit) => new([], false);
@@ -67,7 +67,10 @@ internal abstract class ProjectionStoreTestDouble : IMonitorProjectionStore
     public virtual MonitorProjectionPage<MonitorSpanRow> ListMonitorSpans(string traceId, long afterId, int limit) => new([], false);
     public virtual IReadOnlyList<MonitorSpanRow> GetSpansForTrace(string traceId) => [];
     public virtual ValueTask<RetentionReadResult<RawTelemetryRecord>> GetRawRecordByIdAsync(long id, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFound());
-    public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFoundBatch());
+    public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ReadRawRecordsAsync(IReadOnlyList<long> ids, RetentionReadKind readKind, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ids.Count == 0
+            ? RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>.Empty([])
+            : NotFoundBatch());
     public virtual ValueTask<RetentionBatchReadResult<IReadOnlyList<RawTelemetryRecord>>> ListRawRecordsByTraceIdAsync(string traceId, int limit, RetentionReadKind readKind, CancellationToken cancellationToken) => ValueTask.FromResult(NotFoundBatch());
     public virtual IReadOnlyList<long> ListRecentRawRecordIdsForRepositoryMetadataDiagnostics(int limit, int maxPayloadBytes, int maxTotalPayloadBytes) => [];
     public virtual MonitorPeriodSummaryRow GetPeriodSummary(string startInclusive, string endExclusive) => new(0, 0, 0, 0, 0, 0, 0, 0);

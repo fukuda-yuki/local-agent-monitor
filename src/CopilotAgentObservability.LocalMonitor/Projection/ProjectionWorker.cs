@@ -118,88 +118,99 @@ internal sealed class ProjectionWorker : BackgroundService
             }
             await using (var recordsLease = recordsResult.Lease)
             {
-                var records = recordsLease?.Value ?? recordsResult.EmptyValue;
-                if (records is null)
+                if (recordsLease is null)
                 {
-                    if (anyProjected)
+                    if (recordsResult.EmptyValue is null)
                     {
-                        eventBroker?.PublishProjectionChanged();
-                    }
-                    return;
-                }
-                foreach (var record in records)
-                {
-                    if (cancellationToken.IsCancellationRequested)
-                    {
-                        break;
-                    }
-
-                    int? ownedProjectionRevision = null;
-                    try
-                    {
-                        var rawRecordId = record.Id!.Value;
-                        _ = ValidateProjectionDisposition(rawRecordId);
-                        var disposition = store.GetProjectionDisposition(rawRecordId);
-                        if (disposition is not null)
+                        if (anyProjected)
                         {
-                            if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
-                                !store.TryBeginProjection(rawRecordId, disposition.Revision, timeProvider.GetUtcNow()))
+                            eventBroker?.PublishProjectionChanged();
+                        }
+                        return;
+                    }
+                    var emptyStatus = store.GetProjectionStatus();
+                    health.SetProjectionStatus(emptyStatus.Backlog, emptyStatus.OldestUnprocessedReceivedAt);
+                }
+                else
+                {
+                    using var recordsReference = recordsLease.AcquireValueReference();
+                    var records = recordsReference.Value;
+                    foreach (var record in records)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            break;
+                        }
+
+                        int? ownedProjectionRevision = null;
+                        try
+                        {
+                            var rawRecordId = record.Id!.Value;
+                            _ = ValidateProjectionDisposition(rawRecordId);
+                            var disposition = store.GetProjectionDisposition(rawRecordId);
+                            if (disposition is not null)
                             {
-                                continue;
-                            }
-                            ownedProjectionRevision = disposition.Revision + 1;
-                        }
-                        var projectionInput = CreateProjectionInput(record);
-                        var projection = compatibilityStore is null
-                            ? MonitorProjectionBuilder.Build(projectionInput)
-                            : MonitorProjectionBuilder.Build(
-                                projectionInput,
-                                traceId =>
+                                if (disposition.State is not (ProjectionDispositionState.NotStarted or ProjectionDispositionState.Pending or ProjectionDispositionState.Failed) ||
+                                    !store.TryBeginProjection(rawRecordId, disposition.Revision, timeProvider.GetUtcNow()))
                                 {
-                                    var resolution = compatibilityStore.GetTraceSourceResolution(traceId);
-                                    return resolution?.State == TraceSourceResolutionState.Resolved
-                                        ? resolution.SourceFamily
-                                        : null;
-                                });
-                        var projected = ownedProjectionRevision is { } expectedRevision
-                            ? store.ApplyProjection(
-                                rawRecordId,
-                                record.Source,
-                                record.ReceivedAt,
-                                projection,
-                                timeProvider.GetUtcNow(),
-                                expectedRevision)
-                            : store.ApplyProjection(
-                                rawRecordId,
-                                record.Source,
-                                record.ReceivedAt,
-                                projection,
-                                timeProvider.GetUtcNow());
-                        if (projected)
+                                    continue;
+                                }
+                                ownedProjectionRevision = disposition.Revision + 1;
+                            }
+                            var projectionInput = CreateProjectionInput(record);
+                            var projection = compatibilityStore is null
+                                ? MonitorProjectionBuilder.Build(projectionInput)
+                                : MonitorProjectionBuilder.Build(
+                                    projectionInput,
+                                    traceId =>
+                                    {
+                                        var resolution = compatibilityStore.GetTraceSourceResolution(traceId);
+                                        return resolution?.State == TraceSourceResolutionState.Resolved
+                                            ? resolution.SourceFamily
+                                            : null;
+                                    });
+                            var projected = ownedProjectionRevision is { } expectedRevision
+                                ? store.ApplyProjection(
+                                    rawRecordId,
+                                    record.Source,
+                                    record.ReceivedAt,
+                                    projection,
+                                    timeProvider.GetUtcNow(),
+                                    expectedRevision,
+                                    recordsLease)
+                                : store.ApplyProjection(
+                                    rawRecordId,
+                                    record.Source,
+                                    record.ReceivedAt,
+                                    projection,
+                                    timeProvider.GetUtcNow(),
+                                    recordsLease);
+                            if (projected)
+                            {
+                                anyProjected = true;
+                            }
+                        }
+                        catch (PersistenceBusyException)
                         {
-                            anyProjected = true;
+                            // DB busy: stop this pass; this record and the rest retry next cycle.
+                            break;
+                        }
+                        catch (Exception)
+                        {
+                            // Non-busy projection failure: keep the raw record, record the
+                            // failure, and continue with the next record.
+                            var rawRecordId = record.Id!.Value;
+                            if (ownedProjectionRevision is { } expectedRevision)
+                            {
+                                store.RecordProjectionFailure(rawRecordId, expectedRevision, timeProvider.GetUtcNow());
+                            }
+                            health.RecordProjectionFailure();
                         }
                     }
-                    catch (PersistenceBusyException)
-                    {
-                        // DB busy: stop this pass; this record and the rest retry next cycle.
-                        break;
-                    }
-                    catch (Exception)
-                    {
-                        // Non-busy projection failure: keep the raw record, record the
-                        // failure, and continue with the next record.
-                        var rawRecordId = record.Id!.Value;
-                        if (ownedProjectionRevision is { } expectedRevision)
-                        {
-                            store.RecordProjectionFailure(rawRecordId, expectedRevision, timeProvider.GetUtcNow());
-                        }
-                        health.RecordProjectionFailure();
-                    }
-                }
 
-                var status = store.GetProjectionStatus();
-                health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
+                    var status = store.GetProjectionStatus();
+                    health.SetProjectionStatus(status.Backlog, status.OldestUnprocessedReceivedAt);
+                }
             }
             // Phase 2: span projection (runs after trace projection in the same pass).
             var spanRecordsResult = await store.ListUnprocessedForSpanProjectionAsync(BatchSize, cancellationToken).ConfigureAwait(false);
@@ -208,15 +219,21 @@ internal sealed class ProjectionWorker : BackgroundService
                 throw new PersistenceBusyException();
             }
             await using var spanRecordsLease = spanRecordsResult.Lease;
-            var spanRecords = spanRecordsLease?.Value ?? spanRecordsResult.EmptyValue;
-            if (spanRecords is null)
+            if (spanRecordsLease is null)
             {
+                if (spanRecordsResult.EmptyValue is not null)
+                {
+                    var emptySpanStatus = store.GetSpanProjectionStatus();
+                    health.SetSpanProjectionStatus(emptySpanStatus.Backlog, emptySpanStatus.OldestUnprocessedReceivedAt);
+                }
                 if (anyProjected)
                 {
                     eventBroker?.PublishProjectionChanged();
                 }
                 return;
             }
+            using var spanRecordsReference = spanRecordsLease.AcquireValueReference();
+            var spanRecords = spanRecordsReference.Value;
             foreach (var record in spanRecords)
             {
                 if (cancellationToken.IsCancellationRequested)
@@ -231,7 +248,8 @@ internal sealed class ProjectionWorker : BackgroundService
                     var newlyProjected = store.ApplySpanProjection(
                         record.Id!.Value,
                         spans,
-                        timeProvider.GetUtcNow());
+                        timeProvider.GetUtcNow(),
+                        spanRecordsLease);
                     if (newlyProjected)
                     {
                         anyProjected = true;

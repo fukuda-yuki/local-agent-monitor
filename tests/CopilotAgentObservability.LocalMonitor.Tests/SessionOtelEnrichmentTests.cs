@@ -586,6 +586,27 @@ public sealed class SessionOtelEnrichmentTests
         Assert.Equal(1, store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey)!.ProjectionCursor);
     }
 
+    [Fact]
+    public void ProcessNextBatch_RawGrantLostAfterMaterialization_WritesNothingAndDoesNotAdvanceCursor()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = PrepareClaudeFixture(temp.DatabasePath, ReadClaudeFixture());
+        _ = SeedClaudeSession(store, "SYNTHETIC_SESSION_001", SessionBindingKind.Native);
+        var enricher = new SqliteSessionOtelEnricher(
+            temp.DatabasePath,
+            store,
+            temp.RetentionContext,
+            new FixedTimeProvider(ObservedAt.AddMinutes(1)),
+            checkpoint =>
+            {
+                if (checkpoint == "before_raw_terminal")
+                    Execute(temp.DatabasePath, "DELETE FROM retention_leases WHERE lease_kind='operation';");
+            });
+
+        Assert.Equal(0, enricher.ProcessNextBatch(1));
+        Assert.Null(store.GetProjectionState(SqliteSessionOtelEnricher.ProjectorKey));
+    }
+
     private static ObservedSessionEvent Event(Guid sessionId, string sourceId, string type, DateTimeOffset occurredAt) =>
         new(Guid.CreateVersion7(), sessionId, null, SessionSourceSurface.HookUnknown, null, null, null, "copilot-compatible-hook", sourceId, type, occurredAt, SessionContentState.NotCaptured);
 

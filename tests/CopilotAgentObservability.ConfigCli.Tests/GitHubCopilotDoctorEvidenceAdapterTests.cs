@@ -389,6 +389,35 @@ public sealed class GitHubCopilotDoctorEvidenceAdapterTests
     }
 
     [Fact]
+    public void Observe_RawGrantLostAfterMaterialization_PersistsNoEvidence()
+    {
+        using var database = TemporaryDatabase.Create();
+        var verification = Start(database.Path, "github-copilot-cli");
+        var rawRecordId = CommitCliRaw(database.Path, "github-copilot", "github.copilot", includeSpan: true);
+
+        var observed = GitHubCopilotDoctorEvidenceAdapter.Observe(
+            database.Path,
+            new AdjustableTimeProvider(Now),
+            new(verification.VerificationId, "cli", rawRecordId, null),
+            new GitHubCopilotDoctorEvidenceStorePolicy(
+                BeforeRawTerminal: () => DeleteOperationLeases(database.Path)));
+
+        Assert.Empty(observed.ObservedKinds);
+        Assert.Empty(observed.EvidenceRefs);
+        Assert.Empty(ReadCandidates(database.Path, verification.VerificationId));
+        Assert.Equal(DoctorResultCode.DoctorStoreBusy, observed.ObservationResult.Code);
+    }
+
+    private static void DeleteOperationLeases(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM retention_leases WHERE lease_kind='operation';";
+        command.ExecuteNonQuery();
+    }
+
+    [Fact]
     public void Observe_OmitsNavigationTargetWhenExactIdentityIsUnavailable()
     {
         using var database = TemporaryDatabase.Create();

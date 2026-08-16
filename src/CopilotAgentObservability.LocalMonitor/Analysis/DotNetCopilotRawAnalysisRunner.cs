@@ -326,8 +326,6 @@ internal sealed record CopilotAnalysisSettings(bool Enabled, string Model, int T
 
 internal sealed class MonitorAnalysisToolData : IAsyncDisposable
 {
-    private readonly RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? rawLease;
-
     private MonitorAnalysisToolData(
         object rawTrace,
         object? rawRecord,
@@ -336,8 +334,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
         object traceSpanTree,
         object cacheSummary,
         InstructionEvidence instructionEvidence,
-        InstructionFindingSubmissionCollectorV1? instructionFindingCollector,
-        RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>? rawLease)
+        InstructionFindingSubmissionCollectorV1? instructionFindingCollector)
     {
         RawTrace = rawTrace;
         RawRecord = rawRecord;
@@ -347,7 +344,6 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
         CacheSummary = cacheSummary;
         InstructionEvidence = instructionEvidence;
         InstructionFindingCollector = instructionFindingCollector;
-        this.rawLease = rawLease;
     }
 
     public object RawTrace { get; }
@@ -359,7 +355,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
     public InstructionEvidence InstructionEvidence { get; }
     public InstructionFindingSubmissionCollectorV1? InstructionFindingCollector { get; }
 
-    public ValueTask DisposeAsync() => rawLease?.DisposeAsync() ?? ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private const int RawRecordLimit = 50;
     private const int ConversationContextSiblingRadius = 2;
@@ -367,7 +363,8 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
     public static async ValueTask<MonitorAnalysisToolData> CreateAsync(
         IMonitorProjectionStore projectionStore,
         MonitorAnalysisContext context,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? beforeRawTerminal = null)
     {
         var spans = projectionStore.GetSpansForTrace(context.TraceId);
         var selectedSpan = string.IsNullOrWhiteSpace(context.SpanId)
@@ -403,9 +400,36 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
         }
 
         var rawLease = rawResult.Lease;
+        if (rawLease is null)
+        {
+            if (rawRecordIds.Count != 0 || rawResult.Disposition != RetentionReadDisposition.Empty)
+                throw new AnalysisOwnershipException();
+            return Materialize(rawResult.EmptyValue ?? []);
+        }
+
         try
         {
-            var rawRecordsById = (rawLease?.Value ?? [])
+            MonitorAnalysisToolData data;
+            using (var reference = rawLease.AcquireValueReference())
+            {
+                data = Materialize(reference.Value);
+            }
+            beforeRawTerminal?.Invoke();
+            return rawLease.TryCompleteWithoutRaw() switch
+            {
+                RetentionRawTerminalResult.CompletedWithoutRaw => data,
+                RetentionRawTerminalResult.Busy => throw new PersistenceBusyException(),
+                _ => throw new AnalysisOwnershipException(),
+            };
+        }
+        finally
+        {
+            await rawLease.DisposeAsync();
+        }
+
+        MonitorAnalysisToolData Materialize(IReadOnlyList<RawTelemetryRecord> retainedRecords)
+        {
+            var rawRecordsById = retainedRecords
                 .Where(record => record.Id is not null)
                 .ToDictionary(record => record.Id!.Value);
             var rawRecords = spans
@@ -513,17 +537,7 @@ internal sealed class MonitorAnalysisToolData : IAsyncDisposable
                     ? new InstructionFindingSubmissionCollectorV1(
                         context.RunId,
                         InstructionFindingEvidenceIndexFactoryV1.FromInstructionEvidence(context.TraceId, instructionEvidence))
-                    : null,
-                rawLease);
-        }
-        catch
-        {
-            if (rawLease is not null)
-            {
-                await rawLease.DisposeAsync();
-            }
-
-            throw;
+                    : null);
         }
     }
 

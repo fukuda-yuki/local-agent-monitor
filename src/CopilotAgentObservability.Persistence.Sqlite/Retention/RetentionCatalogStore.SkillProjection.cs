@@ -64,4 +64,38 @@ public sealed partial class RetentionCatalogStore
         }
         return true;
     }
+
+    internal static bool ValidateMonitorProjectionOperationLeases(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<RetentionReadGrant> grants,
+        RetentionGrantPublicationSet publications,
+        long projectedRawRecordId,
+        DateTimeOffset at,
+        Action? grantProved = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(grants);
+        ArgumentNullException.ThrowIfNull(publications);
+        if (grants.Count == 0 || grants.Count != publications.Count)
+            return false;
+        var targetIncluded = false;
+        for (var index = 0; index < grants.Count; index++)
+        {
+            var grant = grants[index];
+            if (!long.TryParse(grant.OwnershipKey.SourceItemId, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var rawRecordId)
+                || !ValidateSourceCompatibilityOperationLease(
+                    connection,
+                    transaction,
+                    grant,
+                    rawRecordId,
+                    publications.ScopeFor(index, grant),
+                    at))
+                return false;
+            targetIncluded |= rawRecordId == projectedRawRecordId;
+            grantProved?.Invoke();
+        }
+        return targetIncluded;
+    }
 }

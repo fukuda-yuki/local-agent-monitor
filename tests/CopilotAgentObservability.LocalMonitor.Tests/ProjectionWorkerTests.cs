@@ -839,7 +839,8 @@ public class ProjectionWorkerTests
             string source,
             DateTimeOffset receivedAt,
             MonitorRecordProjection projection,
-            DateTimeOffset projectedAt)
+            DateTimeOffset projectedAt,
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease)
         {
             ApplyCalls[rawRecordId] = ApplyCalls.GetValueOrDefault(rawRecordId) + 1;
             switch (OnApply(rawRecordId))
@@ -867,8 +868,9 @@ public class ProjectionWorkerTests
             DateTimeOffset receivedAt,
             MonitorRecordProjection projection,
             DateTimeOffset projectedAt,
-            int expectedDispositionRevision) =>
-            ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt);
+            int expectedDispositionRevision,
+            RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease) =>
+            ApplyProjection(rawRecordId, source, receivedAt, projection, projectedAt, retentionLease);
 
         public override MonitorProjectionStatus GetProjectionStatus()
         {
@@ -890,7 +892,7 @@ public class ProjectionWorkerTests
                 : Granted<IReadOnlyList<RawTelemetryRecord>>(selected));
         }
 
-        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt)
+        public override bool ApplySpanProjection(long rawRecordId, IReadOnlyList<MonitorSpanProjection> spans, DateTimeOffset projectedAt, RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>> retentionLease)
         {
             SpanApplyCalls[rawRecordId] = SpanApplyCalls.GetValueOrDefault(rawRecordId) + 1;
             if (!projected.Contains(rawRecordId) || spanProjected.Contains(rawRecordId))

@@ -124,8 +124,8 @@ public class MonitorTraceListEndpointTests
     public async Task TraceList_PeriodFilter_ExcludesOldRows()
     {
         using var temp = new MonitorTempDirectory();
-        temp.TimeProvider = TimeProvider.System;
         var store = SeedDefaultTraces(temp);
+        temp.TimeProvider = TimeProvider.System;
         await using var host = await StartHostAsync(temp);
 
         // Seeded rows sit at the 1970 epoch — far outside any 30d window.
