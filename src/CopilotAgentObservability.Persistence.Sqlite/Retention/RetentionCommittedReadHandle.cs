@@ -99,21 +99,25 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         while (true)
         {
             var observed = Volatile.Read(ref state);
             if (observed == Lost)
             {
-                cleanup.ReleaseOrOwn();
-                return ValueTask.CompletedTask;
+                await cleanup.ReleaseOrOwnAsync().ConfigureAwait(false);
+                return;
             }
-            if (observed == Released) return ValueTask.CompletedTask;
+            if (observed == Released)
+            {
+                await cleanup.ReleaseOrOwnAsync().ConfigureAwait(false);
+                return;
+            }
             if (Interlocked.CompareExchange(ref state, Released, observed) != observed) continue;
             Volatile.Read(ref currentNotification).Invalidate();
-            cleanup.ReleaseOrOwn();
-            return ValueTask.CompletedTask;
+            await cleanup.ReleaseOrOwnAsync().ConfigureAwait(false);
+            return;
         }
     }
 
@@ -136,6 +140,13 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         RetentionExpiryNotification expected,
         RetentionExpiryNotification replacement)
     {
+        if (!expected.TryBeginReplacement())
+        {
+            replacement.Invalidate();
+            if (ReferenceEquals(Volatile.Read(ref currentNotification), expected))
+                Lose(releaseSynchronously: false);
+            return false;
+        }
         if (!ReferenceEquals(
                 Interlocked.CompareExchange(ref currentNotification, replacement, expected),
                 expected))
@@ -149,6 +160,16 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
         expected.Invalidate();
         if (!activated) Lose(releaseSynchronously: false);
         return activated;
+    }
+
+    internal void RearmFailed(RetentionExpiryNotification notification)
+    {
+        var current = Volatile.Read(ref currentNotification);
+        if (!ReferenceEquals(current, notification)
+            || current.Generation != notification.Generation
+            || !notification.TryInvalidateAfterRearmFailure())
+            return;
+        Lose(releaseSynchronously: false);
     }
 
     internal void ExpiryDue(RetentionExpiryNotification notification)
@@ -204,7 +225,8 @@ internal sealed class RetentionExpiryNotification
 {
     private const int Dormant = 0;
     private const int Active = 1;
-    private const int Invalid = 2;
+    private const int Replacing = 2;
+    private const int Invalid = 3;
     private readonly RetentionCommittedReadHandle handle;
     private readonly DateTimeOffset expiresAt;
     private readonly TimeProvider timeProvider;
@@ -262,14 +284,29 @@ internal sealed class RetentionExpiryNotification
         try
         {
             if (!timer.Change(delay, Timeout.InfiniteTimeSpan))
-                handle.LoseAsynchronously();
+                handle.RearmFailed(this);
         }
-        catch { handle.LoseAsynchronously(); }
+        catch { handle.RearmFailed(this); }
+    }
+
+    internal bool TryBeginReplacement() =>
+        Interlocked.CompareExchange(ref state, Replacing, Active) == Active;
+
+    internal bool TryInvalidateAfterRearmFailure()
+    {
+        if (Interlocked.CompareExchange(ref state, Invalid, Active) != Active) return false;
+        DisposeTimer();
+        return true;
     }
 
     internal void Invalidate()
     {
         if (Interlocked.Exchange(ref state, Invalid) == Invalid) return;
+        DisposeTimer();
+    }
+
+    private void DisposeTimer()
+    {
         try { timer.Dispose(); }
         catch { }
     }
@@ -361,19 +398,23 @@ internal sealed class RetentionMandatoryLeaseCleanup
     private readonly IReadOnlyList<RetentionReadGrant> grants;
     private readonly Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease;
     private readonly Action? beforeWaitingForReleaseForTesting;
+    private readonly Func<Action, bool>? queueReleaseForTesting;
     private readonly ITimer retry;
     private ReleaseAttempt? active;
+    private int pending;
     private int completed;
 
     internal RetentionMandatoryLeaseCleanup(
         IReadOnlyList<RetentionReadGrant> grants,
         TimeProvider timeProvider,
         Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
-        Action? beforeWaitingForReleaseForTesting)
+        Action? beforeWaitingForReleaseForTesting,
+        Func<Action, bool>? queueReleaseForTesting = null)
     {
         this.grants = grants;
         this.exactRelease = exactRelease;
         this.beforeWaitingForReleaseForTesting = beforeWaitingForReleaseForTesting;
+        this.queueReleaseForTesting = queueReleaseForTesting;
         retry = timeProvider.CreateTimer(
             static state => ((RetentionMandatoryLeaseCleanup)state!).SignalRelease(),
             this,
@@ -389,14 +430,44 @@ internal sealed class RetentionMandatoryLeaseCleanup
             if (attempt is not null)
             {
                 beforeWaitingForReleaseForTesting?.Invoke();
+                if (attempt.TryStart())
+                {
+                    TryRelease(attempt, retryOnFailure: true);
+                    return;
+                }
                 if (attempt.WaitForOutcome() != ReleaseAttemptOutcome.NotStarted) return;
                 continue;
             }
 
+            Volatile.Write(ref pending, 1);
             attempt = new ReleaseAttempt();
             if (Interlocked.CompareExchange(ref active, attempt, null) is not null) continue;
+            AssertStarted(attempt);
             TryRelease(attempt, retryOnFailure: true);
             return;
+        }
+    }
+
+    internal async ValueTask ReleaseOrOwnAsync()
+    {
+        while (Volatile.Read(ref completed) == 0)
+        {
+            Volatile.Write(ref pending, 1);
+            var attempt = Volatile.Read(ref active);
+            if (attempt is null)
+            {
+                TryQueueRelease();
+                attempt = Volatile.Read(ref active);
+                if (attempt is null)
+                {
+                    await Task.Yield();
+                    continue;
+                }
+            }
+
+            beforeWaitingForReleaseForTesting?.Invoke();
+            if (await attempt.WaitForOutcomeAsync().ConfigureAwait(false) != ReleaseAttemptOutcome.NotStarted)
+                return;
         }
     }
 
@@ -412,23 +483,28 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     private void SignalRelease()
     {
-        if (TryQueueRelease()) return;
-        ScheduleRetry();
+        Volatile.Write(ref pending, 1);
+        TryQueueRelease();
     }
 
     private bool TryQueueRelease()
     {
+        if (Volatile.Read(ref completed) != 0 || Volatile.Read(ref pending) == 0) return true;
         var attempt = new ReleaseAttempt();
         try
         {
             if (Volatile.Read(ref completed) != 0
                 || Interlocked.CompareExchange(ref active, attempt, null) is not null)
                 return true;
-            if (!ThreadPool.UnsafeQueueUserWorkItem(
+            var queued = queueReleaseForTesting is null
+                ? ThreadPool.UnsafeQueueUserWorkItem(
                     static state => state.Cleanup.TryRelease(state.Attempt, retryOnFailure: true),
                     (Cleanup: this, Attempt: attempt),
-                    preferLocal: false))
+                    preferLocal: false)
+                : queueReleaseForTesting(() => TryRelease(attempt, retryOnFailure: true));
+            if (!queued)
             {
+                if (!attempt.TryCancelBeforeStart()) return true;
                 Interlocked.CompareExchange(ref active, null, attempt);
                 attempt.Complete(ReleaseAttemptOutcome.NotStarted);
                 return false;
@@ -437,6 +513,7 @@ internal sealed class RetentionMandatoryLeaseCleanup
         }
         catch
         {
+            if (!attempt.TryCancelBeforeStart()) return true;
             Interlocked.CompareExchange(ref active, null, attempt);
             attempt.Complete(ReleaseAttemptOutcome.NotStarted);
             return false;
@@ -445,6 +522,8 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     private void TryRelease(ReleaseAttempt attempt, bool retryOnFailure)
     {
+        if (!attempt.IsStarted && !attempt.TryStart()) return;
+        Volatile.Write(ref pending, 0);
         var released = false;
         try
         {
@@ -460,21 +539,27 @@ internal sealed class RetentionMandatoryLeaseCleanup
             released
                 ? ReleaseAttemptOutcome.Released
                 : ReleaseAttemptOutcome.RetainedForRetry);
-        if (!released && retryOnFailure) ScheduleRetry();
+        if (!released && retryOnFailure)
+        {
+            Volatile.Write(ref pending, 1);
+            ScheduleRetry();
+        }
     }
 
     private void ScheduleRetry()
     {
-        while (Volatile.Read(ref completed) == 0)
+        if (Volatile.Read(ref completed) != 0) return;
+        try
         {
-            try
-            {
-                if (retry.Change(RetryDelay, Timeout.InfiniteTimeSpan)) return;
-            }
-            catch { }
-            if (TryQueueRelease()) return;
-            Thread.Yield();
+            if (retry.Change(RetryDelay, Timeout.InfiniteTimeSpan)) return;
         }
+        catch { }
+        TryQueueRelease();
+    }
+
+    private static void AssertStarted(ReleaseAttempt attempt)
+    {
+        if (!attempt.TryStart()) throw new InvalidOperationException("A newly owned release attempt must be startable.");
     }
 
     private void Complete()
@@ -493,12 +578,25 @@ internal sealed class RetentionMandatoryLeaseCleanup
 
     private sealed class ReleaseAttempt
     {
+        private const int Waiting = 0;
+        private const int Started = 1;
+        private const int Cancelled = 2;
         private readonly TaskCompletionSource<ReleaseAttemptOutcome> completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int state;
+
+        internal bool IsStarted => Volatile.Read(ref state) == Started;
+
+        internal bool TryStart() => Interlocked.CompareExchange(ref state, Started, Waiting) == Waiting;
+
+        internal bool TryCancelBeforeStart() =>
+            Interlocked.CompareExchange(ref state, Cancelled, Waiting) == Waiting;
 
         internal void Complete(ReleaseAttemptOutcome outcome) => completion.TrySetResult(outcome);
 
         internal ReleaseAttemptOutcome WaitForOutcome() => completion.Task.GetAwaiter().GetResult();
+
+        internal Task<ReleaseAttemptOutcome> WaitForOutcomeAsync() => completion.Task;
     }
 }
 

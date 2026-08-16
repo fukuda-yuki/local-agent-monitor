@@ -105,6 +105,7 @@ public sealed class RetentionWorkerRaceTests
         Assert.Equal(now.AddMinutes(2), publications.LeaseExpiresAt(1));
         Assert.True(handle.IsPublished);
         Assert.False(time.Timers[0].IsDisposed);
+        publications.Dispose();
         await handle.DisposeAsync();
     }
 
@@ -161,6 +162,30 @@ public sealed class RetentionWorkerRaceTests
         Assert.Null(exception);
         Assert.False(handle.IsPublished);
         await WaitUntilAsync(() => Volatile.Read(ref releases) == 1);
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task StaleExpiryNotification_RearmFailureAfterRenewalDoesNotLoseCurrentHandle()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var grant = CreateGrant("first", 0x11, now.AddMinutes(2));
+        var handle = new RetentionCommittedReadHandle([grant], time, _ => true);
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        var oldNotification = time.Timers[0];
+        oldNotification.RejectChange = true;
+        oldNotification.BeforeChange = () =>
+        {
+            using var publications = RetentionGrantPublicationSet.EnterInOrder([new(grant, 0)]);
+            using var renewal = publications.PrepareExpiryNotificationRenewal([0], now.AddMinutes(3));
+            Assert.True(renewal.Publish());
+        };
+
+        oldNotification.Fire();
+
+        Assert.True(handle.IsPublished);
         await handle.DisposeAsync();
     }
 
@@ -273,6 +298,45 @@ public sealed class RetentionWorkerRaceTests
     }
 
     [Fact]
+    public void MandatoryCleanup_TimerCallbackQueueRejectionReturnsWithoutSpinning()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        var attempts = 0;
+        var cleanup = new RetentionMandatoryLeaseCleanup(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ => Interlocked.Increment(ref attempts) > 1,
+            beforeWaitingForReleaseForTesting: null,
+            queueReleaseForTesting: _ => false);
+        cleanup.ReleaseOrOwn();
+        var retry = Assert.Single(time.Timers);
+        retry.ThrowOnChange = true;
+        using var callbackReturned = new ManualResetEventSlim();
+        var callback = new Thread(() =>
+        {
+            retry.Fire();
+            callbackReturned.Set();
+        })
+        {
+            IsBackground = true,
+        };
+
+        try
+        {
+            callback.Start();
+            Assert.True(
+                callbackReturned.Wait(TimeSpan.FromSeconds(1)),
+                "The cleanup timer callback spun after both retry scheduling and worker signaling failed.");
+        }
+        finally
+        {
+            cleanup.Abandon();
+            Assert.True(callback.Join(TimeSpan.FromSeconds(5)));
+        }
+    }
+
+    [Fact]
     public async Task DisposeAsync_InFlightAsynchronousReleaseWaitsUntilLeaseRowIsDeleted()
     {
         using var fixture = CreateFixture();
@@ -327,6 +391,67 @@ public sealed class RetentionWorkerRaceTests
             fixture.Path,
             "SELECT COUNT(*) FROM retention_leases WHERE item_id=$item AND lease_kind='operation' AND owner='reader' AND generation=1;",
             fixture.ItemId));
+    }
+
+    [Fact]
+    public async Task DisposeAsync_InFlightWorkerReturnsIncompleteValueTaskWithoutBlockingCallerThread()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        using var releaseEntered = new ManualResetEventSlim();
+        using var allowRelease = new ManualResetEventSlim();
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                releaseEntered.Set();
+                allowRelease.Wait();
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        handle.LoseAsynchronously();
+        Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+        var disposeReturned = new TaskCompletionSource<ValueTask>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ThreadPool.UnsafeQueueUserWorkItem(
+            _ => disposeReturned.TrySetResult(handle.DisposeAsync()),
+            state: (object?)null,
+            preferLocal: false);
+
+        var dispose = await disposeReturned.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(dispose.IsCompleted);
+        allowRelease.Set();
+        await dispose.AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ConcurrentCallerWaitsForTheSameLeaseRelease()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new ManualNotificationTimeProvider(now);
+        using var releaseEntered = new ManualResetEventSlim();
+        using var allowRelease = new ManualResetEventSlim();
+        var handle = new RetentionCommittedReadHandle(
+            [CreateGrant("first", 0x11, now.AddMinutes(2))],
+            time,
+            _ =>
+            {
+                releaseEntered.Set();
+                allowRelease.Wait();
+                return true;
+            });
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        var first = handle.DisposeAsync();
+        Assert.True(releaseEntered.Wait(TimeSpan.FromSeconds(5)));
+
+        var second = handle.DisposeAsync();
+
+        Assert.False(first.IsCompleted);
+        Assert.False(second.IsCompleted);
+        allowRelease.Set();
+        await Task.WhenAll(first.AsTask(), second.AsTask()).WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]
@@ -619,11 +744,13 @@ public sealed class RetentionWorkerRaceTests
         private bool disposed;
         internal bool IsScheduled { get; private set; }
         internal bool IsDisposed => disposed;
-        internal bool RejectChange { get; init; }
+        internal bool RejectChange { get; set; }
+        internal Action? BeforeChange { get; set; }
         internal bool ThrowOnChange { get; set; }
         internal bool ThrowOnDispose { get; set; }
         public bool Change(TimeSpan dueTime, TimeSpan period)
         {
+            BeforeChange?.Invoke();
             if (ThrowOnChange) throw new InvalidOperationException("synthetic_notification_change_failure");
             if (RejectChange) return false;
             if (disposed) return false;
