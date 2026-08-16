@@ -355,6 +355,8 @@ internal sealed class RetentionRevisionFenceRejectedException : InvalidOperation
 internal sealed class RetentionReadLease<T> : IAsyncDisposable
 {
     private readonly Func<RetentionReadGrant, ValueTask> release;
+    private readonly RetentionReadValueOwner<T> valueOwner;
+    private readonly RetentionCommittedReadHandle? committedHandle;
     private int released;
 
     internal RetentionReadLease(
@@ -363,22 +365,58 @@ internal sealed class RetentionReadLease<T> : IAsyncDisposable
         RetentionReadGrant grant,
         Func<RetentionReadGrant, ValueTask> release)
     {
-        Value = value;
+        valueOwner = new RetentionReadValueOwner<T>(value);
         RevisionFence = revisionFence;
         this.release = release;
         Grant = grant;
     }
 
-    internal T Value { get; }
+    internal RetentionReadLease(
+        T value,
+        RetentionRevisionFence revisionFence,
+        RetentionReadGrant grant,
+        RetentionCommittedReadHandle committedHandle,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(committedHandle);
+        valueOwner = new RetentionReadValueOwner<T>(value);
+        RevisionFence = revisionFence;
+        Grant = grant;
+        this.committedHandle = committedHandle;
+        release = _ => committedHandle.DisposeAsync();
+        committedHandle.AttachValueOwner(valueOwner, cancellationToken);
+    }
+
+    internal T Value => valueOwner.Value;
     internal RetentionRevisionFence RevisionFence { get; }
     internal RetentionReadGrant Grant { get; }
+    internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;
+    internal bool IsValueBufferCleared => valueOwner.IsCleared;
+    internal RetentionReadValueReference<T> AcquireValueReference()
+    {
+        committedHandle?.ObserveTerminalCancellation();
+        if (committedHandle is not null && !committedHandle.AllowsUse)
+            throw new InvalidOperationException("The retention handle is no longer usable.");
+        return valueOwner.Acquire();
+    }
+    internal RetentionRawTerminalResult TrySealRawResponse() =>
+        committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TryCompleteWithoutRaw() =>
+        committedHandle?.TryCompleteWithoutRaw() ?? RetentionRawTerminalResult.Lost;
 
-    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release(Grant) : ValueTask.CompletedTask;
+    public ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref released, 1) != 0) return ValueTask.CompletedTask;
+        valueOwner.Close();
+        return release(Grant);
+    }
 }
 
 internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
 {
     private readonly Func<ValueTask> release;
+    private readonly RetentionReadValueOwner<T> valueOwner;
+    private readonly RetentionCommittedReadHandle? committedHandle;
     private int released;
 
     internal RetentionBatchReadLease(
@@ -386,7 +424,7 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
         RetentionRevisionFence revisionFence,
         Func<ValueTask> release)
     {
-        Value = value;
+        valueOwner = new RetentionReadValueOwner<T>(value);
         RevisionFence = revisionFence;
         this.release = release;
         Grants = Array.Empty<RetentionReadGrant>();
@@ -401,16 +439,52 @@ internal sealed class RetentionBatchReadLease<T> : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(release);
         var admittedGrants = grants.ToArray();
-        Value = value;
+        valueOwner = new RetentionReadValueOwner<T>(value);
         RevisionFence = revisionFence;
         Grants = Array.AsReadOnly(admittedGrants);
         this.release = () => ReleaseEveryAsync(admittedGrants, release);
     }
 
-    internal T Value { get; }
+    internal RetentionBatchReadLease(
+        T value,
+        RetentionRevisionFence revisionFence,
+        IReadOnlyList<RetentionReadGrant> grants,
+        RetentionCommittedReadHandle committedHandle,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(grants);
+        ArgumentNullException.ThrowIfNull(committedHandle);
+        var admittedGrants = grants.ToArray();
+        valueOwner = new RetentionReadValueOwner<T>(value);
+        RevisionFence = revisionFence;
+        Grants = Array.AsReadOnly(admittedGrants);
+        this.committedHandle = committedHandle;
+        release = committedHandle.DisposeAsync;
+        committedHandle.AttachValueOwner(valueOwner, cancellationToken);
+    }
+
+    internal T Value => valueOwner.Value;
     internal RetentionRevisionFence RevisionFence { get; }
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
-    public ValueTask DisposeAsync() => Interlocked.Exchange(ref released, 1) == 0 ? release() : ValueTask.CompletedTask;
+    internal RetentionRawTerminalState TerminalState => committedHandle?.TerminalState ?? RetentionRawTerminalState.Lost;
+    internal bool IsValueBufferCleared => valueOwner.IsCleared;
+    internal RetentionReadValueReference<T> AcquireValueReference()
+    {
+        committedHandle?.ObserveTerminalCancellation();
+        if (committedHandle is not null && !committedHandle.AllowsUse)
+            throw new InvalidOperationException("The retention handle is no longer usable.");
+        return valueOwner.Acquire();
+    }
+    internal RetentionRawTerminalResult TrySealRawResponse() =>
+        committedHandle?.TrySealRawResponse() ?? RetentionRawTerminalResult.Lost;
+    internal RetentionRawTerminalResult TryCompleteWithoutRaw() =>
+        committedHandle?.TryCompleteWithoutRaw() ?? RetentionRawTerminalResult.Lost;
+    public ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref released, 1) != 0) return ValueTask.CompletedTask;
+        valueOwner.Close();
+        return release();
+    }
 
     private static async ValueTask ReleaseEveryAsync(
         IReadOnlyList<RetentionReadGrant> grants,

@@ -13,6 +13,85 @@ internal enum RetentionRowReadability
 
 public sealed partial class RetentionCatalogStore
 {
+    private RetentionRawTerminalResult TryCompleteRawTerminal(
+        RetentionCommittedReadHandle handle,
+        RetentionRawTerminalOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        try
+        {
+            rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterClaimBeforeTransaction);
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterTransactionBeganBeforePublicationScopes);
+            var lost = false;
+            using (var publications = RetentionGrantPublicationSet.EnterInOrder(
+                       handle.Grants
+                           .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
+                           .ToArray()))
+            {
+                rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterPublicationScopesAcquiredBeforeClockSample);
+                if (!handle.IsPublished || !handle.IsTerminalAttemptInProgress)
+                {
+                    transaction.Rollback();
+                    handle.LoseTerminalAttempt();
+                    lost = true;
+                }
+                else
+                {
+                    handle.InvalidateExpiryNotificationForTerminal();
+                    var terminalAt = timeProvider.GetUtcNow();
+                    rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterClockSampleBeforeProof);
+                    var usable = true;
+                    for (var index = 0; index < handle.Grants.Count; index++)
+                    {
+                        var grant = handle.Grants[index];
+                        usable &= IsGrantUsable(
+                            connection,
+                            transaction,
+                            grant,
+                            publications.ScopeFor(index, grant),
+                            terminalAt);
+                    }
+                    if (!usable || !handle.IsPublished || !handle.IsTerminalAttemptInProgress)
+                    {
+                        transaction.Rollback();
+                        handle.LoseTerminalAttempt();
+                        lost = true;
+                    }
+                    else
+                    {
+                        rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterProofBeforeStateMove);
+                        if (!handle.TryMoveTerminalAttemptToPending(operation))
+                        {
+                            transaction.Rollback();
+                            handle.LoseTerminalAttempt();
+                            lost = true;
+                        }
+                        else
+                        {
+                            if (operation == RetentionRawTerminalOperation.CompleteWithoutRaw)
+                                ReleaseWithinTransaction(connection, transaction, handle.Grants);
+                            rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterStateMoveBeforeCommit);
+                            transaction.Commit();
+                        }
+                    }
+                }
+            }
+
+            if (lost) return RetentionRawTerminalResult.Lost;
+            rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterCommitBeforePublish);
+            var published = handle.PublishTerminal(operation);
+            rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.AfterPublish);
+            return published;
+        }
+        catch (Exception exception) when (exception is SqliteException or RetentionRawTerminalBusyException)
+        {
+            handle.FailTerminalAttempt();
+            return RetentionRawTerminalResult.Busy;
+        }
+    }
+
     private RetentionHandlePublicationDisposition TryPublishCommittedHandle(
         RetentionCommittedReadHandle handle,
         CancellationToken cancellationToken)
@@ -253,6 +332,9 @@ public sealed partial class RetentionCatalogStore
             return RetentionOperationRenewalDisposition.LeaseLost;
         if (grant.LeaseKind != RetentionLeaseKind.Operation)
             return RetentionOperationRenewalDisposition.LeaseLost;
+        var committedHandle = publications.ScopeFor(publicationIndex, grant).CommittedHandle;
+        if (committedHandle is not null && !committedHandle.AllowsUse)
+            return RetentionOperationRenewalDisposition.LeaseLost;
         if (!IsGrantUsable(
                 connection,
                 transaction,
@@ -369,6 +451,7 @@ public sealed partial class RetentionCatalogStore
                     transaction.Rollback();
                     return RetentionOperationRenewalDisposition.LeaseLost;
                 }
+                rawTerminalCheckpoint?.Reached(RetentionRawTerminalCheckpoint.RenewalCommittedBeforePublication);
                 return notificationRenewal.Publish()
                     ? RetentionOperationRenewalDisposition.Renewed
                     : RetentionOperationRenewalDisposition.LeaseLost;

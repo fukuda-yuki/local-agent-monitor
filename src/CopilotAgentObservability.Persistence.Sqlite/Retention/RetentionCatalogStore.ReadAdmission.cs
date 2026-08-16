@@ -233,7 +233,11 @@ public sealed partial class RetentionCatalogStore
         RetentionCommittedReadHandle handle;
         try
         {
-            handle = new RetentionCommittedReadHandle(grants, timeProvider, TryReleaseCommittedGrants);
+            handle = new RetentionCommittedReadHandle(
+                grants,
+                timeProvider,
+                TryReleaseCommittedGrants,
+                terminalAuthority: TryCompleteRawTerminal);
         }
         catch (Exception)
         {

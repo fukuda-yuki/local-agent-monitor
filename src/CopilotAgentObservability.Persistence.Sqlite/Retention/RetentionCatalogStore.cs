@@ -38,6 +38,7 @@ public sealed partial class RetentionCatalogStore
     private readonly Action<SqliteConnection, SqliteTransaction, string>? denialCasCheckpoint;
     private readonly IRetentionReadAdmissionCheckpoint? readAdmissionCheckpoint;
     private readonly IRetentionReadBoundaryCheckpoint? readBoundaryCheckpoint;
+    private readonly IRetentionRawTerminalCheckpoint? rawTerminalCheckpoint;
     public RetentionCatalogStore(string databasePath, TimeProvider? timeProvider = null) { this.databasePath = databasePath ?? throw new ArgumentNullException(nameof(databasePath)); this.timeProvider = timeProvider ?? TimeProvider.System; }
     internal RetentionCatalogStore(string databasePath, Action<SqliteConnection, SqliteTransaction> backfillValidationCheckpoint)
         : this(databasePath)
@@ -76,6 +77,12 @@ public sealed partial class RetentionCatalogStore
         databasePath = context.DatabasePath;
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
+    internal RetentionCatalogStore(
+        RetentionCatalogContext context,
+        TimeProvider timeProvider,
+        IRetentionRawTerminalCheckpoint rawTerminalCheckpoint)
+        : this(context, timeProvider) =>
+        this.rawTerminalCheckpoint = rawTerminalCheckpoint ?? throw new ArgumentNullException(nameof(rawTerminalCheckpoint));
     internal RetentionCatalogStore(RetentionCatalogContext context, TimeProvider timeProvider, Action<string> fileCaptureCheckpoint)
         : this(context, timeProvider) => this.fileCaptureCheckpoint = fileCaptureCheckpoint;
     internal RetentionCatalogStore(RetentionCatalogContext context, TimeProvider timeProvider, Action<string> fileCaptureCheckpoint, Action<string> analysisSdkDirectoryCheckpoint)
@@ -536,7 +543,7 @@ public sealed partial class RetentionCatalogStore
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
                 if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                    && handle.IsPublished)
+                    && handle.AllowsUse)
                 {
                     transaction.Commit();
                     published = RetentionReadResult<T>.FromHandle(
@@ -544,7 +551,8 @@ public sealed partial class RetentionCatalogStore
                             value,
                             RetentionRevisionFence.Create(),
                             grant,
-                            _ => handle.DisposeAsync()));
+                            handle,
+                            cancellationToken));
                 }
                 else
                 {
@@ -623,7 +631,7 @@ public sealed partial class RetentionCatalogStore
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
                 if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                    && handle.IsPublished)
+                    && handle.AllowsUse)
                 {
                     transaction.Commit();
                     published = RetentionBatchReadResult<T>.FromHandle(
@@ -631,7 +639,8 @@ public sealed partial class RetentionCatalogStore
                             value,
                             RetentionRevisionFence.Create(),
                             handle.Grants,
-                            _ => handle.DisposeAsync()));
+                            handle,
+                            cancellationToken));
                 }
                 else
                 {
@@ -702,7 +711,7 @@ public sealed partial class RetentionCatalogStore
             {
                 var afterSelectionAt = timeProvider.GetUtcNow();
                 if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                    && handle.IsPublished)
+                    && handle.AllowsUse)
                 {
                     transaction.Commit();
                     published = RetentionBatchReadResult<T>.FromHandle(
@@ -710,7 +719,8 @@ public sealed partial class RetentionCatalogStore
                             value,
                             RetentionRevisionFence.Create(),
                             handle.Grants,
-                            _ => handle.DisposeAsync()));
+                            handle,
+                            cancellationToken));
                 }
                 else
                 {

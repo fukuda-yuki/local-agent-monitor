@@ -11,14 +11,23 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private readonly TimeProvider timeProvider;
     private readonly RetentionGrantPublicationMember[] publicationMembers;
     private readonly RetentionMandatoryLeaseCleanup cleanup;
+    private readonly Func<RetentionCommittedReadHandle, RetentionRawTerminalOperation, RetentionRawTerminalResult>? terminalAuthority;
+    private readonly object cancellationGate = new();
     private RetentionExpiryNotification currentNotification;
+    private IRetentionReadValueOwner? valueOwner;
+    private CancellationToken terminalCancellationToken;
+    private CancellationTokenRegistration terminalCancellationRegistration;
+    private bool terminalCancellationObserved;
+    private bool terminalCancellationDisposed;
     private int state;
+    private int terminalState;
 
     internal RetentionCommittedReadHandle(
         IReadOnlyList<RetentionReadGrant> grants,
         TimeProvider timeProvider,
         Func<IReadOnlyList<RetentionReadGrant>, bool> exactRelease,
-        Action? beforeWaitingForReleaseForTesting = null)
+        Action? beforeWaitingForReleaseForTesting = null,
+        Func<RetentionCommittedReadHandle, RetentionRawTerminalOperation, RetentionRawTerminalResult>? terminalAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -31,6 +40,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
         Grants = Array.AsReadOnly(snapshot);
         this.timeProvider = timeProvider;
+        this.terminalAuthority = terminalAuthority;
         RetentionExpiryNotification? preparedExpiry = null;
         try
         {
@@ -42,7 +52,11 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
             cleanup = new RetentionMandatoryLeaseCleanup(
                 Grants,
                 timeProvider,
-                exactRelease,
+                grantsToRelease =>
+                {
+                    CloseValueOwner();
+                    return exactRelease(grantsToRelease);
+                },
                 beforeWaitingForReleaseForTesting);
             currentNotification = preparedExpiry;
         }
@@ -55,6 +69,120 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
     internal bool IsPublished => Volatile.Read(ref state) == Published;
+    internal bool AllowsUse => IsPublished && TerminalState == RetentionRawTerminalState.Open;
+    internal RetentionRawTerminalState TerminalState => (RetentionRawTerminalState)Volatile.Read(ref terminalState);
+
+    internal void AttachValueOwner(IRetentionReadValueOwner owner, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        if (Interlocked.CompareExchange(ref valueOwner, owner, null) is { } existing
+            && !ReferenceEquals(existing, owner))
+            throw new InvalidOperationException("A committed handle cannot own multiple value buffers.");
+        terminalCancellationToken = cancellationToken;
+        if (!AllowsUse) owner.Close();
+    }
+
+    internal void ObserveTerminalCancellation()
+    {
+        lock (cancellationGate)
+        {
+            if (terminalCancellationObserved || terminalCancellationDisposed) return;
+            terminalCancellationObserved = true;
+            terminalCancellationRegistration = terminalCancellationToken.UnsafeRegister(
+                static state => ((RetentionCommittedReadHandle)state!).LoseAsynchronously(),
+                this);
+        }
+    }
+
+    internal RetentionRawTerminalResult TrySealRawResponse() => TryTerminal(RetentionRawTerminalOperation.SealRawResponse);
+
+    internal RetentionRawTerminalResult TryCompleteWithoutRaw() => TryTerminal(RetentionRawTerminalOperation.CompleteWithoutRaw);
+
+    private RetentionRawTerminalResult TryTerminal(RetentionRawTerminalOperation operation)
+    {
+        ObserveTerminalCancellation();
+        if (Interlocked.CompareExchange(
+                ref terminalState,
+                (int)RetentionRawTerminalState.TerminalAttemptInProgress,
+                (int)RetentionRawTerminalState.Open) != (int)RetentionRawTerminalState.Open)
+            return TerminalState == RetentionRawTerminalState.Failed
+                ? RetentionRawTerminalResult.Busy
+                : RetentionRawTerminalResult.Lost;
+
+        CloseValueOwner();
+        if (!IsPublished)
+        {
+            LoseTerminalAttempt();
+            return RetentionRawTerminalResult.Lost;
+        }
+        if (terminalAuthority is null)
+        {
+            FailTerminalAttempt();
+            return RetentionRawTerminalResult.Busy;
+        }
+        return terminalAuthority(this, operation);
+    }
+
+    internal bool IsTerminalAttemptInProgress =>
+        TerminalState == RetentionRawTerminalState.TerminalAttemptInProgress;
+
+    internal void InvalidateExpiryNotificationForTerminal() =>
+        Volatile.Read(ref currentNotification).Invalidate();
+
+    internal bool TryMoveTerminalAttemptToPending(RetentionRawTerminalOperation operation) =>
+        Interlocked.CompareExchange(
+            ref terminalState,
+            operation == RetentionRawTerminalOperation.SealRawResponse
+                ? (int)RetentionRawTerminalState.SealedPending
+                : (int)RetentionRawTerminalState.CompletedWithoutRawPending,
+            (int)RetentionRawTerminalState.TerminalAttemptInProgress) ==
+        (int)RetentionRawTerminalState.TerminalAttemptInProgress;
+
+    internal RetentionRawTerminalResult PublishTerminal(RetentionRawTerminalOperation operation)
+    {
+        var pending = operation == RetentionRawTerminalOperation.SealRawResponse
+            ? RetentionRawTerminalState.SealedPending
+            : RetentionRawTerminalState.CompletedWithoutRawPending;
+        var final = operation == RetentionRawTerminalOperation.SealRawResponse
+            ? RetentionRawTerminalState.Sealed
+            : RetentionRawTerminalState.CompletedWithoutRaw;
+        if (Interlocked.CompareExchange(ref terminalState, (int)final, (int)pending) != (int)pending)
+            return RetentionRawTerminalResult.Lost;
+        return operation == RetentionRawTerminalOperation.SealRawResponse
+            ? RetentionRawTerminalResult.Sealed
+            : RetentionRawTerminalResult.CompletedWithoutRaw;
+    }
+
+    internal void LoseTerminalAttempt()
+    {
+        _ = TryLoseTerminalAttempt();
+    }
+
+    private bool TryLoseTerminalAttempt()
+    {
+        Volatile.Read(ref currentNotification).Invalidate();
+        while (true)
+        {
+            var observed = TerminalState;
+            if (observed is RetentionRawTerminalState.Lost or RetentionRawTerminalState.Failed) return true;
+            if (observed is RetentionRawTerminalState.Sealed or RetentionRawTerminalState.CompletedWithoutRaw) return false;
+            if (Interlocked.CompareExchange(ref terminalState, (int)RetentionRawTerminalState.Lost, (int)observed) == (int)observed) return true;
+        }
+    }
+
+    internal void FailTerminalAttempt()
+    {
+        Volatile.Read(ref currentNotification).Invalidate();
+        while (true)
+        {
+            var observed = TerminalState;
+            if (observed == RetentionRawTerminalState.Failed) return;
+            if (observed is RetentionRawTerminalState.Sealed or RetentionRawTerminalState.CompletedWithoutRaw) return;
+            if (Interlocked.CompareExchange(ref terminalState, (int)RetentionRawTerminalState.Failed, (int)observed) == (int)observed) return;
+        }
+    }
+
+    private void CloseValueOwner() => Volatile.Read(ref valueOwner)?.Close();
 
     internal bool Activate()
     {
@@ -80,6 +208,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     private void Lose(bool releaseSynchronously)
     {
+        if (!TryLoseTerminalAttempt()) return;
         while (true)
         {
             var observed = Volatile.Read(ref state);
@@ -101,6 +230,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        DisposeTerminalCancellation();
         while (true)
         {
             var observed = Volatile.Read(ref state);
@@ -115,9 +245,19 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
                 return;
             }
             if (Interlocked.CompareExchange(ref state, Released, observed) != observed) continue;
+            LoseTerminalAttempt();
             Volatile.Read(ref currentNotification).Invalidate();
             await cleanup.ReleaseOrOwnAsync().ConfigureAwait(false);
             return;
+        }
+    }
+
+    private void DisposeTerminalCancellation()
+    {
+        lock (cancellationGate)
+        {
+            terminalCancellationDisposed = true;
+            if (terminalCancellationObserved) terminalCancellationRegistration.Dispose();
         }
     }
 
