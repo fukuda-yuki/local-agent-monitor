@@ -10,7 +10,9 @@ internal sealed record MonitorOptions(
     int IngestionStallThresholdSeconds = MonitorOptions.DefaultIngestionStallThresholdSeconds,
     int ProjectionLagThresholdSeconds = MonitorOptions.DefaultProjectionLagThresholdSeconds,
     IReadOnlyList<ConfiguredApplyRoot>? ApplyRoots = null,
-    IReadOnlyList<string>? PricingRegistryOverridePaths = null)
+    IReadOnlyList<string>? PricingRegistryOverridePaths = null,
+    IReadOnlyList<string>? SkillDiscoveryProjectPaths = null,
+    IReadOnlyList<string>? SkillDiscoveryDirectories = null)
 {
     public const string MaxRequestBodyBytesEnvironmentVariable = "CAO_MONITOR_MAX_REQUEST_BODY_BYTES";
     public const int DefaultMaxRequestBodyBytes = 31_457_280;
@@ -36,6 +38,10 @@ internal sealed record MonitorOptions(
         int? projectionLagThresholdSeconds = null;
         var applyRoots = new List<ConfiguredApplyRoot>();
         var pricingRegistryOverridePaths = new List<string>();
+        var skillDiscoveryProjectPaths = new List<string>();
+        var skillDiscoveryDirectories = new List<string>();
+        var skillDiscoveryProjectPathValueFault = false;
+        var skillDiscoveryDirectoryValueFault = false;
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -201,9 +207,77 @@ internal sealed record MonitorOptions(
                     index++;
                     break;
 
+                case "--skill-discovery-project-path":
+                    if (TryReadValue(args, index, out var skillDiscoveryProjectPathValue))
+                    {
+                        index++;
+                        if (skillDiscoveryProjectPathValue.Length == 0)
+                        {
+                            skillDiscoveryProjectPathValueFault = true;
+                        }
+                        else
+                        {
+                            skillDiscoveryProjectPaths.Add(skillDiscoveryProjectPathValue);
+                        }
+                    }
+                    else
+                    {
+                        skillDiscoveryProjectPathValueFault = true;
+                    }
+
+                    break;
+
+                case "--skill-discovery-directory":
+                    if (TryReadValue(args, index, out var skillDiscoveryDirectoryValue))
+                    {
+                        index++;
+                        if (skillDiscoveryDirectoryValue.Length == 0)
+                        {
+                            skillDiscoveryDirectoryValueFault = true;
+                        }
+                        else
+                        {
+                            skillDiscoveryDirectories.Add(skillDiscoveryDirectoryValue);
+                        }
+                    }
+                    else
+                    {
+                        skillDiscoveryDirectoryValueFault = true;
+                    }
+
+                    break;
+
                 default:
                     return Failure($"unknown local-monitor option '{args[index]}'.");
             }
+        }
+
+        // Every other option fails on its own first fault in argv order. These five Skill-discovery
+        // faults instead resolve by a fixed priority evaluated once the scan is done, so the result is
+        // independent of option/array order (docs/specifications/interfaces/skill-invocation-snapshot.md).
+        if (skillDiscoveryProjectPathValueFault)
+        {
+            return Failure("--skill-discovery-project-path requires a value.");
+        }
+
+        if (skillDiscoveryDirectoryValueFault)
+        {
+            return Failure("--skill-discovery-directory requires a value.");
+        }
+
+        if (skillDiscoveryProjectPaths.Count > 16)
+        {
+            return Failure("local-monitor accepts at most 16 --skill-discovery-project-path values.");
+        }
+
+        if (skillDiscoveryDirectories.Count > 32)
+        {
+            return Failure("local-monitor accepts at most 32 --skill-discovery-directory values.");
+        }
+
+        if (sanitizedOnly && (skillDiscoveryProjectPaths.Count > 0 || skillDiscoveryDirectories.Count > 0))
+        {
+            return Failure("skill discovery options cannot be used with --sanitized-only.");
         }
 
         if (maxRequestBodyBytes is null)
@@ -257,7 +331,9 @@ internal sealed record MonitorOptions(
                 ingestionStallThresholdSeconds ?? DefaultIngestionStallThresholdSeconds,
                 projectionLagThresholdSeconds ?? DefaultProjectionLagThresholdSeconds,
                 applyRoots,
-                pricingRegistryOverridePaths.AsReadOnly()),
+                pricingRegistryOverridePaths.AsReadOnly(),
+                skillDiscoveryProjectPaths.AsReadOnly(),
+                skillDiscoveryDirectories.AsReadOnly()),
             null);
     }
 
