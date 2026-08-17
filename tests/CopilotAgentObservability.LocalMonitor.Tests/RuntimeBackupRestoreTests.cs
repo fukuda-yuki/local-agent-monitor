@@ -2966,6 +2966,16 @@ public sealed class RuntimeBackupRestoreTests
             using (var connection = Open(mutatedPath))
             {
                 Execute(connection, "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;");
+                // A Session 13 backup cannot legitimately declare skill_invocation_snapshot: the
+                // component's conditional trigger registry is parented to Session 14 exactly, so a
+                // downgraded archive that kept it would be incompatible rather than legacy.
+                Execute(
+                    connection,
+                    "DELETE FROM schema_version WHERE component='skill_invocation_snapshot';"
+                    + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
+                    + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
+                    + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
+                    + "DROP TABLE IF EXISTS skill_invocation_snapshots;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
                 Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
             }
@@ -2973,7 +2983,11 @@ public sealed class RuntimeBackupRestoreTests
             var rowCounts = new Dictionary<string, long>(StringComparer.Ordinal);
             using (var connection = Open(mutatedPath))
             {
-                foreach (var table in parsed.RowCounts.Keys.Where(static table => table is not ("local_archive_current" or "local_archive_events")))
+                foreach (var table in parsed.RowCounts.Keys.Where(static table => table is not (
+                    "local_archive_current"
+                    or "local_archive_events"
+                    or "skill_invocation_snapshots"
+                    or "skill_invocation_snapshot_receipts")))
                     rowCounts[table] = Scalar<long>(connection, $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";");
             }
             database = File.ReadAllBytes(mutatedPath);
@@ -2987,6 +3001,7 @@ public sealed class RuntimeBackupRestoreTests
                 StringComparer.Ordinal);
             componentVersions["session"] = 13;
             componentVersions.Remove("local_archive");
+            componentVersions.Remove("skill_invocation_snapshot");
             var databaseHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
             manifest = RuntimeBackupJson.WriteManifest(parsed with
             {

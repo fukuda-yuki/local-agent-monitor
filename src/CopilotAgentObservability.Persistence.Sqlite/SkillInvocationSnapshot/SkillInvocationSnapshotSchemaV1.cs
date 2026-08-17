@@ -34,6 +34,14 @@ internal static class SkillInvocationSnapshotSchemaV1
     internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects
     { get; } = SqliteOwnedSchemaAuthority.Compile(Definitions);
 
+    internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
+
+    internal static IReadOnlyList<(string Name, string Table, string Sql)> TriggerDefinitions { get; } =
+        Definitions
+            .Where(static item => item.Type == "trigger")
+            .Select(static item => (item.Name, item.Table, item.Sql))
+            .ToArray();
+
     internal static void Ensure(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
