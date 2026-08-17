@@ -277,6 +277,8 @@ internal sealed class RunningMonitorHost(
 {
     public HttpClient Client { get; } = client;
 
+    public void StopApplication() => app.Lifetime.StopApplication();
+
     public IReadOnlyList<string> RoutePatterns =>
         ((Microsoft.AspNetCore.Routing.IEndpointRouteBuilder)app).DataSources
             .SelectMany(source => source.Endpoints)

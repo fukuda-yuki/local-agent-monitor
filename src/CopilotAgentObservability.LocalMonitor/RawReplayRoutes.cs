@@ -19,7 +19,8 @@ internal static class RawReplayRoutes
         var application = new Application(databasePath, catalog, timeProvider,
             snapshotProvider ?? new SqliteRawReplaySnapshotProvider(databasePath),
             transientLimits ?? RawReplayTransientLimits.Default);
-        app.Lifetime.ApplicationStopping.Register(application.Dispose);
+        app.Lifetime.ApplicationStopping.Register(application.StopAcceptingTransientReservations);
+        app.Lifetime.ApplicationStopped.Register(application.Dispose);
         app.MapPost("/api/raw-replay/v1/export-previews", context => ExportPreviewAsync(context, application, sanitizedOnly))
             .WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
         app.MapPost("/api/raw-replay/v1/exports", context => ExportAsync(context, application, sanitizedOnly))
@@ -231,8 +232,7 @@ internal static class RawReplayRoutes
                     id = created.ArchiveSha256!;
                     archive = created.ArchiveBytes!;
                     result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
-                    var expiresAt = transientStore.ExpirationFromNow();
-                    if (!transientStore.TryReserve("export", id, archive.LongLength, expiresAt, out reservation))
+                    if (!transientStore.TryReserve("export", id, archive.LongLength, out reservation))
                     {
                         completionError = "archive_too_large";
                         RawReplayAuthorizedService.DiscardRaw(created, completionError);
@@ -326,6 +326,8 @@ internal static class RawReplayRoutes
         }
 
         public void Dispose() => transientStore.Dispose();
+
+        internal void StopAcceptingTransientReservations() => transientStore.StopAcceptingReservations();
 
         private static string? ControlError(RawReplayControl control)
         {
