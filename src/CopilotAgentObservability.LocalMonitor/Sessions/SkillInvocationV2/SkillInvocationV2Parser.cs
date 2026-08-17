@@ -126,7 +126,7 @@ public static class SkillInvocationV2Parser
         }
 
         var envelope = state.Payloads[0].Build(requestUtf8);
-        return new ParsedSkillInvocationV2Batch([envelope], runtimeCapability);
+        return new ParsedSkillInvocationV2Batch([envelope], runtimeCapability, state.NativeSessionId!);
     }
 
     private static void ReadEnvelope(ref Utf8JsonReader reader, ParseState state)
@@ -171,7 +171,8 @@ public static class SkillInvocationV2Parser
                     RequireExactString(ref reader, state, SourceSurface);
                     break;
                 case "native_session_id":
-                    RequireBoundedIdentity(ref reader, state, nullable: false);
+                    RequireBoundedIdentity(ref reader, state, nullable: false, out var nativeSessionId);
+                    state.NativeSessionId = nativeSessionId;
                     break;
                 case "source_application_version":
                     RequireExactString(ref reader, state, SourceApplicationVersion);
@@ -235,6 +236,12 @@ public static class SkillInvocationV2Parser
     private static void ReadEvent(ref Utf8JsonReader reader, ParseState state)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        string? sourceEventId = null;
+        string? sourceParentEventId = null;
+        DateTimeOffset occurredAt = default;
+        string? runNativeId = null;
+        var sourceEphemeral = false;
+        PayloadCandidate? payloadCandidate = null;
         while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
         {
             if (reader.TokenType != JsonTokenType.PropertyName)
@@ -261,22 +268,26 @@ public static class SkillInvocationV2Parser
             switch (propertyName)
             {
                 case "source_event_id":
-                    RequireUuidV4(ref reader, state, nullable: false);
+                    RequireUuidV4(ref reader, state, nullable: false, out sourceEventId);
                     break;
                 case "source_parent_event_id":
-                    RequireUuidV4(ref reader, state, nullable: true);
+                    RequireUuidV4(ref reader, state, nullable: true, out sourceParentEventId);
                     break;
                 case "type":
                     RequireExactString(ref reader, state, EventType);
                     break;
                 case "occurred_at":
-                    RequireTimestamp(ref reader, state);
+                    RequireTimestamp(ref reader, state, out occurredAt);
                     break;
                 case "run_native_id":
-                    RequireBoundedIdentity(ref reader, state, nullable: true);
+                    RequireBoundedIdentity(ref reader, state, nullable: true, out runNativeId);
                     break;
                 case "source_ephemeral":
-                    if (reader.TokenType is not (JsonTokenType.True or JsonTokenType.False))
+                    if (reader.TokenType is JsonTokenType.True or JsonTokenType.False)
+                    {
+                        sourceEphemeral = reader.TokenType == JsonTokenType.True;
+                    }
+                    else
                     {
                         state.OuterInvalid = true;
                         ConsumeValue(ref reader, state);
@@ -298,7 +309,8 @@ public static class SkillInvocationV2Parser
                     }
                     else
                     {
-                        state.Payloads.Add(ReadPayload(ref reader, state));
+                        payloadCandidate = ReadPayload(ref reader, state);
+                        state.Payloads.Add(payloadCandidate);
                     }
                     break;
                 default:
@@ -310,6 +322,15 @@ public static class SkillInvocationV2Parser
         if (reader.TokenType != JsonTokenType.EndObject || seen.Count != EventProperties.Count || !seen.SetEquals(EventProperties))
         {
             state.OuterInvalid = true;
+        }
+
+        if (payloadCandidate is not null)
+        {
+            payloadCandidate.SourceEventId = sourceEventId;
+            payloadCandidate.SourceParentEventId = sourceParentEventId;
+            payloadCandidate.OccurredAt = occurredAt;
+            payloadCandidate.RunNativeId = runNativeId;
+            payloadCandidate.SourceEphemeral = sourceEphemeral;
         }
     }
 
@@ -563,54 +584,66 @@ public static class SkillInvocationV2Parser
         }
     }
 
-    private static void RequireBoundedIdentity(ref Utf8JsonReader reader, ParseState state, bool nullable)
+    private static void RequireBoundedIdentity(ref Utf8JsonReader reader, ParseState state, bool nullable, out string? value)
     {
+        value = null;
         if (nullable && reader.TokenType == JsonTokenType.Null)
         {
             return;
         }
 
-        if (!TryDecodeString(ref reader, state, out var value, out _)
-            || value.EnumerateRunes().Count() is < 1 or > 256
-            || value.Contains('\0', StringComparison.Ordinal)
-            || Encoding.UTF8.GetByteCount(value) > 1_024)
+        if (!TryDecodeString(ref reader, state, out var decoded, out _)
+            || decoded.EnumerateRunes().Count() is < 1 or > 256
+            || decoded.Contains('\0', StringComparison.Ordinal)
+            || Encoding.UTF8.GetByteCount(decoded) > 1_024)
         {
             state.OuterInvalid = true;
             ConsumeValue(ref reader, state);
+            return;
         }
+
+        value = decoded;
     }
 
-    private static void RequireUuidV4(ref Utf8JsonReader reader, ParseState state, bool nullable)
+    private static void RequireUuidV4(ref Utf8JsonReader reader, ParseState state, bool nullable, out string? value)
     {
+        value = null;
         if (nullable && reader.TokenType == JsonTokenType.Null)
         {
             return;
         }
 
-        if (!TryDecodeString(ref reader, state, out var value, out _)
-            || value.Length != 36
-            || !Guid.TryParseExact(value, "D", out var uuid)
-            || !string.Equals(uuid.ToString("D", CultureInfo.InvariantCulture), value, StringComparison.Ordinal)
-            || value[14] != '4'
-            || value[19] is not ('8' or '9' or 'a' or 'b'))
+        if (!TryDecodeString(ref reader, state, out var decoded, out _)
+            || decoded.Length != 36
+            || !Guid.TryParseExact(decoded, "D", out var uuid)
+            || !string.Equals(uuid.ToString("D", CultureInfo.InvariantCulture), decoded, StringComparison.Ordinal)
+            || decoded[14] != '4'
+            || decoded[19] is not ('8' or '9' or 'a' or 'b'))
         {
             state.OuterInvalid = true;
             ConsumeValue(ref reader, state);
+            return;
         }
+
+        value = decoded;
     }
 
-    private static void RequireTimestamp(ref Utf8JsonReader reader, ParseState state)
+    private static void RequireTimestamp(ref Utf8JsonReader reader, ParseState state, out DateTimeOffset value)
     {
+        value = default;
         const string format = "yyyy-MM-dd'T'HH:mm:ss.fffffffzzz";
-        if (!TryDecodeString(ref reader, state, out var value, out _)
-            || value.Length != 33
-            || !DateTimeOffset.TryParseExact(value, format, CultureInfo.InvariantCulture, DateTimeStyles.None, out var timestamp)
+        if (!TryDecodeString(ref reader, state, out var decoded, out _)
+            || decoded.Length != 33
+            || !DateTimeOffset.TryParseExact(decoded, format, CultureInfo.InvariantCulture, DateTimeStyles.None, out var timestamp)
             || timestamp.Offset != TimeSpan.Zero
-            || !string.Equals(timestamp.ToString(format, CultureInfo.InvariantCulture), value, StringComparison.Ordinal))
+            || !string.Equals(timestamp.ToString(format, CultureInfo.InvariantCulture), decoded, StringComparison.Ordinal))
         {
             state.OuterInvalid = true;
             ConsumeValue(ref reader, state);
+            return;
         }
+
+        value = timestamp;
     }
 
     private static bool TryDecodeString(
@@ -698,6 +731,8 @@ public static class SkillInvocationV2Parser
         public bool OuterInvalid { get; set; }
 
         public List<PayloadCandidate> Payloads { get; } = [];
+
+        public string? NativeSessionId { get; set; }
     }
 
     private sealed class PayloadCandidate(int start)
@@ -740,6 +775,16 @@ public static class SkillInvocationV2Parser
 
         public string? Path { get; set; }
 
+        public string? SourceEventId { get; set; }
+
+        public string? SourceParentEventId { get; set; }
+
+        public DateTimeOffset OccurredAt { get; set; }
+
+        public string? RunNativeId { get; set; }
+
+        public bool SourceEphemeral { get; set; }
+
         public SkillInvocationV2AcceptedEnvelope Build(ReadOnlySpan<byte> requestUtf8)
         {
             var (state, reason) = Classify();
@@ -754,11 +799,21 @@ public static class SkillInvocationV2Parser
                     new SkillInvocationV2TextEvidence(Path!));
             }
 
+            var identity = new SkillInvocationV2EventIdentity(
+                SourceEventId!,
+                SourceParentEventId,
+                OccurredAt,
+                RunNativeId,
+                SourceEphemeral,
+                traceId: null,
+                spanId: null);
+
             return new SkillInvocationV2AcceptedEnvelope(
                 new SkillInvocationV2RawPayloadEvidence(requestUtf8[Start..End]),
                 state,
                 reason,
-                facts);
+                facts,
+                identity);
         }
 
         private (SkillInvocationV2PayloadState State, SkillInvocationV2PayloadReason Reason) Classify()

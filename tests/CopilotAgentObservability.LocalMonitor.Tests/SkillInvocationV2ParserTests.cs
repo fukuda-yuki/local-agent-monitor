@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -33,6 +34,53 @@ public sealed class SkillInvocationV2ParserTests
         Assert.Equal(".github/skills/review.md", envelope.DefinitionPath!.Text);
         Assert.Equal(24, envelope.DefinitionPath.Utf8ByteLength);
         Assert.Equal("d6636e09410332fdadebd7a8925b0d5e8177c401a8b59d5f1747ef742d9bd701", Convert.ToHexStringLower(envelope.DefinitionPath.Sha256.Span));
+    }
+
+    [Fact]
+    public void Parse_CapturesAdmittedOuterIdentityWithNonnullOptionals()
+    {
+        var batch = SkillInvocationV2Parser.Parse(ValidRequest(ValidPayload), new TestRuntimeCapability());
+        var envelope = Assert.Single(batch.AcceptedEnvelopes);
+
+        Assert.Equal("native-session", batch.NativeSessionId);
+        Assert.Equal("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", envelope.Identity.SourceEventId);
+        Assert.Equal("bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb", envelope.Identity.SourceParentEventId);
+        Assert.Equal(new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero), envelope.Identity.OccurredAt);
+        Assert.Equal("run-1", envelope.Identity.RunNativeId);
+        Assert.True(envelope.Identity.SourceEphemeral);
+        Assert.Null(envelope.Identity.TraceId);
+        Assert.Null(envelope.Identity.SpanId);
+    }
+
+    [Fact]
+    public void Parse_CapturesAdmittedOuterIdentityWithAllNullOptionalsAndFalseEphemeral()
+    {
+        var request = Encoding.UTF8.GetBytes(
+            ValidRequestText(ValidPayload)
+                .Replace("\"source_parent_event_id\":\"bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb\"", "\"source_parent_event_id\":null", StringComparison.Ordinal)
+                .Replace("\"run_native_id\":\"run-1\"", "\"run_native_id\":null", StringComparison.Ordinal)
+                .Replace("\"source_ephemeral\":true", "\"source_ephemeral\":false", StringComparison.Ordinal));
+
+        var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
+
+        Assert.Equal("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", envelope.Identity.SourceEventId);
+        Assert.Null(envelope.Identity.SourceParentEventId);
+        Assert.Null(envelope.Identity.RunNativeId);
+        Assert.False(envelope.Identity.SourceEphemeral);
+    }
+
+    [Fact]
+    public void Parse_OccurredAtRoundTripsToTheExactAdmittedInstantToTheTick()
+    {
+        const string occurredAt = "2026-08-09T12:34:56.7654321+00:00";
+        const string format = "yyyy-MM-ddTHH:mm:ss.fffffffzzz";
+        var request = Encoding.UTF8.GetBytes(
+            ValidRequestText(ValidPayload).Replace("2026-08-09T00:00:00.0000000+00:00", occurredAt, StringComparison.Ordinal));
+
+        var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
+
+        Assert.Equal(TimeSpan.Zero, envelope.Identity.OccurredAt.Offset);
+        Assert.Equal(occurredAt, envelope.Identity.OccurredAt.ToString(format, CultureInfo.InvariantCulture));
     }
 
     [Fact]

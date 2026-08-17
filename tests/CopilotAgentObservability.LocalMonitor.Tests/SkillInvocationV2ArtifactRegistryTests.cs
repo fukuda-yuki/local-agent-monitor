@@ -71,7 +71,7 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var rawPayload = new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}"));
         var facts = state == SkillInvocationV2PayloadState.Available ? AvailableFacts(source: null, trigger: null) : null;
 
-        var envelope = new SkillInvocationV2AcceptedEnvelope(rawPayload, state, reason, facts);
+        var envelope = new SkillInvocationV2AcceptedEnvelope(rawPayload, state, reason, facts, SampleIdentity());
 
         Assert.Same(facts, envelope.ClaimFacts);
         Assert.Equal(facts?.Name, envelope.Name);
@@ -88,17 +88,17 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var facts = AvailableFacts();
 
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None, null));
+            rawPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.None, null));
+            rawPayload, SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyUnicodeInvalid, null));
+            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyUnicodeInvalid, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyOversized, null));
+            rawPayload, SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyOversized, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.NameMissing, null));
+            rawPayload, SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.NameMissing, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing, facts));
+            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing, facts, SampleIdentity()));
     }
 
     [Fact]
@@ -120,16 +120,18 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
             SkillInvocationV2PayloadState.Available,
             SkillInvocationV2PayloadReason.None,
-            AvailableFacts());
+            AvailableFacts(),
+            SampleIdentity());
         var capability = new ThrowingRuntimeCapability();
         var sourceEnvelopes = new[] { envelope };
-        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability);
-        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability());
+        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability, SampleNativeSessionId);
+        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SampleNativeSessionId);
         sourceEnvelopes[0] = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
             SkillInvocationV2PayloadState.Missing,
             SkillInvocationV2PayloadReason.NameMissing,
-            null);
+            null,
+            SampleIdentity());
 
         Assert.Same(capability, batch.RuntimeCapability);
         Assert.Same(envelope, Assert.Single(batch.AcceptedEnvelopes));
@@ -140,6 +142,39 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         Assert.DoesNotContain("RuntimeCapability", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", batch.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Identity_NeverLeaksIntoBatchOrEnvelopeToStringOrJsonSerialization()
+    {
+        var identity = new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb",
+            new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
+            "run-SENTINEL-VALUE",
+            true,
+            null,
+            null);
+        var envelope = new SkillInvocationV2AcceptedEnvelope(
+            new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
+            SkillInvocationV2PayloadState.Available,
+            SkillInvocationV2PayloadReason.None,
+            AvailableFacts(),
+            identity);
+        var batch = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), "native-SENTINEL-VALUE");
+
+        Assert.DoesNotContain("SENTINEL", batch.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("SENTINEL", JsonSerializer.Serialize(batch), StringComparison.Ordinal);
+        Assert.DoesNotContain("SENTINEL", envelope.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EventIdentity_RejectsNonnullProducerTraceOrSpanId()
+    {
+        Assert.Throws<ArgumentException>(() => new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", null, DateTimeOffset.UnixEpoch, null, false, "trace", null));
+        Assert.Throws<ArgumentException>(() => new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", null, DateTimeOffset.UnixEpoch, null, false, null, "span"));
     }
 
     [Fact]
@@ -221,6 +256,17 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         trigger,
         new SkillInvocationV2TextEvidence("body"),
         new SkillInvocationV2TextEvidence(".github/skills/skill.md"));
+
+    private const string SampleNativeSessionId = "native-session";
+
+    private static SkillInvocationV2EventIdentity SampleIdentity() => new(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb",
+        new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
+        "run-1",
+        true,
+        null,
+        null);
 
     private static void AssertRejectedExact(byte[] schema, byte[] sidecar, IReadOnlyDictionary<int, byte[]> history)
     {

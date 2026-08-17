@@ -137,15 +137,69 @@ public sealed class SkillInvocationV2ParsedClaimFacts
     public SkillInvocationV2TextEvidence DefinitionPath { get; }
 }
 
+public sealed class SkillInvocationV2EventIdentity
+{
+    public SkillInvocationV2EventIdentity(
+        string sourceEventId,
+        string? sourceParentEventId,
+        DateTimeOffset occurredAt,
+        string? runNativeId,
+        bool sourceEphemeral,
+        string? traceId,
+        string? spanId)
+    {
+        if (string.IsNullOrEmpty(sourceEventId))
+        {
+            throw new ArgumentException("Event identity requires an admitted source event id.", nameof(sourceEventId));
+        }
+
+        // r0001 structurally admits only a null trace_id/span_id token; a nonnull value here
+        // means the caller bypassed the parser's admission gate.
+        if (traceId is not null)
+        {
+            throw new ArgumentException("The r0001 wire never admits a nonnull producer trace id.", nameof(traceId));
+        }
+
+        if (spanId is not null)
+        {
+            throw new ArgumentException("The r0001 wire never admits a nonnull producer span id.", nameof(spanId));
+        }
+
+        SourceEventId = sourceEventId;
+        SourceParentEventId = sourceParentEventId;
+        OccurredAt = occurredAt;
+        RunNativeId = runNativeId;
+        SourceEphemeral = sourceEphemeral;
+        TraceId = traceId;
+        SpanId = spanId;
+    }
+
+    public string SourceEventId { get; }
+
+    public string? SourceParentEventId { get; }
+
+    public DateTimeOffset OccurredAt { get; }
+
+    public string? RunNativeId { get; }
+
+    public bool SourceEphemeral { get; }
+
+    public string? TraceId { get; }
+
+    public string? SpanId { get; }
+}
+
 public sealed class SkillInvocationV2AcceptedEnvelope
 {
     public SkillInvocationV2AcceptedEnvelope(
         SkillInvocationV2RawPayloadEvidence rawPayloadEvidence,
         SkillInvocationV2PayloadState payloadState,
         SkillInvocationV2PayloadReason payloadReason,
-        SkillInvocationV2ParsedClaimFacts? claimFacts)
+        SkillInvocationV2ParsedClaimFacts? claimFacts,
+        SkillInvocationV2EventIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(rawPayloadEvidence);
+        ArgumentNullException.ThrowIfNull(identity);
 
         if (!IsReasonForState(payloadState, payloadReason))
         {
@@ -161,6 +215,7 @@ public sealed class SkillInvocationV2AcceptedEnvelope
         PayloadState = payloadState;
         PayloadReason = payloadReason;
         ClaimFacts = claimFacts;
+        Identity = identity;
     }
 
     public SkillInvocationV2RawPayloadEvidence RawPayloadEvidence { get; }
@@ -170,6 +225,9 @@ public sealed class SkillInvocationV2AcceptedEnvelope
     public SkillInvocationV2PayloadReason PayloadReason { get; }
 
     public SkillInvocationV2ParsedClaimFacts? ClaimFacts { get; }
+
+    [JsonIgnore]
+    public SkillInvocationV2EventIdentity Identity { get; }
 
     public string? Name => ClaimFacts?.Name;
 
@@ -199,10 +257,12 @@ public sealed class ParsedSkillInvocationV2Batch
 
     public ParsedSkillInvocationV2Batch(
         IEnumerable<SkillInvocationV2AcceptedEnvelope> acceptedEnvelopes,
-        ISkillInvocationV2RuntimeCapability runtimeCapability)
+        ISkillInvocationV2RuntimeCapability runtimeCapability,
+        string nativeSessionId)
     {
         ArgumentNullException.ThrowIfNull(acceptedEnvelopes);
         ArgumentNullException.ThrowIfNull(runtimeCapability);
+        ArgumentException.ThrowIfNullOrEmpty(nativeSessionId);
 
         var ownedEnvelopes = acceptedEnvelopes.ToArray();
         if (ownedEnvelopes.Any(envelope => envelope is null))
@@ -212,6 +272,7 @@ public sealed class ParsedSkillInvocationV2Batch
 
         this.acceptedEnvelopes = Array.AsReadOnly(ownedEnvelopes);
         RuntimeCapability = runtimeCapability;
+        NativeSessionId = nativeSessionId;
     }
 
     [JsonIgnore]
@@ -219,6 +280,9 @@ public sealed class ParsedSkillInvocationV2Batch
 
     [JsonIgnore]
     public ISkillInvocationV2RuntimeCapability RuntimeCapability { get; }
+
+    [JsonIgnore]
+    public string NativeSessionId { get; }
 
     public override bool Equals(object? obj) => ReferenceEquals(this, obj);
 
