@@ -450,8 +450,11 @@ public sealed class SkillProjectionGenerationTests
                 ("$trusted_at", expectedTime)));
     }
 
-    [Fact]
-    public async Task Publish_CompositeHandleLostBetweenMemberProofs_RetriesWithoutPublishingRows()
+    [Theory]
+    [InlineData((int)SkillProjectionCheckpoint.AfterPublishGrantProof)]
+    [InlineData((int)SkillProjectionCheckpoint.BeforePublishCommitClaim)]
+    public async Task Publish_CompositeHandleLostBeforeCommitClaim_RetriesWithoutPublishingRows(
+        int lossCheckpointValue)
     {
         using var database = new TestDatabase();
         new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
@@ -463,7 +466,9 @@ public sealed class SkillProjectionGenerationTests
             SkillPayload));
         var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
         var time = new MutableTimeProvider(ObservedAt.AddSeconds(2));
-        var checkpoint = new SkillPublishPublicationCheckpoint(loseHandle: true);
+        var checkpoint = new SkillPublishPublicationCheckpoint(
+            loseHandle: true,
+            (SkillProjectionCheckpoint)lossCheckpointValue);
         var store = new SqliteSkillProjectionStore(
             database.Path,
             new RawTelemetryStore(database.Path, retention, time),
@@ -3254,7 +3259,9 @@ public sealed class SkillProjectionGenerationTests
         }
     }
 
-    private sealed class SkillPublishPublicationCheckpoint(bool loseHandle)
+    private sealed class SkillPublishPublicationCheckpoint(
+        bool loseHandle,
+        SkillProjectionCheckpoint lossCheckpoint = SkillProjectionCheckpoint.AfterPublishGrantProof)
         : ISkillProjectionCheckpoint
     {
         private IReadOnlyList<RetentionReadGrant> grants = [];
@@ -3273,8 +3280,9 @@ public sealed class SkillProjectionGenerationTests
 
             if (loseHandle)
             {
-                if (checkpoint != SkillProjectionCheckpoint.AfterPublishGrantProof
-                    || Interlocked.Increment(ref proofCount) != 1)
+                if (checkpoint != lossCheckpoint
+                    || (checkpoint == SkillProjectionCheckpoint.AfterPublishGrantProof
+                        && Interlocked.Increment(ref proofCount) != 1))
                     return;
                 using var publication = grants[0].EnterLeasePublication();
                 publication.CommittedHandle?.LoseAsynchronously();

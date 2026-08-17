@@ -45,6 +45,7 @@ internal enum SkillProjectionCheckpoint
     AfterHeartbeatTransactionBeganBeforePublicationScopes,
     AfterPublishTransactionBeganBeforeClockSample,
     AfterPublishGrantProof,
+    BeforePublishCommitClaim,
     AfterFinishOwnedTransactionBeganBeforeClockSample,
     BeforeRetentionRenewalPublication,
 }
@@ -435,9 +436,6 @@ internal sealed class SqliteSkillProjectionStore
         {
             return FinishRetry(connection, transaction, lease, transactionAt, "retention_lease_lost");
         }
-        if (!publications.AreCommittedHandlesPublished())
-            return FinishRetry(connection, transaction, lease, transactionAt, "retention_lease_lost");
-
         foreach (var projectedInput in projectedInputs)
             InsertProjection(connection, transaction, lease.GenerationId, projectedInput, transactionAt);
         Execute(
@@ -475,7 +473,14 @@ internal sealed class SqliteSkillProjectionStore
             ("$generation_id", lease.GenerationId),
             ("$updated_at", Timestamp(transactionAt)),
             ("$trace_id", lease.TraceId));
-        transaction.Commit();
+        checkpoint?.Reached(SkillProjectionCheckpoint.BeforePublishCommitClaim);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+        {
+            transaction.Rollback();
+            return RecordRetry(lease, transactionAt, "retention_lease_lost");
+        }
+        using (publicationClaim)
+            transaction.Commit();
         return SkillProjectionWorkOutcome.Published;
     }
 

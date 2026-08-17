@@ -252,12 +252,13 @@ internal sealed partial class SqliteLocalRepositoryReconciliationStore
                     return LocalRepositoryQueueTransitionResult.Corrupt;
                 }
             }
-            if (!publications.AreCommittedHandlesPublished())
+            if (!publications.TryClaimCommittedHandles(out var publicationClaim))
             {
                 transaction.Rollback();
                 return LocalRepositoryQueueTransitionResult.StaleOwner;
             }
-            transaction.Commit();
+            using (publicationClaim)
+                transaction.Commit();
             return LocalRepositoryQueueTransitionResult.Applied;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6) { return LocalRepositoryQueueTransitionResult.Busy; }

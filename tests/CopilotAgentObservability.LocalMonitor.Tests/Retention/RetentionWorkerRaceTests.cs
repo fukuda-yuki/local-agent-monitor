@@ -8,6 +8,57 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionWorkerRaceTests
 {
     [Fact]
+    public async Task PublicationClaim_CompositeFailureRollsBackEveryEarlierMember()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        var firstGrant = CreateGrant("first", 0x11, now.AddMinutes(2));
+        var secondGrant = CreateGrant("second", 0x22, now.AddMinutes(2));
+        var first = new RetentionCommittedReadHandle([firstGrant], time, _ => true);
+        var second = new RetentionCommittedReadHandle([secondGrant], time, _ => true);
+        Assert.True(first.Activate());
+        Assert.True(first.Publish());
+        Assert.True(second.Activate());
+        Assert.True(second.Publish());
+        second.LoseAsynchronously();
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            [new(firstGrant, 0), new(secondGrant, 1)]);
+
+        Assert.False(publications.TryClaimCommittedHandles(out var claim));
+        Assert.Null(claim);
+        Assert.True(first.IsPublished);
+        Assert.False(second.IsPublished);
+
+        publications.Dispose();
+        await first.DisposeAsync();
+        await second.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PublicationClaim_CancellationIsDeferredUntilTheOwnerReleasesTheClaim()
+    {
+        var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);
+        var time = new MutableTimeProvider(now);
+        using var cancellation = new CancellationTokenSource();
+        var grant = CreateGrant("first", 0x11, now.AddMinutes(2));
+        var handle = new RetentionCommittedReadHandle([grant], time, _ => true);
+        handle.AttachTerminalCancellation(cancellation.Token);
+        handle.ObserveTerminalCancellation();
+        Assert.True(handle.Activate());
+        Assert.True(handle.Publish());
+        using var publications = RetentionGrantPublicationSet.EnterInOrder([new(grant, 0)]);
+        Assert.True(publications.TryClaimCommittedHandles(out var claim));
+
+        cancellation.Cancel();
+
+        Assert.True(handle.IsPublished);
+        claim!.Dispose();
+        Assert.False(handle.IsPublished);
+        publications.Dispose();
+        await handle.DisposeAsync();
+    }
+
+    [Fact]
     public async Task AlreadyCancelledTerminalClaimObservesCancellationOnlyAfterWinningCas()
     {
         var now = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);

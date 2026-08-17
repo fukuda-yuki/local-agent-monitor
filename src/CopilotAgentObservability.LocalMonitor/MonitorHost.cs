@@ -720,7 +720,9 @@ internal static class MonitorHost
             options.SanitizedOnly,
             timeProvider,
             testOptions?.RawReplaySnapshotProvider,
-            testOptions?.RawReplayTransientLimits);
+            testOptions?.RawReplayTransientLimits,
+            testOptions?.RawReplayCreatedObserver,
+            testOptions?.RawReplayTransientPreparationCheckpoint);
         SanitizedImportRoutes.Map(app, sanitizedImportStore);
         if (!options.SanitizedOnly)
         {
@@ -2365,6 +2367,8 @@ internal sealed class MonitorHostTestOptions
     public ISanitizedExportSnapshotProvider? SanitizedExportSnapshotProvider { get; init; }
     public IRawReplaySnapshotProvider? RawReplaySnapshotProvider { get; init; }
     public RawReplayTransientLimits? RawReplayTransientLimits { get; init; }
+    public Action<RawReplayResult>? RawReplayCreatedObserver { get; init; }
+    public Action<RawReplayTransientPreparationCheckpoint>? RawReplayTransientPreparationCheckpoint { get; init; }
     public IAlertEngineStore? AlertEngineStore { get; set; }
 
     public IAlertLifecycleStore? AlertLifecycleStore { get; set; }

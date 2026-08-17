@@ -370,14 +370,13 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
 
         var scopes = new RetentionReadGrant.LeasePublication[members.Length];
         var acquiredLockOrder = new List<int>(members.Length);
-        foreach (var semanticIndex in lockOrder)
-            acquisitionObserverForTesting?.Invoke(members[semanticIndex].FrontierOrdinal);
         try
         {
             foreach (var semanticIndex in lockOrder)
             {
                 scopes[semanticIndex] = members[semanticIndex].Grant.EnterLeasePublication();
                 acquiredLockOrder.Add(semanticIndex);
+                acquisitionObserverForTesting?.Invoke(members[semanticIndex].FrontierOrdinal);
             }
         }
         catch
@@ -458,10 +457,36 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
         return scopes[index];
     }
 
-    internal bool AreCommittedHandlesPublished()
+    internal bool TryClaimCommittedHandles(out RetentionCommittedHandlePublicationClaim? claim)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        return scopes.All(static scope => scope.CommittedHandle?.IsPublished == true);
+        var handles = scopes
+            .Select(static scope => scope.CommittedHandle)
+            .Distinct()
+            .ToArray();
+        if (handles.Any(static handle => handle is null))
+        {
+            claim = null;
+            return false;
+        }
+
+        var claimed = new List<RetentionCommittedReadHandle>(handles.Length);
+        foreach (var handle in handles)
+        {
+            if (handle!.TryClaimPublication())
+            {
+                claimed.Add(handle);
+                continue;
+            }
+
+            for (var index = claimed.Count - 1; index >= 0; index--)
+                claimed[index].ReleasePublicationClaim();
+            claim = null;
+            return false;
+        }
+
+        claim = new RetentionCommittedHandlePublicationClaim(claimed);
+        return true;
     }
 
     internal void AdvanceExpiry(int index, DateTimeOffset expiry)
@@ -606,4 +631,18 @@ internal sealed class RetentionGrantPublicationSet : IDisposable
             RetentionLeaseKind.Deletion => 2,
             _ => -1,
         };
+}
+
+internal sealed class RetentionCommittedHandlePublicationClaim(
+    IReadOnlyList<RetentionCommittedReadHandle> handles) : IDisposable
+{
+    private IReadOnlyList<RetentionCommittedReadHandle>? claimedHandles = handles;
+
+    public void Dispose()
+    {
+        var claimed = Interlocked.Exchange(ref claimedHandles, null);
+        if (claimed is null) return;
+        for (var index = claimed.Count - 1; index >= 0; index--)
+            claimed[index].ReleasePublicationClaim();
+    }
 }

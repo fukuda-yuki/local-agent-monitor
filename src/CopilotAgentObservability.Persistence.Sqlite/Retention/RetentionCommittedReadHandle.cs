@@ -6,6 +6,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private const int Published = 1;
     private const int Lost = 2;
     private const int Released = 3;
+    private const int PublicationClaimed = 4;
     private static readonly TimeSpan PublicationRetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly TimeProvider timeProvider;
@@ -22,6 +23,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     private bool terminalCancellationDisposed;
     private int state;
     private int terminalState;
+    private int lossDeferredByPublicationClaim;
 
     internal RetentionCommittedReadHandle(
         IReadOnlyList<RetentionReadGrant> grants,
@@ -71,7 +73,7 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     }
 
     internal IReadOnlyList<RetentionReadGrant> Grants { get; }
-    internal bool IsPublished => Volatile.Read(ref state) == Published;
+    internal bool IsPublished => Volatile.Read(ref state) is Published or PublicationClaimed;
     internal bool AllowsUse => IsPublished && TerminalState == RetentionRawTerminalState.Open;
     internal RetentionRawTerminalState TerminalState => (RetentionRawTerminalState)Volatile.Read(ref terminalState);
 
@@ -218,6 +220,17 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     internal bool Publish() =>
         Interlocked.CompareExchange(ref state, Published, Hidden) == Hidden;
 
+    internal bool TryClaimPublication() =>
+        Interlocked.CompareExchange(ref state, PublicationClaimed, Published) == Published;
+
+    internal void ReleasePublicationClaim()
+    {
+        var target = Volatile.Read(ref lossDeferredByPublicationClaim) == 0 ? Published : Lost;
+        if (Interlocked.CompareExchange(ref state, target, PublicationClaimed) != PublicationClaimed)
+            throw new InvalidOperationException("The committed handle publication claim is not active.");
+        if (target == Lost) cleanup.Own();
+    }
+
     internal void AbandonBeforeCommit()
     {
         if (Interlocked.CompareExchange(ref state, Released, Hidden) != Hidden) return;
@@ -243,6 +256,12 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
                 return;
             }
             if (observed == Released) return;
+            if (observed == PublicationClaimed)
+            {
+                Volatile.Write(ref lossDeferredByPublicationClaim, 1);
+                if (Volatile.Read(ref state) == PublicationClaimed) return;
+                continue;
+            }
             if (Interlocked.CompareExchange(ref state, Lost, observed) != observed) continue;
             Volatile.Read(ref currentNotification).Invalidate();
             if (releaseSynchronously)
@@ -268,6 +287,12 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
             {
                 await cleanup.ReleaseOrOwnAsync().ConfigureAwait(false);
                 return;
+            }
+            if (observed == PublicationClaimed)
+            {
+                Volatile.Write(ref lossDeferredByPublicationClaim, 1);
+                await Task.Yield();
+                continue;
             }
             if (Interlocked.CompareExchange(ref state, Released, observed) != observed) continue;
             LoseTerminalAttempt();

@@ -205,8 +205,7 @@ internal sealed partial class RawTelemetryStore
                 publications,
                 rawRecordId,
                 publicationAt,
-                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof))
-            || !publications.AreCommittedHandlesPublished())
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
         {
             transaction.Rollback();
             return false;
@@ -314,6 +313,12 @@ internal sealed partial class RawTelemetryStore
         }
 
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.BeforeCommit);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+        {
+            transaction.Rollback();
+            return false;
+        }
+        using (publicationClaim)
         transaction.Commit();
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;
@@ -679,8 +684,7 @@ internal sealed partial class RawTelemetryStore
                 publications,
                 rawRecordId,
                 publicationAt,
-                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof))
-            || !publications.AreCommittedHandlesPublished())
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
         {
             transaction.Rollback();
             return false;
@@ -863,6 +867,12 @@ internal sealed partial class RawTelemetryStore
         }
 
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.BeforeCommit);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+        {
+            transaction.Rollback();
+            return false;
+        }
+        using (publicationClaim)
         transaction.Commit();
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;

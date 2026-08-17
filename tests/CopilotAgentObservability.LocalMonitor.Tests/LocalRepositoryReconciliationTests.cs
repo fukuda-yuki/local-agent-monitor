@@ -867,24 +867,25 @@ public sealed class LocalRepositoryReconciliationTests
     }
 
     [Fact]
-    public async Task CallerCancellationAtPublicationPropagatesAndRollsBack()
+    public async Task CallerCancellationImmediatelyBeforePublicationClaimRollsBackEveryRow()
     {
         using var cancellation = new CancellationTokenSource();
         var checkpoint = new DelegatingAdmissionCheckpoint((stage) =>
         {
-            if (stage == LocalRepositoryAdmissionCheckpoint.BeforePublication)
+            if (stage == LocalRepositoryAdmissionCheckpoint.BeforePublicationClaim)
                 cancellation.Cancel();
         });
         using var fixture = new LocalRepositoryAdmissionFixture(checkpoint);
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.RunAsync(
+        var outcome = await fixture.RunAsync(
             LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
                 LocalRepositoryAdmissionFixture.Trace(1),
                 LocalRepositoryAdmissionFixture.Span(1),
                 "https://github.com/Example/Cancelled")),
             [LocalRepositoryAdmissionFixture.MatchedEvent(1)],
-            cancellation.Token));
+            cancellation.Token);
 
+        Assert.NotEqual(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
         Assert.NotEqual("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
         Assert.Equal(0, fixture.DomainRowCount());
     }

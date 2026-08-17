@@ -9,6 +9,7 @@ public sealed class ProjectionRetentionFenceTests
     [Theory]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes)]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterGrantProof)]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.BeforeCommit)]
     public async Task ApplyProjection_HandleLostInsidePublicationFence_PublishesNothing(
         int cancellationCheckpointValue)
     {
@@ -52,6 +53,7 @@ public sealed class ProjectionRetentionFenceTests
     [Theory]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes)]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterGrantProof)]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.BeforeCommit)]
     public async Task ApplySpanProjection_HandleLostInsidePublicationFence_LeavesAllProjectionTablesUnchanged(
         int cancellationCheckpointValue)
     {

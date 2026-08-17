@@ -13,6 +13,14 @@ internal sealed record RawReplayTransientLimits(
         TimeSpan.FromMinutes(1));
 }
 
+internal enum RawReplayTransientPreparationCheckpoint
+{
+    BeforeCopy,
+    BeforeClock,
+    BeforeValidation,
+    BeforeCapacity,
+}
+
 internal sealed class RawReplayTransientStore : IDisposable
 {
     private readonly object gate = new();
@@ -21,16 +29,21 @@ internal sealed class RawReplayTransientStore : IDisposable
     private readonly TimeProvider timeProvider;
     private readonly RawReplayTransientLimits limits;
     private readonly ITimer sweepTimer;
+    private readonly Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting;
     private long nextSequence;
     private long totalBytes;
     private long reservedBytes;
     private int acceptingReservations = 1;
     private bool disposed;
 
-    internal RawReplayTransientStore(TimeProvider timeProvider, RawReplayTransientLimits limits)
+    internal RawReplayTransientStore(
+        TimeProvider timeProvider,
+        RawReplayTransientLimits limits,
+        Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting = null)
     {
         this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         this.limits = Validate(limits);
+        this.preparationCheckpointForTesting = preparationCheckpointForTesting;
         sweepTimer = timeProvider.CreateTimer(
             static state => ((RawReplayTransientStore)state!).Sweep(),
             this,
@@ -212,16 +225,20 @@ internal sealed class RawReplayTransientStore : IDisposable
         ArgumentNullException.ThrowIfNull(metadata);
         if (bytes.LongLength != byteLength)
             throw new ArgumentException("The committed transient bytes must match the exact reservation.", nameof(bytes));
+        preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeCopy);
         var frozenBytes = bytes.ToArray();
         try
         {
+            preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeClock);
             var expiresAt = timeProvider.GetUtcNow().Add(limits.Lifetime);
             lock (gate)
             {
+                preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeValidation);
                 if (!reservations.TryGetValue(itemKey, out var reserved)
                     || reserved.ByteLength != byteLength)
                     throw new InvalidOperationException("The transient reservation is no longer active.");
-                entries.EnsureCapacity(limits.MaximumEntries);
+                preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeCapacity);
+                entries.EnsureCapacity(entries.Count + (entries.ContainsKey(itemKey) ? 0 : 1));
                 return new(frozenBytes, metadata, expiresAt, nextSequence++);
             }
         }
@@ -232,18 +249,15 @@ internal sealed class RawReplayTransientStore : IDisposable
         }
     }
 
-    private void CommitReservation((string Kind, string Key) itemKey, long byteLength, Entry prepared)
+    private void ActivateReservation((string Kind, string Key) itemKey, long byteLength, Entry prepared)
     {
         lock (gate)
         {
             if (!reservations.TryGetValue(itemKey, out var reserved)
                 || reserved.ByteLength != byteLength)
-                throw new InvalidOperationException("The transient reservation is no longer active.");
+                return;
             entries.TryGetValue(itemKey, out var replaced);
-            if (replaced is null)
-                entries.Add(itemKey, prepared);
-            else
-                entries[itemKey] = prepared;
+            entries[itemKey] = prepared;
             totalBytes += byteLength - (replaced?.Bytes.LongLength ?? 0);
             reservations.Remove(itemKey);
             reservedBytes -= byteLength;
@@ -357,24 +371,43 @@ internal sealed class RawReplayTransientStore : IDisposable
         (string Kind, string Key) itemKey,
         long byteLength) : IDisposable
     {
+        private readonly object gate = new();
+        private Entry? prepared;
         private int completed;
 
-        internal void Commit(byte[] bytes, object metadata)
+        internal void Prepare(byte[] bytes, object metadata)
         {
-            if (Volatile.Read(ref completed) != 0) return;
-            var prepared = store.PrepareReservation(itemKey, byteLength, bytes, metadata);
-            if (Interlocked.Exchange(ref completed, 1) != 0)
+            lock (gate)
             {
-                Array.Clear(prepared.Bytes);
-                return;
+                if (completed != 0)
+                    throw new InvalidOperationException("The transient reservation is no longer active.");
+                if (prepared is not null) return;
+                prepared = store.PrepareReservation(itemKey, byteLength, bytes, metadata);
             }
-            store.CommitReservation(itemKey, byteLength, prepared);
+        }
+
+        internal void Activate()
+        {
+            lock (gate)
+            {
+                if (completed != 0 || prepared is null) return;
+                completed = 1;
+                var activated = prepared;
+                prepared = null;
+                store.ActivateReservation(itemKey, byteLength, activated);
+            }
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref completed, 1) == 0)
+            lock (gate)
+            {
+                if (completed != 0) return;
+                completed = 1;
+                if (prepared is { } abandoned) Array.Clear(abandoned.Bytes);
+                prepared = null;
                 store.CancelReservation(itemKey, byteLength);
+            }
         }
     }
 }

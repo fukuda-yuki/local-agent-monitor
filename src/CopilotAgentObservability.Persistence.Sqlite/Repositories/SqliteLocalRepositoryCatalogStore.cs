@@ -18,6 +18,7 @@ internal enum LocalRepositoryAdmissionCheckpoint
     AfterContexts,
     AfterAssignments,
     BeforeQueueCompletion,
+    BeforePublicationClaim,
 }
 
 internal interface ILocalRepositoryAdmissionCheckpoint

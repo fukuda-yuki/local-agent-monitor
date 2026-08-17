@@ -14,11 +14,15 @@ internal static class RawReplayRoutes
 
     internal static void Map(WebApplication app, string databasePath, RetentionCatalogStore catalog, bool sanitizedOnly,
         TimeProvider timeProvider, IRawReplaySnapshotProvider? snapshotProvider = null,
-        RawReplayTransientLimits? transientLimits = null)
+        RawReplayTransientLimits? transientLimits = null,
+        Action<RawReplayResult>? createdObserverForTesting = null,
+        Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting = null)
     {
         var application = new Application(databasePath, catalog, timeProvider,
             snapshotProvider ?? new SqliteRawReplaySnapshotProvider(databasePath),
-            transientLimits ?? RawReplayTransientLimits.Default);
+            transientLimits ?? RawReplayTransientLimits.Default,
+            createdObserverForTesting,
+            preparationCheckpointForTesting);
         app.Lifetime.ApplicationStopping.Register(application.StopAcceptingTransientReservations);
         app.Lifetime.ApplicationStopped.Register(application.Dispose);
         app.MapPost("/api/raw-replay/v1/export-previews", context => ExportPreviewAsync(context, application, sanitizedOnly))
@@ -185,18 +189,22 @@ internal static class RawReplayRoutes
         private readonly RawReplayArchiveService archiveService = new();
         private readonly RetentionRawReplayStore replayStore;
         private readonly RawReplayTransientStore transientStore;
+        private readonly Action<RawReplayResult>? createdObserverForTesting;
 
         internal Application(
             string databasePath,
             RetentionCatalogStore catalog,
             TimeProvider timeProvider,
             IRawReplaySnapshotProvider provider,
-            RawReplayTransientLimits transientLimits)
+            RawReplayTransientLimits transientLimits,
+            Action<RawReplayResult>? createdObserverForTesting,
+            Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting)
         {
             exportService = new(provider);
             snapshotProvider = provider;
             replayStore = new(catalog, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(databasePath))!, "raw-replays"), timeProvider);
-            transientStore = new(timeProvider, transientLimits);
+            transientStore = new(timeProvider, transientLimits, preparationCheckpointForTesting);
+            this.createdObserverForTesting = createdObserverForTesting;
         }
 
         internal ValueTask<RawReplayPreviewPublication> ExportPreviewAsync(RawReplayExportControl control, CancellationToken token) =>
@@ -213,42 +221,50 @@ internal static class RawReplayRoutes
             if (!capture.Success || capture.Lease is null)
                 return new(new(null, RawReplayAuthorizedService.ProviderError(capture.ErrorCode), null, null, null), false);
             await using var lease = capture.Lease;
-            RawReplayResult created;
+            RawReplayResult? created = null;
             string id = null!;
             byte[] archive = null!;
             ExportResult result = null!;
             RawReplayTransientStore.RawReplayTransientReservation? reservation = null;
             string? completionError = null;
-            using (var reference = lease.AcquireSnapshotReference())
+            try
             {
-                created = archiveService.Create(reference.Snapshot, control);
-                if (!created.Success)
+                using (var reference = lease.AcquireSnapshotReference())
                 {
-                    completionError = created.ErrorCode!;
-                    RawReplayAuthorizedService.DiscardRaw(created, completionError);
-                }
-                else
-                {
-                    id = created.ArchiveSha256!;
-                    archive = created.ArchiveBytes!;
-                    result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
-                    if (!transientStore.TryReserve("export", id, archive.LongLength, out reservation))
+                    created = archiveService.Create(reference.Snapshot, control);
+                    createdObserverForTesting?.Invoke(created);
+                    if (!created.Success)
                     {
-                        completionError = "archive_too_large";
+                        completionError = created.ErrorCode!;
                         RawReplayAuthorizedService.DiscardRaw(created, completionError);
                     }
+                    else
+                    {
+                        id = created.ArchiveSha256!;
+                        archive = created.ArchiveBytes!;
+                        result = new ExportResult(id, null, id, created.Preview, $"/api/raw-replay/v1/exports/{id}/archive");
+                        if (!transientStore.TryReserve("export", id, archive.LongLength, out reservation))
+                        {
+                            completionError = "archive_too_large";
+                            RawReplayAuthorizedService.DiscardRaw(created, completionError);
+                        }
+                    }
                 }
+                if (completionError is not null) return CompleteExportFailure(lease, completionError);
+                using (reservation)
+                {
+                    reservation!.Prepare(archive, result);
+                    if (!lease.TrySealRawReplayTransientPublication(out _))
+                        return new(new(null, null, null, null, null), true);
+                    reservation.Activate();
+                }
+                return new(result, false);
             }
-            if (completionError is not null) return CompleteExportFailure(lease, completionError);
-            using (reservation)
+            finally
             {
-                if (!lease.TrySealRawReplayTransientPublication(out _))
-                    return new(new(null, null, null, null, null), true);
-                reservation!.Commit(archive, result);
+                if (created?.ArchiveBytes is { } createdArchive) Array.Clear(createdArchive);
+                if (created?.ManifestBytes is { } manifest) Array.Clear(manifest);
             }
-            Array.Clear(archive);
-            if (created.ManifestBytes is { } manifest) Array.Clear(manifest);
-            return new(result, false);
         }
 
         private static ExportPublication CompleteExportFailure(RawReplaySnapshotLease lease, string errorCode)

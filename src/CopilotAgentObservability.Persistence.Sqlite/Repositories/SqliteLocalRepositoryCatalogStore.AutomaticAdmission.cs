@@ -663,8 +663,7 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             grant,
             rawRecordId,
             publications.ScopeFor(0, grant),
-            publicationAt)
-            || !publications.AreCommittedHandlesPublished())
+            publicationAt))
         {
             throw new InvalidOperationException("local_repository_retention_authority_lost");
         }
@@ -708,7 +707,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             publications,
             cancellationToken);
         RequireApplied(queue.TryFailTerminal(connection, transaction, lease, at, reason));
-        transaction.Commit();
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePublicationClaim);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+            throw new InvalidOperationException("local_repository_retention_authority_lost");
+        using (publicationClaim)
+            transaction.Commit();
     }
 
     private void CompleteQueueOnly(
@@ -733,7 +736,11 @@ internal sealed partial class SqliteLocalRepositoryCatalogStore
             ? queue.TryWaitForSession(connection, transaction, lease, at)
             : queue.TryComplete(connection, transaction, lease, at);
         RequireApplied(result);
-        transaction.Commit();
+        checkpoint?.Reached(LocalRepositoryAdmissionCheckpoint.BeforePublicationClaim);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+            throw new InvalidOperationException("local_repository_retention_authority_lost");
+        using (publicationClaim)
+            transaction.Commit();
     }
 
     private static void RequireApplied(LocalRepositoryQueueTransitionResult result)

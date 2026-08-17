@@ -299,12 +299,18 @@ public sealed class RawReplaySurfaceTests
     {
         using var temp = new MonitorTempDirectory();
         var provider = new Provider(Snapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider));
+        RawReplayResult? created = null;
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider, createdObserver: value => created = value));
         var preview = new RawReplayArchiveService().Preview(Snapshot(), ExportControl());
         var control = ExportControl() with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
 
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => host.Client.SendAsync(
             PostJson("/api/raw-replay/v1/exports", control)));
+        Assert.NotNull(created);
+        Assert.All(created!.ArchiveBytes!, static value => Assert.Equal(0, value));
+        Assert.All(created.ManifestBytes!, static value => Assert.Equal(0, value));
     }
 
     [Fact]
@@ -363,8 +369,11 @@ public sealed class RawReplaySurfaceTests
     {
         using var temp = new MonitorTempDirectory();
         var provider = new Provider(Snapshot());
+        RawReplayResult? created = null;
         var limits = new RawReplayTransientLimits(1, 1, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1));
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider, limits));
+        await using var host = await MonitorTestHost.StartAsync(
+            temp,
+            testOptions: Options(provider, limits, value => created = value));
         var preview = new RawReplayArchiveService().Preview(Snapshot(), ExportControl());
         var control = ExportControl() with { PreviewDigest = preview.PreviewDigest, Consent = Consent() };
 
@@ -373,6 +382,9 @@ public sealed class RawReplaySurfaceTests
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.Equal("{\"error\":\"archive_too_large\"}", await response.Content.ReadAsStringAsync());
         Assert.Equal([RawReplaySnapshotTerminalOperation.CompleteWithoutRaw], provider.TerminalOperations);
+        Assert.NotNull(created);
+        Assert.All(created!.ArchiveBytes!, static value => Assert.Equal(0, value));
+        Assert.All(created.ManifestBytes!, static value => Assert.Equal(0, value));
     }
 
     [Fact]
@@ -489,7 +501,7 @@ public sealed class RawReplaySurfaceTests
     }
 
     [Fact]
-    public async Task Api_TransientAuthorityStartsAtCommitAfterAReservationToSealDelay()
+    public async Task Api_TransientExpiryIsFrozenByPreparationBeforeASealDelay()
     {
         var time = new MutableTimeProvider(Now);
         using var temp = new MonitorTempDirectory { TimeProvider = time };
@@ -502,7 +514,7 @@ public sealed class RawReplaySurfaceTests
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(provider));
 
         var exported = await ExportAsync(host.Client, ExportControl());
-        time.Advance(TimeSpan.FromMinutes(9).Add(TimeSpan.FromSeconds(59)));
+        time.Advance(TimeSpan.FromSeconds(59));
         using var stillAuthorized = await host.Client.GetAsync($"/api/raw-replay/v1/exports/{exported.Id}");
         time.Advance(TimeSpan.FromSeconds(1));
         using var expired = await host.Client.GetAsync($"/api/raw-replay/v1/exports/{exported.Id}");
@@ -606,7 +618,7 @@ public sealed class RawReplaySurfaceTests
     }
 
     [Fact]
-    public async Task Transient_reservation_is_prepared_without_holding_the_store_lock_and_commits_once()
+    public async Task Transient_reservation_is_prepared_without_holding_the_store_lock_and_activates_once()
     {
         var store = new RawReplayTransientStore(
             TimeProvider.System,
@@ -621,9 +633,11 @@ public sealed class RawReplaySurfaceTests
 
             Assert.Equal(0, await Task.Run(() => store.Count).WaitAsync(TimeSpan.FromSeconds(5)));
             var bytesToFreeze = new byte[] { 1, 2, 3 };
-            reservation!.Commit(bytesToFreeze, "metadata");
+            reservation!.Prepare(bytesToFreeze, "metadata");
             bytesToFreeze[0] = 9;
-            reservation.Commit([9, 9, 9], "replacement");
+            reservation.Prepare([9, 9, 9], "replacement");
+            reservation.Activate();
+            reservation.Activate();
 
             Assert.Equal(1, store.Count);
             Assert.True(store.TryGet("export", "reserved", out var bytes, out string metadata));
@@ -652,7 +666,7 @@ public sealed class RawReplaySurfaceTests
         try
         {
             await disposal.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Throws<InvalidOperationException>(() => reservation!.Commit([1, 2, 3], "must-not-publish"));
+            Assert.Throws<InvalidOperationException>(() => reservation!.Prepare([1, 2, 3], "must-not-publish"));
 
             Assert.Equal(0, store.Count);
             Assert.Equal(0, store.TotalBytes);
@@ -676,7 +690,8 @@ public sealed class RawReplaySurfaceTests
         await Task.Run(store.StopAcceptingReservations).WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(store.TryReserve("export", "rejected", 3, out _));
-        sealedTicket!.Commit([1, 2, 3], "published-after-stopping");
+        sealedTicket!.Prepare([1, 2, 3], "published-after-stopping");
+        sealedTicket.Activate();
         Assert.True(store.TryGet("export", "sealed", out var bytes, out string metadata));
         Assert.Equal(new byte[] { 1, 2, 3 }, bytes);
         Assert.Equal("published-after-stopping", metadata);
@@ -720,36 +735,51 @@ public sealed class RawReplaySurfaceTests
         Assert.Equal("large-metadata", metadata);
     }
 
-    [Fact]
-    public void Transient_commit_clock_failure_preserves_victims_and_keeps_the_reservation_retryable()
+    [Theory]
+    [InlineData((int)RawReplayTransientPreparationCheckpoint.BeforeCopy)]
+    [InlineData((int)RawReplayTransientPreparationCheckpoint.BeforeClock)]
+    [InlineData((int)RawReplayTransientPreparationCheckpoint.BeforeValidation)]
+    [InlineData((int)RawReplayTransientPreparationCheckpoint.BeforeCapacity)]
+    public void Transient_prepare_failure_preserves_victims_and_keeps_the_reservation_retryable(
+        int failureCheckpointValue)
     {
-        var time = new CommitFailureTimeProvider(Now);
+        var failureCheckpoint = (RawReplayTransientPreparationCheckpoint)failureCheckpointValue;
+        var fail = true;
         using var store = new RawReplayTransientStore(
-            time,
-            new RawReplayTransientLimits(1, 3, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)));
+            new MutableTimeProvider(Now),
+            new RawReplayTransientLimits(1, 3, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)),
+            checkpoint =>
+            {
+                if (fail && checkpoint == failureCheckpoint)
+                    throw new InvalidOperationException($"injected-{checkpoint}");
+            });
         Assert.True(store.Put("export", "original", [1, 2, 3], "original-metadata"));
         Assert.True(store.TryReserve("export", "replacement", 3, out var reservation));
-        time.ThrowOnRead = true;
 
-        Assert.Throws<InvalidOperationException>(() => reservation!.Commit([4, 5, 6], "replacement-metadata"));
+        Assert.Throws<InvalidOperationException>(() => reservation!.Prepare([4, 5, 6], "replacement-metadata"));
 
-        time.ThrowOnRead = false;
+        fail = false;
         Assert.True(store.TryGet("export", "original", out var originalBytes, out string originalMetadata));
         Assert.Equal(new byte[] { 1, 2, 3 }, originalBytes);
         Assert.Equal("original-metadata", originalMetadata);
-        reservation!.Commit([4, 5, 6], "replacement-metadata");
+        reservation!.Prepare([4, 5, 6], "replacement-metadata");
+        reservation.Activate();
         Assert.False(store.TryGet<string>("export", "original", out _, out _));
         Assert.True(store.TryGet("export", "replacement", out var replacementBytes, out string replacementMetadata));
         Assert.Equal(new byte[] { 4, 5, 6 }, replacementBytes);
         Assert.Equal("replacement-metadata", replacementMetadata);
     }
 
-    private static MonitorHostTestOptions Options(IRawReplaySnapshotProvider provider, RawReplayTransientLimits? transientLimits = null) => new()
+    private static MonitorHostTestOptions Options(
+        IRawReplaySnapshotProvider provider,
+        RawReplayTransientLimits? transientLimits = null,
+        Action<RawReplayResult>? createdObserver = null) => new()
     {
         StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
         StartSessionOtelEnrichment = false, StartRetentionCleanupWorker = false,
         RawReplaySnapshotProvider = provider,
         RawReplayTransientLimits = transientLimits,
+        RawReplayCreatedObserver = createdObserver,
     };
 
     private sealed class CommitFailureTimeProvider(DateTimeOffset now) : TimeProvider

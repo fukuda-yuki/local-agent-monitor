@@ -208,9 +208,10 @@ internal sealed class SourceCompatibilityReconciler
         {
             if (!string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))
                 throw new InvalidOperationException("source_compatibility_operation_conflict");
-            if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+            if (!publications.TryClaimCommittedHandles(out var existingPublicationClaim))
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
-            transaction.Commit();
+            using (existingPublicationClaim)
+                transaction.Commit();
             return existing.Result;
         }
 
@@ -294,9 +295,10 @@ internal sealed class SourceCompatibilityReconciler
                 noChange,
                 committedAt);
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.BeforeCommit);
-            if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+            if (!publications.TryClaimCommittedHandles(out var noChangePublicationClaim))
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
-            transaction.Commit();
+            using (noChangePublicationClaim)
+                transaction.Commit();
             return noChange;
         }
 
@@ -350,9 +352,10 @@ internal sealed class SourceCompatibilityReconciler
             changed,
             committedAt);
         checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.BeforeCommit);
-        if (retentionGrant is not null && !publications.AreCommittedHandlesPublished())
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
             throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
-        transaction.Commit();
+        using (publicationClaim)
+            transaction.Commit();
         return changed;
     }
 

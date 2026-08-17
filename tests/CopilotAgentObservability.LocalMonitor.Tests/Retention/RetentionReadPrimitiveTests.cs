@@ -1157,6 +1157,21 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
+    public void RetentionGrantPublicationSet_AcquisitionObserverRunsImmediatelyAfterEachActualAcquisition()
+    {
+        var events = new List<string>();
+        var first = CreateGrant("item-a", "1", 1, publicationAcquired: () => events.Add("acquire-10"));
+        var second = CreateGrant("item-b", "2", 2, publicationAcquired: () => events.Add("acquire-20"));
+
+        using var publications = RetentionGrantPublicationSet.EnterInOrder(
+            [new(first, 10), new(second, 20)],
+            ordinal => events.Add($"observe-{ordinal}"),
+            releaseObserverForTesting: null);
+
+        Assert.Equal(["acquire-10", "observe-10", "acquire-20", "observe-20"], events);
+    }
+
+    [Fact]
     public void RetentionGrantPublicationSet_MixedLeaseKindsUseFixedRankAndReleaseInReverseAcquisitionOrder()
     {
         var operation = CreateGrant(
@@ -1205,7 +1220,7 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Fact]
-    public async Task RetentionGrantPublicationSet_BlockingAcquisitionObserverHoldsNoPublicationLock()
+    public async Task RetentionGrantPublicationSet_BlockingAcquisitionObserverReleasesItsAcquiredScopeAfterCompletion()
     {
         var first = CreateGrant("item-a", "1", 1);
         var second = CreateGrant("item-b", "2", 2);
@@ -1225,7 +1240,8 @@ public sealed class RetentionReadPrimitiveTests
         try
         {
             Assert.True(observerEntered.Wait(TimeSpan.FromSeconds(5)));
-            AssertPublicationLocksEnterableFromAnotherThread(first, second);
+            Assert.False(TryBindGrant(first));
+            Assert.True(TryBindGrant(second));
         }
         finally
         {
@@ -1233,6 +1249,7 @@ public sealed class RetentionReadPrimitiveTests
         }
 
         await acquisition.WaitAsync(TimeSpan.FromSeconds(5));
+        AssertPublicationLocksEnterableFromAnotherThread(first, second);
     }
 
     [Fact]
