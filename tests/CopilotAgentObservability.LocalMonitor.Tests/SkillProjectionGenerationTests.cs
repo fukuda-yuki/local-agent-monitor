@@ -1528,7 +1528,7 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
-    public void SdkClaimParticipant_RejectsUnpromotedPayloadAuthorityAndRollsBackCaller()
+    public void SdkClaimParticipant_InsertsUnderTheCallerTransactionAndRollsBackWithIt()
     {
         using var database = new TestDatabase();
         _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
@@ -1594,12 +1594,12 @@ public sealed class SkillProjectionGenerationTests
             unrelated.CommandText =
                 "INSERT INTO schema_version(component,version) VALUES('collision-proof',1);";
             unrelated.ExecuteNonQuery();
-            var error = Assert.Throws<InvalidOperationException>(
-                () => SkillProjectionSdkClaimParticipant.InsertOrVerify(
+            Assert.Equal(
+                SkillProjectionSdkClaimWriteOutcome.Inserted,
+                SkillProjectionSdkClaimParticipant.InsertOrVerify(
                     connection,
                     transaction,
                     claim));
-            Assert.Equal("skill_projection_sdk_claim_authority_unpromoted", error.Message);
             transaction.Rollback();
         }
         using var verification = Open(database.Path);
