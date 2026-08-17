@@ -13,6 +13,10 @@ internal enum RetentionReadBoundaryCheckpoint
 {
     BeforeConsumptionTransaction,
     AfterPublicationProofBeforeCommit,
+    AfterValueSelector,
+    AfterValuePublicationProof,
+    BeforeValuePublicationCommit,
+    AfterValueOwnerAttachedBeforeClaimRelease,
 }
 
 internal interface IRetentionReadAdmissionCheckpoint
@@ -536,53 +540,46 @@ public sealed partial class RetentionCatalogStore
         var handle = admission.Handle;
         try
         {
-            return await RetentionPostGrantConsumptionContradiction.NormalizeAsync(async () =>
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var grant = handle.Grants[0];
+            if (!ProveGrantsUsable(connection, transaction, handle.Grants))
             {
-                readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
-                cancellationToken.ThrowIfCancellationRequested();
-                using var connection = OpenExisting();
-                using var transaction = connection.BeginTransaction(deferred: false);
-                var grant = handle.Grants[0];
-                if (!ProveGrantsUsable(connection, transaction, handle.Grants))
-                {
-                    transaction.Rollback();
-                    await handle.DisposeAsync().ConfigureAwait(false);
-                    return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-                }
-                var value = await selector(connection, transaction, grant, cancellationToken).ConfigureAwait(false);
-                if (value is null)
-                {
-                    transaction.Rollback();
-                    return RetainSinglePostGrantFailure<T>(
-                        handle,
-                        RetentionReadDisposition.ConsumptionUnavailable,
-                        cancellationToken);
-                }
-                RetentionReadResult<T>? published = null;
-                using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
-                {
-                    var afterSelectionAt = timeProvider.GetUtcNow();
-                    if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                        && handle.AllowsUse)
-                    {
-                        transaction.Commit();
-                        published = RetentionReadResult<T>.FromHandle(
-                            new RetentionReadLease<T>(
-                                value,
-                                RetentionRevisionFence.Create(),
-                                grant,
-                                handle,
-                                cancellationToken));
-                    }
-                    else
-                    {
-                        transaction.Rollback();
-                    }
-                }
-                if (published is not null) return published;
+                transaction.Rollback();
                 await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-            }).ConfigureAwait(false);
+            }
+            var value = await RetentionPostGrantConsumptionContradiction.NormalizeAsync(
+                    () => selector(connection, transaction, grant, cancellationToken))
+                .ConfigureAwait(false);
+            if (value is null)
+            {
+                transaction.Rollback();
+                return RetainSinglePostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
+            }
+            var (published, publicationRetained) = TryPublishReadValue(
+                connection,
+                transaction,
+                handle,
+                cancellationToken,
+                () => new RetentionReadLease<T>(
+                    value,
+                    RetentionRevisionFence.Create(),
+                    grant,
+                    handle,
+                    cancellationToken));
+            if (published is not null && publicationRetained)
+                return RetentionReadResult<T>.FromHandle(published);
+            if (published is not null)
+                await published.DisposeAsync().ConfigureAwait(false);
+            else
+                await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -631,52 +628,45 @@ public sealed partial class RetentionCatalogStore
         var handle = admission.Handle;
         try
         {
-            return await RetentionPostGrantConsumptionContradiction.NormalizeAsync(async () =>
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (!ProveGrantsUsable(connection, transaction, handle.Grants))
             {
-                readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
-                cancellationToken.ThrowIfCancellationRequested();
-                using var connection = OpenExisting();
-                using var transaction = connection.BeginTransaction(deferred: false);
-                if (!ProveGrantsUsable(connection, transaction, handle.Grants))
-                {
-                    transaction.Rollback();
-                    await handle.DisposeAsync().ConfigureAwait(false);
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-                }
-                var value = await selector(connection, transaction, handle.Grants, cancellationToken).ConfigureAwait(false);
-                if (value is null)
-                {
-                    transaction.Rollback();
-                    return RetainBatchPostGrantFailure<T>(
-                        handle,
-                        RetentionReadDisposition.ConsumptionUnavailable,
-                        cancellationToken);
-                }
-                RetentionBatchReadResult<T>? published = null;
-                using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
-                {
-                    var afterSelectionAt = timeProvider.GetUtcNow();
-                    if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                        && handle.AllowsUse)
-                    {
-                        transaction.Commit();
-                        published = RetentionBatchReadResult<T>.FromHandle(
-                            new RetentionBatchReadLease<T>(
-                                value,
-                                RetentionRevisionFence.Create(),
-                                handle.Grants,
-                                handle,
-                                cancellationToken));
-                    }
-                    else
-                    {
-                        transaction.Rollback();
-                    }
-                }
-                if (published is not null) return published;
+                transaction.Rollback();
                 await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-            }).ConfigureAwait(false);
+            }
+            var value = await RetentionPostGrantConsumptionContradiction.NormalizeAsync(
+                    () => selector(connection, transaction, handle.Grants, cancellationToken))
+                .ConfigureAwait(false);
+            if (value is null)
+            {
+                transaction.Rollback();
+                return RetainBatchPostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
+            }
+            var (published, publicationRetained) = TryPublishReadValue(
+                connection,
+                transaction,
+                handle,
+                cancellationToken,
+                () => new RetentionBatchReadLease<T>(
+                    value,
+                    RetentionRevisionFence.Create(),
+                    handle.Grants,
+                    handle,
+                    cancellationToken));
+            if (published is not null && publicationRetained)
+                return RetentionBatchReadResult<T>.FromHandle(published);
+            if (published is not null)
+                await published.DisposeAsync().ConfigureAwait(false);
+            else
+                await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -717,52 +707,45 @@ public sealed partial class RetentionCatalogStore
         var handle = selected.Admission.Handle;
         try
         {
-            return await RetentionPostGrantConsumptionContradiction.NormalizeAsync(async () =>
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var connection = OpenExisting();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            if (!ProveGrantsUsable(connection, transaction, handle.Grants))
             {
-                readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction);
-                cancellationToken.ThrowIfCancellationRequested();
-                using var connection = OpenExisting();
-                using var transaction = connection.BeginTransaction(deferred: false);
-                if (!ProveGrantsUsable(connection, transaction, handle.Grants))
-                {
-                    transaction.Rollback();
-                    await handle.DisposeAsync().ConfigureAwait(false);
-                    return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-                }
-                var value = await selector(connection, transaction, handle.Grants, cancellationToken).ConfigureAwait(false);
-                if (value is null)
-                {
-                    transaction.Rollback();
-                    return RetainBatchPostGrantFailure<T>(
-                        handle,
-                        RetentionReadDisposition.ConsumptionUnavailable,
-                        cancellationToken);
-                }
-                RetentionBatchReadResult<T>? published = null;
-                using (var publications = EnterConsumptionPublicationScopes(handle.Grants))
-                {
-                    var afterSelectionAt = timeProvider.GetUtcNow();
-                    if (AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt)
-                        && handle.AllowsUse)
-                    {
-                        transaction.Commit();
-                        published = RetentionBatchReadResult<T>.FromHandle(
-                            new RetentionBatchReadLease<T>(
-                                value,
-                                RetentionRevisionFence.Create(),
-                                handle.Grants,
-                                handle,
-                                cancellationToken));
-                    }
-                    else
-                    {
-                        transaction.Rollback();
-                    }
-                }
-                if (published is not null) return published;
+                transaction.Rollback();
                 await handle.DisposeAsync().ConfigureAwait(false);
                 return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
-            }).ConfigureAwait(false);
+            }
+            var value = await RetentionPostGrantConsumptionContradiction.NormalizeAsync(
+                    () => selector(connection, transaction, handle.Grants, cancellationToken))
+                .ConfigureAwait(false);
+            if (value is null)
+            {
+                transaction.Rollback();
+                return RetainBatchPostGrantFailure<T>(
+                    handle,
+                    RetentionReadDisposition.ConsumptionUnavailable,
+                    cancellationToken);
+            }
+            var (published, publicationRetained) = TryPublishReadValue(
+                connection,
+                transaction,
+                handle,
+                cancellationToken,
+                () => new RetentionBatchReadLease<T>(
+                    value,
+                    RetentionRevisionFence.Create(),
+                    handle.Grants,
+                    handle,
+                    cancellationToken));
+            if (published is not null && publicationRetained)
+                return RetentionBatchReadResult<T>.FromHandle(published);
+            if (published is not null)
+                await published.DisposeAsync().ConfigureAwait(false);
+            else
+                await handle.DisposeAsync().ConfigureAwait(false);
+            return RetentionBatchReadResult<T>.FromDisposition(RetentionReadDisposition.LeaseLost);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
@@ -793,6 +776,61 @@ public sealed partial class RetentionCatalogStore
             grants
                 .Select((grant, index) => new RetentionGrantPublicationMember(grant, index))
                 .ToArray());
+
+    private (TLease? Lease, bool PublicationRetained) TryPublishReadValue<TLease>(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RetentionCommittedReadHandle handle,
+        CancellationToken cancellationToken,
+        Func<TLease> attachValueOwner)
+        where TLease : class
+    {
+        readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.AfterValueSelector);
+        using var publications = EnterConsumptionPublicationScopes(handle.Grants);
+        if (!publications.TryClaimCommittedHandles(out var publicationClaim))
+        {
+            transaction.Rollback();
+            return (null, false);
+        }
+
+        using (publicationClaim)
+        {
+            if (cancellationToken.IsCancellationRequested || !handle.AllowsUse)
+            {
+                transaction.Rollback();
+                return (null, false);
+            }
+
+            var afterSelectionAt = timeProvider.GetUtcNow();
+            if (cancellationToken.IsCancellationRequested
+                || !handle.AllowsUse
+                || !AreGrantsUsable(connection, transaction, handle.Grants, publications, afterSelectionAt))
+            {
+                transaction.Rollback();
+                return (null, false);
+            }
+
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.AfterValuePublicationProof);
+            if (cancellationToken.IsCancellationRequested || !handle.AllowsUse)
+            {
+                transaction.Rollback();
+                return (null, false);
+            }
+
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.BeforeValuePublicationCommit);
+            if (cancellationToken.IsCancellationRequested || !handle.AllowsUse)
+            {
+                transaction.Rollback();
+                return (null, false);
+            }
+
+            transaction.Commit();
+            var lease = attachValueOwner();
+            handle.ObserveTerminalCancellation();
+            readBoundaryCheckpoint?.Reached(RetentionReadBoundaryCheckpoint.AfterValueOwnerAttachedBeforeClaimRelease);
+            return (lease, publicationClaim!.Release());
+        }
+    }
 
     private static RetentionReadResult<T> RetainSinglePostGrantFailure<T>(
         RetentionCommittedReadHandle handle,

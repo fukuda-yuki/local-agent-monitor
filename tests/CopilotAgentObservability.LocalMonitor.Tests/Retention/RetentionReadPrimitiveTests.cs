@@ -1737,6 +1737,190 @@ public sealed class RetentionReadPrimitiveTests
     }
 
     [Theory]
+    [InlineData(ReadPrimitivePath.Single, ValuePublicationBoundary.AfterSelector)]
+    [InlineData(ReadPrimitivePath.Single, ValuePublicationBoundary.AfterProof)]
+    [InlineData(ReadPrimitivePath.Single, ValuePublicationBoundary.BeforeCommit)]
+    [InlineData(ReadPrimitivePath.FixedBatch, ValuePublicationBoundary.AfterSelector)]
+    [InlineData(ReadPrimitivePath.FixedBatch, ValuePublicationBoundary.AfterProof)]
+    [InlineData(ReadPrimitivePath.FixedBatch, ValuePublicationBoundary.BeforeCommit)]
+    [InlineData(ReadPrimitivePath.SelectedBatch, ValuePublicationBoundary.AfterSelector)]
+    [InlineData(ReadPrimitivePath.SelectedBatch, ValuePublicationBoundary.AfterProof)]
+    [InlineData(ReadPrimitivePath.SelectedBatch, ValuePublicationBoundary.BeforeCommit)]
+    public async Task ReadPrimitive_CancellationAtValuePublicationFencePublishesNoValueAndReturnsLeaseLost(
+        ReadPrimitivePath primitivePath,
+        ValuePublicationBoundary cancellationBoundary)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            using var cancellation = new CancellationTokenSource();
+            var cancellationCheckpoint = cancellationBoundary switch
+            {
+                ValuePublicationBoundary.AfterSelector => RetentionReadBoundaryCheckpoint.AfterValueSelector,
+                ValuePublicationBoundary.AfterProof => RetentionReadBoundaryCheckpoint.AfterValuePublicationProof,
+                ValuePublicationBoundary.BeforeCommit => RetentionReadBoundaryCheckpoint.BeforeValuePublicationCommit,
+                _ => throw new ArgumentOutOfRangeException(nameof(cancellationBoundary)),
+            };
+            var checkpoint = new DelegateReadCheckpoint(reached =>
+            {
+                if (reached == cancellationCheckpoint)
+                    cancellation.Cancel();
+            });
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now), checkpoint);
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+
+            var (disposition, lease) = await ExecutePrimitiveAsync(
+                store,
+                primitivePath,
+                request,
+                static () => ValueTask.FromResult<string?>("must-not-publish"),
+                cancellation.Token);
+            if (lease is not null)
+                await lease.DisposeAsync();
+
+            Assert.True(cancellation.IsCancellationRequested);
+            Assert.Equal(RetentionReadDisposition.LeaseLost, disposition);
+            Assert.Null(lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single)]
+    [InlineData(ReadPrimitivePath.FixedBatch)]
+    [InlineData(ReadPrimitivePath.SelectedBatch)]
+    public async Task ReadPrimitive_DeferredLossAtValuePublicationClaimReleasePublishesNoValue(
+        ReadPrimitivePath primitivePath)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            using var cancellation = new CancellationTokenSource();
+            var checkpoint = new DelegateReadCheckpoint(reached =>
+            {
+                if (reached == RetentionReadBoundaryCheckpoint.AfterValueOwnerAttachedBeforeClaimRelease)
+                    cancellation.Cancel();
+            });
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now), checkpoint);
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+
+            var (disposition, lease) = await ExecutePrimitiveAsync(
+                store,
+                primitivePath,
+                request,
+                static () => ValueTask.FromResult<string?>("must-not-publish"),
+                cancellation.Token);
+            if (lease is not null)
+                await lease.DisposeAsync();
+
+            Assert.True(cancellation.IsCancellationRequested);
+            Assert.Equal(RetentionReadDisposition.LeaseLost, disposition);
+            Assert.Null(lease);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single, "sqlite")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "sqlite")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite")]
+    [InlineData(ReadPrimitivePath.Single, "overflow")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "overflow")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "overflow")]
+    public async Task ReadPrimitive_DefectShapedFailureOutsideMapperPropagatesAndReleasesLease(
+        ReadPrimitivePath primitivePath,
+        string failure)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var checkpoint = new DelegateReadCheckpoint(reached =>
+            {
+                if (reached != RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction)
+                    return;
+                if (failure == "sqlite")
+                    throw new SqliteException("synthetic_defect_shaped_sql", 1);
+                throw new OverflowException("synthetic_defect_shaped_checked_arithmetic");
+            });
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now), checkpoint);
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+
+            var exception = await Record.ExceptionAsync(async () =>
+            {
+                var (_, lease) = await ExecutePrimitiveAsync(
+                    store,
+                    primitivePath,
+                    request,
+                    static () => ValueTask.FromResult<string?>("must-not-publish"),
+                    CancellationToken.None);
+                if (lease is not null)
+                    await lease.DisposeAsync();
+            });
+
+            if (failure == "sqlite")
+                Assert.Equal(1, Assert.IsType<SqliteException>(exception).SqliteErrorCode);
+            else
+                Assert.IsType<OverflowException>(exception);
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single)]
+    [InlineData(ReadPrimitivePath.FixedBatch)]
+    [InlineData(ReadPrimitivePath.SelectedBatch)]
+    public async Task ReadPrimitive_DataShapeContradictionInsideMapperReturnsConsumptionUnavailableWithRetainedHandle(
+        ReadPrimitivePath primitivePath)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+
+            var (disposition, lease) = await ExecutePrimitiveAsync(
+                store,
+                primitivePath,
+                request,
+                static () => throw new FormatException("synthetic_mapper_shape_contradiction"),
+                CancellationToken.None);
+
+            Assert.Equal(RetentionReadDisposition.ConsumptionUnavailable, disposition);
+            var retained = Assert.IsAssignableFrom<IAsyncDisposable>(lease);
+            Assert.Equal(
+                RetentionRawTerminalResult.CompletedWithoutRaw,
+                retained switch
+                {
+                    RetentionReadLease<string> single => single.TryCompleteWithoutRaw(),
+                    RetentionBatchReadLease<string> batch => batch.TryCompleteWithoutRaw(),
+                    _ => throw new InvalidOperationException(retained.GetType().FullName),
+                });
+            await retained.DisposeAsync();
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
     [InlineData(ReadPrimitivePath.Single)]
     [InlineData(ReadPrimitivePath.FixedBatch)]
     [InlineData(ReadPrimitivePath.SelectedBatch)]
@@ -2938,6 +3122,44 @@ public sealed class RetentionReadPrimitiveTests
         }
     }
 
+    private static async ValueTask<(RetentionReadDisposition? Disposition, IAsyncDisposable? Lease)> ExecutePrimitiveAsync(
+        RetentionCatalogStore store,
+        ReadPrimitivePath primitivePath,
+        RetentionReadRequest request,
+        Func<ValueTask<string?>> selector,
+        CancellationToken cancellationToken)
+    {
+        switch (primitivePath)
+        {
+            case ReadPrimitivePath.Single:
+                {
+                    var result = await store.ReadAsync<string>(
+                        request,
+                        (_, _, _, _) => selector(),
+                        cancellationToken);
+                    return (result.Disposition, result.Lease);
+                }
+            case ReadPrimitivePath.FixedBatch:
+                {
+                    var result = await store.ReadBatchAsync<string>(
+                        [request],
+                        (_, _, _, _) => selector(),
+                        cancellationToken);
+                    return (result.Disposition, result.Lease);
+                }
+            case ReadPrimitivePath.SelectedBatch:
+                {
+                    var result = await store.ReadSelectedBatchAsync<string>(
+                        (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([request]),
+                        (_, _, _, _) => selector(),
+                        cancellationToken);
+                    return (result.Disposition, result.Lease);
+                }
+            default:
+                throw new ArgumentOutOfRangeException(nameof(primitivePath));
+        }
+    }
+
     private static long LeaseTupleCount(string path, RetentionReadGrant grant)
     {
         using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
@@ -3324,5 +3546,12 @@ public sealed class RetentionReadPrimitiveTests
         Single,
         FixedBatch,
         SelectedBatch,
+    }
+
+    public enum ValuePublicationBoundary
+    {
+        AfterSelector,
+        AfterProof,
+        BeforeCommit,
     }
 }

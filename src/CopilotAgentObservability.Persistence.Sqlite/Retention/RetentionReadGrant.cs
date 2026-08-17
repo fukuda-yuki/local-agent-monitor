@@ -638,11 +638,15 @@ internal sealed class RetentionCommittedHandlePublicationClaim(
 {
     private IReadOnlyList<RetentionCommittedReadHandle>? claimedHandles = handles;
 
-    public void Dispose()
+    internal bool Release()
     {
         var claimed = Interlocked.Exchange(ref claimedHandles, null);
-        if (claimed is null) return;
+        if (claimed is null) return false;
+        var retained = true;
         for (var index = claimed.Count - 1; index >= 0; index--)
-            claimed[index].ReleasePublicationClaim();
+            retained &= claimed[index].ReleasePublicationClaim();
+        return retained;
     }
+
+    public void Dispose() => Release();
 }

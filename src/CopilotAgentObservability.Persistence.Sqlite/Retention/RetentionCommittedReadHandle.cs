@@ -223,12 +223,13 @@ internal sealed class RetentionCommittedReadHandle : IAsyncDisposable
     internal bool TryClaimPublication() =>
         Interlocked.CompareExchange(ref state, PublicationClaimed, Published) == Published;
 
-    internal void ReleasePublicationClaim()
+    internal bool ReleasePublicationClaim()
     {
         var target = Volatile.Read(ref lossDeferredByPublicationClaim) == 0 ? Published : Lost;
         if (Interlocked.CompareExchange(ref state, target, PublicationClaimed) != PublicationClaimed)
             throw new InvalidOperationException("The committed handle publication claim is not active.");
         if (target == Lost) cleanup.Own();
+        return target == Published;
     }
 
     internal void AbandonBeforeCommit()
