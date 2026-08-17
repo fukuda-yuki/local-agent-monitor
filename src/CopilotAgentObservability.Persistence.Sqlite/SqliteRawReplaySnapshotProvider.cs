@@ -30,6 +30,8 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
     private readonly RetentionCatalogContext context;
     private readonly TimeProvider timeProvider;
     private readonly IRawReplaySnapshotCheckpoint? checkpoint;
+    private readonly IRetentionReadBoundaryCheckpoint? readBoundaryCheckpoint;
+    private readonly IRetentionRawTerminalCheckpoint? terminalCheckpoint;
 
     public SqliteRawReplaySnapshotProvider(string databasePath, TimeProvider? timeProvider = null)
         : this(databasePath, RetentionCatalogContext.AdoptExistingCatalogV1(databasePath), timeProvider)
@@ -45,7 +47,9 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         string databasePath,
         RetentionCatalogContext context,
         TimeProvider? timeProvider,
-        IRawReplaySnapshotCheckpoint? checkpoint)
+        IRawReplaySnapshotCheckpoint? checkpoint,
+        IRetentionReadBoundaryCheckpoint? readBoundaryCheckpoint = null,
+        IRetentionRawTerminalCheckpoint? terminalCheckpoint = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(context);
@@ -54,6 +58,8 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         this.context = context;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.checkpoint = checkpoint;
+        this.readBoundaryCheckpoint = readBoundaryCheckpoint;
+        this.terminalCheckpoint = terminalCheckpoint;
     }
 
     public async ValueTask<RawReplaySnapshotCapture> CaptureAsync(
@@ -65,7 +71,14 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
         IReadOnlyList<Candidate>? candidates = null;
         try
         {
-            var result = await new RetentionCatalogStore(context, timeProvider).ReadSelectedBatchAsync(
+            var catalog = (readBoundaryCheckpoint, terminalCheckpoint) switch
+            {
+                ({ } readBoundary, { } terminal) => new RetentionCatalogStore(context, timeProvider, readBoundary, terminal),
+                ({ } readBoundary, null) => new RetentionCatalogStore(context, timeProvider, readBoundary),
+                (null, { } terminal) => new RetentionCatalogStore(context, timeProvider, terminal),
+                _ => new RetentionCatalogStore(context, timeProvider),
+            };
+            var result = await catalog.ReadSelectedBatchAsync(
                 (connection, transaction, _) =>
                 {
                     candidates = SelectCandidates(connection, transaction, selection, includeSessionContent);
@@ -117,9 +130,11 @@ public sealed class SqliteRawReplaySnapshotProvider : IRawReplaySnapshotProvider
                 await using (lease.ConfigureAwait(false))
                 {
                     var terminal = result.CompletePostGrantFailure();
-                    return Failure(postGrantDisposition == RetentionReadDisposition.Busy
-                            || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
-                        ? "snapshot_store_busy"
+                    if (postGrantDisposition == RetentionReadDisposition.Busy
+                        || terminal != RetentionRawTerminalResult.CompletedWithoutRaw)
+                        return Failure("snapshot_store_busy");
+                    return Failure(postGrantDisposition == RetentionReadDisposition.ConsumptionUnavailable
+                        ? "snapshot_store_unavailable"
                         : "snapshot_read_denied");
                 }
             }

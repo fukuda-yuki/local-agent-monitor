@@ -13,6 +13,58 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     private static readonly DateTimeOffset Now = new(2026, 7, 23, 1, 2, 3, TimeSpan.Zero);
 
     [Fact]
+    public async Task CaptureAsync_OutOfRangeSchemaVersionCompletesWithoutRawThenReturnsSnapshotStoreUnavailable()
+    {
+        using var temp = new TempDirectory();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var store = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        store.CreateMonitorSchema();
+        var rawRecordId = store.Insert(new RawTelemetryRecord(
+            null, RawTelemetrySources.RawOtlp, "trace-corrupt-schema", Now, null, "{\"resourceSpans\":[]}"));
+        var terminal = new RecordingTerminalCheckpoint();
+
+        var capture = await new SqliteRawReplaySnapshotProvider(
+                temp.DatabasePath,
+                context,
+                new FixedTimeProvider(Now),
+                checkpoint: null,
+                new CorruptSchemaVersionAfterGrantCheckpoint(temp.DatabasePath, rawRecordId),
+                terminal)
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: [rawRecordId]), false, CancellationToken.None);
+
+        Assert.False(capture.Success);
+        Assert.Equal("snapshot_store_unavailable", capture.ErrorCode);
+        Assert.Null(capture.Lease);
+        Assert.Contains(RetentionRawTerminalCheckpoint.AfterPublish, terminal.ReachedCheckpoints);
+        Assert.Equal(0, Scalar<long>(temp.DatabasePath, "SELECT COUNT(*) FROM retention_leases;"));
+    }
+
+    [Fact]
+    public async Task CaptureAsync_OutOfRangeSchemaVersionWithBusyTerminalKeepsSnapshotStoreBusyMapping()
+    {
+        using var temp = new TempDirectory();
+        var context = RetentionCatalogContext.InitializeNewOwnedDatabase(temp.DatabasePath, new FixedTimeProvider(Now));
+        var store = new RawTelemetryStore(temp.DatabasePath, context, new FixedTimeProvider(Now));
+        store.CreateMonitorSchema();
+        var rawRecordId = store.Insert(new RawTelemetryRecord(
+            null, RawTelemetrySources.RawOtlp, "trace-corrupt-schema-busy", Now, null, "{\"resourceSpans\":[]}"));
+
+        var capture = await new SqliteRawReplaySnapshotProvider(
+                temp.DatabasePath,
+                context,
+                new FixedTimeProvider(Now),
+                checkpoint: null,
+                new CorruptSchemaVersionAfterGrantCheckpoint(temp.DatabasePath, rawRecordId),
+                new BusyTerminalCheckpoint())
+            .CaptureAsync(new RawReplaySelection(RawRecordIds: [rawRecordId]), false, CancellationToken.None);
+
+        Assert.False(capture.Success);
+        Assert.Equal("snapshot_store_busy", capture.ErrorCode);
+        Assert.Null(capture.Lease);
+        Assert.Equal(0, Scalar<long>(temp.DatabasePath, "SELECT COUNT(*) FROM retention_leases;"));
+    }
+
+    [Fact]
     public async Task CaptureAsync_AfterValueOwnerCancellationRejectsEveryNewSnapshotAccess()
     {
         using var temp = new TempDirectory();
@@ -1230,6 +1282,34 @@ public sealed class SqliteRawReplaySnapshotProviderTests
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => value;
+    }
+
+    private sealed class RecordingTerminalCheckpoint : IRetentionRawTerminalCheckpoint
+    {
+        internal List<RetentionRawTerminalCheckpoint> ReachedCheckpoints { get; } = [];
+
+        public void Reached(RetentionRawTerminalCheckpoint checkpoint) => ReachedCheckpoints.Add(checkpoint);
+    }
+
+    private sealed class CorruptSchemaVersionAfterGrantCheckpoint(string path, long rawRecordId) : IRetentionReadBoundaryCheckpoint
+    {
+        public void Reached(RetentionReadBoundaryCheckpoint checkpoint)
+        {
+            if (checkpoint != RetentionReadBoundaryCheckpoint.BeforeConsumptionTransaction) return;
+            Execute(
+                path,
+                "PRAGMA ignore_check_constraints=ON; UPDATE raw_records SET schema_version=2147483648 WHERE id=$id;",
+                ("$id", rawRecordId));
+        }
+    }
+
+    private sealed class BusyTerminalCheckpoint : IRetentionRawTerminalCheckpoint
+    {
+        public void Reached(RetentionRawTerminalCheckpoint checkpoint)
+        {
+            if (checkpoint == RetentionRawTerminalCheckpoint.AfterClaimBeforeTransaction)
+                throw new RetentionRawTerminalBusyException();
+        }
     }
 
     private sealed class TestTimeProvider(DateTimeOffset value) : TimeProvider

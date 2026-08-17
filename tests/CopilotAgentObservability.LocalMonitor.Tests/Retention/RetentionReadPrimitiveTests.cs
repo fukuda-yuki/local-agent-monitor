@@ -1621,6 +1621,12 @@ public sealed class RetentionReadPrimitiveTests
     [InlineData(ReadPrimitivePath.Single, "sqlite_non_contention", "ConsumptionUnavailable")]
     [InlineData(ReadPrimitivePath.FixedBatch, "sqlite_non_contention", "ConsumptionUnavailable")]
     [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite_non_contention", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.Single, "overflow", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "overflow", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "overflow", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.Single, "invalid_cast", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.FixedBatch, "invalid_cast", "ConsumptionUnavailable")]
+    [InlineData(ReadPrimitivePath.SelectedBatch, "invalid_cast", "ConsumptionUnavailable")]
     [InlineData(ReadPrimitivePath.Single, "sqlite_contention", "Busy")]
     [InlineData(ReadPrimitivePath.FixedBatch, "sqlite_contention", "Busy")]
     [InlineData(ReadPrimitivePath.SelectedBatch, "sqlite_contention", "Busy")]
@@ -1644,6 +1650,8 @@ public sealed class RetentionReadPrimitiveTests
                 "format" => new FormatException("synthetic_malformed_persisted_timestamp"),
                 "sqlite_non_contention" => new SqliteException("synthetic_query_failure", 10),
                 "sqlite_contention" => new SqliteException("synthetic_busy", 5),
+                "overflow" => new OverflowException("synthetic_out_of_range_integer"),
+                "invalid_cast" => new InvalidCastException("synthetic_incompatible_storage_class"),
                 _ => new InvalidOperationException(failure),
             };
             var (disposition, lease) = primitivePath switch
@@ -1691,6 +1699,39 @@ public sealed class RetentionReadPrimitiveTests
                 RetentionReadResult<string> result) => (result.Disposition, result.Lease);
             static (RetentionReadDisposition? Disposition, IAsyncDisposable? Lease) BatchResult(
                 RetentionBatchReadResult<string> result) => (result.Disposition, result.Lease);
+        }
+        finally { Delete(path); }
+    }
+
+    [Theory]
+    [InlineData(ReadPrimitivePath.Single)]
+    [InlineData(ReadPrimitivePath.FixedBatch)]
+    [InlineData(ReadPrimitivePath.SelectedBatch)]
+    public async Task ReadPrimitive_PostGrantProgrammingFaultPropagatesAndReleasesLease(ReadPrimitivePath primitivePath)
+    {
+        var path = CopyFixture();
+        try
+        {
+            var now = new DateTimeOffset(2026, 7, 12, 0, 0, 0, TimeSpan.Zero);
+            var store = new RetentionCatalogStore(path, new MutableTimeProvider(now));
+            store.CreateSchema();
+            var key = new RetentionOwnershipKey(store.StoreInstanceId, RetentionStoreKind.RawRecord, Scalar<long>(path, "SELECT id FROM raw_records ORDER BY id LIMIT 1;").ToString());
+            var item = Assert.IsType<RetentionCatalogItem>(store.Find(key));
+            var request = new RetentionReadRequest(key, RetentionReadKind.Access, now, item.Revision);
+
+            await Assert.ThrowsAsync<NullReferenceException>(async () =>
+            {
+                if (primitivePath == ReadPrimitivePath.Single)
+                    await store.ReadAsync<string>(request, static (_, _, _, _) => throw new NullReferenceException("synthetic_programming_fault"), CancellationToken.None);
+                else if (primitivePath == ReadPrimitivePath.FixedBatch)
+                    await store.ReadBatchAsync<string>([request], static (_, _, _, _) => throw new NullReferenceException("synthetic_programming_fault"), CancellationToken.None);
+                else
+                    await store.ReadSelectedBatchAsync<string>(
+                        (_, _, _) => ValueTask.FromResult<IReadOnlyList<RetentionReadRequest>>([request]),
+                        static (_, _, _, _) => throw new NullReferenceException("synthetic_programming_fault"),
+                        CancellationToken.None);
+            });
+            Assert.Equal(0L, Scalar<long>(path, "SELECT COUNT(*) FROM retention_leases;"));
         }
         finally { Delete(path); }
     }
