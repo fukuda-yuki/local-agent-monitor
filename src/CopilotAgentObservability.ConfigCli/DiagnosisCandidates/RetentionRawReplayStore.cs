@@ -91,7 +91,7 @@ internal sealed class RetentionRawReplayStore
         {
             ObserveRawByteCopies(execution);
             new RetentionSensitiveBundleStore(catalog).CaptureRawReplay(replayId, archive, execution, parent);
-            return WithoutRawByteCopies(execution);
+            return DiscardRaw(execution);
         }
         catch (ArgumentException)
         {
@@ -111,7 +111,7 @@ internal sealed class RetentionRawReplayStore
         }
         finally
         {
-            ZeroRawByteCopies(execution);
+            DiscardRaw(execution);
         }
     }
 
@@ -119,19 +119,13 @@ internal sealed class RetentionRawReplayStore
         RetainedRawReplayLease lease,
         RawReplayExecutionResult result)
     {
-        try
+        var safeResult = DiscardRaw(result);
+        return lease.TryCompleteWithoutRaw() switch
         {
-            return lease.TryCompleteWithoutRaw() switch
-            {
-                RetentionRawTerminalResult.CompletedWithoutRaw => WithoutRawByteCopies(result),
-                RetentionRawTerminalResult.Busy => Failure("replay_terminal_busy"),
-                _ => Failure("replay_terminal_lost"),
-            };
-        }
-        finally
-        {
-            ZeroRawByteCopies(result);
-        }
+            RetentionRawTerminalResult.CompletedWithoutRaw => safeResult,
+            RetentionRawTerminalResult.Busy => Failure("replay_terminal_busy"),
+            _ => Failure("replay_terminal_lost"),
+        };
     }
 
     internal async ValueTask<RetainedRawReplayReadResult> ReadAsync(string replayId, CancellationToken cancellationToken)
@@ -358,19 +352,30 @@ internal sealed class RetentionRawReplayStore
         }
     }
     private static RawReplayExecutionResult Failure(string code) => new(false, code, false, null, null, null, null, null, [], []);
-    private static RawReplayExecutionResult WithoutRawByteCopies(RawReplayExecutionResult result) => result with
-    {
-        ResultBytes = null,
-        NormalizedBytes = null,
-        ProjectionBytes = null,
-        DashboardBytes = null,
-    };
-    private static void ZeroRawByteCopies(RawReplayExecutionResult result)
+    private static RawReplayExecutionResult DiscardRaw(RawReplayExecutionResult result)
     {
         if (result.ResultBytes is { } receipt) CryptographicOperations.ZeroMemory(receipt);
         if (result.NormalizedBytes is { } normalized) CryptographicOperations.ZeroMemory(normalized);
         if (result.ProjectionBytes is { } projection) CryptographicOperations.ZeroMemory(projection);
         if (result.DashboardBytes is { } dashboard) CryptographicOperations.ZeroMemory(dashboard);
+        DiscardStaging(result.StagedRecords);
+        DiscardStaging(result.StagedSessionContents);
+        return result with
+        {
+            ResultBytes = null,
+            NormalizedBytes = null,
+            ProjectionBytes = null,
+            DashboardBytes = null,
+            StagedRecords = [],
+            StagedSessionContents = [],
+        };
+    }
+    private static void DiscardStaging<T>(IReadOnlyList<T> staging) where T : class
+    {
+        if (staging is T[] array)
+            Array.Clear(array);
+        else if (staging is ICollection<T> { IsReadOnly: false } collection)
+            collection.Clear();
     }
     private void ObserveRawByteCopies(RawReplayExecutionResult result)
     {

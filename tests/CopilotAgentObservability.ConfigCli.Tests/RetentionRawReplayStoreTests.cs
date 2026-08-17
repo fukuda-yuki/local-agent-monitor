@@ -322,6 +322,8 @@ public sealed class RetentionRawReplayStoreTests
         Assert.Null(result.NormalizedBytes);
         Assert.Null(result.ProjectionBytes);
         Assert.Null(result.DashboardBytes);
+        AssertNoRawCarrierReachable(result);
+        AssertExactSafeResultSurface(result);
         Assert.NotEmpty(ownedBuffers);
         Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
     }
@@ -418,6 +420,144 @@ public sealed class RetentionRawReplayStoreTests
         Assert.Equal(RetainedRawReplayReadDisposition.Denied, result.Disposition);
         Assert.Null(result.Lease);
         Assert.False(File.Exists(fixture.DatabasePath));
+    }
+
+    [Theory]
+    [InlineData((int)RetentionRawTerminalResult.CompletedWithoutRaw, true, null)]
+    [InlineData((int)RetentionRawTerminalResult.Lost, false, "replay_terminal_lost")]
+    [InlineData((int)RetentionRawTerminalResult.Busy, false, "replay_terminal_busy")]
+    public void CompleteRetainedResult_DiscardsEveryRawCarrierBeforeTerminalAndReturnsOnlySafeState(
+        int terminalResultValue,
+        bool expectedSuccess,
+        string? expectedErrorCode)
+    {
+        var rawBuffers = new[]
+        {
+            new byte[] { 1, 2, 3 },
+            new byte[] { 4, 5, 6 },
+            new byte[] { 7, 8, 9 },
+            new byte[] { 10, 11, 12 },
+        };
+        List<RawReplayRecord> stagedRecords =
+        [
+            new(1, "raw-source", "raw-trace", Now, "raw-resource-attributes", "raw-payload", 1,
+                new("raw-surface", "raw-version", "raw-adapter", "raw-adapter-version", "raw-schema", "raw-inventory",
+                    "supported", "available", "not_applied_raw_capture", RawReplayContractVersions.CredentialScanner)),
+        ];
+        RawReplaySessionContent[] stagedSessionContents =
+        [
+            new("raw-event", "raw-session", "raw-run", "raw-trace", "raw-adapter", "raw-source-event", Now,
+                "available", "raw-version", "raw-adapter-version", "raw-schema", "raw-normalization", "raw-match",
+                "application/json", "raw-content", Now, Now.AddDays(1), "not_applied_raw_capture",
+                RawReplayContractVersions.CredentialScanner),
+        ];
+        var receipt = new RawReplayReceipt(
+            RawReplayContractVersions.ReplayResult,
+            "replay-safe-result",
+            RawReplayContractVersions.BundleProfile,
+            new string('a', 64),
+            RawReplayContractVersions.Normalization,
+            RawReplayContractVersions.Projection,
+            RawReplayContractVersions.Dashboard,
+            new string('b', 64),
+            new string('c', 64),
+            new string('d', 64),
+            ["source-version"],
+            1,
+            1,
+            0);
+        var unsafeResult = new RawReplayExecutionResult(
+            true,
+            null,
+            true,
+            receipt,
+            rawBuffers[0],
+            rawBuffers[1],
+            rawBuffers[2],
+            rawBuffers[3],
+            stagedRecords,
+            stagedSessionContents);
+        var rawWasDiscardedAtTerminal = false;
+        var terminalCalls = 0;
+        var lease = new RetainedRawReplayLease(
+            static () => throw new InvalidOperationException(),
+            static () => ValueTask.CompletedTask,
+            () =>
+            {
+                terminalCalls++;
+                rawWasDiscardedAtTerminal = rawBuffers.All(bytes => bytes.All(value => value == 0))
+                    && stagedRecords.Count == 0
+                    && stagedSessionContents.Cast<object?>().All(item => item is null);
+                return (RetentionRawTerminalResult)terminalResultValue;
+            });
+        var serializedSuccessBeforeDiscard = RawReplayJson.Serialize(unsafeResult);
+        var method = typeof(RetentionRawReplayStore).GetMethod(
+            "CompleteRetainedResult",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var safeResult = Assert.IsType<RawReplayExecutionResult>(method.Invoke(null, [lease, unsafeResult]));
+
+        Assert.Equal(1, terminalCalls);
+        Assert.Equal(expectedSuccess, safeResult.Success);
+        Assert.Equal(expectedErrorCode, safeResult.ErrorCode);
+        AssertNoRawCarrierReachable(safeResult);
+        AssertExactSafeResultSurface(safeResult);
+        Assert.True(rawWasDiscardedAtTerminal);
+        if (expectedSuccess)
+            Assert.Equal(serializedSuccessBeforeDiscard, RawReplayJson.Serialize(safeResult));
+    }
+
+    private static void AssertNoRawCarrierReachable(RawReplayExecutionResult result)
+    {
+        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        Visit(result);
+        return;
+
+        void Visit(object? value)
+        {
+            if (value is null || value is string || value.GetType().IsValueType || !visited.Add(value)) return;
+            Assert.False(value is byte[], "A raw byte carrier remained reachable from the safe result.");
+            Assert.False(value is RawReplayRecord, "A staged raw-record carrier remained reachable from the safe result.");
+            Assert.False(value is RawReplaySessionContent, "A staged Session-content carrier remained reachable from the safe result.");
+            if (value is System.Collections.IEnumerable collection)
+            {
+                foreach (var item in collection) Visit(item);
+                return;
+            }
+            foreach (var property in value.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                Visit(property.GetValue(value));
+        }
+    }
+
+    private static void AssertExactSafeResultSurface(RawReplayExecutionResult result)
+    {
+        Assert.Equal(
+            new[]
+            {
+                "DashboardBytes", "ErrorCode", "IdempotentReplay", "NormalizedBytes", "ProjectionBytes", "Result",
+                "ResultBytes", "StagedRecords", "StagedSessionContents", "Success",
+            },
+            typeof(RawReplayExecutionResult).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(property => property.Name)
+                .Order(StringComparer.Ordinal));
+        Assert.Null(result.ResultBytes);
+        Assert.Null(result.NormalizedBytes);
+        Assert.Null(result.ProjectionBytes);
+        Assert.Null(result.DashboardBytes);
+        Assert.Empty(result.StagedRecords);
+        Assert.Empty(result.StagedSessionContents);
+        if (result.Result is not { } receipt) return;
+        Assert.Equal(
+            new[]
+            {
+                "ArchiveSha256", "DashboardSha256", "DashboardVersion", "ExternalModelInvocations", "NormalizationVersion",
+                "NormalizedSha256", "Profile", "ProjectionSha256", "ProjectionVersion", "RawRecordCount", "ReplayId",
+                "SchemaVersion", "SessionContentCount", "SourceVersions",
+            },
+            receipt.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Select(property => property.Name)
+                .Order(StringComparer.Ordinal));
     }
 
     private static void AssertExactPinnedRawReplayReadPublicSurface()
