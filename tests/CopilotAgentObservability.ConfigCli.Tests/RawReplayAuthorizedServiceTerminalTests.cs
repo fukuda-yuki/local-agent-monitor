@@ -99,6 +99,147 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
         if (scenario != "output_exists") Assert.False(File.Exists(output));
     }
 
+    [Fact]
+    public async Task DirectCliNonSealDeletionFailureRetainsCleanupUntilTheExactStagedPathIsRemoved()
+    {
+        using var directory = new TempDirectory();
+        var stagedPath = Path.Combine(directory.Path, "raw-local-replay.zip.owned.partial");
+        var deleteAttempts = 0;
+        var archiveService = ArchiveService(
+            stagedPath,
+            deleteFile: path =>
+            {
+                if (Interlocked.Increment(ref deleteAttempts) == 1) throw new IOException("synthetic delete contention");
+                File.Delete(path);
+            },
+            inspectArchive: bytes => new RawReplayArchiveService().Inspect(bytes),
+            checkpoint: checkpoint =>
+            {
+                if (checkpoint == RawReplayFileStagingCheckpoint.BeforeFlush)
+                    throw new IOException("synthetic non-seal failure");
+            });
+
+        var result = await new RawReplayAuthorizedService(
+            new Provider(ValidSnapshot(), []),
+            archiveService).CreateAndPublishAsync(
+                ConfirmedControl(ValidSnapshot()),
+                Path.Combine(directory.Path, "raw-local-replay.zip"));
+
+        Assert.False(result.Success);
+        Assert.Equal("publish_failed", result.ErrorCode);
+        Assert.True(SpinWait.SpinUntil(() => !File.Exists(stagedPath), TimeSpan.FromSeconds(5)));
+        Assert.True(deleteAttempts >= 2);
+    }
+
+    [Theory]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Lost)]
+    [InlineData((int)RawReplaySnapshotTerminalResult.Busy)]
+    public async Task DirectCliSealLossDeletionFailureRetainsCleanupUntilTheExactStagedPathIsRemoved(int terminalResultValue)
+    {
+        using var directory = new TempDirectory();
+        var stagedPath = Path.Combine(directory.Path, "raw-local-replay.zip.owned.partial");
+        var deleteAttempts = 0;
+        var archiveService = ArchiveService(
+            stagedPath,
+            deleteFile: path =>
+            {
+                if (Interlocked.Increment(ref deleteAttempts) == 1) throw new UnauthorizedAccessException("synthetic delete contention");
+                File.Delete(path);
+            });
+        var provider = new TerminalProvider(ValidSnapshot(), (RawReplaySnapshotTerminalResult)terminalResultValue);
+
+        var result = await new RawReplayAuthorizedService(provider, archiveService).CreateAndPublishAsync(
+            ConfirmedControl(ValidSnapshot()),
+            Path.Combine(directory.Path, "raw-local-replay.zip"));
+
+        Assert.False(result.Success);
+        Assert.Equal(
+            (RawReplaySnapshotTerminalResult)terminalResultValue == RawReplaySnapshotTerminalResult.Busy
+                ? "snapshot_store_busy"
+                : "snapshot_read_denied",
+            result.ErrorCode);
+        Assert.True(SpinWait.SpinUntil(() => !File.Exists(stagedPath), TimeSpan.FromSeconds(5)));
+        Assert.True(deleteAttempts >= 2);
+    }
+
+    [Fact]
+    public void StagedFileDoesNotReachIrreversibleDisposalBeforeDeletionIsConfirmed()
+    {
+        using var directory = new TempDirectory();
+        var stagedPath = Path.Combine(directory.Path, "raw-local-replay.zip.owned.partial");
+        File.WriteAllBytes(stagedPath, [1, 2, 3]);
+        var deleteAttempts = 0;
+        var staged = new RawReplayStagedFile(
+            stagedPath,
+            Path.Combine(directory.Path, "raw-local-replay.zip"),
+            path =>
+            {
+                if (Interlocked.Increment(ref deleteAttempts) == 1) throw new IOException("synthetic delete contention");
+                File.Delete(path);
+            },
+            new InertTimeProvider());
+
+        staged.Dispose();
+        Assert.True(File.Exists(stagedPath));
+
+        staged.Dispose();
+
+        Assert.False(File.Exists(stagedPath));
+        Assert.Equal(2, deleteAttempts);
+    }
+
+    [Theory]
+    [InlineData("success")]
+    [InlineData("loss")]
+    [InlineData("busy")]
+    [InlineData("non_seal")]
+    [InlineData("exception")]
+    public async Task DirectCliZeroesEveryOwnedRawBufferOnEveryPostGrantExit(string scenario)
+    {
+        using var directory = new TempDirectory();
+        var ownedBuffers = new List<byte[]>();
+        var inspectCalls = 0;
+        var realInspector = new RawReplayArchiveService();
+        var output = Path.Combine(directory.Path, "raw-local-replay.zip");
+        if (scenario == "non_seal") File.WriteAllBytes(output, [9]);
+        var archiveService = ArchiveService(
+            output + ".owned.partial",
+            inspectArchive: bytes =>
+            {
+                if (scenario == "exception" && Interlocked.Increment(ref inspectCalls) == 2)
+                    throw new IOException("synthetic staged inspection failure");
+                return realInspector.Inspect(bytes);
+            },
+            rawBufferObserver: bytes => ownedBuffers.Add(bytes));
+        var terminal = scenario switch
+        {
+            "loss" => RawReplaySnapshotTerminalResult.Lost,
+            "busy" => RawReplaySnapshotTerminalResult.Busy,
+            _ => RawReplaySnapshotTerminalResult.Sealed,
+        };
+
+        _ = await new RawReplayAuthorizedService(
+            new TerminalProvider(ValidSnapshot(), terminal),
+            archiveService).CreateAndPublishAsync(ConfirmedControl(ValidSnapshot()), output);
+
+        Assert.NotEmpty(ownedBuffers);
+        Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+    }
+
+    private static RawReplayArchiveService ArchiveService(
+        string stagedPath,
+        Action<string>? deleteFile = null,
+        Func<byte[], RawReplayInspection>? inspectArchive = null,
+        Action<RawReplayFileStagingCheckpoint>? checkpoint = null,
+        Action<byte[]>? rawBufferObserver = null) =>
+        new(
+            _ => stagedPath,
+            inspectArchive,
+            checkpoint,
+            deleteFile,
+            TimeProvider.System,
+            rawBufferObserver);
+
     private static RawReplaySnapshot ScenarioSnapshot(string scenario) => scenario switch
     {
         "archive" => ValidSnapshot() with { Records = [] },
@@ -198,6 +339,38 @@ public sealed class RawReplayAuthorizedServiceTerminalTests
                     events.Add("seal");
                     return RawReplaySnapshotTerminalResult.Sealed;
                 })));
+    }
+
+    private sealed class TerminalProvider(
+        RawReplaySnapshot snapshot,
+        RawReplaySnapshotTerminalResult terminalResult) : IRawReplaySnapshotProvider
+    {
+        public ValueTask<RawReplaySnapshotCapture> CaptureAsync(
+            RawReplaySelection selection,
+            bool includeSessionContent,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new RawReplaySnapshotCapture(true, null, new RawReplaySnapshotLease(
+                () => new RawReplaySnapshotUseReference(() => snapshot, static () => { }),
+                static () => ValueTask.CompletedTask,
+                operation => operation == RawReplaySnapshotTerminalOperation.CompleteWithoutRaw
+                    ? RawReplaySnapshotTerminalResult.CompletedWithoutRaw
+                    : terminalResult)));
+    }
+
+    private sealed class InertTimeProvider : TimeProvider
+    {
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period) => new InertTimer();
+
+        private sealed class InertTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
     }
 
     private sealed class TempDirectory : IDisposable

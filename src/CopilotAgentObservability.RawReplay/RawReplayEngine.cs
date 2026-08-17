@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Security.Cryptography;
 
 namespace CopilotAgentObservability.RawReplay;
 
@@ -31,34 +32,61 @@ public sealed class RawReplayEngine
         try { outputs = RawReplayOutputBuilder.Build(bundle.Records); }
         catch (Exception exception) when (exception is JsonException or InvalidDataException or ArgumentException or OverflowException)
         { return Failure("normalization_failed"); }
-        if (outputs.NormalizedSha256 != bundle.Manifest.ExpectedNormalizedSha256) return Failure("normalized_hash_mismatch");
-        if (outputs.ProjectionSha256 != bundle.Manifest.ExpectedProjectionSha256) return Failure("projection_hash_mismatch");
-        if (outputs.DashboardSha256 != bundle.Manifest.ExpectedDashboardSha256) return Failure("dashboard_hash_mismatch");
-        var receipt = new RawReplayReceipt(
-            RawReplayContractVersions.ReplayResult,
-            replayId,
-            RawReplayContractVersions.BundleProfile,
-            archiveSha,
-            normalizationVersion,
-            RawReplayContractVersions.Projection,
-            RawReplayContractVersions.Dashboard,
-            outputs.NormalizedSha256,
-            outputs.ProjectionSha256,
-            outputs.DashboardSha256,
-            bundle.Manifest.SourceVersions,
-            bundle.Records.Count,
-            bundle.SessionContents.Count,
-            ExternalModelInvocations: 0);
-        if (existing is not null && !RawReplayJson.SerializeCanonical(existing).AsSpan().SequenceEqual(RawReplayJson.SerializeCanonical(receipt)))
-            return Failure("replay_id_conflict");
-        return new(true, null, existing is not null, receipt, RawReplayJson.SerializeCanonical(receipt),
-            outputs.Normalized, outputs.Projection, outputs.Dashboard, bundle.Records, bundle.SessionContents);
+        var transferred = false;
+        try
+        {
+            if (outputs.NormalizedSha256 != bundle.Manifest.ExpectedNormalizedSha256) return Failure("normalized_hash_mismatch");
+            if (outputs.ProjectionSha256 != bundle.Manifest.ExpectedProjectionSha256) return Failure("projection_hash_mismatch");
+            if (outputs.DashboardSha256 != bundle.Manifest.ExpectedDashboardSha256) return Failure("dashboard_hash_mismatch");
+            var receipt = new RawReplayReceipt(
+                RawReplayContractVersions.ReplayResult,
+                replayId,
+                RawReplayContractVersions.BundleProfile,
+                archiveSha,
+                normalizationVersion,
+                RawReplayContractVersions.Projection,
+                RawReplayContractVersions.Dashboard,
+                outputs.NormalizedSha256,
+                outputs.ProjectionSha256,
+                outputs.DashboardSha256,
+                bundle.Manifest.SourceVersions,
+                bundle.Records.Count,
+                bundle.SessionContents.Count,
+                ExternalModelInvocations: 0);
+            if (existing is not null && !CanonicalReceiptsEqual(existing, receipt))
+                return Failure("replay_id_conflict");
+            var resultBytes = RawReplayJson.SerializeCanonical(receipt);
+            transferred = true;
+            return new(true, null, existing is not null, receipt, resultBytes,
+                outputs.Normalized, outputs.Projection, outputs.Dashboard, bundle.Records, bundle.SessionContents);
+        }
+        finally
+        {
+            if (!transferred)
+            {
+                CryptographicOperations.ZeroMemory(outputs.Normalized);
+                CryptographicOperations.ZeroMemory(outputs.Projection);
+                CryptographicOperations.ZeroMemory(outputs.Dashboard);
+            }
+        }
     }
 
     private static bool ValidReplayId(string? value) => value is { Length: >= 8 and <= 64 }
         && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_')
         && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
         && !RawReplayCredentialScanner.ContainsKnownCredential(value);
+
+    private static bool CanonicalReceiptsEqual(RawReplayReceipt first, RawReplayReceipt second)
+    {
+        var firstBytes = RawReplayJson.SerializeCanonical(first);
+        var secondBytes = RawReplayJson.SerializeCanonical(second);
+        try { return firstBytes.AsSpan().SequenceEqual(secondBytes); }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(firstBytes);
+            CryptographicOperations.ZeroMemory(secondBytes);
+        }
+    }
 
     private static RawReplayExecutionResult Failure(string code) => new(false, code, false, null, null, null, null, null, [], []);
 }

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -16,14 +17,17 @@ public sealed partial class RawReplayArchiveService
     private readonly Func<string, string> temporaryPathFactory;
     private readonly Func<byte[], RawReplayInspection> inspectArchive;
     private readonly Action<RawReplayFileStagingCheckpoint>? stagingCheckpoint;
+    private readonly Action<string> deleteFile;
+    private readonly TimeProvider timeProvider;
+    private readonly Action<byte[]>? rawBufferObserverForTesting;
 
     public RawReplayArchiveService()
-        : this(outputPath => $"{outputPath}.{Guid.NewGuid():N}.partial", null, null)
+        : this(outputPath => $"{outputPath}.{Guid.NewGuid():N}.partial", null, null, null, null, null)
     {
     }
 
     internal RawReplayArchiveService(Func<string, string> temporaryPathFactory)
-        : this(temporaryPathFactory, null, null)
+        : this(temporaryPathFactory, null, null, null, null, null)
     {
     }
 
@@ -31,11 +35,25 @@ public sealed partial class RawReplayArchiveService
         Func<string, string> temporaryPathFactory,
         Func<byte[], RawReplayInspection>? inspectArchive,
         Action<RawReplayFileStagingCheckpoint>? stagingCheckpoint)
+        : this(temporaryPathFactory, inspectArchive, stagingCheckpoint, null, null, null)
+    {
+    }
+
+    internal RawReplayArchiveService(
+        Func<string, string> temporaryPathFactory,
+        Func<byte[], RawReplayInspection>? inspectArchive,
+        Action<RawReplayFileStagingCheckpoint>? stagingCheckpoint,
+        Action<string>? deleteFile,
+        TimeProvider? timeProvider,
+        Action<byte[]>? rawBufferObserverForTesting)
     {
         ArgumentNullException.ThrowIfNull(temporaryPathFactory);
         this.temporaryPathFactory = temporaryPathFactory;
         this.inspectArchive = inspectArchive ?? Inspect;
         this.stagingCheckpoint = stagingCheckpoint;
+        this.deleteFile = deleteFile ?? File.Delete;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.rawBufferObserverForTesting = rawBufferObserverForTesting;
     }
 
     [GeneratedRegex("^(records/record-[0-9]{6}\\.json|session-content/content-[0-9]{6}\\.json)$", RegexOptions.CultureInvariant)]
@@ -43,6 +61,7 @@ public sealed partial class RawReplayArchiveService
 
     public RawReplayPreview Preview(RawReplaySnapshot snapshot, RawReplayExportControl control)
     {
+        using var ownedBuffers = new OwnedRawBuffers(rawBufferObserverForTesting);
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(control);
         if (ValidateControl(control) is { } controlError) return Failure(controlError);
@@ -56,12 +75,16 @@ public sealed partial class RawReplayArchiveService
             return Failure("credential_material_detected");
 
         RawReplayOutputs outputs;
-        try { outputs = RawReplayOutputBuilder.Build(prepared.Records); }
+        try
+        {
+            outputs = RawReplayOutputBuilder.Build(prepared.Records);
+            ownedBuffers.Add(outputs.Normalized, outputs.Projection, outputs.Dashboard);
+        }
         catch (Exception exception) when (exception is JsonException or InvalidDataException or ArgumentException or OverflowException)
         { return Failure("normalization_failed"); }
 
-        var recordMembers = prepared.Records.Select(RawReplayJson.SerializeCanonical).ToArray();
-        var contentMembers = prepared.Contents.Select(RawReplayJson.SerializeCanonical).ToArray();
+        var recordMembers = prepared.Records.Select(record => ownedBuffers.Add(RawReplayJson.SerializeCanonical(record))).ToArray();
+        var contentMembers = prepared.Contents.Select(content => ownedBuffers.Add(RawReplayJson.SerializeCanonical(content))).ToArray();
         if (recordMembers.Any(bytes => bytes.Length > RawReplayLimits.MaximumRawRecordBytes)
             || contentMembers.Any(bytes => bytes.Length > RawReplayLimits.MaximumSessionContentBytes)) return Failure("entry_too_large");
         var estimated = recordMembers.Sum(bytes => (long)bytes.Length) + contentMembers.Sum(bytes => (long)bytes.Length);
@@ -82,7 +105,7 @@ public sealed partial class RawReplayArchiveService
         var knownMissing = snapshot.KnownMissing.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         if (!ValidSummary(sourceVersions) || !ValidSummary(contentStates)
             || !ValidSummary(filterStates) || !ValidSummary(knownMissing)) return Failure("record_invalid");
-        var binding = RawReplayJson.SerializeCanonical(new
+        var binding = ownedBuffers.Add(RawReplayJson.SerializeCanonical(new
         {
             schema_version = RawReplayContractVersions.ExportControl,
             profile = control.Profile,
@@ -97,7 +120,7 @@ public sealed partial class RawReplayArchiveService
             normalization_version = RawReplayContractVersions.Normalization,
             projection_version = RawReplayContractVersions.Projection,
             dashboard_version = RawReplayContractVersions.Dashboard,
-        });
+        }));
         var digest = RawReplayHash.Framed("copilot-agent-observability/raw-local-replay-preview/v1", binding);
         return new(
             true, null, RawReplayWarnings.RawData, "raw", RawReplayContractVersions.BundleProfile,
@@ -111,6 +134,7 @@ public sealed partial class RawReplayArchiveService
 
     public RawReplayResult Create(RawReplaySnapshot snapshot, RawReplayExportControl control)
     {
+        using var ownedBuffers = new OwnedRawBuffers(rawBufferObserverForTesting);
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(control);
         if (ValidateCommitControl(control) is { } controlError)
@@ -123,9 +147,9 @@ public sealed partial class RawReplayArchiveService
         var prepared = Prepare(snapshot);
         var files = new List<(string Path, string Kind, byte[] Bytes)>();
         for (var index = 0; index < prepared.Records.Count; index++)
-            files.Add(($"records/record-{index + 1:000000}.json", "raw_record", RawReplayJson.SerializeCanonical(prepared.Records[index])));
+            files.Add(($"records/record-{index + 1:000000}.json", "raw_record", ownedBuffers.Add(RawReplayJson.SerializeCanonical(prepared.Records[index]))));
         for (var index = 0; index < prepared.Contents.Count; index++)
-            files.Add(($"session-content/content-{index + 1:000000}.json", "session_event_content", RawReplayJson.SerializeCanonical(prepared.Contents[index])));
+            files.Add(($"session-content/content-{index + 1:000000}.json", "session_event_content", ownedBuffers.Add(RawReplayJson.SerializeCanonical(prepared.Contents[index]))));
 
         var manifest = new RawReplayManifest(
             RawReplayContractVersions.Manifest,
@@ -153,7 +177,7 @@ public sealed partial class RawReplayArchiveService
             preview.ExpectedProjectionSha256!,
             preview.ExpectedDashboardSha256!,
             files.Select(file => new RawReplayManifestFile(file.Path, file.Kind, file.Bytes.LongLength, RawReplayHash.Sha256(file.Bytes))).ToArray());
-        var manifestBytes = RawReplayJson.SerializeCanonical(manifest);
+        var manifestBytes = ownedBuffers.Add(RawReplayJson.SerializeCanonical(manifest));
         if (manifestBytes.Length > RawReplayLimits.MaximumManifestBytes)
             return new(false, "manifest_too_large", preview, null, null, null);
 
@@ -164,11 +188,18 @@ public sealed partial class RawReplayArchiveService
             foreach (var file in files) WriteEntry(archive, file.Path, file.Bytes);
         }
         var archiveBytes = output.ToArray();
+        if (output.TryGetBuffer(out var outputBuffer) && outputBuffer.Array is { } backing)
+            ownedBuffers.Add(archiveBytes, backing);
+        else
+            ownedBuffers.Add(archiveBytes);
         if (archiveBytes.LongLength > RawReplayLimits.MaximumArchiveBytes)
             return new(false, "archive_too_large", preview, null, null, null);
         var inspection = inspectArchive(archiveBytes);
         if (!inspection.Success) return new(false, inspection.ErrorCode ?? "publish_validation_failed", preview, null, null, null);
-        return new(true, null, preview, manifestBytes, archiveBytes, RawReplayHash.Sha256(archiveBytes));
+        var result = new RawReplayResult(true, null, preview, manifestBytes, archiveBytes, RawReplayHash.Sha256(archiveBytes));
+        ownedBuffers.Transfer(manifestBytes);
+        ownedBuffers.Transfer(archiveBytes);
+        return result;
     }
 
     internal RawReplayFileStagingResult StageForPublication(RawReplayResult result, string outputPath)
@@ -176,7 +207,8 @@ public sealed partial class RawReplayArchiveService
         ArgumentNullException.ThrowIfNull(result);
         if (!result.Success || result.ArchiveBytes is null)
             throw new ArgumentException("Only a complete raw replay archive can be staged.", nameof(result));
-        string? ownedTemporaryPath = null;
+        RawReplayStagedFile? ownedStagedFile = null;
+        using var ownedBuffers = new OwnedRawBuffers(rawBufferObserverForTesting);
         try
         {
             var fullOutputPath = Path.GetFullPath(outputPath);
@@ -194,33 +226,41 @@ public sealed partial class RawReplayArchiveService
                 || !temporaryName.EndsWith(".partial", pathComparison))
                 return new(WithoutRaw(result, "publish_failed"), null);
 
+            ownedStagedFile = new RawReplayStagedFile(
+                temporaryPath,
+                fullOutputPath,
+                deleteFile,
+                timeProvider,
+                ownsPath: false);
             using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                ownedTemporaryPath = temporaryPath;
+                ownedStagedFile.TakeOwnership();
                 stagingCheckpoint?.Invoke(RawReplayFileStagingCheckpoint.BeforeWrite);
                 stream.Write(result.ArchiveBytes!);
                 stagingCheckpoint?.Invoke(RawReplayFileStagingCheckpoint.BeforeFlush);
                 stream.Flush(flushToDisk: true);
             }
-            if (!inspectArchive(File.ReadAllBytes(temporaryPath)).Success)
+            var stagedArchiveBytes = ownedBuffers.Add(File.ReadAllBytes(temporaryPath));
+            if (!inspectArchive(stagedArchiveBytes).Success)
                 return new(WithoutRaw(result, "publish_validation_failed"), null);
-            var staged = new RawReplayStagedFile(temporaryPath, fullOutputPath);
-            ownedTemporaryPath = null;
-            return new(result, staged);
+            var staged = ownedStagedFile;
+            ownedStagedFile = null;
+            return new(result with { ManifestBytes = null, ArchiveBytes = null }, staged);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
         { return new(WithoutRaw(result, "publish_failed"), null); }
         finally
         {
-            try { if (ownedTemporaryPath is not null && File.Exists(ownedTemporaryPath)) File.Delete(ownedTemporaryPath); }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+            if (result.ManifestBytes is { } manifest) CryptographicOperations.ZeroMemory(manifest);
+            if (result.ArchiveBytes is { } archive) CryptographicOperations.ZeroMemory(archive);
+            ownedStagedFile?.Dispose();
         }
     }
 
     private static RawReplayResult WithoutRaw(RawReplayResult result, string errorCode)
     {
-        if (result.ManifestBytes is { } manifest) Array.Clear(manifest);
-        if (result.ArchiveBytes is { } archive) Array.Clear(archive);
+        if (result.ManifestBytes is { } manifest) CryptographicOperations.ZeroMemory(manifest);
+        if (result.ArchiveBytes is { } archive) CryptographicOperations.ZeroMemory(archive);
         return result with
         {
             Success = false,
@@ -233,6 +273,7 @@ public sealed partial class RawReplayArchiveService
 
     public RawReplayInspection Inspect(byte[] archiveBytes)
     {
+        using var ownedBuffers = new OwnedRawBuffers(rawBufferObserverForTesting);
         ArgumentNullException.ThrowIfNull(archiveBytes);
         if (archiveBytes.LongLength > RawReplayLimits.MaximumArchiveBytes) return InspectionFailure("archive_too_large");
         if (archiveBytes.Length < 22) return InspectionFailure("archive_invalid");
@@ -249,6 +290,7 @@ public sealed partial class RawReplayArchiveService
             if (framingError is not null) return InspectionFailure(framingError);
             var manifestBytes = ReadEntry(archive.Entries[0], RawReplayLimits.MaximumManifestBytes);
             if (manifestBytes is null) return InspectionFailure("manifest_too_large");
+            ownedBuffers.Add(manifestBytes);
             RawReplayManifest manifest;
             try { manifest = RawReplayJson.DeserializeExact<RawReplayManifest>(manifestBytes); }
             catch (JsonException) { return InspectionFailure("manifest_invalid"); }
@@ -302,7 +344,9 @@ public sealed partial class RawReplayArchiveService
                     || descriptor.Kind is not ("raw_record" or "session_event_content")) return InspectionFailure("inventory_mismatch");
                 var maximum = descriptor.Kind == "raw_record" ? RawReplayLimits.MaximumRawRecordBytes : RawReplayLimits.MaximumSessionContentBytes;
                 var bytes = ReadEntry(entry, maximum);
-                if (bytes is null || bytes.LongLength != descriptor.Size) return InspectionFailure("entry_size_mismatch");
+                if (bytes is null) return InspectionFailure("entry_size_mismatch");
+                ownedBuffers.Add(bytes);
+                if (bytes.LongLength != descriptor.Size) return InspectionFailure("entry_size_mismatch");
                 total += bytes.LongLength;
                 if (total > RawReplayLimits.MaximumArchiveBytes) return InspectionFailure("archive_too_large");
                 if (RawReplayHash.Sha256(bytes) != descriptor.Sha256) return InspectionFailure("checksum_mismatch");
@@ -347,7 +391,11 @@ public sealed partial class RawReplayArchiveService
                 || !manifest.SecretFilterStates.SequenceEqual(filterStates, StringComparer.Ordinal))
                 return InspectionFailure("manifest_metadata_mismatch");
             RawReplayOutputs outputs;
-            try { outputs = RawReplayOutputBuilder.Build(prepared.Records); }
+            try
+            {
+                outputs = RawReplayOutputBuilder.Build(prepared.Records);
+                ownedBuffers.Add(outputs.Normalized, outputs.Projection, outputs.Dashboard);
+            }
             catch (Exception exception) when (exception is JsonException or InvalidDataException or ArgumentException or OverflowException)
             { return InspectionFailure("normalization_failed"); }
             if (outputs.NormalizedSha256 != manifest.ExpectedNormalizedSha256) return InspectionFailure("normalized_hash_mismatch");
@@ -372,9 +420,18 @@ public sealed partial class RawReplayArchiveService
         {
             var grouped = group.ToArray();
             if (grouped.Any(record => Validate(record) is not null)) return PreparedSnapshot.Failure("record_invalid");
-            var canonical = grouped.Select(record => (Record: record, Bytes: RawReplayJson.SerializeCanonical(record))).ToArray();
-            if (canonical.Skip(1).Any(item => !item.Bytes.AsSpan().SequenceEqual(canonical[0].Bytes))) return PreparedSnapshot.Failure("source_id_conflict");
-            records.Add(canonical[0].Record);
+            var canonical = new List<(RawReplayRecord Record, byte[] Bytes)>();
+            try
+            {
+                foreach (var record in grouped)
+                    canonical.Add((record, RawReplayJson.SerializeCanonical(record)));
+                if (canonical.Skip(1).Any(item => !item.Bytes.AsSpan().SequenceEqual(canonical[0].Bytes))) return PreparedSnapshot.Failure("source_id_conflict");
+                records.Add(canonical[0].Record);
+            }
+            finally
+            {
+                foreach (var item in canonical) CryptographicOperations.ZeroMemory(item.Bytes);
+            }
         }
         var contents = new List<RawReplaySessionContent>();
         foreach (var group in snapshot.SessionContents
@@ -384,9 +441,18 @@ public sealed partial class RawReplayArchiveService
         {
             var grouped = group.ToArray();
             if (grouped.Any(content => Validate(content) is not null)) return PreparedSnapshot.Failure("record_invalid");
-            var canonical = grouped.Select(content => (Content: content, Bytes: RawReplayJson.SerializeCanonical(content))).ToArray();
-            if (canonical.Skip(1).Any(item => !item.Bytes.AsSpan().SequenceEqual(canonical[0].Bytes))) return PreparedSnapshot.Failure("source_id_conflict");
-            contents.Add(canonical[0].Content);
+            var canonical = new List<(RawReplaySessionContent Content, byte[] Bytes)>();
+            try
+            {
+                foreach (var content in grouped)
+                    canonical.Add((content, RawReplayJson.SerializeCanonical(content)));
+                if (canonical.Skip(1).Any(item => !item.Bytes.AsSpan().SequenceEqual(canonical[0].Bytes))) return PreparedSnapshot.Failure("source_id_conflict");
+                contents.Add(canonical[0].Content);
+            }
+            finally
+            {
+                foreach (var item in canonical) CryptographicOperations.ZeroMemory(item.Bytes);
+            }
         }
         if (records.Count + contents.Count == 0) return PreparedSnapshot.Failure("selection_empty");
         return new(records, contents, null);
@@ -526,10 +592,16 @@ public sealed partial class RawReplayArchiveService
         while (offset < output.Length)
         {
             var read = stream.Read(output, offset, output.Length - offset);
-            if (read == 0) return null;
+            if (read == 0)
+            {
+                CryptographicOperations.ZeroMemory(output);
+                return null;
+            }
             offset += read;
         }
-        return stream.ReadByte() == -1 ? output : null;
+        if (stream.ReadByte() == -1) return output;
+        CryptographicOperations.ZeroMemory(output);
+        return null;
     }
 
     private static string? ValidateStoredArchive(byte[] bytes, int expectedEntries)
@@ -589,6 +661,31 @@ public sealed partial class RawReplayArchiveService
     {
         internal static PreparedSnapshot Failure(string code) => new([], [], code);
     }
+
+    private sealed class OwnedRawBuffers(Action<byte[]>? observer) : IDisposable
+    {
+        private readonly List<byte[]> buffers = [];
+
+        internal byte[] Add(byte[] bytes)
+        {
+            buffers.Add(bytes);
+            observer?.Invoke(bytes);
+            return bytes;
+        }
+
+        internal void Add(params byte[][] values)
+        {
+            buffers.AddRange(values);
+            foreach (var bytes in values) observer?.Invoke(bytes);
+        }
+
+        internal void Transfer(byte[] bytes) => buffers.Remove(bytes);
+
+        public void Dispose()
+        {
+            foreach (var bytes in buffers) CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
 }
 
 internal sealed record RawReplayFileStagingResult(
@@ -601,20 +698,148 @@ internal enum RawReplayFileStagingCheckpoint
     BeforeFlush,
 }
 
-internal sealed class RawReplayStagedFile(string stagedPath, string outputPath) : IDisposable
+internal sealed class RawReplayStagedFile : IDisposable
 {
-    private int disposed;
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
+    private readonly Action<string> deleteFile;
+    private readonly SemaphoreSlim dispatcherSignal = new(0, 1);
+    private readonly ITimer retry;
+    private readonly Task dispatcher;
+    private int deleting;
+    private int pending;
+    private int retryWaiting;
+    private int dispatcherDelayRequired;
+    private int completed;
 
-    internal string StagedPath { get; } = stagedPath;
-    internal string OutputPath { get; } = outputPath;
+    internal RawReplayStagedFile(string stagedPath, string outputPath)
+        : this(stagedPath, outputPath, File.Delete, TimeProvider.System)
+    {
+    }
+
+    internal RawReplayStagedFile(
+        string stagedPath,
+        string outputPath,
+        Action<string> deleteFile,
+        TimeProvider timeProvider)
+        : this(stagedPath, outputPath, deleteFile, timeProvider, ownsPath: true)
+    {
+    }
+
+    internal RawReplayStagedFile(
+        string stagedPath,
+        string outputPath,
+        Action<string> deleteFile,
+        TimeProvider timeProvider,
+        bool ownsPath)
+    {
+        StagedPath = stagedPath;
+        OutputPath = outputPath;
+        this.deleteFile = deleteFile;
+        retry = timeProvider.CreateTimer(
+            static state => ((RawReplayStagedFile)state!).RetryDue(),
+            this,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
+        dispatcher = DispatchAsync();
+        this.ownsPath = ownsPath ? 1 : 0;
+    }
+
+    private int ownsPath;
+
+    internal string StagedPath { get; }
+    internal string OutputPath { get; }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        if (Volatile.Read(ref completed) != 0) return;
+        if (Volatile.Read(ref ownsPath) == 0)
+        {
+            Complete();
+            return;
+        }
+        Volatile.Write(ref pending, 1);
+        Volatile.Write(ref retryWaiting, 0);
+        if (Interlocked.CompareExchange(ref deleting, 1, 0) == 0)
+            TryDelete();
+        else
+            SignalDispatcher();
+    }
+
+    internal void TakeOwnership() => Volatile.Write(ref ownsPath, 1);
+
+    private async Task DispatchAsync()
+    {
+        while (true)
+        {
+            await dispatcherSignal.WaitAsync().ConfigureAwait(false);
+            if (Volatile.Read(ref completed) != 0) return;
+            if (Interlocked.Exchange(ref dispatcherDelayRequired, 0) != 0)
+            {
+                await Task.Delay(RetryDelay).ConfigureAwait(false);
+                if (Volatile.Read(ref completed) != 0) return;
+                Volatile.Write(ref retryWaiting, 0);
+            }
+            else if (Volatile.Read(ref retryWaiting) != 0)
+            {
+                continue;
+            }
+            if (Volatile.Read(ref pending) == 0 || Interlocked.CompareExchange(ref deleting, 1, 0) != 0) continue;
+            TryDelete();
+        }
+    }
+
+    private void RetryDue()
+    {
+        Volatile.Write(ref retryWaiting, 0);
+        Volatile.Write(ref pending, 1);
+        SignalDispatcher();
+    }
+
+    private void TryDelete()
+    {
+        Volatile.Write(ref pending, 0);
+        var deleted = false;
         try
         {
-            if (File.Exists(StagedPath)) File.Delete(StagedPath);
+            deleteFile(StagedPath);
+            deleted = true;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        // Delete failures stay inside the standing dispatcher; callers never regain cleanup authority.
+        catch { }
+
+        if (deleted) Complete();
+        Volatile.Write(ref deleting, 0);
+        if (!deleted)
+        {
+            Volatile.Write(ref pending, 1);
+            ScheduleRetry();
+        }
+    }
+
+    private void ScheduleRetry()
+    {
+        if (Volatile.Read(ref completed) != 0) return;
+        Volatile.Write(ref retryWaiting, 1);
+        try
+        {
+            if (retry.Change(RetryDelay, Timeout.InfiniteTimeSpan)) return;
+        }
+        catch { }
+        Volatile.Write(ref dispatcherDelayRequired, 1);
+        SignalDispatcher();
+    }
+
+    private void Complete()
+    {
+        if (Interlocked.Exchange(ref completed, 1) != 0) return;
+        try { retry.Dispose(); }
+        catch { }
+        SignalDispatcher();
+    }
+
+    private void SignalDispatcher()
+    {
+        try { dispatcherSignal.Release(); }
+        catch (SemaphoreFullException) { }
     }
 }

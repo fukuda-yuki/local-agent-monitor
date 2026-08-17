@@ -55,12 +55,18 @@ internal sealed class RetentionRawReplayStore
     private readonly string parent;
     private readonly TimeProvider timeProvider;
     private readonly RawReplayEngine engine = new();
+    private readonly Action<byte[]>? rawBufferObserverForTesting;
 
-    internal RetentionRawReplayStore(RetentionCatalogStore catalog, string? parentLocator = null, TimeProvider? timeProvider = null)
+    internal RetentionRawReplayStore(
+        RetentionCatalogStore catalog,
+        string? parentLocator = null,
+        TimeProvider? timeProvider = null,
+        Action<byte[]>? rawBufferObserverForTesting = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         parent = Path.GetFullPath(parentLocator ?? Path.Combine(Path.GetTempPath(), "copilot-agent-observability", "raw-replays"));
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.rawBufferObserverForTesting = rawBufferObserverForTesting;
     }
 
     internal async ValueTask<RawReplayExecutionResult> ReplayAsync(string replayId, byte[] archive, CancellationToken cancellationToken)
@@ -83,8 +89,9 @@ internal sealed class RetentionRawReplayStore
         if (!execution.Success) return execution;
         try
         {
+            ObserveRawByteCopies(execution);
             new RetentionSensitiveBundleStore(catalog).CaptureRawReplay(replayId, archive, execution, parent);
-            return execution;
+            return WithoutRawByteCopies(execution);
         }
         catch (ArgumentException)
         {
@@ -102,17 +109,30 @@ internal sealed class RetentionRawReplayStore
             }
             return CompleteRetainedResult(lease, result);
         }
+        finally
+        {
+            ZeroRawByteCopies(execution);
+        }
     }
 
     private static RawReplayExecutionResult CompleteRetainedResult(
         RetainedRawReplayLease lease,
-        RawReplayExecutionResult result) =>
-        lease.TryCompleteWithoutRaw() switch
+        RawReplayExecutionResult result)
+    {
+        try
         {
-            RetentionRawTerminalResult.CompletedWithoutRaw => result,
-            RetentionRawTerminalResult.Busy => Failure("replay_terminal_busy"),
-            _ => Failure("replay_terminal_lost"),
-        };
+            return lease.TryCompleteWithoutRaw() switch
+            {
+                RetentionRawTerminalResult.CompletedWithoutRaw => WithoutRawByteCopies(result),
+                RetentionRawTerminalResult.Busy => Failure("replay_terminal_busy"),
+                _ => Failure("replay_terminal_lost"),
+            };
+        }
+        finally
+        {
+            ZeroRawByteCopies(result);
+        }
+    }
 
     internal async ValueTask<RetainedRawReplayReadResult> ReadAsync(string replayId, CancellationToken cancellationToken)
     {
@@ -223,29 +243,53 @@ internal sealed class RetentionRawReplayStore
         {
             var manifestPath = Path.Combine(locator, "manifest.json");
             if (!SafeFile(manifestPath, 1024 * 1024, out var manifestBytes)) return null;
-            var manifest = RawReplayJson.DeserializeExact<RawReplayRetentionManifest>(manifestBytes);
-            if (!RawReplayJson.IsCanonical(manifestBytes, manifest)
-                || manifest.SchemaVersion != RawReplaySensitiveBundlePlanBuilder.SchemaVersion
-                || manifest.Profile != RawReplayContractVersions.BundleProfile || manifest.ReplayId != replayId
-                || manifest.CaptureId != captureId || manifest.ExpiresAt != manifest.ReservedAt.Add(RetentionV1Constants.SensitiveBundleTtl)
-                || manifest.Files.Count != 5 || manifest.Files.Select(file => file.Path).Distinct(StringComparer.Ordinal).Count() != 5) return null;
-            foreach (var file in manifest.Files)
+            try
             {
-                if (!RetentionFileCaptureContracts.IsCanonicalRelativePath(file.Path)
-                    || file.Path is not ("input/archive.zip" or "output/result.json" or "output/normalized.json" or "output/projection.json" or "output/dashboard.json")
-                    || file.Size < 0 || file.Size > RetentionV1Constants.MaximumFileBytes
-                    || !IsSha(file.Sha256)) return null;
-                var path = Path.GetFullPath(Path.Combine(locator, file.Path.Replace('/', Path.DirectorySeparatorChar)));
-                if (!path.StartsWith(locator + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                    || !SafeFile(path, file.Size, out var bytes, exact: true)
-                    || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(file.Sha256))) return null;
+                Observe(manifestBytes);
+                var manifest = RawReplayJson.DeserializeExact<RawReplayRetentionManifest>(manifestBytes);
+                if (!RawReplayJson.IsCanonical(manifestBytes, manifest)
+                    || manifest.SchemaVersion != RawReplaySensitiveBundlePlanBuilder.SchemaVersion
+                    || manifest.Profile != RawReplayContractVersions.BundleProfile || manifest.ReplayId != replayId
+                    || manifest.CaptureId != captureId || manifest.ExpiresAt != manifest.ReservedAt.Add(RetentionV1Constants.SensitiveBundleTtl)
+                    || manifest.Files.Count != 5 || manifest.Files.Select(file => file.Path).Distinct(StringComparer.Ordinal).Count() != 5) return null;
+                foreach (var file in manifest.Files)
+                {
+                    if (!RetentionFileCaptureContracts.IsCanonicalRelativePath(file.Path)
+                        || file.Path is not ("input/archive.zip" or "output/result.json" or "output/normalized.json" or "output/projection.json" or "output/dashboard.json")
+                        || file.Size < 0 || file.Size > RetentionV1Constants.MaximumFileBytes
+                        || !IsSha(file.Sha256)) return null;
+                    var path = Path.GetFullPath(Path.Combine(locator, file.Path.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!path.StartsWith(locator + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                        || !SafeFile(path, file.Size, out var bytes, exact: true)) return null;
+                    try
+                    {
+                        Observe(bytes);
+                        if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(file.Sha256))) return null;
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(bytes);
+                    }
+                }
+                var resultFile = manifest.Files.Single(file => file.Path == "output/result.json");
+                if (!SafeFile(Path.Combine(locator, resultFile.Path.Replace('/', Path.DirectorySeparatorChar)), resultFile.Size, out var resultBytes, exact: true)) return null;
+                try
+                {
+                    Observe(resultBytes);
+                    var receipt = RawReplayJson.DeserializeExact<RawReplayReceipt>(resultBytes);
+                    return RawReplayJson.IsCanonical(resultBytes, receipt)
+                        && CanonicalReceiptsEqual(receipt, manifest.Receipt)
+                        && receipt.ReplayId == replayId ? receipt : null;
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(resultBytes);
+                }
             }
-            var resultFile = manifest.Files.Single(file => file.Path == "output/result.json");
-            if (!SafeFile(Path.Combine(locator, resultFile.Path.Replace('/', Path.DirectorySeparatorChar)), resultFile.Size, out var resultBytes, exact: true)) return null;
-            var receipt = RawReplayJson.DeserializeExact<RawReplayReceipt>(resultBytes);
-            return RawReplayJson.IsCanonical(resultBytes, receipt)
-                && RawReplayJson.SerializeCanonical(receipt).AsSpan().SequenceEqual(RawReplayJson.SerializeCanonical(manifest.Receipt))
-                && receipt.ReplayId == replayId ? receipt : null;
+            finally
+            {
+                CryptographicOperations.ZeroMemory(manifestBytes);
+            }
         }
         catch (Exception exception) when (exception is JsonException or FormatException or InvalidOperationException)
         {
@@ -289,15 +333,52 @@ internal sealed class RetentionRawReplayStore
         var length = new FileInfo(path).Length;
         if (length < 0 || exact && length != maximum || !exact && length > maximum || length > int.MaxValue) return false;
         bytes = File.ReadAllBytes(path);
-        return bytes.LongLength == length;
+        if (bytes.LongLength == length) return true;
+        CryptographicOperations.ZeroMemory(bytes);
+        bytes = [];
+        return false;
     }
+
+    private void Observe(byte[] bytes) => rawBufferObserverForTesting?.Invoke(bytes);
 
     private static bool ValidReplayId(string? value) => value is { Length: >= 8 and <= 64 }
         && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_')
         && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
         && !RawReplayCredentialScanner.ContainsKnownCredential(value);
     private static bool IsSha(string value) => value.Length == 64 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+    private static bool CanonicalReceiptsEqual(RawReplayReceipt first, RawReplayReceipt second)
+    {
+        var firstBytes = RawReplayJson.SerializeCanonical(first);
+        var secondBytes = RawReplayJson.SerializeCanonical(second);
+        try { return firstBytes.AsSpan().SequenceEqual(secondBytes); }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(firstBytes);
+            CryptographicOperations.ZeroMemory(secondBytes);
+        }
+    }
     private static RawReplayExecutionResult Failure(string code) => new(false, code, false, null, null, null, null, null, [], []);
+    private static RawReplayExecutionResult WithoutRawByteCopies(RawReplayExecutionResult result) => result with
+    {
+        ResultBytes = null,
+        NormalizedBytes = null,
+        ProjectionBytes = null,
+        DashboardBytes = null,
+    };
+    private static void ZeroRawByteCopies(RawReplayExecutionResult result)
+    {
+        if (result.ResultBytes is { } receipt) CryptographicOperations.ZeroMemory(receipt);
+        if (result.NormalizedBytes is { } normalized) CryptographicOperations.ZeroMemory(normalized);
+        if (result.ProjectionBytes is { } projection) CryptographicOperations.ZeroMemory(projection);
+        if (result.DashboardBytes is { } dashboard) CryptographicOperations.ZeroMemory(dashboard);
+    }
+    private void ObserveRawByteCopies(RawReplayExecutionResult result)
+    {
+        if (result.ResultBytes is { } receipt) Observe(receipt);
+        if (result.NormalizedBytes is { } normalized) Observe(normalized);
+        if (result.ProjectionBytes is { } projection) Observe(projection);
+        if (result.DashboardBytes is { } dashboard) Observe(dashboard);
+    }
     private static void Frame(IncrementalHash hash, string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value); Span<byte> length = stackalloc byte[4];

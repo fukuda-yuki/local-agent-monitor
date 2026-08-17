@@ -61,6 +61,7 @@ public sealed class RawReplayAuthorizedService(IRawReplaySnapshotProvider snapsh
         }
         if (!result.Success) return CompleteFailure(lease, result);
         var completedStaging = staging!;
+        result = completedStaging.Result;
         if (completedStaging.StagedFile is null) return CompleteFailure(lease, completedStaging.Result);
         using var staged = completedStaging.StagedFile;
         if (!lease.TrySealRawReplayFilePublication(
@@ -112,8 +113,8 @@ public sealed class RawReplayAuthorizedService(IRawReplaySnapshotProvider snapsh
 
     internal static RawReplayResult DiscardRaw(RawReplayResult result, string errorCode)
     {
-        if (result.ManifestBytes is { } manifest) Array.Clear(manifest);
-        if (result.ArchiveBytes is { } archive) Array.Clear(archive);
+        if (result.ManifestBytes is { } manifest) System.Security.Cryptography.CryptographicOperations.ZeroMemory(manifest);
+        if (result.ArchiveBytes is { } archive) System.Security.Cryptography.CryptographicOperations.ZeroMemory(archive);
         return result with
         {
             Success = false,

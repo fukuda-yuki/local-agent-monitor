@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -10,39 +11,72 @@ public static class RawReplayJson
     private static readonly JsonSerializerOptions Options = CreateOptions();
 
     public static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Options);
-    public static string Text<T>(T value) => Encoding.UTF8.GetString(Serialize(value));
+    public static string Text<T>(T value)
+    {
+        var bytes = Serialize(value);
+        try { return Encoding.UTF8.GetString(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
 
     public static byte[] SerializeCanonical<T>(T value)
     {
         var serialized = Serialize(value);
-        using var document = JsonDocument.Parse(serialized, new JsonDocumentOptions
+        try
         {
-            AllowTrailingCommas = false,
-            CommentHandling = JsonCommentHandling.Disallow,
-            MaxDepth = 64,
-        });
-        using var output = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false }))
-        {
-            WriteCanonical(writer, document.RootElement);
+            using var document = JsonDocument.Parse(serialized, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 64,
+            });
+            using var output = new MemoryStream();
+            try
+            {
+                using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false }))
+                {
+                    WriteCanonical(writer, document.RootElement);
+                }
+                output.WriteByte((byte)'\n');
+                return output.ToArray();
+            }
+            finally
+            {
+                if (output.TryGetBuffer(out var buffer) && buffer.Array is { } backing)
+                    CryptographicOperations.ZeroMemory(backing);
+            }
         }
-        output.WriteByte((byte)'\n');
-        return output.ToArray();
+        finally
+        {
+            CryptographicOperations.ZeroMemory(serialized);
+        }
     }
 
     internal static T DeserializeExact<T>(ReadOnlySpan<byte> bytes)
     {
-        using var document = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions
+        var copy = bytes.ToArray();
+        try
         {
-            AllowTrailingCommas = false,
-            CommentHandling = JsonCommentHandling.Disallow,
-            MaxDepth = 64,
-        });
-        RejectDuplicateProperties(document.RootElement);
-        return JsonSerializer.Deserialize<T>(bytes, Options) ?? throw new JsonException();
+            using var document = JsonDocument.Parse(copy, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 64,
+            });
+            RejectDuplicateProperties(document.RootElement);
+            return JsonSerializer.Deserialize<T>(bytes, Options) ?? throw new JsonException();
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(copy);
+        }
     }
 
-    internal static bool IsCanonical<T>(byte[] bytes, T value) => bytes.AsSpan().SequenceEqual(SerializeCanonical(value));
+    internal static bool IsCanonical<T>(byte[] bytes, T value)
+    {
+        var canonical = SerializeCanonical(value);
+        try { return bytes.AsSpan().SequenceEqual(canonical); }
+        finally { CryptographicOperations.ZeroMemory(canonical); }
+    }
 
     private static JsonSerializerOptions CreateOptions()
     {

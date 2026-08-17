@@ -11,9 +11,18 @@ internal static class RawReplayHash
     internal static string Framed(string domain, params byte[][] values)
     {
         using var stream = new MemoryStream();
-        Write(stream, Encoding.UTF8.GetBytes(domain));
-        foreach (var value in values) Write(stream, value);
-        return Sha256(stream.GetBuffer().AsSpan(0, checked((int)stream.Length)));
+        var domainBytes = Encoding.UTF8.GetBytes(domain);
+        try
+        {
+            Write(stream, domainBytes);
+            foreach (var value in values) Write(stream, value);
+            return Sha256(stream.GetBuffer().AsSpan(0, checked((int)stream.Length)));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(domainBytes);
+            CryptographicOperations.ZeroMemory(stream.GetBuffer());
+        }
     }
 
     private static void Write(Stream stream, byte[] value)

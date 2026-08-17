@@ -253,6 +253,80 @@ public sealed class RetentionRawReplayStoreTests
     }
 
     [Fact]
+    public async Task ReadAsyncZeroesEveryOwnedRawBufferAfterGrantedReceiptMaterialization()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-buffer-lifetime";
+        var writer = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
+        Assert.True((await writer.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
+        var ownedBuffers = new List<byte[]>();
+        var reader = new RetentionRawReplayStore(
+            fixture.Catalog,
+            fixture.BundleParent,
+            fixture.TimeProvider,
+            bytes => ownedBuffers.Add(bytes));
+
+        var result = await reader.ReadAsync(replayId, CancellationToken.None);
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Granted, result.Disposition);
+        Assert.NotEmpty(ownedBuffers);
+        Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+        await Assert.IsType<RetainedRawReplayLease>(result.Lease).DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ReadAsyncZeroesOwnedRawBuffersWhenMaterializationThrowsMidPath()
+    {
+        using var fixture = new Fixture();
+        const string replayId = "replay-buffer-exception";
+        var writer = new RetentionRawReplayStore(fixture.Catalog, fixture.BundleParent, fixture.TimeProvider);
+        Assert.True((await writer.ReplayAsync(replayId, Archive(1, "trace-one"), CancellationToken.None)).Success);
+        var ownedBuffers = new List<byte[]>();
+        var reader = new RetentionRawReplayStore(
+            fixture.Catalog,
+            fixture.BundleParent,
+            fixture.TimeProvider,
+            bytes =>
+            {
+                ownedBuffers.Add(bytes);
+                throw new IOException("synthetic materialization failure");
+            });
+
+        var result = await reader.ReadAsync(replayId, CancellationToken.None);
+
+        Assert.Equal(RetainedRawReplayReadDisposition.Busy, result.Disposition);
+        Assert.Null(result.Lease);
+        Assert.NotEmpty(ownedBuffers);
+        Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+        Assert.Equal(0, fixture.Scalar<long>("SELECT COUNT(*) FROM retention_leases;"));
+    }
+
+    [Fact]
+    public async Task ReplayAsyncZeroesEveryOwnedExecutionBufferBeforeReturningTheSafeReceipt()
+    {
+        using var fixture = new Fixture();
+        var ownedBuffers = new List<byte[]>();
+        var store = new RetentionRawReplayStore(
+            fixture.Catalog,
+            fixture.BundleParent,
+            fixture.TimeProvider,
+            bytes => ownedBuffers.Add(bytes));
+
+        var result = await store.ReplayAsync(
+            "replay-execution-buffers",
+            Archive(1, "trace-one"),
+            CancellationToken.None);
+
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Null(result.ResultBytes);
+        Assert.Null(result.NormalizedBytes);
+        Assert.Null(result.ProjectionBytes);
+        Assert.Null(result.DashboardBytes);
+        Assert.NotEmpty(ownedBuffers);
+        Assert.All(ownedBuffers, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+    }
+
+    [Fact]
     public async Task ReadAsync_TreatsSqliteContentionAsBusyWithoutCatalogMutation()
     {
         using var fixture = new Fixture();
