@@ -519,6 +519,57 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
+    public async Task Publish_HandleLostAfterCommitClaim_PublishesBeforeTheClaimReleasesTheHandle()
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var ingestion = new SqliteIngestionCommitStore(database.Path);
+        ingestion.Commit(CreateBatch("claimed-publication-frontier-1", ObservedAt, SkillPayload));
+        ingestion.Commit(CreateBatch("claimed-publication-frontier-2", ObservedAt.AddMilliseconds(1), SkillPayload));
+        var retention = RetentionCatalogContext.AdoptExistingCatalogV1(database.Path);
+        var time = new MutableTimeProvider(ObservedAt.AddSeconds(2));
+        var checkpoint = new SkillPublishPublicationCheckpoint(
+            loseHandle: true,
+            SkillProjectionCheckpoint.AfterPublishClaimBeforeCommit);
+        var store = new SqliteSkillProjectionStore(
+            database.Path,
+            new RawTelemetryStore(database.Path, retention, time),
+            checkpoint);
+        var lease = Assert.IsType<SkillProjectionQueueLease>(store.ClaimNext(ObservedAt.AddSeconds(1)));
+        var read = await store.ReadFrontierAsync(lease, CancellationToken.None);
+        await using var retentionLease =
+            Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        checkpoint.Configure(retentionLease.Grants);
+        using var retentionReference = retentionLease.AcquireValueReference();
+        var projected = retentionReference.Value
+            .Select((record, index) => new SkillProjectionProjectedInput(
+                record.Id!.Value,
+                record,
+                MonitorSkillProjectionBuilder.Build(
+                    record,
+                    lease.Inputs[index].SourceSurface,
+                    traceId => traceId == lease.TraceId
+                        ? (TraceSourceVersionResolutionState.Resolved, lease.ExactVersion)
+                        : null)))
+            .ToArray();
+        RetentionCommittedReadHandle handle;
+        using (var publication = retentionLease.Grants[0].EnterLeasePublication())
+            handle = Assert.IsType<RetentionCommittedReadHandle>(publication.CommittedHandle);
+
+        var outcome = store.Publish(lease, projected, retentionLease, ObservedAt.AddSeconds(2));
+
+        Assert.Equal(SkillProjectionWorkOutcome.Published, outcome);
+        Assert.True(checkpoint.HandleWasPublishedAfterCommit);
+        Assert.False(handle.IsPublished);
+        using var verification = Open(database.Path);
+        Assert.Equal(2, ScalarLong(verification, "SELECT COUNT(*) FROM skill_projection_invocations;"));
+        Assert.Equal("completed", ScalarText(
+            verification,
+            "SELECT state FROM skill_projection_queue WHERE generation_id=$generation_id;",
+            ("$generation_id", lease.GenerationId)));
+    }
+
+    [Fact]
     public async Task Publish_CompositeFrontierUsesOneClockSampleWhileEveryPublicationScopeIsHeld()
     {
         using var database = new TestDatabase();
@@ -3268,6 +3319,7 @@ public sealed class SkillProjectionGenerationTests
         private int proofCount;
 
         internal bool AllPublicationScopesWereHeld { get; private set; }
+        internal bool HandleWasPublishedAfterCommit { get; private set; }
         internal Task? ConcurrentProbes { get; private set; }
 
         internal void Configure(IReadOnlyList<RetentionReadGrant> configuredGrants) =>
@@ -3277,6 +3329,13 @@ public sealed class SkillProjectionGenerationTests
         {
             if (grants.Count == 0)
                 throw new InvalidOperationException("publish checkpoint was not configured");
+
+            if (checkpoint == SkillProjectionCheckpoint.AfterPublishCommitBeforeClaimRelease)
+            {
+                using var publication = grants[0].EnterLeasePublication();
+                HandleWasPublishedAfterCommit = publication.CommittedHandle!.IsPublished;
+                return;
+            }
 
             if (loseHandle)
             {

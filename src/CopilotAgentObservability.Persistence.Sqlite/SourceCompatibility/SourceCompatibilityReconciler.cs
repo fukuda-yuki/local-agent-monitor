@@ -8,6 +8,8 @@ internal enum SourceCompatibilityReconciliationCheckpoint
 {
     AfterRetentionAdmission,
     BeforeCommit,
+    AfterPublicationClaimBeforeCommit,
+    AfterCommitBeforePublicationClaimRelease,
 }
 
 internal sealed class SourceCompatibilityReconciler
@@ -17,6 +19,7 @@ internal sealed class SourceCompatibilityReconciler
     private readonly TimeProvider timeProvider;
     private readonly Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint;
     private readonly Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting;
+    private readonly Action<RetentionReadGrant>? retentionGrantObserverForTesting;
 
     internal SourceCompatibilityReconciler(
         string databasePath,
@@ -34,7 +37,8 @@ internal sealed class SourceCompatibilityReconciler
         SourceCompatibilityReconciliationAuthority authority,
         TimeProvider timeProvider,
         Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null,
-        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null)
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null,
+        Action<RetentionReadGrant>? retentionGrantObserverForTesting = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(authority);
@@ -44,6 +48,7 @@ internal sealed class SourceCompatibilityReconciler
         this.timeProvider = timeProvider;
         this.checkpoint = checkpoint;
         this.lastRawAccessObserverForTesting = lastRawAccessObserverForTesting;
+        this.retentionGrantObserverForTesting = retentionGrantObserverForTesting;
     }
 
     internal SourceCompatibilityReconciliationResult Reconcile(
@@ -129,6 +134,7 @@ internal sealed class SourceCompatibilityReconciler
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
             }
             checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterRetentionAdmission);
+            retentionGrantObserverForTesting?.Invoke(grant);
             using var retainedRecordReference = lease.AcquireValueReference();
             lastRawAccessObserverForTesting?.Invoke(() => retainedRecordReference.Value);
             return Commit(request, fingerprint, registry, retainedRecordReference.Value, grant);
@@ -211,7 +217,11 @@ internal sealed class SourceCompatibilityReconciler
             if (!publications.TryClaimCommittedHandles(out var existingPublicationClaim))
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
             using (existingPublicationClaim)
+            {
+                checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterPublicationClaimBeforeCommit);
                 transaction.Commit();
+                checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterCommitBeforePublicationClaimRelease);
+            }
             return existing.Result;
         }
 
@@ -298,7 +308,11 @@ internal sealed class SourceCompatibilityReconciler
             if (!publications.TryClaimCommittedHandles(out var noChangePublicationClaim))
                 throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
             using (noChangePublicationClaim)
+            {
+                checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterPublicationClaimBeforeCommit);
                 transaction.Commit();
+                checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterCommitBeforePublicationClaimRelease);
+            }
             return noChange;
         }
 
@@ -355,7 +369,11 @@ internal sealed class SourceCompatibilityReconciler
         if (!publications.TryClaimCommittedHandles(out var publicationClaim))
             throw new InvalidOperationException("source_compatibility_retained_input_unavailable");
         using (publicationClaim)
+        {
+            checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterPublicationClaimBeforeCommit);
             transaction.Commit();
+            checkpoint?.Invoke(SourceCompatibilityReconciliationCheckpoint.AfterCommitBeforePublicationClaimRelease);
+        }
         return changed;
     }
 

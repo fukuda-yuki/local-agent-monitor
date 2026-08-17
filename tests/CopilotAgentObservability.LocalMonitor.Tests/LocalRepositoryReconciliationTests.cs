@@ -891,6 +891,35 @@ public sealed class LocalRepositoryReconciliationTests
     }
 
     [Fact]
+    public async Task CallerCancellationAfterPublicationClaim_CommitsBeforeTheClaimReleasesTheHandle()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var observedAfterCommit = false;
+        var checkpoint = new DelegatingAdmissionCheckpoint(stage =>
+        {
+            if (stage == LocalRepositoryAdmissionCheckpoint.AfterPublicationClaimBeforeCommit)
+                cancellation.Cancel();
+            if (stage == LocalRepositoryAdmissionCheckpoint.AfterCommitBeforePublicationClaimRelease)
+                observedAfterCommit = true;
+        });
+        using var fixture = new LocalRepositoryAdmissionFixture(checkpoint);
+
+        var outcome = await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/Claimed")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)],
+            cancellation.Token);
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.ProcessorInvoked, outcome);
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.True(observedAfterCommit);
+        Assert.Equal("completed", fixture.ScalarText("SELECT state FROM local_repository_reconciliation_queue;"));
+        AssertSinglePublishedGraph(fixture);
+    }
+
+    [Fact]
     public async Task BusyAtAdmissionBeginIsRetryableAndPublishesNoRows()
     {
         using var checkpoint = new WriteLockAdmissionCheckpoint();

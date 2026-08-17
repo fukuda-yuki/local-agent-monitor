@@ -14,6 +14,8 @@ internal enum MonitorProjectionPublicationCheckpoint
     AfterClockSampleBeforeProof,
     AfterGrantProof,
     BeforeCommit,
+    AfterPublicationClaimBeforeCommit,
+    AfterCommitBeforePublicationClaimRelease,
     AfterCommit,
 }
 
@@ -319,7 +321,11 @@ internal sealed partial class RawTelemetryStore
             return false;
         }
         using (publicationClaim)
-        transaction.Commit();
+        {
+            projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterPublicationClaimBeforeCommit);
+            transaction.Commit();
+            projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommitBeforePublicationClaimRelease);
+        }
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;
     }
@@ -873,7 +879,11 @@ internal sealed partial class RawTelemetryStore
             return false;
         }
         using (publicationClaim)
-        transaction.Commit();
+        {
+            projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterPublicationClaimBeforeCommit);
+            transaction.Commit();
+            projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommitBeforePublicationClaimRelease);
+        }
         projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterCommit);
         return true;
     }

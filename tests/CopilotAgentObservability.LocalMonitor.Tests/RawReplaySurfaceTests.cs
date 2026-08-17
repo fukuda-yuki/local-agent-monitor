@@ -636,8 +636,8 @@ public sealed class RawReplaySurfaceTests
             reservation!.Prepare(bytesToFreeze, "metadata");
             bytesToFreeze[0] = 9;
             reservation.Prepare([9, 9, 9], "replacement");
-            reservation.Activate();
-            reservation.Activate();
+            Assert.True(reservation.Activate());
+            Assert.False(reservation.Activate());
 
             Assert.Equal(1, store.Count);
             Assert.True(store.TryGet("export", "reserved", out var bytes, out string metadata));
@@ -648,6 +648,72 @@ public sealed class RawReplaySurfaceTests
         {
             store.Dispose();
         }
+    }
+
+    [Fact]
+    public void Transient_prepared_reservation_survives_store_disposal_and_activates_exactly_once()
+    {
+        var store = new RawReplayTransientStore(
+            new MutableTimeProvider(Now),
+            new RawReplayTransientLimits(2, 1024, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)));
+        Assert.True(store.TryReserve("export", "sealed-before-disposal", 3, out var reservation));
+        reservation!.Prepare([1, 2, 3], "download-metadata");
+
+        store.Dispose();
+
+        Assert.True(reservation.Activate());
+        Assert.False(reservation.Activate());
+        Assert.True(store.TryGet("export", "sealed-before-disposal", out var bytes, out string metadata));
+        Assert.Equal(new byte[] { 1, 2, 3 }, bytes);
+        Assert.Equal("download-metadata", metadata);
+        reservation.Dispose();
+        store.Dispose();
+    }
+
+    [Fact]
+    public void Transient_activation_without_preparation_reports_loss_without_completing_the_ticket()
+    {
+        using var store = new RawReplayTransientStore(
+            new MutableTimeProvider(Now),
+            new RawReplayTransientLimits(2, 1024, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)));
+        Assert.True(store.TryReserve("export", "not-yet-prepared", 3, out var reservation));
+
+        Assert.False(reservation!.Activate());
+
+        reservation.Prepare([1, 2, 3], "prepared-after-loss");
+        Assert.True(reservation.Activate());
+        Assert.True(store.TryGet("export", "not-yet-prepared", out var bytes, out string metadata));
+        Assert.Equal(new byte[] { 1, 2, 3 }, bytes);
+        Assert.Equal("prepared-after-loss", metadata);
+    }
+
+    [Fact]
+    public void Transient_preparation_loss_zeroes_the_original_and_frozen_copies()
+    {
+        byte[]? frozen = null;
+        RawReplayTransientStore? store = null;
+        store = new RawReplayTransientStore(
+            new MutableTimeProvider(Now),
+            new RawReplayTransientLimits(2, 1024, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)),
+            checkpoint =>
+            {
+                if (checkpoint == RawReplayTransientPreparationCheckpoint.BeforeValidation)
+                    store!.Dispose();
+            },
+            preparedBytes => frozen = preparedBytes);
+        Assert.True(store.TryReserve("export", "lost-before-seal", 3, out var reservation));
+        var original = new byte[] { 1, 2, 3 };
+
+        Assert.Throws<InvalidOperationException>(() => reservation!.Prepare(original, "must-not-publish"));
+        Array.Clear(original);
+
+        Assert.Equal(new byte[3], original);
+        Assert.NotNull(frozen);
+        Assert.Equal(new byte[3], frozen);
+        Assert.False(reservation!.Activate());
+        Assert.False(store.TryGet<string>("export", "lost-before-seal", out _, out _));
+        reservation.Dispose();
+        store.Dispose();
     }
 
     [Fact]

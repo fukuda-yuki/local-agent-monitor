@@ -46,6 +46,8 @@ internal enum SkillProjectionCheckpoint
     AfterPublishTransactionBeganBeforeClockSample,
     AfterPublishGrantProof,
     BeforePublishCommitClaim,
+    AfterPublishClaimBeforeCommit,
+    AfterPublishCommitBeforeClaimRelease,
     AfterFinishOwnedTransactionBeganBeforeClockSample,
     BeforeRetentionRenewalPublication,
 }
@@ -480,7 +482,11 @@ internal sealed class SqliteSkillProjectionStore
             return RecordRetry(lease, transactionAt, "retention_lease_lost");
         }
         using (publicationClaim)
+        {
+            checkpoint?.Reached(SkillProjectionCheckpoint.AfterPublishClaimBeforeCommit);
             transaction.Commit();
+            checkpoint?.Reached(SkillProjectionCheckpoint.AfterPublishCommitBeforeClaimRelease);
+        }
         return SkillProjectionWorkOutcome.Published;
     }
 

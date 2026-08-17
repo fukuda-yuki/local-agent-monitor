@@ -13,6 +13,52 @@ public sealed class SourceCompatibilityReconciliationTests
     private static readonly DateTimeOffset ObservedAt =
         new(2026, 7, 31, 0, 0, 0, TimeSpan.Zero);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Reconcile_HandleLostAfterCommitClaim_CommitsBeforeTheClaimReleasesTheHandle(bool semanticChange)
+    {
+        using var database = new TestDatabase();
+        new SqliteSourceCompatibilityStore(database.Path).CreateSchema();
+        var committed = new SqliteIngestionCommitStore(database.Path).Commit(
+            CreateBatch(
+                semanticChange ? "claimed-change" : "claimed-no-change",
+                TraceSourceVersionResolutionState.Missing,
+                sourceApplicationVersion: null,
+                semanticChange ? VersionPayload("1.0.74") : "{}"));
+        RetentionCommittedReadHandle? handle = null;
+        var observedAfterCommit = false;
+        var reconciler = CreateReconciler(
+            database.Path,
+            checkpoint =>
+            {
+                if (checkpoint == SourceCompatibilityReconciliationCheckpoint.AfterPublicationClaimBeforeCommit)
+                    handle!.LoseAsynchronously();
+                if (checkpoint == SourceCompatibilityReconciliationCheckpoint.AfterCommitBeforePublicationClaimRelease)
+                    observedAfterCommit = handle!.IsPublished;
+            },
+            retentionGrantObserverForTesting: grant =>
+            {
+                using var publication = grant.EnterLeasePublication();
+                handle = Assert.IsType<RetentionCommittedReadHandle>(publication.CommittedHandle);
+            });
+
+        var result = reconciler.Reconcile(Request(
+            semanticChange ? "claimed-change-operation" : "claimed-no-change-operation",
+            committed.ObservationId,
+            SourceCompatibilityReconciliationTrigger.DecoderRevision,
+            "resolver-2",
+            "registry-1"));
+
+        Assert.Equal(
+            semanticChange ? SourceCompatibilityReconciliationOutcome.Changed : SourceCompatibilityReconciliationOutcome.NoChange,
+            result.Outcome);
+        Assert.True(observedAfterCommit);
+        Assert.False(handle!.IsPublished);
+        using var verification = Open(database.Path);
+        Assert.Equal(1, ScalarLong(verification, "SELECT COUNT(*) FROM source_compatibility_reconciliation_receipts;"));
+    }
+
     [Fact]
     public void DecoderRevision_DeletedBeforeDigestPersistsAndReplaysUnavailableReceiptOnly()
     {
@@ -1286,7 +1332,8 @@ public sealed class SourceCompatibilityReconciliationTests
     private static SourceCompatibilityReconciler CreateReconciler(
         string databasePath,
         Action<SourceCompatibilityReconciliationCheckpoint>? checkpoint = null,
-        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null) =>
+        Action<Func<RawTelemetryRecord>>? lastRawAccessObserverForTesting = null,
+        Action<RetentionReadGrant>? retentionGrantObserverForTesting = null) =>
         new(
             databasePath,
             SourceCompatibilityReconciliationAuthority.Create(
@@ -1302,7 +1349,8 @@ public sealed class SourceCompatibilityReconciliationTests
             ]),
             new MutableTimeProvider(ObservedAt.AddMinutes(1)),
             checkpoint,
-            lastRawAccessObserverForTesting);
+            lastRawAccessObserverForTesting,
+            retentionGrantObserverForTesting);
 
     private static VerifiedSourceFingerprintRegistry Registry(string version) =>
         VerifiedSourceFingerprintRegistry.Create(

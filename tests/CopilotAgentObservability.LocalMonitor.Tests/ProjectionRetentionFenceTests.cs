@@ -7,6 +7,76 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class ProjectionRetentionFenceTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Projection_LossAfterPublicationClaim_CommitsBeforeTheClaimReleasesTheHandle(bool spanProjection)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        RetentionCommittedReadHandle? handle = null;
+        var armed = false;
+        var observedClaimBeforeCommit = false;
+        var observedClaimAfterCommit = false;
+        var store = new RawTelemetryStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            temp.TimeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter,
+            projectionPublicationCheckpoint: checkpoint =>
+            {
+                if (!armed) return;
+                if (checkpoint == MonitorProjectionPublicationCheckpoint.AfterPublicationClaimBeforeCommit)
+                {
+                    cancellation.Cancel();
+                    observedClaimBeforeCommit = handle!.IsPublished;
+                }
+                if (checkpoint == MonitorProjectionPublicationCheckpoint.AfterCommitBeforePublicationClaimRelease)
+                    observedClaimAfterCommit = handle!.IsPublished;
+            });
+        store.CreateMonitorSchema();
+        var record = Raw("claim-pinned-trace", "claim-pinned-span");
+        var rawRecordId = store.Insert(record);
+        if (spanProjection)
+            await ProjectTraceAsync(store, rawRecordId);
+        var read = spanProjection
+            ? await store.ListUnprocessedForSpanProjectionAsync(100, RetentionReadKind.Operation, cancellation.Token)
+            : await store.ListUnprocessedForProjectionAsync(100, RetentionReadKind.Operation, cancellation.Token);
+        await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        RawTelemetryRecord retained;
+        using (var reference = lease.AcquireValueReference())
+        {
+            retained = Assert.Single(reference.Value);
+        }
+        using (var publication = lease.Grants[0].EnterLeasePublication())
+            handle = Assert.IsType<RetentionCommittedReadHandle>(publication.CommittedHandle);
+        armed = true;
+
+        var applied = spanProjection
+            ? store.ApplySpanProjection(
+                rawRecordId,
+                MonitorSpanProjectionBuilder.Build(retained),
+                temp.TimeProvider.GetUtcNow(),
+                lease)
+            : store.ApplyProjection(
+                rawRecordId,
+                retained.Source,
+                retained.ReceivedAt,
+                MonitorProjectionBuilder.Build(retained),
+                temp.TimeProvider.GetUtcNow(),
+                lease);
+
+        Assert.True(applied);
+        Assert.True(observedClaimBeforeCommit);
+        Assert.True(observedClaimAfterCommit);
+        Assert.False(handle.IsPublished);
+        Assert.Single(store.ListMonitorIngestions(0, 100).Items);
+        if (spanProjection)
+            Assert.Single(store.GetSpansForTrace("claim-pinned-trace"));
+        else
+            Assert.Single(store.ListMonitorTraces(0, 100).Items);
+    }
+
+    [Theory]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes)]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterGrantProof)]
     [InlineData((int)MonitorProjectionPublicationCheckpoint.BeforeCommit)]
@@ -216,6 +286,8 @@ public sealed class ProjectionRetentionFenceTests
                 MonitorProjectionPublicationCheckpoint.AfterGrantProof,
                 MonitorProjectionPublicationCheckpoint.AfterGrantProof,
                 MonitorProjectionPublicationCheckpoint.BeforeCommit,
+                MonitorProjectionPublicationCheckpoint.AfterPublicationClaimBeforeCommit,
+                MonitorProjectionPublicationCheckpoint.AfterCommitBeforePublicationClaimRelease,
                 MonitorProjectionPublicationCheckpoint.AfterCommit,
             ],
             observed);

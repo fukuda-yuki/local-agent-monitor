@@ -256,7 +256,8 @@ internal static class RawReplayRoutes
                     reservation!.Prepare(archive, result);
                     if (!lease.TrySealRawReplayTransientPublication(out _))
                         return new(new(null, null, null, null, null), true);
-                    reservation.Activate();
+                    if (!reservation.Activate())
+                        throw new InvalidOperationException("The sealed transient publication could not be activated.");
                 }
                 return new(result, false);
             }

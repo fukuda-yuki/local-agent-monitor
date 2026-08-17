@@ -30,20 +30,24 @@ internal sealed class RawReplayTransientStore : IDisposable
     private readonly RawReplayTransientLimits limits;
     private readonly ITimer sweepTimer;
     private readonly Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting;
+    private readonly Action<byte[]>? preparedBytesObserverForTesting;
     private long nextSequence;
     private long totalBytes;
     private long reservedBytes;
     private int acceptingReservations = 1;
+    private bool disposalRequested;
     private bool disposed;
 
     internal RawReplayTransientStore(
         TimeProvider timeProvider,
         RawReplayTransientLimits limits,
-        Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting = null)
+        Action<RawReplayTransientPreparationCheckpoint>? preparationCheckpointForTesting = null,
+        Action<byte[]>? preparedBytesObserverForTesting = null)
     {
         this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         this.limits = Validate(limits);
         this.preparationCheckpointForTesting = preparationCheckpointForTesting;
+        this.preparedBytesObserverForTesting = preparedBytesObserverForTesting;
         sweepTimer = timeProvider.CreateTimer(
             static state => ((RawReplayTransientStore)state!).Sweep(),
             this,
@@ -203,16 +207,27 @@ internal sealed class RawReplayTransientStore : IDisposable
     public void Dispose()
     {
         StopAcceptingReservations();
+        var disposeTimer = false;
         lock (gate)
         {
             if (disposed) return;
-            disposed = true;
-            reservations.Clear();
-            reservedBytes = 0;
+            disposalRequested = true;
+            foreach (var reservation in reservations
+                         .Where(static reservation => reservation.Value.Prepared is null)
+                         .ToArray())
+            {
+                reservations.Remove(reservation.Key);
+                reservedBytes -= reservation.Value.ByteLength;
+            }
             entries.Clear();
             totalBytes = 0;
+            if (reservations.Count == 0)
+            {
+                disposed = true;
+                disposeTimer = true;
+            }
         }
-        sweepTimer.Dispose();
+        if (disposeTimer) sweepTimer.Dispose();
     }
 
     private Entry PrepareReservation(
@@ -229,6 +244,7 @@ internal sealed class RawReplayTransientStore : IDisposable
         var frozenBytes = bytes.ToArray();
         try
         {
+            preparedBytesObserverForTesting?.Invoke(frozenBytes);
             preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeClock);
             var expiresAt = timeProvider.GetUtcNow().Add(limits.Lifetime);
             lock (gate)
@@ -239,7 +255,9 @@ internal sealed class RawReplayTransientStore : IDisposable
                     throw new InvalidOperationException("The transient reservation is no longer active.");
                 preparationCheckpointForTesting?.Invoke(RawReplayTransientPreparationCheckpoint.BeforeCapacity);
                 entries.EnsureCapacity(entries.Count + (entries.ContainsKey(itemKey) ? 0 : 1));
-                return new(frozenBytes, metadata, expiresAt, nextSequence++);
+                var prepared = new Entry(frozenBytes, metadata, expiresAt, nextSequence++);
+                reserved.Prepared = prepared;
+                return prepared;
             }
         }
         catch
@@ -249,13 +267,14 @@ internal sealed class RawReplayTransientStore : IDisposable
         }
     }
 
-    private void ActivateReservation((string Kind, string Key) itemKey, long byteLength, Entry prepared)
+    private bool ActivateReservation((string Kind, string Key) itemKey, long byteLength, Entry prepared)
     {
         lock (gate)
         {
             if (!reservations.TryGetValue(itemKey, out var reserved)
-                || reserved.ByteLength != byteLength)
-                return;
+                || reserved.ByteLength != byteLength
+                || !ReferenceEquals(reserved.Prepared, prepared))
+                return false;
             entries.TryGetValue(itemKey, out var replaced);
             entries[itemKey] = prepared;
             totalBytes += byteLength - (replaced?.Bytes.LongLength ?? 0);
@@ -268,17 +287,25 @@ internal sealed class RawReplayTransientStore : IDisposable
                     Remove(victim.Key, current);
             }
             Monitor.PulseAll(gate);
+            return true;
         }
     }
 
     private void CancelReservation((string Kind, string Key) itemKey, long byteLength)
     {
+        var disposeTimer = false;
         lock (gate)
         {
             if (!reservations.Remove(itemKey)) return;
             reservedBytes -= byteLength;
             Monitor.PulseAll(gate);
+            if (disposalRequested && reservations.Count == 0 && entries.Count == 0)
+            {
+                disposed = true;
+                disposeTimer = true;
+            }
         }
+        if (disposeTimer) sweepTimer.Dispose();
     }
 
     private bool Put(
@@ -294,7 +321,7 @@ internal sealed class RawReplayTransientStore : IDisposable
         ArgumentNullException.ThrowIfNull(metadata);
         lock (gate)
         {
-            if (disposed) return false;
+            if (disposed || disposalRequested) return false;
             PurgeExpired(now);
             if (bytes.LongLength > limits.MaximumBytes || expiresAt <= now || expiresAt > now.Add(limits.Lifetime)) return false;
             if (reservations.ContainsKey(itemKey)) return false;
@@ -310,10 +337,20 @@ internal sealed class RawReplayTransientStore : IDisposable
 
     private void Sweep()
     {
+        var disposeTimer = false;
         lock (gate)
         {
-            if (!disposed) PurgeExpired(timeProvider.GetUtcNow());
+            if (!disposed)
+            {
+                PurgeExpired(timeProvider.GetUtcNow());
+                if (disposalRequested && reservations.Count == 0 && entries.Count == 0)
+                {
+                    disposed = true;
+                    disposeTimer = true;
+                }
+            }
         }
+        if (disposeTimer) sweepTimer.Dispose();
     }
 
     private void PurgeExpired(DateTimeOffset now)
@@ -364,7 +401,12 @@ internal sealed class RawReplayTransientStore : IDisposable
 
     private sealed record Entry(byte[] Bytes, object Metadata, DateTimeOffset ExpiresAt, long Sequence);
     private sealed record PlannedRemoval((string Kind, string Key) Key, long Sequence);
-    private sealed record ReservedEntry(long ByteLength, PlannedRemoval[] Victims);
+    private sealed class ReservedEntry(long byteLength, PlannedRemoval[] victims)
+    {
+        internal long ByteLength { get; } = byteLength;
+        internal PlannedRemoval[] Victims { get; } = victims;
+        internal Entry? Prepared { get; set; }
+    }
 
     internal sealed class RawReplayTransientReservation(
         RawReplayTransientStore store,
@@ -386,15 +428,17 @@ internal sealed class RawReplayTransientStore : IDisposable
             }
         }
 
-        internal void Activate()
+        internal bool Activate()
         {
             lock (gate)
             {
-                if (completed != 0 || prepared is null) return;
-                completed = 1;
+                if (completed != 0 || prepared is null) return false;
                 var activated = prepared;
+                var published = store.ActivateReservation(itemKey, byteLength, activated);
+                if (!published) Array.Clear(activated.Bytes);
+                completed = 1;
                 prepared = null;
-                store.ActivateReservation(itemKey, byteLength, activated);
+                return published;
             }
         }
 
