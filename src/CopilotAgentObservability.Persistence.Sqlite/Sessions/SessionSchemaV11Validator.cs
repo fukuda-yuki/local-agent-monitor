@@ -37,6 +37,9 @@ internal static class SessionSchemaV11Validator
         CurrentV14LegacyProfileFingerprintValues,
         StringComparer.Ordinal);
 
+    private static readonly IReadOnlySet<(string Table, string Name)> EmptyChildTriggerExemptions =
+        new HashSet<(string Table, string Name)>();
+
     private static readonly string[] ReservedPrefixes =
     [
         "sessions",
@@ -72,12 +75,18 @@ internal static class SessionSchemaV11Validator
         {
             var expected = GetExpectedSchemas(createCanonicalSchema, expectedVersion);
             if (!HasExactOwnedObjectSet(connection, transaction, expected.TableNames)
-                || !HasExactSessionVersionRow(connection, transaction, expectedVersion))
+                || !HasExactSessionVersionRow(connection, transaction, expectedVersion)
+                || !TryProveChildTriggerExtensions(
+                    connection,
+                    transaction,
+                    expected.TableNames,
+                    expectedVersion,
+                    out var childTriggerExemptions))
             {
                 return false;
             }
 
-            var actual = ReadProfile(connection, transaction, expected.TableNames);
+            var actual = ReadProfile(connection, transaction, expected.TableNames, childTriggerExemptions);
             return actual is not null
                 && (expected.Profiles.Count(profile => ProfileEquals(profile, actual)) == 1
                     || expectedVersion == 14
@@ -647,15 +656,103 @@ internal static class SessionSchemaV11Validator
         return !reader.Read();
     }
 
+    // The child pair is proven against the closed registry and then removed from the parent
+    // profile, so a stamped component leaves the Session 14 core fingerprint unchanged. Failing
+    // the proof must fail the parent: an altered child trigger would otherwise vanish from
+    // parent validation.
+    private static bool TryProveChildTriggerExtensions(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IReadOnlySet<string> sessionTableNames,
+        int expectedVersion,
+        out IReadOnlySet<(string Table, string Name)> exemptions)
+    {
+        exemptions = EmptyChildTriggerExemptions;
+        var resolution = SessionChildTriggerExtensionRegistry.ResolveStamp(
+            connection,
+            transaction,
+            SessionChildTriggerExtensionRegistry.Entries[0].ParentComponent,
+            expectedVersion);
+        if (resolution.Kind == SessionChildTriggerExtensionRegistry.StampKind.Incompatible)
+        {
+            return false;
+        }
+        if (resolution.Kind == SessionChildTriggerExtensionRegistry.StampKind.Inactive)
+        {
+            return true;
+        }
+
+        var installed = ReadSessionScopedTriggers(connection, transaction, sessionTableNames);
+        var proven = new HashSet<(string Table, string Name)>();
+        var registered = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in resolution.ActiveEntries)
+        {
+            foreach (var trigger in entry.Triggers)
+            {
+                var matches = installed
+                    .Where(item => string.Equals(item.Name, trigger.Name, StringComparison.Ordinal))
+                    .ToArray();
+                if (matches.Length != 1
+                    || !string.Equals(matches[0].Table, trigger.TargetTable, StringComparison.Ordinal)
+                    || !string.Equals(
+                        CanonicalSql(matches[0].Sql),
+                        CanonicalSql(trigger.Sql),
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+                registered.Add(trigger.Name);
+                proven.Add((
+                    trigger.TargetTable.ToLowerInvariant(),
+                    trigger.Name.ToLowerInvariant()));
+            }
+
+            if (installed.Any(item =>
+                    item.Name.StartsWith(entry.Component, StringComparison.OrdinalIgnoreCase)
+                    && !registered.Contains(item.Name)))
+            {
+                return false;
+            }
+        }
+
+        exemptions = proven;
+        return true;
+    }
+
+    private static IReadOnlyList<(string Name, string Table, string Sql)> ReadSessionScopedTriggers(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IReadOnlySet<string> sessionTableNames)
+    {
+        var triggers = new List<(string Name, string Table, string Sql)>();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT name,tbl_name,sql FROM sqlite_schema WHERE type='trigger' ORDER BY name;";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var table = reader.GetString(1);
+            if (!sessionTableNames.Contains(table) || reader.IsDBNull(2))
+            {
+                continue;
+            }
+            triggers.Add((reader.GetString(0), table, reader.GetString(2)));
+        }
+        return triggers;
+    }
+
     private static DatabaseProfile? ReadProfile(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        IReadOnlySet<string> tableNames)
+        IReadOnlySet<string> tableNames,
+        IReadOnlySet<(string Table, string Name)>? childTriggerExemptions = null)
     {
+        var exemptions = childTriggerExemptions ?? EmptyChildTriggerExemptions;
         var tables = new Dictionary<string, TableShape>(StringComparer.OrdinalIgnoreCase);
         foreach (var table in tableNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
         {
-            var shape = ReadTable(connection, transaction, table);
+            var shape = ReadTable(connection, transaction, table, exemptions);
             if (shape is null)
             {
                 return null;
@@ -668,7 +765,8 @@ internal static class SessionSchemaV11Validator
     private static TableShape? ReadTable(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        string table)
+        string table,
+        IReadOnlySet<(string Table, string Name)> childTriggerExemptions)
     {
         TableListShape tableList;
         using (var command = connection.CreateCommand())
@@ -727,7 +825,7 @@ internal static class SessionSchemaV11Validator
             sql,
             ReadIndexes(connection, transaction, table),
             ReadForeignKeys(connection, transaction, table),
-            ReadTriggers(connection, transaction, table));
+            ReadTriggers(connection, transaction, table, childTriggerExemptions));
     }
 
     private static IReadOnlyList<IndexShape> ReadIndexes(
@@ -821,8 +919,10 @@ internal static class SessionSchemaV11Validator
     private static IReadOnlyList<TriggerShape> ReadTriggers(
         SqliteConnection connection,
         SqliteTransaction? transaction,
-        string table)
+        string table,
+        IReadOnlySet<(string Table, string Name)> childTriggerExemptions)
     {
+        var owningTable = table.ToLowerInvariant();
         var triggers = new List<TriggerShape>();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -833,6 +933,7 @@ internal static class SessionSchemaV11Validator
         {
             var name = reader.GetString(0).ToLowerInvariant();
             if (name == "retention_session_event_content_token_immutable") continue;
+            if (childTriggerExemptions.Contains((owningTable, name))) continue;
             triggers.Add(new(name, CanonicalSql(reader.GetString(1))));
         }
         return triggers;
