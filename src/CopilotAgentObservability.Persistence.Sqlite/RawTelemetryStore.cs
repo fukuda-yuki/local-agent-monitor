@@ -205,7 +205,8 @@ internal sealed partial class RawTelemetryStore
                 publications,
                 rawRecordId,
                 publicationAt,
-                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof))
+            || !publications.AreCommittedHandlesPublished())
         {
             transaction.Rollback();
             return false;
@@ -678,7 +679,8 @@ internal sealed partial class RawTelemetryStore
                 publications,
                 rawRecordId,
                 publicationAt,
-                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof)))
+                () => projectionPublicationCheckpoint?.Invoke(MonitorProjectionPublicationCheckpoint.AfterGrantProof))
+            || !publications.AreCommittedHandlesPublished())
         {
             transaction.Rollback();
             return false;

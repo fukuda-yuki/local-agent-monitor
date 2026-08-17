@@ -620,7 +620,9 @@ public sealed class RawReplaySurfaceTests
                 out var reservation));
 
             Assert.Equal(0, await Task.Run(() => store.Count).WaitAsync(TimeSpan.FromSeconds(5)));
-            reservation!.Commit([1, 2, 3], "metadata");
+            var bytesToFreeze = new byte[] { 1, 2, 3 };
+            reservation!.Commit(bytesToFreeze, "metadata");
+            bytesToFreeze[0] = 9;
             reservation.Commit([9, 9, 9], "replacement");
 
             Assert.Equal(1, store.Count);
@@ -718,6 +720,30 @@ public sealed class RawReplaySurfaceTests
         Assert.Equal("large-metadata", metadata);
     }
 
+    [Fact]
+    public void Transient_commit_clock_failure_preserves_victims_and_keeps_the_reservation_retryable()
+    {
+        var time = new CommitFailureTimeProvider(Now);
+        using var store = new RawReplayTransientStore(
+            time,
+            new RawReplayTransientLimits(1, 3, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(1)));
+        Assert.True(store.Put("export", "original", [1, 2, 3], "original-metadata"));
+        Assert.True(store.TryReserve("export", "replacement", 3, out var reservation));
+        time.ThrowOnRead = true;
+
+        Assert.Throws<InvalidOperationException>(() => reservation!.Commit([4, 5, 6], "replacement-metadata"));
+
+        time.ThrowOnRead = false;
+        Assert.True(store.TryGet("export", "original", out var originalBytes, out string originalMetadata));
+        Assert.Equal(new byte[] { 1, 2, 3 }, originalBytes);
+        Assert.Equal("original-metadata", originalMetadata);
+        reservation!.Commit([4, 5, 6], "replacement-metadata");
+        Assert.False(store.TryGet<string>("export", "original", out _, out _));
+        Assert.True(store.TryGet("export", "replacement", out var replacementBytes, out string replacementMetadata));
+        Assert.Equal(new byte[] { 4, 5, 6 }, replacementBytes);
+        Assert.Equal("replacement-metadata", replacementMetadata);
+    }
+
     private static MonitorHostTestOptions Options(IRawReplaySnapshotProvider provider, RawReplayTransientLimits? transientLimits = null) => new()
     {
         StartWriter = false, StartProjectionWorker = false, StartSessionWriter = false,
@@ -725,6 +751,14 @@ public sealed class RawReplaySurfaceTests
         RawReplaySnapshotProvider = provider,
         RawReplayTransientLimits = transientLimits,
     };
+
+    private sealed class CommitFailureTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        internal bool ThrowOnRead { get; set; }
+
+        public override DateTimeOffset GetUtcNow() =>
+            ThrowOnRead ? throw new InvalidOperationException("injected transient commit clock failure") : now;
+    }
 
     private static HttpRequestMessage PostJson<T>(string path, T value)
     {

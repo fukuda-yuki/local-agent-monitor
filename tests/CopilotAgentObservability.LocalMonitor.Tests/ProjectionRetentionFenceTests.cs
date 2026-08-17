@@ -6,6 +6,95 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class ProjectionRetentionFenceTests
 {
+    [Theory]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes)]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterGrantProof)]
+    public async Task ApplyProjection_HandleLostInsidePublicationFence_PublishesNothing(
+        int cancellationCheckpointValue)
+    {
+        var cancellationCheckpoint = (MonitorProjectionPublicationCheckpoint)cancellationCheckpointValue;
+        using var temp = new MonitorTempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        var store = new RawTelemetryStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            temp.TimeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter,
+            projectionPublicationCheckpoint: checkpoint =>
+            {
+                if (checkpoint == cancellationCheckpoint) cancellation.Cancel();
+            });
+        store.CreateMonitorSchema();
+        var record = Raw("lost-inside-trace-fence", "lost-inside-trace-span");
+        var rawRecordId = store.Insert(record);
+        var read = await store.ListUnprocessedForProjectionAsync(100, RetentionReadKind.Operation, cancellation.Token);
+        await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        RawTelemetryRecord retained;
+        using (var reference = lease.AcquireValueReference())
+        {
+            retained = Assert.Single(reference.Value);
+        }
+
+        var applied = store.ApplyProjection(
+            rawRecordId,
+            retained.Source,
+            retained.ReceivedAt,
+            MonitorProjectionBuilder.Build(retained),
+            temp.TimeProvider.GetUtcNow(),
+            lease);
+
+        Assert.False(applied);
+        Assert.Empty(store.ListMonitorIngestions(0, 100).Items);
+        Assert.Empty(store.ListMonitorTraces(0, 100).Items);
+        Assert.Empty(store.GetSpansForTrace("lost-inside-trace-fence"));
+    }
+
+    [Theory]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterTransactionBeganBeforePublicationScopes)]
+    [InlineData((int)MonitorProjectionPublicationCheckpoint.AfterGrantProof)]
+    public async Task ApplySpanProjection_HandleLostInsidePublicationFence_LeavesAllProjectionTablesUnchanged(
+        int cancellationCheckpointValue)
+    {
+        var cancellationCheckpoint = (MonitorProjectionPublicationCheckpoint)cancellationCheckpointValue;
+        using var temp = new MonitorTempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        var cancellationArmed = false;
+        var store = new RawTelemetryStore(
+            temp.DatabasePath,
+            temp.RetentionContext,
+            temp.TimeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter,
+            projectionPublicationCheckpoint: checkpoint =>
+            {
+                if (cancellationArmed && checkpoint == cancellationCheckpoint) cancellation.Cancel();
+            });
+        store.CreateMonitorSchema();
+        var record = Raw("lost-inside-span-fence", "lost-inside-span");
+        var rawRecordId = store.Insert(record);
+        await ProjectTraceAsync(store, rawRecordId);
+        var beforeIngestions = store.ListMonitorIngestions(0, 100).Items.ToArray();
+        var beforeTraces = store.ListMonitorTraces(0, 100).Items.ToArray();
+        var read = await store.ListUnprocessedForSpanProjectionAsync(100, RetentionReadKind.Operation, cancellation.Token);
+        await using var lease = Assert.IsType<RetentionBatchReadLease<IReadOnlyList<RawTelemetryRecord>>>(read.Lease);
+        RawTelemetryRecord retained;
+        using (var reference = lease.AcquireValueReference())
+        {
+            retained = Assert.Single(reference.Value);
+        }
+        cancellationArmed = true;
+
+        var applied = store.ApplySpanProjection(
+            rawRecordId,
+            MonitorSpanProjectionBuilder.Build(retained),
+            temp.TimeProvider.GetUtcNow(),
+            lease);
+
+        Assert.False(applied);
+        Assert.Equal(beforeIngestions, store.ListMonitorIngestions(0, 100).Items);
+        Assert.Equal(beforeTraces, store.ListMonitorTraces(0, 100).Items);
+        Assert.Empty(store.GetSpansForTrace("lost-inside-span-fence"));
+    }
+
     [Fact]
     public async Task ApplyProjection_GrantLostAfterRead_PublishesNothing()
     {

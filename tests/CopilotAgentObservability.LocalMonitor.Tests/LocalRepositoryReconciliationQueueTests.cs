@@ -1384,6 +1384,42 @@ public sealed class LocalRepositoryReconciliationQueueTests
     }
 
     [Fact]
+    public async Task Worker_HandleLostDuringDigestComputation_RetriesWithoutPublishingDigestMismatch()
+    {
+        using var temp = new MonitorTempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        var rawStore = temp.CreateRawStore();
+        rawStore.CreateMonitorSchema();
+        using var connection = OpenCatalog(temp.DatabasePath);
+        const string payload = "{\"resourceSpans\":[]}";
+        var rawId = rawStore.Insert(new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, null, DateTimeOffset.UnixEpoch, null, payload));
+        InsertQueue(
+            connection,
+            "01900000-0000-7000-8000-000000000031",
+            rawId,
+            "pending",
+            "1970-01-01T00:00:00.0000000+00:00",
+            rawPayloadSha256: new string('a', 64));
+        var processor = new RecordingProcessor();
+        var worker = new LocalRepositoryReconciliationWorker(
+            new SqliteLocalRepositoryReconciliationStore(temp.DatabasePath, temp.TimeProvider, static () => new string('1', 64)),
+            new LocalRepositoryRawAvailabilityReader(
+                rawStore,
+                temp.RetentionContext,
+                _ => cancellation.Cancel()),
+            processor,
+            temp.TimeProvider);
+
+        var outcome = await worker.RunOnceAsync(cancellation.Token);
+
+        Assert.Equal(LocalRepositoryReconciliationWorkOutcome.Retrying, outcome);
+        Assert.Equal(0, processor.CallCount);
+        Assert.Equal("pending", ScalarText(connection, $"SELECT state FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+        Assert.Equal(string.Empty, ScalarText(connection, $"SELECT terminal_reason FROM local_repository_reconciliation_queue WHERE raw_record_id={rawId};"));
+        Assert.Equal(0, ScalarLong(connection, "SELECT COUNT(*) FROM retention_leases WHERE lease_kind='operation';"));
+    }
+
+    [Fact]
     public async Task Worker_InvokesTheProcessorOnceWithOnlyTheClaimedRawRecord()
     {
         using var temp = new MonitorTempDirectory();

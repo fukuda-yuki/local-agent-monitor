@@ -149,8 +149,11 @@ internal sealed class LocalRepositoryRawAvailabilityReader
         }
         if (expectedPayloadSha256 is not null && !string.Equals(expectedPayloadSha256, digest, StringComparison.Ordinal))
         {
+            var terminal = read.Lease.TryCompleteWithoutRaw();
             await read.Lease.DisposeAsync().ConfigureAwait(false);
-            return LocalRepositoryRawAvailabilityResult.PayloadDigestMismatch();
+            return terminal == RetentionRawTerminalResult.CompletedWithoutRaw
+                ? LocalRepositoryRawAvailabilityResult.PayloadDigestMismatch()
+                : LocalRepositoryRawAvailabilityResult.Busy();
         }
         return LocalRepositoryRawAvailabilityResult.Available(read.Lease);
     }
