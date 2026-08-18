@@ -1865,6 +1865,518 @@ public class LocalMonitorScriptTests
         }
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(16)]
+    public void SkillDiscoveryProjectPathAcceptsUpToSixteenMembers(int count)
+    {
+        var projectPaths = Enumerable.Range(1, count).Select(index => $@"C:\skills\project-{index}").ToArray();
+
+        var message = InvokeSkillDiscoveryValidation(projectPaths, Array.Empty<string>(), sanitizedOnly: false);
+
+        Assert.Null(message);
+    }
+
+    [Fact]
+    public void SkillDiscoveryProjectPathRejectsSeventeenthMember()
+    {
+        var projectPaths = Enumerable.Range(1, 17).Select(index => $@"C:\skills\project-{index}").ToArray();
+
+        var message = InvokeSkillDiscoveryValidation(projectPaths, Array.Empty<string>(), sanitizedOnly: false);
+
+        Assert.Equal("local-monitor accepts at most 16 --skill-discovery-project-path values.", message);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(32)]
+    public void SkillDiscoveryDirectoryAcceptsUpToThirtyTwoMembers(int count)
+    {
+        var directories = Enumerable.Range(1, count).Select(index => $@"C:\skills\dir-{index}").ToArray();
+
+        var message = InvokeSkillDiscoveryValidation(Array.Empty<string>(), directories, sanitizedOnly: false);
+
+        Assert.Null(message);
+    }
+
+    [Fact]
+    public void SkillDiscoveryDirectoryRejectsThirtyThirdMember()
+    {
+        var directories = Enumerable.Range(1, 33).Select(index => $@"C:\skills\dir-{index}").ToArray();
+
+        var message = InvokeSkillDiscoveryValidation(Array.Empty<string>(), directories, sanitizedOnly: false);
+
+        Assert.Equal("local-monitor accepts at most 32 --skill-discovery-directory values.", message);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void SkillDiscoveryProjectPathRejectsEmptyOrWhitespaceOrNullMember(string? blankMember)
+    {
+        var message = InvokeSkillDiscoveryValidation(
+            [@"C:\skills\ok", blankMember],
+            Array.Empty<string>(),
+            sanitizedOnly: false);
+
+        Assert.Equal("--skill-discovery-project-path requires a value.", message);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void SkillDiscoveryDirectoryRejectsEmptyOrWhitespaceOrNullMember(string? blankMember)
+    {
+        var message = InvokeSkillDiscoveryValidation(
+            Array.Empty<string>(),
+            [@"C:\skills\ok", blankMember],
+            sanitizedOnly: false);
+
+        Assert.Equal("--skill-discovery-directory requires a value.", message);
+    }
+
+    [Fact]
+    public void SkillDiscoveryOptionsConflictWithSanitizedOnlyOnBothScripts()
+    {
+        var message = InvokeSkillDiscoveryValidation([@"C:\skills\one"], Array.Empty<string>(), sanitizedOnly: true);
+        Assert.Equal("skill discovery options cannot be used with --sanitized-only.", message);
+
+        var startScript = ScriptPath("start.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var startResult = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", $"& '{startScript}' -SanitizedOnly -SkillDiscoveryDirectory @('C:\\skills\\dir')"],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+        Assert.NotEqual(0, startResult.ExitCode);
+        Assert.Contains("skill discovery options cannot be used with --sanitized-only.", startResult.StandardErrorText, StringComparison.Ordinal);
+
+        var installScript = ScriptPath("install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var installResult = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", $"& '{installScript}' -SanitizedOnly -SkillDiscoveryDirectory @('C:\\skills\\dir')"],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+        Assert.NotEqual(0, installResult.ExitCode);
+        Assert.Contains("skill discovery options cannot be used with --sanitized-only.", installResult.StandardErrorText, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object[]> SkillDiscoveryPrecedenceCases()
+    {
+        yield return new object[]
+        {
+            new[] { @"C:\skills\ok", "" },
+            new[] { @"C:\skills\ok", "   " },
+            false,
+            "--skill-discovery-project-path requires a value.",
+        };
+        yield return new object[]
+        {
+            Enumerable.Range(1, 17).Select(index => $@"C:\skills\project-{index}").ToArray(),
+            new[] { "" },
+            false,
+            "--skill-discovery-directory requires a value.",
+        };
+        yield return new object[]
+        {
+            Enumerable.Range(1, 17).Select(index => $@"C:\skills\project-{index}").ToArray(),
+            Enumerable.Range(1, 33).Select(index => $@"C:\skills\dir-{index}").ToArray(),
+            false,
+            "local-monitor accepts at most 16 --skill-discovery-project-path values.",
+        };
+        yield return new object[]
+        {
+            new[] { @"C:\skills\project-1" },
+            Enumerable.Range(1, 33).Select(index => $@"C:\skills\dir-{index}").ToArray(),
+            true,
+            "local-monitor accepts at most 32 --skill-discovery-directory values.",
+        };
+        yield return new object[]
+        {
+            new[] { @"C:\skills\project-1" },
+            Array.Empty<string>(),
+            true,
+            "skill discovery options cannot be used with --sanitized-only.",
+        };
+    }
+
+    [Theory]
+    [MemberData(nameof(SkillDiscoveryPrecedenceCases))]
+    public void SkillDiscoveryValidationPrecedenceIsFixedAndOrderIndependent(
+        string[] projectPaths,
+        string[] directories,
+        bool sanitizedOnly,
+        string expectedMessage)
+    {
+        var forward = InvokeSkillDiscoveryValidation(projectPaths, directories, sanitizedOnly, reverseParameterOrder: false);
+        var reversed = InvokeSkillDiscoveryValidation(projectPaths, directories, sanitizedOnly, reverseParameterOrder: true);
+
+        Assert.Equal(expectedMessage, forward);
+        Assert.Equal(expectedMessage, reversed);
+    }
+
+    [Fact]
+    public void StartWrapperSerializesSkillDiscoveryArraysAsRepeatedPairsAfterPricingOverrides()
+    {
+        var root = CreateTemporaryDirectory("cao-skill-discovery-argv-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var logs = Directory.CreateDirectory(Path.Combine(root, "logs")).FullName;
+            var database = Path.Combine(root, "raw-store.db");
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var executable = Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe");
+            File.WriteAllText(executable, string.Empty);
+            var capturePath = Path.Combine(root, "argv.json");
+            var start = Path.Combine(scripts, "start.ps1");
+            File.Copy(ScriptPath("start.ps1"), start);
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = '{{database.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LiveProbeCount = 0
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) return $true }
+                function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
+                function Test-LocalMonitorPortInUse { param([string] $Url) return $false }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    if ($Path -eq '/health/live') {
+                        $script:LiveProbeCount++
+                        if ($script:LiveProbeCount -eq 1) { return $null }
+                        return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+                    }
+                    return [pscustomobject]@{ StatusCode = 200; Content = '{"status":"ready"}' }
+                }
+                function Get-LocalMonitorDefaultInstallRoot { return '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorPublishedExePath { param([string] $InstallRoot) return '{{executable.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Start-LocalMonitorProcess {
+                    param(
+                        [string] $FilePath,
+                        [object[]] $ArgumentList,
+                        [string] $WorkingDirectory,
+                        [string] $StandardOutputPath,
+                        [string] $StandardErrorPath)
+                    [System.IO.File]::WriteAllText('{{capturePath.Replace("'", "''", StringComparison.Ordinal)}}', ($ArgumentList | ConvertTo-Json -Compress))
+                    return [pscustomobject]@{ Id = 4242 }
+                }
+                function Save-LocalMonitorState {
+                    param(
+                        [int] $ProcessId, [string] $Url, [string] $DbPath, [string] $Mode,
+                        [string] $RepoRoot, [string] $InstallRoot, [string] $ExecutablePath, [switch] $SanitizedOnly)
+                }
+                function Write-LocalMonitorLog { param([string] $Message) }
+                """);
+
+            var projectPathOne = @"C:\private skills\project one; $(not-a-command)";
+            var projectPathTwo = @"C:\private skills\project two's value";
+            var directoryOne = @"C:\private skills\directory one; $(not-a-command)";
+            var pricingOverride = @"C:\pricing\registry.json";
+
+            var startCommand = "& " + PowerShellLiteral(start) +
+                " -Mode Published -Url http://127.0.0.1:4320 -DbPath " + PowerShellLiteral(database) +
+                " -InstallRoot " + PowerShellLiteral(installRoot) +
+                " -NoBrowser -WaitReady:$false" +
+                " -PricingRegistryOverride @(" + PowerShellLiteral(pricingOverride) + ")" +
+                " -SkillDiscoveryProjectPath @(" + PowerShellLiteral(projectPathOne) + "," + PowerShellLiteral(projectPathTwo) + ")" +
+                " -SkillDiscoveryDirectory @(" + PowerShellLiteral(directoryOne) + ")";
+
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-Command", startCommand],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.True(result.ExitCode == 0, $"{result.StandardOutputText}{result.StandardErrorText}");
+            using var argv = JsonDocument.Parse(File.ReadAllText(capturePath));
+            Assert.Equal(
+                [
+                    "--db", database, "--url", "http://127.0.0.1:4320",
+                    "--pricing-registry-override", pricingOverride,
+                    "--skill-discovery-project-path", projectPathOne,
+                    "--skill-discovery-project-path", projectPathTwo,
+                    "--skill-discovery-directory", directoryOne,
+                ],
+                argv.RootElement.EnumerateArray().Select(item => item.GetString()));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StartupTaskEncodesSkillDiscoveryArraysAndCountOnlyReaderDecodesThem()
+    {
+        var projectPathOne = @"C:\private skills\project one; $(not-a-command)";
+        var projectPathTwo = @"C:\private skills\project two's value";
+        var directoryOne = @"C:\private skills\directory one; $(not-a-command)";
+
+        var command = ". " + PowerShellLiteral(ScriptPath("common.ps1")) + "; " +
+            "$taskArgument = New-LocalMonitorStartupTaskArgument -StartScript 'C:\\safe\\start.ps1' -Url 'http://127.0.0.1:4320' -DbPath 'C:\\safe\\raw-store.db' -Mode 'Published' -InstallRoot 'C:\\safe\\app' " +
+            "-SkillDiscoveryProjectPath @(" + PowerShellLiteral(projectPathOne) + "," + PowerShellLiteral(projectPathTwo) + ") " +
+            "-SkillDiscoveryDirectory @(" + PowerShellLiteral(directoryOne) + "); " +
+            "$encoded = $taskArgument.Split(' ')[-1]; " +
+            "$decodedCommand = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded)); " +
+            "$task = [pscustomobject]@{ Actions = @([pscustomobject]@{ Arguments = $taskArgument }) }; " +
+            "$projectState = Get-LocalMonitorTaskSkillDiscoveryProjectPathState -Task $task; " +
+            "$directoryState = Get-LocalMonitorTaskSkillDiscoveryDirectoryState -Task $task; " +
+            "[pscustomobject]@{ DecodedCommand = $decodedCommand; ProjectState = $projectState.State; ProjectCount = $projectState.Count; DirectoryState = $directoryState.State; DirectoryCount = $directoryState.Count } | ConvertTo-Json -Compress";
+
+        var result = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", command],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.True(result.ExitCode == 0, $"{result.StandardOutputText}{result.StandardErrorText}");
+        using var document = JsonDocument.Parse(result.StandardOutputText);
+        var decodedCommand = document.RootElement.GetProperty("DecodedCommand").GetString();
+        Assert.NotNull(decodedCommand);
+        var expectedProjectPathFragment = "-SkillDiscoveryProjectPath @(" +
+            PowerShellLiteral(projectPathOne) + "," + PowerShellLiteral(projectPathTwo) + ")";
+        var expectedDirectoryFragment = "-SkillDiscoveryDirectory @(" + PowerShellLiteral(directoryOne) + ")";
+        Assert.Contains(expectedProjectPathFragment, decodedCommand, StringComparison.Ordinal);
+        Assert.Contains(expectedDirectoryFragment, decodedCommand, StringComparison.Ordinal);
+        Assert.Equal("present", document.RootElement.GetProperty("ProjectState").GetString());
+        Assert.Equal(2, document.RootElement.GetProperty("ProjectCount").GetInt32());
+        Assert.Equal("present", document.RootElement.GetProperty("DirectoryState").GetString());
+        Assert.Equal(1, document.RootElement.GetProperty("DirectoryCount").GetInt32());
+    }
+
+    [Fact]
+    public void SkillDiscoveryValidationFailureAndDryRunNeverLeakSuppliedRoots()
+    {
+        const string sentinel = "SENTINEL";
+        var sentinelProjectPath = @"C:\SENTINEL_ROOT\project";
+        var sentinelDirectory = @"C:\SENTINEL_ROOT\skills";
+
+        var tooManyProjectPaths = Enumerable.Range(1, 17)
+            .Select(index => index == 1 ? sentinelProjectPath : $@"C:\skills\project-{index}")
+            .ToArray();
+        var startScript = ScriptPath("start.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var literals = string.Join(",", tooManyProjectPaths.Select(PowerShellLiteral));
+        var failure = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", $"& '{startScript}' -SkillDiscoveryProjectPath @({literals})"],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.NotEqual(0, failure.ExitCode);
+        Assert.Contains("local-monitor accepts at most 16 --skill-discovery-project-path values.", failure.StandardErrorText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, failure.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, failure.StandardErrorText, StringComparison.Ordinal);
+
+        var installScript = ScriptPath("install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+        var dryRun = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            [
+                "-NoProfile", "-Command",
+                $"& '{installScript}' -DryRun -SkillDiscoveryProjectPath @({PowerShellLiteral(sentinelProjectPath)}) -SkillDiscoveryDirectory @({PowerShellLiteral(sentinelDirectory)})",
+            ],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.Equal(0, dryRun.ExitCode);
+        Assert.Contains("skill discovery project paths: present (count: 1)", dryRun.StandardOutputText, StringComparison.Ordinal);
+        Assert.Contains("skill discovery directories: present (count: 1)", dryRun.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, dryRun.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, dryRun.StandardErrorText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SkillDiscoveryStartFlowNeverLeaksSuppliedRootsThroughLogsOrState()
+    {
+        const string sentinel = "SENTINEL";
+        var sentinelProjectPath = @"C:\SENTINEL_ROOT\project";
+        var sentinelDirectory = @"C:\SENTINEL_ROOT\skills";
+        var root = CreateTemporaryDirectory("cao-skill-discovery-leak-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var logs = Directory.CreateDirectory(Path.Combine(root, "logs")).FullName;
+            var database = Path.Combine(root, "raw-store.db");
+            var installRoot = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+            var executable = Path.Combine(installRoot, "CopilotAgentObservability.LocalMonitor.exe");
+            File.WriteAllText(executable, string.Empty);
+            var statePath = Path.Combine(root, "local-monitor.state.json");
+            var start = Path.Combine(scripts, "start.ps1");
+            File.Copy(ScriptPath("start.ps1"), start);
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = '{{database.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:StatePath = '{{statePath.Replace("'", "''", StringComparison.Ordinal)}}'
+                $script:LiveProbeCount = 0
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) return $true }
+                function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
+                function Test-LocalMonitorPortInUse { param([string] $Url) return $false }
+                function Test-LocalMonitorHealth {
+                    param([string] $Url, [string] $Path)
+                    if ($Path -eq '/health/live') {
+                        $script:LiveProbeCount++
+                        if ($script:LiveProbeCount -eq 1) { return $null }
+                        return [pscustomobject]@{ StatusCode = 200; Content = '{}' }
+                    }
+                    return [pscustomobject]@{ StatusCode = 200; Content = '{"status":"ready"}' }
+                }
+                function Get-LocalMonitorDefaultInstallRoot { return '{{installRoot.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Get-LocalMonitorPublishedExePath { param([string] $InstallRoot) return '{{executable.Replace("'", "''", StringComparison.Ordinal)}}' }
+                function Start-LocalMonitorProcess {
+                    param(
+                        [string] $FilePath, [object[]] $ArgumentList, [string] $WorkingDirectory,
+                        [string] $StandardOutputPath, [string] $StandardErrorPath)
+                    return [pscustomobject]@{ Id = 4242 }
+                }
+                function Get-LocalMonitorAppVersion { param([string] $InstallRoot) return '' }
+                """);
+
+            var startCommand = "& " + PowerShellLiteral(start) +
+                " -Mode Published -Url http://127.0.0.1:4320 -DbPath " + PowerShellLiteral(database) +
+                " -InstallRoot " + PowerShellLiteral(installRoot) +
+                " -NoBrowser -WaitReady:$false" +
+                " -SkillDiscoveryProjectPath @(" + PowerShellLiteral(sentinelProjectPath) + ")" +
+                " -SkillDiscoveryDirectory @(" + PowerShellLiteral(sentinelDirectory) + ")";
+            var startResult = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-Command", startCommand],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.True(startResult.ExitCode == 0, $"{startResult.StandardOutputText}{startResult.StandardErrorText}");
+            Assert.DoesNotContain(sentinel, startResult.StandardOutputText, StringComparison.Ordinal);
+            Assert.DoesNotContain(sentinel, startResult.StandardErrorText, StringComparison.Ordinal);
+            Assert.True(File.Exists(statePath), "The wrapper must still write its state file.");
+            Assert.DoesNotContain(sentinel, File.ReadAllText(statePath), StringComparison.Ordinal);
+            var logFiles = Directory.EnumerateFiles(logs).ToArray();
+            Assert.NotEmpty(logFiles);
+            foreach (var logFile in logFiles)
+            {
+                Assert.DoesNotContain(sentinel, File.ReadAllText(logFile), StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SkillDiscoveryTaskStateReaderNeverLeaksSuppliedRoots()
+    {
+        const string sentinel = "SENTINEL";
+        var sentinelProjectPath = @"C:\SENTINEL_ROOT\project";
+        var sentinelDirectory = @"C:\SENTINEL_ROOT\skills";
+        var taskCommand = "& 'C:\\safe\\start.ps1' -Url 'http://127.0.0.1:4320' -DbPath 'C:\\safe\\raw-store.db' -Mode 'Published' -InstallRoot 'C:\\safe\\app' -NoBrowser -WaitReady" +
+            " -SkillDiscoveryProjectPath @(" + PowerShellLiteral(sentinelProjectPath) + ")" +
+            " -SkillDiscoveryDirectory @(" + PowerShellLiteral(sentinelDirectory) + ")";
+        var encodedTaskAction = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(taskCommand));
+
+        var command = ". " + PowerShellLiteral(ScriptPath("common.ps1")) + "; " +
+            "$task = [pscustomobject]@{ Actions = @([pscustomobject]@{ Arguments = " + PowerShellLiteral(encodedTaskAction) + " }) }; " +
+            "$projectState = Get-LocalMonitorTaskSkillDiscoveryProjectPathState -Task $task; " +
+            "$directoryState = Get-LocalMonitorTaskSkillDiscoveryDirectoryState -Task $task; " +
+            "[pscustomobject]@{ ProjectState = $projectState.State; ProjectCount = $projectState.Count; DirectoryState = $directoryState.State; DirectoryCount = $directoryState.Count } | ConvertTo-Json -Compress";
+
+        var result = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", command],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.True(result.ExitCode == 0, $"{result.StandardOutputText}{result.StandardErrorText}");
+        Assert.DoesNotContain(sentinel, result.StandardOutputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, result.StandardErrorText, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(result.StandardOutputText);
+        Assert.Equal("present", document.RootElement.GetProperty("ProjectState").GetString());
+        Assert.Equal(1, document.RootElement.GetProperty("ProjectCount").GetInt32());
+        Assert.Equal("present", document.RootElement.GetProperty("DirectoryState").GetString());
+        Assert.Equal(1, document.RootElement.GetProperty("DirectoryCount").GetInt32());
+    }
+
+    [Fact]
+    public void InstallStartupTaskValidationFailureLeavesExistingTaskUnchangedAndRegistersNothing()
+    {
+        var root = CreateTemporaryDirectory("cao-skill-discovery-partial-effect-tests");
+        try
+        {
+            var scripts = Directory.CreateDirectory(Path.Combine(root, "scripts")).FullName;
+            var unregisterMarker = Path.Combine(root, "unregister-called.txt");
+            var registerMarker = Path.Combine(root, "register-called.txt");
+            File.Copy(ScriptPath("install-startup-task.ps1"), Path.Combine(scripts, "install-startup-task.ps1"));
+            File.Copy(ScriptPath("common.ps1"), Path.Combine(scripts, "common.ps1"));
+            File.AppendAllText(
+                Path.Combine(scripts, "common.ps1"),
+                $$"""
+                $script:DefaultDbPath = 'C:\safe\raw-store.db'
+                function Get-LocalMonitorDefaultInstallRoot { 'C:\safe\app' }
+                function Test-LocalMonitorLoopbackUrl { param([string] $Url) $true }
+                function Get-LocalMonitorTask { param([string] $TaskName) [pscustomobject]@{ State = 'Ready' } }
+                function Get-LocalMonitorRepoRoot { 'C:\safe\repo' }
+                function Get-LocalMonitorPowerShellPath { 'C:\safe\pwsh.exe' }
+                function Unregister-ScheduledTask { param([string] $TaskName, [switch] $Confirm) [System.IO.File]::WriteAllText('{{unregisterMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'called') }
+                function New-ScheduledTaskAction { param([string] $Execute, [string] $Argument, [string] $WorkingDirectory) [pscustomobject]@{} }
+                function New-ScheduledTaskTrigger { [pscustomobject]@{} }
+                function New-ScheduledTaskPrincipal { [pscustomobject]@{} }
+                function New-ScheduledTaskSettingsSet { [pscustomobject]@{} }
+                function Register-ScheduledTask { [System.IO.File]::WriteAllText('{{registerMarker.Replace("'", "''", StringComparison.Ordinal)}}', 'called'); [pscustomobject]@{} }
+                """);
+
+            var installScript = Path.Combine(scripts, "install-startup-task.ps1").Replace("'", "''", StringComparison.Ordinal);
+            var result = RunBoundedProcess(
+                PowerShellExecutablePath(),
+                ["-NoProfile", "-Command", $"& '{installScript}' -Force -SanitizedOnly -SkillDiscoveryProjectPath @('C:\\skills\\one')"],
+                environment: null,
+                timeout: TimeSpan.FromMinutes(1));
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("skill discovery options cannot be used with --sanitized-only.", result.StandardErrorText, StringComparison.Ordinal);
+            Assert.False(File.Exists(unregisterMarker), "Validation failure must not unregister the existing task.");
+            Assert.False(File.Exists(registerMarker), "Validation failure must not register a new task.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string? InvokeSkillDiscoveryValidation(
+        IEnumerable<string?> projectPaths,
+        IEnumerable<string?> directories,
+        bool sanitizedOnly,
+        bool reverseParameterOrder = false)
+    {
+        var projectPathLiteral = BuildPowerShellArrayLiteral(projectPaths);
+        var directoryLiteral = BuildPowerShellArrayLiteral(directories);
+        var sanitizedArgument = sanitizedOnly ? " -SanitizedOnly" : string.Empty;
+        var callArguments = reverseParameterOrder
+            ? $"-SkillDiscoveryDirectory {directoryLiteral} -SkillDiscoveryProjectPath {projectPathLiteral}{sanitizedArgument}"
+            : $"-SkillDiscoveryProjectPath {projectPathLiteral} -SkillDiscoveryDirectory {directoryLiteral}{sanitizedArgument}";
+        var command = $". {PowerShellLiteral(ScriptPath("common.ps1"))}; $result = Test-LocalMonitorSkillDiscoveryArguments {callArguments}; if ($null -eq $result) {{ '<null>' }} else {{ $result }}";
+
+        var result = RunBoundedProcess(
+            PowerShellExecutablePath(),
+            ["-NoProfile", "-Command", command],
+            environment: null,
+            timeout: TimeSpan.FromMinutes(1));
+
+        Assert.True(result.ExitCode == 0, $"validation probe failed: {result.StandardOutputText}{result.StandardErrorText}");
+        var output = result.StandardOutputText.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\n');
+        return output == "<null>" ? null : output;
+    }
+
+    private static string BuildPowerShellArrayLiteral(IEnumerable<string?> values)
+    {
+        var items = values.Select(value => value is null ? "$null" : PowerShellLiteral(value));
+        return "@(" + string.Join(",", items) + ")";
+    }
+
     private static void AssertScriptContains(string script, string expected)
     {
         Assert.Contains(expected, File.ReadAllText(ScriptPath(script)), StringComparison.Ordinal);
@@ -1896,6 +2408,7 @@ public class LocalMonitorScriptTests
                 $script:LogDirectory = '{{logs.Replace("'", "''", StringComparison.Ordinal)}}'
                 $script:LiveProbeCount = 0
                 function Test-LocalMonitorPricingRegistryOverrideCount { param([string[]] $PricingRegistryOverride) return $true }
+                function Test-LocalMonitorSkillDiscoveryArguments { param([string[]] $SkillDiscoveryProjectPath, [string[]] $SkillDiscoveryDirectory, [switch] $SanitizedOnly) return $null }
                 function Test-LocalMonitorLoopbackUrl { param([string] $Url) return $true }
                 function Initialize-LocalMonitorRuntime { param([string] $DbPath) }
                 function Test-LocalMonitorHealth {

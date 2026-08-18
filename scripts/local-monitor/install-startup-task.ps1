@@ -7,6 +7,8 @@ param(
     [string] $Mode = 'DotnetRun',
     [switch] $SanitizedOnly,
     [string[]] $PricingRegistryOverride = @(),
+    [string[]] $SkillDiscoveryProjectPath = @(),
+    [string[]] $SkillDiscoveryDirectory = @(),
     [switch] $StartNow,
     [switch] $Force,
     [switch] $DryRun
@@ -16,6 +18,15 @@ param(
 
 if (-not (Test-LocalMonitorPricingRegistryOverrideCount -PricingRegistryOverride $PricingRegistryOverride)) {
     Write-Error 'pricing_registry_override_count_invalid'
+    exit 1
+}
+
+$skillDiscoveryValidationError = Test-LocalMonitorSkillDiscoveryArguments `
+    -SkillDiscoveryProjectPath $SkillDiscoveryProjectPath `
+    -SkillDiscoveryDirectory $SkillDiscoveryDirectory `
+    -SanitizedOnly:$SanitizedOnly.IsPresent
+if ($null -ne $skillDiscoveryValidationError) {
+    Write-Error $skillDiscoveryValidationError
     exit 1
 }
 
@@ -48,13 +59,17 @@ $taskArgument = New-LocalMonitorStartupTaskArgument `
     -Mode $Mode `
     -InstallRoot $InstallRoot `
     -SanitizedOnly:$SanitizedOnly.IsPresent `
-    -PricingRegistryOverride $PricingRegistryOverride
+    -PricingRegistryOverride $PricingRegistryOverride `
+    -SkillDiscoveryProjectPath $SkillDiscoveryProjectPath `
+    -SkillDiscoveryDirectory $SkillDiscoveryDirectory
 
 if ($DryRun) {
     Write-Output "task name: $TaskName"
     Write-Output "execute: $psPath"
     Write-Output 'arguments: encoded'
     Write-Output ("pricing registry overrides: {0} (count: {1})" -f $(if (@($PricingRegistryOverride).Count -gt 0) { 'present' } else { 'absent' }), @($PricingRegistryOverride).Count)
+    Write-Output ("skill discovery project paths: {0} (count: {1})" -f $(if (@($SkillDiscoveryProjectPath).Count -gt 0) { 'present' } else { 'absent' }), @($SkillDiscoveryProjectPath).Count)
+    Write-Output ("skill discovery directories: {0} (count: {1})" -f $(if (@($SkillDiscoveryDirectory).Count -gt 0) { 'present' } else { 'absent' }), @($SkillDiscoveryDirectory).Count)
     Write-Output "working directory: $repoRoot"
     Write-Output "trigger: logon"
     Write-Output "multiple instances: IgnoreNew"
@@ -78,6 +93,8 @@ if ($null -eq $registered) {
 }
 
 Write-Output ("installed (pricing registry overrides: {0} (count: {1}))" -f $(if (@($PricingRegistryOverride).Count -gt 0) { 'present' } else { 'absent' }), @($PricingRegistryOverride).Count)
+Write-Output ("skill discovery project paths: {0} (count: {1})" -f $(if (@($SkillDiscoveryProjectPath).Count -gt 0) { 'present' } else { 'absent' }), @($SkillDiscoveryProjectPath).Count)
+Write-Output ("skill discovery directories: {0} (count: {1})" -f $(if (@($SkillDiscoveryDirectory).Count -gt 0) { 'present' } else { 'absent' }), @($SkillDiscoveryDirectory).Count)
 if ($StartNow) {
     $startParameters = @{
         Url = $Url
@@ -90,6 +107,12 @@ if ($StartNow) {
     }
     if (@($PricingRegistryOverride).Count -gt 0) {
         $startParameters.PricingRegistryOverride = $PricingRegistryOverride
+    }
+    if (@($SkillDiscoveryProjectPath).Count -gt 0) {
+        $startParameters.SkillDiscoveryProjectPath = $SkillDiscoveryProjectPath
+    }
+    if (@($SkillDiscoveryDirectory).Count -gt 0) {
+        $startParameters.SkillDiscoveryDirectory = $SkillDiscoveryDirectory
     }
     & $startScript @startParameters
     exit $LASTEXITCODE
