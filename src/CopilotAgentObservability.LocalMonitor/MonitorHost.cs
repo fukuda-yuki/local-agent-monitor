@@ -213,7 +213,9 @@ internal static class MonitorHost
             skillProjectionStore,
             timeProvider: timeProvider);
         builder.Services.AddSingleton(skillProjectionStore);
-        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath));
+        var skillRegistryAuthority = new Sessions.SkillInvocationV2.SkillInvocationV2RegistryProviderV1();
+        builder.Services.AddSingleton(skillRegistryAuthority);
+        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath, skillRegistryAuthority));
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
         var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);

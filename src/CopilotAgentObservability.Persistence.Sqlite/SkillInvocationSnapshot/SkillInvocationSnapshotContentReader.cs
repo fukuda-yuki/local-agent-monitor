@@ -97,7 +97,8 @@ internal static class SkillInvocationSnapshotContentReader
         TimeProvider timeProvider,
         Guid sessionId,
         Guid snapshotId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RetentionReadKind leaseKind = RetentionReadKind.Access)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(retentionStore);
@@ -124,7 +125,7 @@ internal static class SkillInvocationSnapshotContentReader
 
         var request = new RetentionReadRequest(
             new(retentionStore.StoreInstanceId, RetentionStoreKind.SessionEventContent, metadataFacts.EventId.ToString("D")),
-            RetentionReadKind.Access,
+            leaseKind,
             timeProvider.GetUtcNow(),
             ExpectedRevision: null);
 
