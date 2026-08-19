@@ -53,6 +53,12 @@ public readonly struct SkillProducerPathKeyV1 : IEquatable<SkillProducerPathKeyV
 
     public string Key { get; }
 
+    // Internal accessors for the Gate 8 retained-root opener and the current-file target
+    // derivation: the canonical key string never goes back through string path operations.
+    internal char DriveLetter => driveLetter;
+
+    internal IReadOnlyList<string> Segments => segments;
+
     public static bool TryParse(
         string? input,
         SkillProducerPathKeyPlatform platform,
