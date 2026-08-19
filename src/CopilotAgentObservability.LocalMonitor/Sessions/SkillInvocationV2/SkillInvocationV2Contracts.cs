@@ -3,34 +3,9 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
-
-public enum SkillInvocationV2PayloadState
-{
-    Available,
-    Malformed,
-    Missing,
-    Binary,
-    Oversized
-}
-
-public enum SkillInvocationV2PayloadReason
-{
-    None,
-    DuplicateProperty,
-    UnknownProperty,
-    InvalidFieldType,
-    NameInvalid,
-    PathInvalid,
-    NameMissing,
-    BodyMissing,
-    DefinitionPathMissing,
-    BodyUnicodeInvalid,
-    PathUnicodeInvalid,
-    BodyOversized,
-    PathOversized
-}
 
 public interface ISkillInvocationV2RuntimeCapability
 {
@@ -193,8 +168,8 @@ public sealed class SkillInvocationV2AcceptedEnvelope
 {
     public SkillInvocationV2AcceptedEnvelope(
         SkillInvocationV2RawPayloadEvidence rawPayloadEvidence,
-        SkillInvocationV2PayloadState payloadState,
-        SkillInvocationV2PayloadReason payloadReason,
+        SkillInvocationPayloadState payloadState,
+        SkillInvocationPayloadReason payloadReason,
         SkillInvocationV2ParsedClaimFacts? claimFacts,
         SkillInvocationV2EventIdentity identity)
     {
@@ -206,7 +181,7 @@ public sealed class SkillInvocationV2AcceptedEnvelope
             throw new ArgumentException("Payload state and reason must form an exact Gate 6 pair.", nameof(payloadReason));
         }
 
-        if (payloadState == SkillInvocationV2PayloadState.Available != (claimFacts is not null))
+        if (payloadState == SkillInvocationPayloadState.Available != (claimFacts is not null))
         {
             throw new ArgumentException("Only an available payload has claim facts.", nameof(claimFacts));
         }
@@ -220,9 +195,9 @@ public sealed class SkillInvocationV2AcceptedEnvelope
 
     public SkillInvocationV2RawPayloadEvidence RawPayloadEvidence { get; }
 
-    public SkillInvocationV2PayloadState PayloadState { get; }
+    public SkillInvocationPayloadState PayloadState { get; }
 
-    public SkillInvocationV2PayloadReason PayloadReason { get; }
+    public SkillInvocationPayloadReason PayloadReason { get; }
 
     public SkillInvocationV2ParsedClaimFacts? ClaimFacts { get; }
 
@@ -239,14 +214,14 @@ public sealed class SkillInvocationV2AcceptedEnvelope
 
     public SkillInvocationV2TextEvidence? DefinitionPath => ClaimFacts?.DefinitionPath;
 
-    private static bool IsReasonForState(SkillInvocationV2PayloadState state, SkillInvocationV2PayloadReason reason) =>
+    private static bool IsReasonForState(SkillInvocationPayloadState state, SkillInvocationPayloadReason reason) =>
         (state, reason) switch
         {
-            (SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None) => true,
-            (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty or SkillInvocationV2PayloadReason.UnknownProperty or SkillInvocationV2PayloadReason.InvalidFieldType or SkillInvocationV2PayloadReason.NameInvalid or SkillInvocationV2PayloadReason.PathInvalid) => true,
-            (SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing or SkillInvocationV2PayloadReason.BodyMissing or SkillInvocationV2PayloadReason.DefinitionPathMissing) => true,
-            (SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid or SkillInvocationV2PayloadReason.PathUnicodeInvalid) => true,
-            (SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized or SkillInvocationV2PayloadReason.PathOversized) => true,
+            (SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None) => true,
+            (SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty or SkillInvocationPayloadReason.UnknownProperty or SkillInvocationPayloadReason.InvalidFieldType or SkillInvocationPayloadReason.NameInvalid or SkillInvocationPayloadReason.PathInvalid) => true,
+            (SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing or SkillInvocationPayloadReason.BodyMissing or SkillInvocationPayloadReason.DefinitionPathMissing) => true,
+            (SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid or SkillInvocationPayloadReason.PathUnicodeInvalid) => true,
+            (SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.BodyOversized or SkillInvocationPayloadReason.PathOversized) => true,
             _ => false
         };
 }

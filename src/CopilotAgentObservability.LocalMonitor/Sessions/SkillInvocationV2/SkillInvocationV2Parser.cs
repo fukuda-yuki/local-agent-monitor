@@ -1,7 +1,7 @@
-using System.Buffers;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
@@ -41,38 +41,6 @@ public static class SkillInvocationV2Parser
         "trace_id",
         "span_id",
         "payload"
-    };
-
-    private static readonly HashSet<string> PayloadProperties = new(StringComparer.Ordinal)
-    {
-        "name",
-        "path",
-        "content",
-        "allowedTools",
-        "description",
-        "pluginName",
-        "pluginVersion",
-        "source",
-        "trigger"
-    };
-
-    private static readonly HashSet<string> Sources = new(StringComparer.Ordinal)
-    {
-        "project",
-        "inherited",
-        "personal-copilot",
-        "personal-agents",
-        "custom",
-        "plugin",
-        "builtin",
-        "remote"
-    };
-
-    private static readonly HashSet<string> Triggers = new(StringComparer.Ordinal)
-    {
-        "user-invoked",
-        "agent-invoked",
-        "context-load"
     };
 
     public static ParsedSkillInvocationV2Batch Parse(
@@ -336,243 +304,11 @@ public static class SkillInvocationV2Parser
 
     private static PayloadCandidate ReadPayload(ref Utf8JsonReader reader, ParseState state)
     {
-        var candidate = new PayloadCandidate(checked((int)reader.TokenStartIndex));
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
-        {
-            if (reader.TokenType != JsonTokenType.PropertyName)
-            {
-                candidate.InvalidFieldType = true;
-                ConsumeValue(ref reader, state);
-                continue;
-            }
-
-            if (!TryDecodeString(ref reader, state, out var propertyName, out _))
-            {
-                candidate.UnknownProperty = true;
-                if (!reader.Read()) throw InvalidRequest();
-                ConsumeValue(ref reader, state);
-                continue;
-            }
-
-            if (!seen.Add(propertyName))
-            {
-                candidate.DuplicateProperty = true;
-            }
-
-            if (!PayloadProperties.Contains(propertyName))
-            {
-                candidate.UnknownProperty = true;
-            }
-
-            if (!reader.Read()) throw InvalidRequest();
-            switch (propertyName)
-            {
-                case "name":
-                    candidate.NamePresent = true;
-                    ReadName(ref reader, state, candidate);
-                    break;
-                case "path":
-                    candidate.PathPresent = true;
-                    ReadPath(ref reader, state, candidate);
-                    break;
-                case "content":
-                    candidate.BodyPresent = true;
-                    ReadBody(ref reader, state, candidate);
-                    break;
-                case "allowedTools":
-                    ReadAllowedTools(ref reader, state, candidate);
-                    break;
-                case "description":
-                    ReadBoundedOptionalString(ref reader, state, candidate, 4_096, 16_384);
-                    break;
-                case "pluginName":
-                case "pluginVersion":
-                    ReadBoundedOptionalString(ref reader, state, candidate, int.MaxValue, 256);
-                    break;
-                case "source":
-                    ReadClosedOptionalString(ref reader, state, candidate, Sources, isSource: true);
-                    break;
-                case "trigger":
-                    ReadClosedOptionalString(ref reader, state, candidate, Triggers, isSource: false);
-                    break;
-                default:
-                    ConsumeValue(ref reader, state);
-                    break;
-            }
-        }
-
-        if (reader.TokenType != JsonTokenType.EndObject)
-        {
-            throw InvalidRequest();
-        }
-
-        candidate.End = checked((int)reader.BytesConsumed);
-        return candidate;
-    }
-
-    private static void ReadName(ref Utf8JsonReader reader, ParseState state, PayloadCandidate candidate)
-    {
-        if (!TryDecodeString(ref reader, state, out var value, out var unicodeInvalid))
-        {
-            if (unicodeInvalid)
-            {
-                candidate.NameInvalid = true;
-            }
-            else
-            {
-                candidate.InvalidFieldType = true;
-                ConsumeValue(ref reader, state);
-            }
-            return;
-        }
-
-        candidate.Name = value;
-        var scalarCount = 0;
-        var invalidScalar = false;
-        foreach (var rune in value.EnumerateRunes())
-        {
-            scalarCount++;
-            invalidScalar |= Rune.GetUnicodeCategory(rune) == UnicodeCategory.Control || IsNoncharacter(rune.Value);
-        }
-
-        if (scalarCount is < 1 or > 200 || Encoding.UTF8.GetByteCount(value) > 800 || invalidScalar)
-        {
-            candidate.NameInvalid = true;
-        }
-    }
-
-    private static void ReadPath(ref Utf8JsonReader reader, ParseState state, PayloadCandidate candidate)
-    {
-        if (!TryDecodeString(ref reader, state, out var value, out var unicodeInvalid))
-        {
-            if (unicodeInvalid)
-            {
-                candidate.PathUnicodeInvalid = true;
-            }
-            else
-            {
-                candidate.InvalidFieldType = true;
-                ConsumeValue(ref reader, state);
-            }
-            return;
-        }
-
-        candidate.Path = value;
-        if (value.Length == 0 || value.EnumerateRunes().Any(rune => rune.Value <= 0x1f || rune.Value == 0x7f))
-        {
-            candidate.PathInvalid = true;
-        }
-
-        if (Encoding.UTF8.GetByteCount(value) > 4_096)
-        {
-            candidate.PathOversized = true;
-        }
-    }
-
-    private static void ReadBody(ref Utf8JsonReader reader, ParseState state, PayloadCandidate candidate)
-    {
-        if (!TryDecodeString(ref reader, state, out var value, out var unicodeInvalid))
-        {
-            if (unicodeInvalid)
-            {
-                candidate.BodyUnicodeInvalid = true;
-            }
-            else
-            {
-                candidate.InvalidFieldType = true;
-                ConsumeValue(ref reader, state);
-            }
-            return;
-        }
-
-        candidate.Body = value;
-        if (Encoding.UTF8.GetByteCount(value) > 1_048_576)
-        {
-            candidate.BodyOversized = true;
-        }
-    }
-
-    private static void ReadAllowedTools(ref Utf8JsonReader reader, ParseState state, PayloadCandidate candidate)
-    {
-        if (reader.TokenType != JsonTokenType.StartArray)
-        {
-            candidate.InvalidFieldType = true;
-            ConsumeValue(ref reader, state);
-            return;
-        }
-
-        var count = 0;
-        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
-        {
-            count++;
-            if (!TryDecodeString(ref reader, state, out var value, out _))
-            {
-                candidate.InvalidFieldType = true;
-                ConsumeValue(ref reader, state);
-                continue;
-            }
-
-            var scalarCount = value.EnumerateRunes().Count();
-            if (scalarCount is < 1 or > 128 || Encoding.UTF8.GetByteCount(value) > 512)
-            {
-                candidate.InvalidFieldType = true;
-            }
-        }
-
-        if (reader.TokenType != JsonTokenType.EndArray)
-        {
-            throw InvalidRequest();
-        }
-
-        if (count > 64)
-        {
-            candidate.InvalidFieldType = true;
-        }
-    }
-
-    private static void ReadBoundedOptionalString(
-        ref Utf8JsonReader reader,
-        ParseState state,
-        PayloadCandidate candidate,
-        int maximumScalars,
-        int maximumBytes)
-    {
-        if (!TryDecodeString(ref reader, state, out var value, out _))
-        {
-            candidate.InvalidFieldType = true;
-            ConsumeValue(ref reader, state);
-            return;
-        }
-
-        if (value.EnumerateRunes().Count() > maximumScalars || Encoding.UTF8.GetByteCount(value) > maximumBytes)
-        {
-            candidate.InvalidFieldType = true;
-        }
-    }
-
-    private static void ReadClosedOptionalString(
-        ref Utf8JsonReader reader,
-        ParseState state,
-        PayloadCandidate candidate,
-        HashSet<string> accepted,
-        bool isSource)
-    {
-        if (!TryDecodeString(ref reader, state, out var value, out _) || !accepted.Contains(value))
-        {
-            candidate.InvalidFieldType = true;
-            ConsumeValue(ref reader, state);
-            return;
-        }
-
-        if (isSource)
-        {
-            candidate.Source = value;
-        }
-        else
-        {
-            candidate.Trigger = value;
-        }
+        var start = checked((int)reader.TokenStartIndex);
+        var observedInvalidUtf8 = state.OuterInvalid;
+        var scan = SkillInvocationPayloadClassifierV1.ScanPayloadObject(ref reader, ref observedInvalidUtf8);
+        state.OuterInvalid = observedInvalidUtf8;
+        return new PayloadCandidate(start, scan);
     }
 
     private static void RequireExactString(ref Utf8JsonReader reader, ParseState state, string expected)
@@ -652,77 +388,21 @@ public static class SkillInvocationV2Parser
         out string value,
         out bool unicodeInvalid)
     {
-        value = string.Empty;
-        unicodeInvalid = false;
-        if (reader.TokenType is not (JsonTokenType.String or JsonTokenType.PropertyName))
-        {
-            return false;
-        }
-
-        if (!IsValidUtf8(reader.ValueSpan))
+        var decoded = SkillInvocationPayloadClassifierV1.TryDecodeStringToken(ref reader, out value, out unicodeInvalid, out var invalidUtf8);
+        if (invalidUtf8)
         {
             state.OuterInvalid = true;
-            return false;
         }
 
-        try
-        {
-            value = reader.GetString()!;
-            return true;
-        }
-        catch (InvalidOperationException)
-        {
-            unicodeInvalid = true;
-            return false;
-        }
+        return decoded;
     }
 
     private static void ConsumeValue(ref Utf8JsonReader reader, ParseState state)
     {
-        ValidateRawStringToken(ref reader, state);
-        if (reader.TokenType is not (JsonTokenType.StartArray or JsonTokenType.StartObject))
-        {
-            return;
-        }
-
-        var depth = reader.CurrentDepth;
-        while (reader.Read())
-        {
-            ValidateRawStringToken(ref reader, state);
-            if (reader.CurrentDepth == depth && reader.TokenType is (JsonTokenType.EndArray or JsonTokenType.EndObject))
-            {
-                return;
-            }
-        }
-
-        throw InvalidRequest();
+        var observedInvalidUtf8 = state.OuterInvalid;
+        SkillInvocationPayloadClassifierV1.ConsumeValueToken(ref reader, ref observedInvalidUtf8);
+        state.OuterInvalid = observedInvalidUtf8;
     }
-
-    private static void ValidateRawStringToken(ref Utf8JsonReader reader, ParseState state)
-    {
-        if (reader.TokenType is (JsonTokenType.String or JsonTokenType.PropertyName) && !IsValidUtf8(reader.ValueSpan))
-        {
-            state.OuterInvalid = true;
-        }
-    }
-
-    private static bool IsValidUtf8(ReadOnlySpan<byte> bytes)
-    {
-        while (!bytes.IsEmpty)
-        {
-            if (Rune.DecodeFromUtf8(bytes, out _, out var consumed) != OperationStatus.Done)
-            {
-                return false;
-            }
-
-            bytes = bytes[consumed..];
-        }
-
-        return true;
-    }
-
-    private static bool IsNoncharacter(int scalar) =>
-        scalar is >= 0xfdd0 and <= 0xfdef || (scalar & 0xffff) is 0xfffe or 0xffff;
 
     private static JsonException InvalidRequest() => new("Invalid skill invocation v2 request.");
 
@@ -735,45 +415,11 @@ public static class SkillInvocationV2Parser
         public string? NativeSessionId { get; set; }
     }
 
-    private sealed class PayloadCandidate(int start)
+    private sealed class PayloadCandidate(int start, SkillInvocationPayloadScan scan)
     {
         public int Start { get; } = start;
 
-        public int End { get; set; }
-
-        public bool DuplicateProperty { get; set; }
-
-        public bool UnknownProperty { get; set; }
-
-        public bool InvalidFieldType { get; set; }
-
-        public bool NameInvalid { get; set; }
-
-        public bool PathInvalid { get; set; }
-
-        public bool NamePresent { get; set; }
-
-        public bool BodyPresent { get; set; }
-
-        public bool PathPresent { get; set; }
-
-        public bool BodyUnicodeInvalid { get; set; }
-
-        public bool PathUnicodeInvalid { get; set; }
-
-        public bool BodyOversized { get; set; }
-
-        public bool PathOversized { get; set; }
-
-        public string? Name { get; set; }
-
-        public string? Source { get; set; }
-
-        public string? Trigger { get; set; }
-
-        public string? Body { get; set; }
-
-        public string? Path { get; set; }
+        public SkillInvocationPayloadScan Scan { get; } = scan;
 
         public string? SourceEventId { get; set; }
 
@@ -787,16 +433,16 @@ public static class SkillInvocationV2Parser
 
         public SkillInvocationV2AcceptedEnvelope Build(ReadOnlySpan<byte> requestUtf8)
         {
-            var (state, reason) = Classify();
+            var (state, reason) = SkillInvocationPayloadClassifierV1.ClassifyScan(Scan);
             SkillInvocationV2ParsedClaimFacts? facts = null;
-            if (state == SkillInvocationV2PayloadState.Available)
+            if (state == SkillInvocationPayloadState.Available)
             {
                 facts = new SkillInvocationV2ParsedClaimFacts(
-                    Name!,
-                    Source,
-                    Trigger,
-                    new SkillInvocationV2TextEvidence(Body!),
-                    new SkillInvocationV2TextEvidence(Path!));
+                    Scan.Name!,
+                    Scan.Source,
+                    Scan.Trigger,
+                    new SkillInvocationV2TextEvidence(Scan.Body!),
+                    new SkillInvocationV2TextEvidence(Scan.Path!));
             }
 
             var identity = new SkillInvocationV2EventIdentity(
@@ -809,28 +455,11 @@ public static class SkillInvocationV2Parser
                 spanId: null);
 
             return new SkillInvocationV2AcceptedEnvelope(
-                new SkillInvocationV2RawPayloadEvidence(requestUtf8[Start..End]),
+                new SkillInvocationV2RawPayloadEvidence(requestUtf8[Start..Scan.TokenEndIndex]),
                 state,
                 reason,
                 facts,
                 identity);
-        }
-
-        private (SkillInvocationV2PayloadState State, SkillInvocationV2PayloadReason Reason) Classify()
-        {
-            if (DuplicateProperty) return (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty);
-            if (UnknownProperty) return (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.UnknownProperty);
-            if (InvalidFieldType) return (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-            if (NameInvalid) return (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-            if (PathInvalid) return (SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid);
-            if (!NamePresent) return (SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing);
-            if (!BodyPresent) return (SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyMissing);
-            if (!PathPresent) return (SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.DefinitionPathMissing);
-            if (BodyUnicodeInvalid) return (SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid);
-            if (PathUnicodeInvalid) return (SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.PathUnicodeInvalid);
-            if (BodyOversized) return (SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized);
-            if (PathOversized) return (SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.PathOversized);
-            return (SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None);
         }
     }
 }

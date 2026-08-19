@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
@@ -37,9 +38,9 @@ internal abstract record SkillInvocationMetadataPersistedSnapshotV1
 
     internal sealed record Fault : SkillInvocationMetadataPersistedSnapshotV1
     {
-        internal Fault(SkillInvocationV2PayloadState state, SkillInvocationV2PayloadReason reason)
+        internal Fault(SkillInvocationPayloadState state, SkillInvocationPayloadReason reason)
         {
-            if (state == SkillInvocationV2PayloadState.Available)
+            if (state == SkillInvocationPayloadState.Available)
             {
                 throw new ArgumentException("A fault snapshot cannot carry the available payload state.", nameof(state));
             }
@@ -48,9 +49,9 @@ internal abstract record SkillInvocationMetadataPersistedSnapshotV1
             Reason = reason;
         }
 
-        internal SkillInvocationV2PayloadState State { get; }
+        internal SkillInvocationPayloadState State { get; }
 
-        internal SkillInvocationV2PayloadReason Reason { get; }
+        internal SkillInvocationPayloadReason Reason { get; }
     }
 }
 
@@ -196,29 +197,29 @@ internal static class SkillInvocationMetadataDocumentV1
             nameof(diagnosticToken))
     };
 
-    private static string PersistedStateToken(SkillInvocationV2PayloadState state) => state switch
+    private static string PersistedStateToken(SkillInvocationPayloadState state) => state switch
     {
-        SkillInvocationV2PayloadState.Malformed => "malformed",
-        SkillInvocationV2PayloadState.Missing => "missing",
-        SkillInvocationV2PayloadState.Binary => "binary",
-        SkillInvocationV2PayloadState.Oversized => "oversized",
+        SkillInvocationPayloadState.Malformed => "malformed",
+        SkillInvocationPayloadState.Missing => "missing",
+        SkillInvocationPayloadState.Binary => "binary",
+        SkillInvocationPayloadState.Oversized => "oversized",
         _ => throw new ArgumentOutOfRangeException(nameof(state), state, "Unrecognized fault snapshot state.")
     };
 
-    private static string PersistedReasonToken(SkillInvocationV2PayloadReason reason) => reason switch
+    private static string PersistedReasonToken(SkillInvocationPayloadReason reason) => reason switch
     {
-        SkillInvocationV2PayloadReason.DuplicateProperty => "duplicate_property",
-        SkillInvocationV2PayloadReason.UnknownProperty => "unknown_property",
-        SkillInvocationV2PayloadReason.InvalidFieldType => "invalid_field_type",
-        SkillInvocationV2PayloadReason.NameInvalid => "name_invalid",
-        SkillInvocationV2PayloadReason.PathInvalid => "path_invalid",
-        SkillInvocationV2PayloadReason.NameMissing => "name_missing",
-        SkillInvocationV2PayloadReason.BodyMissing => "body_missing",
-        SkillInvocationV2PayloadReason.DefinitionPathMissing => "definition_path_missing",
-        SkillInvocationV2PayloadReason.BodyUnicodeInvalid => "body_unicode_invalid",
-        SkillInvocationV2PayloadReason.PathUnicodeInvalid => "path_unicode_invalid",
-        SkillInvocationV2PayloadReason.BodyOversized => "body_oversized",
-        SkillInvocationV2PayloadReason.PathOversized => "path_oversized",
+        SkillInvocationPayloadReason.DuplicateProperty => "duplicate_property",
+        SkillInvocationPayloadReason.UnknownProperty => "unknown_property",
+        SkillInvocationPayloadReason.InvalidFieldType => "invalid_field_type",
+        SkillInvocationPayloadReason.NameInvalid => "name_invalid",
+        SkillInvocationPayloadReason.PathInvalid => "path_invalid",
+        SkillInvocationPayloadReason.NameMissing => "name_missing",
+        SkillInvocationPayloadReason.BodyMissing => "body_missing",
+        SkillInvocationPayloadReason.DefinitionPathMissing => "definition_path_missing",
+        SkillInvocationPayloadReason.BodyUnicodeInvalid => "body_unicode_invalid",
+        SkillInvocationPayloadReason.PathUnicodeInvalid => "path_unicode_invalid",
+        SkillInvocationPayloadReason.BodyOversized => "body_oversized",
+        SkillInvocationPayloadReason.PathOversized => "path_oversized",
         _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unrecognized fault snapshot reason.")
     };
 

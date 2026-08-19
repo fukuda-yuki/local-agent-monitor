@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -51,25 +52,25 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     }
 
     [Theory]
-    [InlineData(SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.UnknownProperty)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.DefinitionPathMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.PathUnicodeInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized)]
-    [InlineData(SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.PathOversized)]
+    [InlineData(SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.UnknownProperty)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.PathInvalid)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyMissing)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.DefinitionPathMissing)]
+    [InlineData(SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid)]
+    [InlineData(SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.PathUnicodeInvalid)]
+    [InlineData(SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.BodyOversized)]
+    [InlineData(SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.PathOversized)]
     public void AcceptedEnvelope_AdmitsOnlyGate6StateReasonPairsAndNullableFacts(
-        SkillInvocationV2PayloadState state,
-        SkillInvocationV2PayloadReason reason)
+        SkillInvocationPayloadState state,
+        SkillInvocationPayloadReason reason)
     {
         var rawPayload = new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}"));
-        var facts = state == SkillInvocationV2PayloadState.Available ? AvailableFacts(source: null, trigger: null) : null;
+        var facts = state == SkillInvocationPayloadState.Available ? AvailableFacts(source: null, trigger: null) : null;
 
         var envelope = new SkillInvocationV2AcceptedEnvelope(rawPayload, state, reason, facts, SampleIdentity());
 
@@ -88,17 +89,17 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var facts = AvailableFacts();
 
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None, null, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.None, null, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyUnicodeInvalid, null, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyUnicodeInvalid, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyOversized, null, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyOversized, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.NameMissing, null, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.NameMissing, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing, facts, SampleIdentity()));
+            rawPayload, SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing, facts, SampleIdentity()));
     }
 
     [Fact]
@@ -118,8 +119,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     {
         var envelope = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
-            SkillInvocationV2PayloadState.Available,
-            SkillInvocationV2PayloadReason.None,
+            SkillInvocationPayloadState.Available,
+            SkillInvocationPayloadReason.None,
             AvailableFacts(),
             SampleIdentity());
         var capability = new ThrowingRuntimeCapability();
@@ -128,8 +129,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SampleNativeSessionId);
         sourceEnvelopes[0] = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
-            SkillInvocationV2PayloadState.Missing,
-            SkillInvocationV2PayloadReason.NameMissing,
+            SkillInvocationPayloadState.Missing,
+            SkillInvocationPayloadReason.NameMissing,
             null,
             SampleIdentity());
 
@@ -157,8 +158,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
             null);
         var envelope = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
-            SkillInvocationV2PayloadState.Available,
-            SkillInvocationV2PayloadReason.None,
+            SkillInvocationPayloadState.Available,
+            SkillInvocationPayloadReason.None,
             AvailableFacts(),
             identity);
         var batch = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), "native-SENTINEL-VALUE");

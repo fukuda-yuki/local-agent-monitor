@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using GitHub.Copilot;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -139,7 +140,7 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
         var accepted = Assert.Single(batch.AcceptedEnvelopes);
         Assert.Same(capability, batch.RuntimeCapability);
-        Assert.Equal(SkillInvocationV2PayloadState.Available, accepted.PayloadState);
+        Assert.Equal(SkillInvocationPayloadState.Available, accepted.PayloadState);
         Assert.Equal("skill-name", accepted.Name);
         Assert.Equal("skills/SKILL.md", accepted.DefinitionPath!.Text);
         Assert.Equal("body", accepted.Body!.Text);

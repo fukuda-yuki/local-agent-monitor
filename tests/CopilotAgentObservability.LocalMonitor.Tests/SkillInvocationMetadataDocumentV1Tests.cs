@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -119,7 +120,7 @@ public sealed class SkillInvocationMetadataDocumentV1Tests
         foreach (var token in new[] { "current", "stale", "invalid", null })
         {
             var derived = SkillInvocationMetadataDocumentV1.DeriveState(
-                new SkillInvocationMetadataPersistedSnapshotV1.Fault(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty),
+                new SkillInvocationMetadataPersistedSnapshotV1.Fault(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty),
                 SkillInvocationRetentionProjectionV1.Readable,
                 token);
 
@@ -149,7 +150,7 @@ public sealed class SkillInvocationMetadataDocumentV1Tests
     public void DeriveState_FaultUnreadable_DerivesExpiredSnapshotStateWithThePersistedReasonAndInvalidValidity()
     {
         var derived = SkillInvocationMetadataDocumentV1.DeriveState(
-            new SkillInvocationMetadataPersistedSnapshotV1.Fault(SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid),
+            new SkillInvocationMetadataPersistedSnapshotV1.Fault(SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid),
             SkillInvocationRetentionProjectionV1.RetainedDeletedOrTombstoned,
             "current");
 
@@ -339,29 +340,29 @@ public sealed class SkillInvocationMetadataDocumentV1Tests
         _ => throw new InvalidOperationException($"Unrecognized golden retention token '{text}'.")
     };
 
-    private static SkillInvocationV2PayloadState ParsePersistedState(string text) => text switch
+    private static SkillInvocationPayloadState ParsePersistedState(string text) => text switch
     {
-        "malformed" => SkillInvocationV2PayloadState.Malformed,
-        "missing" => SkillInvocationV2PayloadState.Missing,
-        "binary" => SkillInvocationV2PayloadState.Binary,
-        "oversized" => SkillInvocationV2PayloadState.Oversized,
+        "malformed" => SkillInvocationPayloadState.Malformed,
+        "missing" => SkillInvocationPayloadState.Missing,
+        "binary" => SkillInvocationPayloadState.Binary,
+        "oversized" => SkillInvocationPayloadState.Oversized,
         _ => throw new InvalidOperationException($"Unrecognized golden persisted_state token '{text}'.")
     };
 
-    private static SkillInvocationV2PayloadReason ParsePersistedReason(string text) => text switch
+    private static SkillInvocationPayloadReason ParsePersistedReason(string text) => text switch
     {
-        "duplicate_property" => SkillInvocationV2PayloadReason.DuplicateProperty,
-        "unknown_property" => SkillInvocationV2PayloadReason.UnknownProperty,
-        "invalid_field_type" => SkillInvocationV2PayloadReason.InvalidFieldType,
-        "name_invalid" => SkillInvocationV2PayloadReason.NameInvalid,
-        "path_invalid" => SkillInvocationV2PayloadReason.PathInvalid,
-        "name_missing" => SkillInvocationV2PayloadReason.NameMissing,
-        "body_missing" => SkillInvocationV2PayloadReason.BodyMissing,
-        "definition_path_missing" => SkillInvocationV2PayloadReason.DefinitionPathMissing,
-        "body_unicode_invalid" => SkillInvocationV2PayloadReason.BodyUnicodeInvalid,
-        "path_unicode_invalid" => SkillInvocationV2PayloadReason.PathUnicodeInvalid,
-        "body_oversized" => SkillInvocationV2PayloadReason.BodyOversized,
-        "path_oversized" => SkillInvocationV2PayloadReason.PathOversized,
+        "duplicate_property" => SkillInvocationPayloadReason.DuplicateProperty,
+        "unknown_property" => SkillInvocationPayloadReason.UnknownProperty,
+        "invalid_field_type" => SkillInvocationPayloadReason.InvalidFieldType,
+        "name_invalid" => SkillInvocationPayloadReason.NameInvalid,
+        "path_invalid" => SkillInvocationPayloadReason.PathInvalid,
+        "name_missing" => SkillInvocationPayloadReason.NameMissing,
+        "body_missing" => SkillInvocationPayloadReason.BodyMissing,
+        "definition_path_missing" => SkillInvocationPayloadReason.DefinitionPathMissing,
+        "body_unicode_invalid" => SkillInvocationPayloadReason.BodyUnicodeInvalid,
+        "path_unicode_invalid" => SkillInvocationPayloadReason.PathUnicodeInvalid,
+        "body_oversized" => SkillInvocationPayloadReason.BodyOversized,
+        "path_oversized" => SkillInvocationPayloadReason.PathOversized,
         _ => throw new InvalidOperationException($"Unrecognized golden snapshot_reason token '{text}'.")
     };
 
