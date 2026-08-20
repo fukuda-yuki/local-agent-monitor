@@ -90,6 +90,34 @@ internal sealed class SkillProjectionCurrentSdkClaimAuthorization : IDisposable
     }
 }
 
+internal enum SkillProjectionSdkClaimProofOutcome
+{
+    Proved,
+    Busy,
+    Unavailable
+}
+
+// The sanitized result of proving one snapshot's SDK claim: the exact producer tuple plus the
+// closed name/source facts, and nothing that identifies a registry file, path, or table.
+internal sealed record SkillProjectionSdkClaimProofResult(
+    SkillProjectionSdkClaimProofOutcome Outcome,
+    SkillRegistryProducerTuple? Tuple,
+    string? SkillName,
+    string? SkillSource)
+{
+    internal static readonly SkillProjectionSdkClaimProofResult Busy =
+        new(SkillProjectionSdkClaimProofOutcome.Busy, null, null, null);
+
+    internal static readonly SkillProjectionSdkClaimProofResult Unavailable =
+        new(SkillProjectionSdkClaimProofOutcome.Unavailable, null, null, null);
+
+    internal static SkillProjectionSdkClaimProofResult ForProved(
+        SkillRegistryProducerTuple tuple,
+        string skillName,
+        string? skillSource) =>
+        new(SkillProjectionSdkClaimProofOutcome.Proved, tuple, skillName, skillSource);
+}
+
 internal sealed record SkillProjectionCurrentSdkClaimAuthorizationResult(
     SkillRegistryCurrentAuthorizationOutcome Outcome,
     SkillProjectionCurrentSdkClaimAuthorization? Authorization)

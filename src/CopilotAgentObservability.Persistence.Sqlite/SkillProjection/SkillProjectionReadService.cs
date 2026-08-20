@@ -234,9 +234,26 @@ internal sealed class SkillProjectionReadService
         if (registryAuthority is null)
             return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
-        SkillRegistryProducerTuple tuple;
-        string skillName;
-        string? skillSource;
+        var claim = ProveCurrentSdkClaim(sessionId, snapshotId, timeProvider);
+        return claim.Outcome switch
+        {
+            SkillProjectionSdkClaimProofOutcome.Busy => SkillProjectionCurrentSdkClaimAuthorizationResult.Busy,
+            SkillProjectionSdkClaimProofOutcome.Proved => AcquireGenerationAuthorization(
+                claim.Tuple!, claim.SkillName!, claim.SkillSource),
+            _ => SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable
+        };
+    }
+
+    // The metadata route's point-in-time diagnostic. It shares the claim proof above so there is
+    // one authority for "which exact producer tuple does this snapshot's claim carry", but it takes
+    // no registry generation lease: metadata reports a point observation, while only current-file
+    // holds a capability across later work.
+    internal SkillProjectionSdkClaimProofResult ProveCurrentSdkClaim(
+        Guid sessionId,
+        Guid snapshotId,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
 
         try
         {
@@ -258,7 +275,7 @@ internal sealed class SkillProjectionReadService
                 timeProvider);
 
             if (metadataResult.Outcome == SkillInvocationSnapshotMetadataOutcome.Busy)
-                return SkillProjectionCurrentSdkClaimAuthorizationResult.Busy;
+                return SkillProjectionSdkClaimProofResult.Busy;
 
             // #154 has no not-found outcome; a snapshot that already passed the current-file
             // lookup and historical-state arm cannot legitimately disappear or turn unreadable
@@ -267,31 +284,31 @@ internal sealed class SkillProjectionReadService
                 metadataResult.Facts is null ||
                 !metadataResult.Facts.IsAvailable ||
                 metadataResult.Facts.ClaimId is null)
-                return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+                return SkillProjectionSdkClaimProofResult.Unavailable;
 
             var facts = metadataResult.Facts;
 
             var claim = ReadSdkClaimRow(connection, transaction, sessionId, facts.ClaimId.Value.ToString("D"));
             if (claim is null || !ClaimMatchesSnapshot(claim, sessionId, facts))
-                return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+                return SkillProjectionSdkClaimProofResult.Unavailable;
 
-            tuple = new SkillRegistryProducerTuple(
-                claim.SourceApplicationVersion,
-                claim.AdapterVersion,
-                claim.NormalizationVersion,
-                claim.PayloadSchema,
-                claim.SchemaFingerprint);
-            skillName = claim.SkillName;
-            skillSource = claim.SkillSource;
+            var proved = SkillProjectionSdkClaimProofResult.ForProved(
+                new SkillRegistryProducerTuple(
+                    claim.SourceApplicationVersion,
+                    claim.AdapterVersion,
+                    claim.NormalizationVersion,
+                    claim.PayloadSchema,
+                    claim.SchemaFingerprint),
+                claim.SkillName,
+                claim.SkillSource);
 
             transaction.Commit();
+            return proved;
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
-            return SkillProjectionCurrentSdkClaimAuthorizationResult.Busy;
+            return SkillProjectionSdkClaimProofResult.Busy;
         }
-
-        return AcquireGenerationAuthorization(tuple, skillName, skillSource);
     }
 
     private SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(

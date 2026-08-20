@@ -197,6 +197,51 @@ internal static class SkillInvocationMetadataDocumentV1
             nameof(diagnosticToken))
     };
 
+    // The inverse of the two token maps below, so the persisted fault vocabulary has exactly one
+    // home. A row whose stored state or reason is outside it is a graph contradiction, not a
+    // document.
+    internal static bool TryParsePersistedFault(
+        string? state,
+        string? reason,
+        [NotNullWhen(true)] out SkillInvocationMetadataPersistedSnapshotV1.Fault? fault)
+    {
+        fault = null;
+
+        var parsedState = state switch
+        {
+            "malformed" => SkillInvocationPayloadState.Malformed,
+            "missing" => SkillInvocationPayloadState.Missing,
+            "binary" => SkillInvocationPayloadState.Binary,
+            "oversized" => SkillInvocationPayloadState.Oversized,
+            _ => (SkillInvocationPayloadState?)null
+        };
+
+        var parsedReason = reason switch
+        {
+            "duplicate_property" => SkillInvocationPayloadReason.DuplicateProperty,
+            "unknown_property" => SkillInvocationPayloadReason.UnknownProperty,
+            "invalid_field_type" => SkillInvocationPayloadReason.InvalidFieldType,
+            "name_invalid" => SkillInvocationPayloadReason.NameInvalid,
+            "path_invalid" => SkillInvocationPayloadReason.PathInvalid,
+            "name_missing" => SkillInvocationPayloadReason.NameMissing,
+            "body_missing" => SkillInvocationPayloadReason.BodyMissing,
+            "definition_path_missing" => SkillInvocationPayloadReason.DefinitionPathMissing,
+            "body_unicode_invalid" => SkillInvocationPayloadReason.BodyUnicodeInvalid,
+            "path_unicode_invalid" => SkillInvocationPayloadReason.PathUnicodeInvalid,
+            "body_oversized" => SkillInvocationPayloadReason.BodyOversized,
+            "path_oversized" => SkillInvocationPayloadReason.PathOversized,
+            _ => (SkillInvocationPayloadReason?)null
+        };
+
+        if (parsedState is null || parsedReason is null)
+        {
+            return false;
+        }
+
+        fault = new SkillInvocationMetadataPersistedSnapshotV1.Fault(parsedState.Value, parsedReason.Value);
+        return true;
+    }
+
     private static string PersistedStateToken(SkillInvocationPayloadState state) => state switch
     {
         SkillInvocationPayloadState.Malformed => "malformed",

@@ -73,6 +73,10 @@ internal sealed class SkillDiscoveryRootGenerationV1
         this.preflight = preflight;
     }
 
+    // The composition fact that selects the native reader. Unlike the revision and the canonical
+    // arrays it is not per-request state, so it does not require a held lease.
+    internal SkillProducerPathKeyPlatform Platform => preflight.RootSet!.Platform;
+
     internal bool IsAdmissionClosed
     {
         get

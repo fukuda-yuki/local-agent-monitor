@@ -16,6 +16,9 @@ using CopilotAgentObservability.LocalMonitor.Pricing;
 using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.SkillNative;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
@@ -149,6 +152,13 @@ internal static class MonitorHost
             kestrelOptions.Limits.MaxRequestLineSize = 16_384;
         });
 
+        // The Gate 8 root preflight runs before any store is opened so an invalid configuration
+        // aborts startup without leaving a side effect behind. Receiver-only never reaches it:
+        // --sanitized-only composes no discovery surface at all.
+        var skillDiscoveryRootGeneration = options.SanitizedOnly
+            ? null
+            : BuildSkillDiscoveryRootGeneration(options);
+
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
         var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
         var health = testOptions?.Health ?? new MonitorHealthState();
@@ -213,8 +223,19 @@ internal static class MonitorHost
             skillProjectionStore,
             timeProvider: timeProvider);
         builder.Services.AddSingleton(skillProjectionStore);
-        var skillRegistryAuthority = new Sessions.SkillInvocationV2.SkillInvocationV2RegistryProviderV1();
+        var skillRegistryAuthority = new SkillInvocationV2RegistryProviderV1();
         builder.Services.AddSingleton(skillRegistryAuthority);
+
+        // The runtime admission exists on every raw-default host, but no generation is admitted
+        // until the live producer chain certifies the bundled 1.0.65 runtime. Until then the
+        // current-file route stays registered and forms its fixed discovery-unavailable 503, which
+        // is what Gate 8 requires of an absent or mismatched generation.
+        var skillRuntimeAdmission = options.SanitizedOnly ? null : new CopilotRuntimeAdmissionV1();
+        if (skillDiscoveryRootGeneration is not null)
+        {
+            builder.Services.AddHostedService(_ =>
+                new SkillDiscoveryRootGenerationLifetimeV1(skillDiscoveryRootGeneration));
+        }
         builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath, skillRegistryAuthority));
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
@@ -738,6 +759,14 @@ internal static class MonitorHost
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
             RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
             SessionRoutes.MapRawContentRoute(app, sessionStore);
+            MapSkillInvocationSnapshotRoutes(
+                app,
+                options,
+                timeProvider,
+                retentionCatalog,
+                app.Services.GetRequiredService<SkillProjectionReadService>(),
+                skillDiscoveryRootGeneration,
+                skillRuntimeAdmission);
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
@@ -1922,6 +1951,11 @@ internal static class MonitorHost
             error.WriteLine("error: pricing_catalog_unavailable");
             return 1;
         }
+        catch (SkillDiscoveryStartupAbortException exception)
+        {
+            error.WriteLine($"error: {exception.Reason}");
+            return 1;
+        }
         catch (InvalidOperationException exception)
             when (string.Equals(exception.Message, PricingStoreUnavailable, StringComparison.Ordinal))
         {
@@ -1960,6 +1994,66 @@ internal static class MonitorHost
 
             return 0;
         }
+    }
+
+    private static void MapSkillInvocationSnapshotRoutes(
+        WebApplication app,
+        MonitorOptions options,
+        TimeProvider timeProvider,
+        RetentionCatalogStore retentionCatalog,
+        SkillProjectionReadService skillProjectionReadService,
+        SkillDiscoveryRootGenerationV1? rootGeneration,
+        CopilotRuntimeAdmissionV1? runtimeAdmission)
+    {
+        SkillCurrentFileOrchestratorV1? orchestrator = null;
+
+        // The current-file service and POST are composed only when this platform's gate is
+        // certified and at least one root survived the preflight. A zero-root or uncertified host
+        // omits only that surface; the metadata and historical routes stay registered.
+        if (rootGeneration is not null && runtimeAdmission is not null)
+        {
+            var nativeReader = SkillInvocationSnapshotComposition.CreateNativeReader(
+                rootGeneration.Platform, timeProvider);
+
+            if (nativeReader is not null)
+            {
+                orchestrator = new SkillCurrentFileOrchestratorV1(
+                    new SkillCurrentFileHistoricalGateV1(options.DatabasePath, retentionCatalog, timeProvider),
+                    new SkillCurrentAuthorizationGateV1(skillProjectionReadService, timeProvider),
+                    runtimeAdmission,
+                    new SkillDiscoveryGatewayAdapterV1(new CopilotSdkSkillDiscoveryGateway(
+                        static () => new CopilotSdkBundleClientV1(),
+                        runtimeAdmission)),
+                    nativeReader);
+            }
+        }
+
+        SkillInvocationSnapshotRoutes.Map(app, new SkillInvocationSnapshotRouteServicesV1(
+            (sessionId, snapshotId, cancellationToken) => SkillInvocationSnapshotComposition.ReadMetadataAsync(
+                options.DatabasePath, skillProjectionReadService, timeProvider, sessionId, snapshotId, cancellationToken),
+            (sessionId, snapshotId, cancellationToken) => SkillInvocationSnapshotComposition.ReadHistoricalContentAsync(
+                options.DatabasePath, retentionCatalog, timeProvider, sessionId, snapshotId, cancellationToken),
+            orchestrator is null ? null : rootGeneration,
+            orchestrator));
+    }
+
+    private static SkillDiscoveryRootGenerationV1? BuildSkillDiscoveryRootGeneration(
+        MonitorOptions options)
+    {
+        var preflight = SkillDiscoveryRootPreflightV1.Run(
+            options.SkillDiscoveryProjectPaths,
+            options.SkillDiscoveryDirectories);
+
+        if (preflight.AbortReason is { } reason)
+        {
+            preflight.Dispose();
+            throw new SkillDiscoveryStartupAbortException(reason);
+        }
+
+        // Zero configured roots is valid and simply omits the current-file service and POST.
+        return preflight.Outcome == SkillDiscoveryRootPreflightOutcomeV1.Certified
+            ? new SkillDiscoveryRootGenerationV1(preflight)
+            : null;
     }
 
     private static bool IsValidHostHeader(string? host)
