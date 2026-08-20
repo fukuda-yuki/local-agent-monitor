@@ -449,6 +449,16 @@ internal sealed class SessionContentUseReference : IDisposable
 
 public sealed record SessionContentReadResult(SessionContentReadDisposition Disposition, SessionContentReadLease? Lease);
 
+// The generic raw content route's total policy result. NotFound covers a missing Event, an Event
+// whose content was never readable, and every skill.invoked Event regardless of adapter or the
+// presence or health of a snapshot row: they are indistinguishable to the caller. Unavailable is
+// the non-busy policy failure -- malformed schema, type, or storage, or more than one identity row.
+public enum SessionGenericRouteContentDisposition { Granted, NotFound, Denied, Busy, Unavailable }
+
+public sealed record SessionGenericRouteContentReadResult(
+    SessionGenericRouteContentDisposition Disposition,
+    SessionContentReadLease? Lease);
+
 public sealed record SessionHumanEvaluation(Guid SessionId, string Verdict, DateTimeOffset RecordedAt);
 
 public sealed record ImprovementProposalEvidenceReference(
@@ -513,6 +523,15 @@ public interface ISessionStore
     IReadOnlyList<EffectReceipt> ListEffectReceipts(Guid proposalId);
     EffectComparisonDetail? GetEffectComparison(Guid comparisonId);
     ValueTask<SessionContentReadResult> ReadContentAsync(Guid sessionId, Guid eventId, CancellationToken cancellationToken);
+
+    // The sole read the generic raw content route performs. It is separate from ReadContentAsync
+    // because it must hold one transaction across the type-only policy check, the Retention lease
+    // insertion, and the content selection.
+    ValueTask<SessionGenericRouteContentReadResult> ReadGenericRouteContentAsync(
+        Guid sessionId,
+        Guid eventId,
+        CancellationToken cancellationToken);
+
     SessionRawRetentionState GetRawRetentionState(Guid sessionId);
     SessionProjectionState? GetProjectionState(string projectorKey);
     void UpsertProjectionState(SessionProjectionState state);
