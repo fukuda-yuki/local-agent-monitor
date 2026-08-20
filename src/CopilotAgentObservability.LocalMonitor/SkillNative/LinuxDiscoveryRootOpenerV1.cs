@@ -1,4 +1,3 @@
-using System.Text;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using Microsoft.Win32.SafeHandles;
 
@@ -27,8 +26,7 @@ internal sealed class LinuxDiscoveryRootOpenerV1 : IDiscoveryRootOpenerV1
             return DiscoveryRootOpenResultV1.Failed(DiscoveryRootOpenFailureV1.InvalidSyntax);
         }
 
-        if (LinuxNativeFileApisV1.uname(out var utsName) != 0 ||
-            !LinuxNativeFileApisV1.IsKernelReleaseAtLeast(ReadNulTerminatedAscii(utsName.Release), 5, 8))
+        if (!LinuxNativeFileApisV1.IsSupportedKernel())
         {
             return DiscoveryRootOpenResultV1.Failed(DiscoveryRootOpenFailureV1.KernelUnsupported);
         }
@@ -212,11 +210,5 @@ internal sealed class LinuxDiscoveryRootOpenerV1 : IDiscoveryRootOpenerV1
         {
             return false;
         }
-    }
-
-    private static string ReadNulTerminatedAscii(byte[] buffer)
-    {
-        var end = Array.IndexOf(buffer, (byte)0);
-        return Encoding.ASCII.GetString(buffer, 0, end < 0 ? buffer.Length : end);
     }
 }

@@ -211,6 +211,19 @@ internal static class LinuxNativeFileApisV1
         _ => CurrentSkillNativeOutcomeV1.OtherNativeFailure
     };
 
+    // The Linux platform gate. openat2 and its RESOLVE_BENEATH/NO_SYMLINKS/NO_MAGICLINKS/NO_XDEV
+    // flags arrived in 5.6 but the statx mount ID this contract compares through the read is only
+    // stable from 5.8, so 5.6 and 5.7 cannot satisfy Gate 8 and are uncertified.
+    internal static bool IsSupportedKernel() =>
+        uname(out var utsName) == 0
+        && IsKernelReleaseAtLeast(ReadNulTerminatedAscii(utsName.Release), 5, 8);
+
+    private static string ReadNulTerminatedAscii(byte[] buffer)
+    {
+        var end = Array.IndexOf(buffer, (byte)0);
+        return Encoding.ASCII.GetString(buffer, 0, end < 0 ? buffer.Length : end);
+    }
+
     internal static bool IsKernelReleaseAtLeast(string release, int requiredMajor, int requiredMinor)
     {
         ArgumentNullException.ThrowIfNull(release);
