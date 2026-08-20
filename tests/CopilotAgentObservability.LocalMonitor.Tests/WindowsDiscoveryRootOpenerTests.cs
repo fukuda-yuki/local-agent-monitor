@@ -15,14 +15,9 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         TryDeleteRecursive(rootPath);
     }
 
-    [Fact]
+    [WindowsFact]
     public void ValidNestedDirectory_Succeeds_IdentityReproves_UntilDispose()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(Path.Combine(rootPath, "skills", "team"));
         var configuredRoot = Path.Combine(rootPath, "skills", "team");
 
@@ -46,14 +41,9 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         Assert.False(opener.TryReproveRetainedRoot(result.Root));
     }
 
-    [Fact]
+    [WindowsFact]
     public void DriveRoot_WithZeroSegments_Succeeds()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var result = opener.TryOpenRetainedRoot(@"C:\", DiscoveryRootKindV1.ProjectPath);
 
         Assert.True(result.IsSuccess, $"expected success but got {result.Failure}");
@@ -61,14 +51,9 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         result.Root.Dispose();
     }
 
-    [Fact]
+    [WindowsFact]
     public void MissingPath_FailsUnopenable()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var missing = Path.Combine(rootPath, $"no-such-{Guid.NewGuid():N}");
         Directory.CreateDirectory(rootPath);
 
@@ -78,14 +63,9 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         Assert.Equal(DiscoveryRootOpenFailureV1.Unopenable, result.Failure);
     }
 
-    [Fact]
+    [WindowsFact]
     public void FileInsteadOfDirectory_FailsNotADirectory()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(rootPath);
         var filePath = Path.Combine(rootPath, "not-a-directory.txt");
         File.WriteAllText(filePath, "body");
@@ -96,14 +76,9 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         Assert.Equal(DiscoveryRootOpenFailureV1.NotADirectory, result.Failure);
     }
 
-    [Fact]
+    [WindowsFact]
     public void ReparsePointRoot_FailsReparseRoot()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var realDirectory = Path.Combine(rootPath, "real");
         Directory.CreateDirectory(realDirectory);
         var linkPath = Path.Combine(rootPath, "link");
@@ -115,18 +90,13 @@ public sealed class WindowsDiscoveryRootOpenerTests : IDisposable
         Assert.Equal(DiscoveryRootOpenFailureV1.ReparseRoot, result.Failure);
     }
 
-    [Theory]
+    [WindowsTheory]
     [InlineData("relative\\path")]
     [InlineData("")]
     [InlineData(@"C:\trailing\")]
     [InlineData(@"C:/forward")]
     public void InvalidSyntax_FailsInvalidSyntax(string configuredRoot)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var result = opener.TryOpenRetainedRoot(configuredRoot, DiscoveryRootKindV1.ProjectPath);
 
         Assert.False(result.IsSuccess);

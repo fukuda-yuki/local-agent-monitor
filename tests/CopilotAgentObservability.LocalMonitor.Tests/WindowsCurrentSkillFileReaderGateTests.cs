@@ -26,14 +26,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public void Success_ReturnsExactBytesDigestAndFixedReadAt()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var skillPath = CreateNestedSkillFile(["team", "nested"], "# héllo → skill\n");
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["team", "nested", "SKILL.md"], "revision-1");
@@ -48,14 +43,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(FixedReadAt, result.ReadAt);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Success_PreservesUtf8BomBytesUnchanged()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         CreateNestedSkillFile([], "\uFEFFbom-body");
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -67,14 +57,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal([0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("bom-body")], result.Body);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Missing_FinalSegment_ReturnsMissing()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(rootPath);
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -85,14 +70,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Missing, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Missing_IntermediateSegment_ReturnsMissing()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(rootPath);
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["no-such-directory", "SKILL.md"], "revision-1");
@@ -103,14 +83,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Missing, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void FinalSegmentIsDirectory_ReturnsUnsafe()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(Path.Combine(rootPath, "SKILL.md"));
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -121,14 +96,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Unsafe, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void IntermediateSegmentIsFile_ReturnsUnsafe()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(rootPath);
         File.WriteAllText(Path.Combine(rootPath, "team"), "not a directory");
         using var root = RetainRoot(rootPath);
@@ -140,14 +110,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Unsafe, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void DirectorySymlinkSegment_ReturnsUnsafe()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var externalTarget = Path.Combine(Path.GetTempPath(), $"cao-skillread-ext-{Guid.NewGuid():N}");
         Directory.CreateDirectory(externalTarget);
         File.WriteAllText(Path.Combine(externalTarget, "SKILL.md"), "external");
@@ -170,14 +135,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         }
     }
 
-    [Fact]
+    [WindowsFact]
     public void FileSymlinkFinalSegment_ReturnsUnsafe()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Directory.CreateDirectory(rootPath);
         File.WriteAllText(Path.Combine(rootPath, "real-target.txt"), "external content");
         CreateFileLinkOrSkip(Path.Combine(rootPath, "SKILL.md"), Path.Combine(rootPath, "real-target.txt"));
@@ -190,14 +150,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Unsafe, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Race_AppendBetweenMetadataCaptureAndProofs_ReturnsRaced()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var skillPath = CreateNestedSkillFile([], "original-body");
         var hooks = new CurrentSkillFileReaderHooksV1
         {
@@ -213,14 +168,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Raced, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Race_SameLengthRewriteAfterRead_ReturnsRaced()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var skillPath = CreateNestedSkillFile([], "AAAA-AAAA");
         var hooks = new CurrentSkillFileReaderHooksV1
         {
@@ -243,14 +193,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Raced, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void Race_RootDisposedAfterTargetConstruction_ReturnsRaced()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         CreateNestedSkillFile([], "body");
         var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -262,14 +207,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Raced, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void SharingViolationHolder_ReturnsOtherNativeFailure()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var skillPath = CreateNestedSkillFile([], "locked-body");
         using var exclusiveHolder = new FileStream(
             skillPath,
@@ -285,14 +225,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.OtherNativeFailure, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void BodyAtExactlyMaximumBytes_ReturnsSuccess()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var body = new byte[WindowsCurrentSkillFileReaderV1.MaximumBodyBytes];
         Array.Fill(body, (byte)'a');
         CreateNestedSkillFileBytes([], body);
@@ -306,14 +241,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(body.Length, result.Body!.Length);
     }
 
-    [Fact]
+    [WindowsFact]
     public void BodyOneByteOverMaximum_ReturnsOversized()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var body = new byte[WindowsCurrentSkillFileReaderV1.MaximumBodyBytes + 1];
         Array.Fill(body, (byte)'a');
         CreateNestedSkillFileBytes([], body);
@@ -326,14 +256,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Oversized, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void InvalidUtf8Body_ReturnsBinary()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         CreateNestedSkillFileBytes([], [0xFF, 0xFE, 0x41, 0x42]);
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -344,14 +269,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(CurrentSkillNativeOutcomeV1.Binary, result.Outcome);
     }
 
-    [Fact]
+    [WindowsFact]
     public void HandlesAreClosedInReverseAcquisitionOrder_AndNothingIsRetained()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         CreateNestedSkillFile(["a", "b"], "nested-body");
         var opened = new List<IntPtr>();
         var closed = new List<IntPtr>();
@@ -373,14 +293,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Equal(opened.AsEnumerable().Reverse(), closed);
     }
 
-    [Fact]
+    [WindowsFact]
     public void CancelledToken_ThrowsBeforeAnyNativeWork()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         CreateNestedSkillFile([], "body");
         using var root = RetainRoot(rootPath);
         var target = new CurrentSkillReadTargetV1(root, ["SKILL.md"], "revision-1");
@@ -391,14 +306,9 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
         Assert.Throws<OperationCanceledException>(() => reader.Read(target, cancellation.Token));
     }
 
-    [Fact]
+    [WindowsFact]
     public void LinuxPlatformRoot_Throws()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         Assert.True(SkillProducerPathKeyV1.TryParse(
             "/srv/skills",
             SkillProducerPathKeyPlatform.Linux,
