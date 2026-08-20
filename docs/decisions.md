@@ -2937,8 +2937,8 @@ owned by Session Event content. The writer is one atomic seven-authority
 transaction; partial Event, content, Retention, snapshot, claim, receipt or
 invalid-claim state cannot remain.
 
-Startup `SkillDiscovery.ProjectPaths` and
-`SkillDiscovery.SkillDirectories` are the sole discovery-root authority.
+The repeatable startup CLI options `--skill-discovery-project-path` (0..16) and
+`--skill-discovery-directory` (0..32) are the sole discovery-root authority.
 `ServerSkillsApi.DiscoverAsync` receives only those validated roots. Historical
 path/CWD, Repository locator, prompt, workspace label, timestamp and out-of-root
 results never create a root, and the service never opens the historical path
