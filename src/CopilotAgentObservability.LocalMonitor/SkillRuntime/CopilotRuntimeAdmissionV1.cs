@@ -2,6 +2,13 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
+internal enum CopilotRuntimeAcquisitionDispositionV1
+{
+    Acquired,
+    MissingOrMismatched,
+    NormalShutdownClosed
+}
+
 internal sealed class CopilotRuntimeAdmissionV1
 {
     private readonly object sync = new();
@@ -40,17 +47,33 @@ internal sealed class CopilotRuntimeAdmissionV1
 
     public bool TryAcquireCurrentFileCapability(
         CancellationToken callerToken,
+        [NotNullWhen(true)] out CopilotRuntimeOperationCapabilityV1? capability) =>
+        AcquireCurrentFileCapability(callerToken, out capability)
+            == CopilotRuntimeAcquisitionDispositionV1.Acquired;
+
+    // Normal shutdown closure and a missing/mismatched generation are two different current-file
+    // dispositions -- the first is the cleanup-and-no-response abort, the second is the fixed
+    // discovery-unavailable 503 -- so they must be told apart inside the same lock. Reading
+    // IsShutdownClosed and then acquiring would race the closure between the two observations.
+    public CopilotRuntimeAcquisitionDispositionV1 AcquireCurrentFileCapability(
+        CancellationToken callerToken,
         [NotNullWhen(true)] out CopilotRuntimeOperationCapabilityV1? capability)
     {
         lock (sync)
         {
             capability = null;
-            if (shutdownClosed || currentGeneration is not { IsAdmitted: true })
+            if (shutdownClosed)
             {
-                return false;
+                return CopilotRuntimeAcquisitionDispositionV1.NormalShutdownClosed;
             }
 
-            return currentGeneration.TryAcquireOperationCapability(callerToken, out capability);
+            if (currentGeneration is not { IsAdmitted: true }
+                || !currentGeneration.TryAcquireOperationCapability(callerToken, out capability))
+            {
+                return CopilotRuntimeAcquisitionDispositionV1.MissingOrMismatched;
+            }
+
+            return CopilotRuntimeAcquisitionDispositionV1.Acquired;
         }
     }
 
