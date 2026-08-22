@@ -35,22 +35,31 @@ internal sealed class SkillRuntimeBridgeHolderV1
 internal sealed class SkillRuntimeBridgeLifetimeV1(
     IServer server,
     SkillRuntimeBridgeHolderV1 holder,
-    CopilotRuntimeAdmissionV1 admission) : IHostedService
+    CopilotRuntimeAdmissionV1 admission,
+    IHostApplicationLifetime applicationLifetime) : IHostedService
 {
+    private IDisposable? applicationStartedRegistration;
     private SkillRuntimeCapabilityBridgeV1? bridge;
     private SkillRuntimeBridgeHttpTransportV1? transport;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        // The holder exists because the sole sender may target only the already-bound numeric
-        // loopback endpoint; constructing the bridge before the server binds would require a
-        // forbidden guessed or configured target.
+        // The sole sender may target only the already-bound numeric loopback endpoint, so the
+        // bridge cannot exist before that address does. User-registered hosted services start
+        // before the web host, which is why the address is resolved on ApplicationStarted rather
+        // than here; an unresolvable address leaves the holder empty rather than guessing one.
+        applicationStartedRegistration = applicationLifetime.ApplicationStarted.Register(PublishBridge);
+        return Task.CompletedTask;
+    }
+
+    private void PublishBridge()
+    {
         var addresses = server.Features.Get<IServerAddressesFeature>()?.Addresses;
         if (addresses is null
             || addresses.Count != 1
             || !TryResolveLoopbackOrigin(addresses.Single(), out var loopbackAddress, out var port))
         {
-            return Task.CompletedTask;
+            return;
         }
 
         var createdTransport = new SkillRuntimeBridgeHttpTransportV1(loopbackAddress, port);
@@ -62,11 +71,11 @@ internal sealed class SkillRuntimeBridgeLifetimeV1(
         transport = createdTransport;
         bridge = createdBridge;
         holder.Publish(createdBridge);
-        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
+        Interlocked.Exchange(ref applicationStartedRegistration, null)?.Dispose();
         var stoppedBridge = Interlocked.Exchange(ref bridge, null);
         if (stoppedBridge is not null)
         {

@@ -124,6 +124,21 @@
   as #95 materialize their own exact-SHA rows and handoff under that accepted
   contract; this is extension work, not unfinished #91 implementation.
 
+- **Issue #158 live Skill producer blockers:** the v2 ingest route and its stage
+  table, receipt/registry/commit orchestration, bridge, and loopback sender are
+  implemented and tested on this branch. The live producer half is not
+  implemented and is blocked by three distinct issues: the bundled runtime
+  self-reports `1.0.75`, while r0001 admits only `1.0.65` with
+  `ProtocolVersion` `3`, so certification cannot succeed on this machine; SDK
+  1.0.4 requires `BaseDirectory` or `SessionFs`, plus per-session
+  `AvailableTools`, for `CopilotClientMode.Empty`, and the specification names
+  neither; and SDK 1.0.4 `session.On<T>` is session scoped, so the specified
+  "observe skill invocations" producer model cannot see another session's
+  events. The last blocker needs a product decision on the owning
+  specification's Group 5 producer model. Consequently, the registered v2
+  `POST` returns its exact stage-1 `503 local_monitor_ui_unavailable` with zero
+  writes, which is the specified behavior when no generation is admitted.
+
 - **Issue #88 restore/backup consumer:** preserve the five
   `retention-restore-handoff/v1` tombstone, no-resurrection, retention-clock,
   consistent-restore, and backup-non-purge invariants from the Issue #90

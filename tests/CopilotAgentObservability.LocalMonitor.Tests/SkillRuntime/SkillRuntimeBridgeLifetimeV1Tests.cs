@@ -2,6 +2,7 @@ using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
@@ -25,12 +26,15 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
     public async Task StartAsync_WithoutAddressesFeature_CompletesAndLeavesHolderEmpty()
     {
         var holder = new SkillRuntimeBridgeHolderV1();
+        var applicationLifetime = new FakeHostApplicationLifetime();
         var lifetime = new SkillRuntimeBridgeLifetimeV1(
             new FakeServer(new FeatureCollection()),
             holder,
-            new CopilotRuntimeAdmissionV1());
+            new CopilotRuntimeAdmissionV1(),
+            applicationLifetime);
 
         await lifetime.StartAsync(CancellationToken.None);
+        applicationLifetime.TriggerApplicationStarted();
 
         Assert.Null(holder.TryConsume(UnknownValidToken));
     }
@@ -40,9 +44,10 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
     public async Task StartAsync_WithUnusableAddresses_CompletesAndLeavesHolderEmpty(string[] addresses)
     {
         var holder = new SkillRuntimeBridgeHolderV1();
-        var lifetime = CreateLifetime(addresses, holder);
+        var (lifetime, applicationLifetime) = CreateLifetime(addresses, holder);
 
         await lifetime.StartAsync(CancellationToken.None);
+        applicationLifetime.TriggerApplicationStarted();
 
         Assert.Null(holder.TryConsume(UnknownValidToken));
     }
@@ -53,23 +58,38 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
     public async Task StartAsync_WithSingleNumericLoopbackHttpOrigin_PublishesBridgeAndCanRestart(string address)
     {
         var holder = new SkillRuntimeBridgeHolderV1();
-        var lifetime = CreateLifetime([address], holder);
+        var (lifetime, applicationLifetime) = CreateLifetime([address], holder);
 
         await lifetime.StartAsync(CancellationToken.None);
+        applicationLifetime.TriggerApplicationStarted();
 
         Assert.True(holder.HasBridge);
         await lifetime.StopAsync(CancellationToken.None);
         Assert.False(holder.HasBridge);
 
         var secondHolder = new SkillRuntimeBridgeHolderV1();
-        var secondLifetime = CreateLifetime([address], secondHolder);
+        var (secondLifetime, secondApplicationLifetime) = CreateLifetime([address], secondHolder);
         await secondLifetime.StartAsync(CancellationToken.None);
+        secondApplicationLifetime.TriggerApplicationStarted();
 
         Assert.True(secondHolder.HasBridge);
         await secondLifetime.StopAsync(CancellationToken.None);
     }
 
-    private static SkillRuntimeBridgeLifetimeV1 CreateLifetime(
+    [Fact]
+    public async Task StopAsync_BeforeApplicationStarted_LeavesHolderEmptyAndDisposesRegistration()
+    {
+        var holder = new SkillRuntimeBridgeHolderV1();
+        var (lifetime, applicationLifetime) = CreateLifetime(["http://127.0.0.1:5000"], holder);
+
+        await lifetime.StartAsync(CancellationToken.None);
+        await lifetime.StopAsync(CancellationToken.None);
+        applicationLifetime.TriggerApplicationStarted();
+
+        Assert.False(holder.HasBridge);
+    }
+
+    private static (SkillRuntimeBridgeLifetimeV1 Lifetime, FakeHostApplicationLifetime ApplicationLifetime) CreateLifetime(
         IReadOnlyCollection<string> addresses,
         SkillRuntimeBridgeHolderV1 holder)
     {
@@ -81,10 +101,28 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
 
         var features = new FeatureCollection();
         features.Set<IServerAddressesFeature>(addressFeature);
-        return new SkillRuntimeBridgeLifetimeV1(
+        var applicationLifetime = new FakeHostApplicationLifetime();
+        var lifetime = new SkillRuntimeBridgeLifetimeV1(
             new FakeServer(features),
             holder,
-            new CopilotRuntimeAdmissionV1());
+            new CopilotRuntimeAdmissionV1(),
+            applicationLifetime);
+        return (lifetime, applicationLifetime);
+    }
+
+    private sealed class FakeHostApplicationLifetime : IHostApplicationLifetime
+    {
+        private readonly CancellationTokenSource started = new();
+        private readonly CancellationTokenSource stopping = new();
+        private readonly CancellationTokenSource stopped = new();
+
+        public CancellationToken ApplicationStarted => started.Token;
+        public CancellationToken ApplicationStopping => stopping.Token;
+        public CancellationToken ApplicationStopped => stopped.Token;
+
+        public void StopApplication() => stopping.Cancel();
+
+        public void TriggerApplicationStarted() => started.Cancel();
     }
 
     private sealed class FakeServer(IFeatureCollection features) : IServer

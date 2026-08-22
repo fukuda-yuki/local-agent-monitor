@@ -239,7 +239,8 @@ internal static class MonitorHost
             builder.Services.AddHostedService(services => new SkillRuntimeBridgeLifetimeV1(
                 services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>(),
                 skillRuntimeBridgeHolder,
-                skillRuntimeAdmission));
+                skillRuntimeAdmission,
+                services.GetRequiredService<IHostApplicationLifetime>()));
         }
         if (skillDiscoveryRootGeneration is not null)
         {
