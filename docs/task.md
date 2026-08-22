@@ -132,9 +132,19 @@
   `ProtocolVersion` `3`, so certification cannot succeed on this machine; SDK
   1.0.4 requires `BaseDirectory` or `SessionFs`, plus per-session
   `AvailableTools`, for `CopilotClientMode.Empty`, and the specification names
-  neither; and SDK 1.0.4 `session.On<T>` is session scoped, so the specified
-  "observe skill invocations" producer model cannot see another session's
-  events. The last blocker needs a product decision on the owning
+  neither; and SDK 1.0.4 offers no side-effect-free subscription to a session
+  another process owns: `session.On<T>` is scoped to one `CopilotSession`, and
+  while `CopilotClient.ResumeSessionAsync` exists it is not a read-only attach
+  -- it sends `session.resume` and re-applies session configuration such as
+  model, system message, tools, hooks, working directory, and skill
+  directories, and concurrent access to one session is outside the SDK's
+  stated guarantees. The Group 5 producer topology therefore cannot be
+  composed from SDK 1.0.4's public contract for a Copilot CLI or VS Code
+  session the Local Monitor does not own. A related record is corrected here:
+  `OnEvent` is available on `SessionConfig` through `SessionConfigBase`, so a
+  handler can be installed before session creation; that does not change the
+  blocker, because it still only observes the session it is attached to. The
+  last blocker needs a product decision on the owning
   specification's Group 5 producer model. Consequently, the registered v2
   `POST` returns its exact stage-1 `503 local_monitor_ui_unavailable` with zero
   writes, which is the specified behavior when no generation is admitted.
