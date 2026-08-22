@@ -367,6 +367,32 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task ExecuteAsync_NativeReadCancellation_ReleasesTheRuntimeCapabilityAndRethrows()
+    {
+        var fixture = new Fixture(handleSource);
+        fixture.NativeReader.BeforeRead = () =>
+        {
+            fixture.CallerAbort.Cancel();
+            fixture.CallerAbort.Token.ThrowIfCancellationRequested();
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.ExecuteAsync());
+
+        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DiscoveryFailure_ReleasesTheRuntimeCapabilityAndRethrows()
+    {
+        var fixture = new Fixture(handleSource);
+        fixture.DiscoveryGateway.ExceptionToThrow = new InvalidOperationException("discovery failed");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.ExecuteAsync());
+
+        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+    }
+
     private static string? ErrorToken(SkillCurrentFileResultV1 result)
     {
         using var document = JsonDocument.Parse(result.BodyUtf8);
@@ -536,6 +562,8 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     {
         internal CopilotSkillDiscoveryOutcome Outcome { get; set; } = new CopilotSkillDiscoveryOutcome.Unavailable();
 
+        internal Exception? ExceptionToThrow { get; set; }
+
         internal bool WasCalled { get; private set; }
 
         internal CopilotRuntimeOperationCapabilityV1? ObservedCapability { get; private set; }
@@ -547,6 +575,11 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         {
             WasCalled = true;
             ObservedCapability = capability;
+            if (ExceptionToThrow is not null)
+            {
+                return Task.FromException<CopilotSkillDiscoveryOutcome>(ExceptionToThrow);
+            }
+
             return Task.FromResult(Outcome);
         }
     }

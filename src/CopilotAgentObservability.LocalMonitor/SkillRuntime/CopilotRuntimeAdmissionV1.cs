@@ -96,7 +96,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         out CopilotRuntimeGenerationV1? replacedGeneration)
     {
         ArgumentNullException.ThrowIfNull(client);
-        var generation = new CopilotRuntimeGenerationV1(client);
+        var generation = new CopilotRuntimeGenerationV1(client, shutdownGate);
         var generationDisposal = new GenerationDisposalGuard();
         GenerationDisposalGuard? replacedDisposal;
         lock (sync)

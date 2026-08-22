@@ -170,9 +170,19 @@ internal sealed class SkillCurrentFileOrchestratorV1(
             return PreRuntimeSafe(grant, 503, DiscoveryUnavailableToken, callerToken);
         }
 
-        var result = await ExecuteWithRuntimeCapabilityAsync(
-            grant, authorization, capability, rootLease, callerToken).ConfigureAwait(false);
-        return result with { ReleaseRuntimeCapability = capability.Release };
+        try
+        {
+            var result = await ExecuteWithRuntimeCapabilityAsync(
+                grant, authorization, capability, rootLease, callerToken).ConfigureAwait(false);
+            return result with { ReleaseRuntimeCapability = capability.Release };
+        }
+        catch
+        {
+            // The capability transfers to the route only with a returned result, so every
+            // non-returning path must release it before unwinding.
+            capability.Release();
+            throw;
+        }
     }
 
     private async Task<SkillCurrentFileResultV1> ExecuteWithRuntimeCapabilityAsync(

@@ -103,6 +103,7 @@ internal sealed class CopilotRuntimeGenerationV1
     public const string AdmittedCopilotVersion = "1.0.65";
     public const int AdmittedProtocolVersion = 3;
 
+    private readonly SkillHostShutdownGateV1 shutdownGate;
     private readonly object sync = new();
     private readonly Dictionary<Guid, CopilotRuntimeOperationCapabilityV1> outstandingCapabilities = [];
     private readonly TaskCompletionSource drained =
@@ -111,7 +112,16 @@ internal sealed class CopilotRuntimeGenerationV1
     private bool admissionClosed;
 
     internal CopilotRuntimeGenerationV1(ICopilotSkillRuntimeClient client)
+        : this(client, new SkillHostShutdownGateV1())
     {
+    }
+
+    internal CopilotRuntimeGenerationV1(
+        ICopilotSkillRuntimeClient client,
+        SkillHostShutdownGateV1 shutdownGate)
+    {
+        ArgumentNullException.ThrowIfNull(shutdownGate);
+        this.shutdownGate = shutdownGate;
         Client = client;
         Identity = Guid.NewGuid();
         FrozenVersion = AdmittedCopilotVersion;
@@ -168,7 +178,7 @@ internal sealed class CopilotRuntimeGenerationV1
         lock (sync)
         {
             capability = null;
-            if (invalid || admissionClosed)
+            if (shutdownGate.IsNormalShutdownStarted || invalid || admissionClosed)
             {
                 return false;
             }

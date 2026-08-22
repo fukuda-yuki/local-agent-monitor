@@ -73,6 +73,19 @@ public sealed class CopilotRuntimeGenerationV1Tests
     }
 
     [Fact]
+    public void SharedShutdownGate_StopsDirectGenerationCapabilityAcquisition()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var admission = new CopilotRuntimeAdmissionV1(gate);
+        var generation = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _)!;
+
+        Assert.True(gate.TryStartNormalShutdown());
+
+        Assert.False(generation.TryAcquireOperationCapability(CancellationToken.None, out _));
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
     public void Seal_IsAtomicPerCapability_AndRecordsWonKind()
     {
         var generation = NewAdmittedGeneration();
