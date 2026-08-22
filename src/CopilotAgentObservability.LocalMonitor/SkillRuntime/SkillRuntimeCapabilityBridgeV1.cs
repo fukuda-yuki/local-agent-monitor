@@ -34,6 +34,12 @@ internal sealed class SkillRuntimeBridgeTransfer
 
     internal byte[] ExpectedBodySha256 { get; }
 
+    public bool TrySealV2NonCommitResponse() => concreteCapability.TrySealV2NonCommitResponse();
+
+    public bool TrySealCommit() => concreteCapability.TrySealCommit();
+
+    public bool TrySealReplaySuccess() => concreteCapability.TrySealReplaySuccess();
+
     public void ReleaseTransferredCapability()
     {
         if (Interlocked.Exchange(ref releaseCalls, 1) == 0)
