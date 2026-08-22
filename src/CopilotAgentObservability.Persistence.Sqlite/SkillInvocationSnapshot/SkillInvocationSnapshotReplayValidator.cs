@@ -19,6 +19,15 @@ internal enum SkillInvocationSnapshotReplayOutcome
     Unavailable,
 }
 
+internal enum SkillInvocationSnapshotReceiptProbeOutcome
+{
+    Missing,
+    DifferentFingerprint,
+    EqualFingerprint,
+    Busy,
+    Unavailable,
+}
+
 // Both transaction-ownership arms below run the exact same Core: a divergence between an owned
 // validation-only transaction and a mutation-owner's already-held one is the exact failure this
 // component exists to prevent, so neither arm may carry its own copy of the graph logic.
@@ -26,6 +35,48 @@ internal static class SkillInvocationSnapshotReplayValidator
 {
     private const string CopilotSdkSurface = "copilot-sdk";
     private static readonly string[] AcceptedBindingKinds = ["native", "explicit_resume", "explicit_handoff"];
+
+    // Receipt lookup is its own stage ahead of the validation transaction so write contention
+    // cannot mask a different-fingerprint conflict or a later registry-authority failure.
+    internal static SkillInvocationSnapshotReceiptProbeOutcome ProbeReceipt(
+        string databasePath,
+        SkillInvocationSnapshotReplayRequest request)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentNullException.ThrowIfNull(request);
+        try
+        {
+            using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadWrite);
+            using var transaction = connection.BeginTransaction(deferred: true);
+            try
+            {
+                var receipt = ReadReceipt(connection, transaction, request.SourceAdapter, request.SourceEventId);
+                if (receipt is null)
+                    return SkillInvocationSnapshotReceiptProbeOutcome.Missing;
+
+                return string.Equals(
+                    receipt.RequestFingerprintSha256,
+                    request.RequestFingerprintSha256,
+                    StringComparison.Ordinal)
+                    ? SkillInvocationSnapshotReceiptProbeOutcome.EqualFingerprint
+                    : SkillInvocationSnapshotReceiptProbeOutcome.DifferentFingerprint;
+            }
+            finally
+            {
+                transaction.Rollback();
+            }
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return SkillInvocationSnapshotReceiptProbeOutcome.Busy;
+        }
+        catch (Exception exception) when (
+            exception is SqliteException or InvalidOperationException or FormatException
+                or OverflowException or InvalidCastException)
+        {
+            return SkillInvocationSnapshotReceiptProbeOutcome.Unavailable;
+        }
+    }
 
     internal static SkillInvocationSnapshotReplayOutcome ValidateOwnedTransaction(
         string databasePath,
