@@ -197,9 +197,9 @@ internal static class SkillInvocationMetadataDocumentV1
             nameof(diagnosticToken))
     };
 
-    // The inverse of the two token maps below, so the persisted fault vocabulary has exactly one
-    // home. A row whose stored state or reason is outside it is a graph contradiction, not a
-    // document.
+    // This deliberately separate inverse is a closed parse guard over values already persisted:
+    // only the fault vocabulary is admitted; available/none or unknown tokens make the row a graph
+    // contradiction rather than a document.
     internal static bool TryParsePersistedFault(
         string? state,
         string? reason,
@@ -242,31 +242,15 @@ internal static class SkillInvocationMetadataDocumentV1
         return true;
     }
 
-    private static string PersistedStateToken(SkillInvocationPayloadState state) => state switch
-    {
-        SkillInvocationPayloadState.Malformed => "malformed",
-        SkillInvocationPayloadState.Missing => "missing",
-        SkillInvocationPayloadState.Binary => "binary",
-        SkillInvocationPayloadState.Oversized => "oversized",
-        _ => throw new ArgumentOutOfRangeException(nameof(state), state, "Unrecognized fault snapshot state.")
-    };
+    private static string PersistedStateToken(SkillInvocationPayloadState state) =>
+        state == SkillInvocationPayloadState.Available
+            ? throw new ArgumentOutOfRangeException(nameof(state), state, "Unrecognized fault snapshot state.")
+            : SkillInvocationPayloadTokensV1.StateToken(state);
 
-    private static string PersistedReasonToken(SkillInvocationPayloadReason reason) => reason switch
-    {
-        SkillInvocationPayloadReason.DuplicateProperty => "duplicate_property",
-        SkillInvocationPayloadReason.UnknownProperty => "unknown_property",
-        SkillInvocationPayloadReason.InvalidFieldType => "invalid_field_type",
-        SkillInvocationPayloadReason.NameInvalid => "name_invalid",
-        SkillInvocationPayloadReason.PathInvalid => "path_invalid",
-        SkillInvocationPayloadReason.NameMissing => "name_missing",
-        SkillInvocationPayloadReason.BodyMissing => "body_missing",
-        SkillInvocationPayloadReason.DefinitionPathMissing => "definition_path_missing",
-        SkillInvocationPayloadReason.BodyUnicodeInvalid => "body_unicode_invalid",
-        SkillInvocationPayloadReason.PathUnicodeInvalid => "path_unicode_invalid",
-        SkillInvocationPayloadReason.BodyOversized => "body_oversized",
-        SkillInvocationPayloadReason.PathOversized => "path_oversized",
-        _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unrecognized fault snapshot reason.")
-    };
+    private static string PersistedReasonToken(SkillInvocationPayloadReason reason) =>
+        reason == SkillInvocationPayloadReason.None
+            ? throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unrecognized fault snapshot reason.")
+            : SkillInvocationPayloadTokensV1.ReasonToken(reason);
 
     private static byte[] WriteDocument(SkillInvocationMetadataDocumentV1Input input, SkillInvocationMetadataDerivedStateV1 derived)
     {

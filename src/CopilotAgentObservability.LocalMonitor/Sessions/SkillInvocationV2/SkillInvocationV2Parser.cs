@@ -7,13 +7,13 @@ namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
 public static class SkillInvocationV2Parser
 {
-    private const string SourceAdapter = "copilot-sdk-stream";
-    private const string SourceSurface = "copilot-sdk";
-    private const string SourceApplicationVersion = "1.0.65";
-    private const string AdapterVersion = "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1";
-    private const string NormalizationVersion = "github-copilot-sdk.skill-invoked.normalize.v1";
-    private const string PayloadSchema = "github-copilot-sdk.skill-invoked.v1";
-    private const string SchemaFingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
+    internal const string SourceAdapter = "copilot-sdk-stream";
+    internal const string SourceSurface = "copilot-sdk";
+    internal const string SourceApplicationVersion = "1.0.65";
+    internal const string AdapterVersion = "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1";
+    internal const string NormalizationVersion = "github-copilot-sdk.skill-invoked.normalize.v1";
+    internal const string PayloadSchema = "github-copilot-sdk.skill-invoked.v1";
+    internal const string SchemaFingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string EventType = "skill.invoked";
 
     private static readonly HashSet<string> EnvelopeProperties = new(StringComparer.Ordinal)
