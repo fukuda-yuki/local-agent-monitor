@@ -12,6 +12,7 @@ internal interface ISkillRuntimeBridgeTransport
 internal sealed class SkillRuntimeBridgeHttpTransportV1 : ISkillRuntimeBridgeTransport, IDisposable
 {
     public const string CapabilityHeaderName = "X-CAO-Skill-Runtime-Capability";
+    private const string VersionHeaderName = "X-CAO-Session-Event-Version";
     internal const string IngestRoutePath = "/api/session-ingest/v2/events";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
@@ -61,6 +62,7 @@ internal sealed class SkillRuntimeBridgeHttpTransportV1 : ISkillRuntimeBridgeTra
                     Headers = { ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" } }
                 }
             };
+            request.Headers.TryAddWithoutValidation(VersionHeaderName, "2");
             request.Headers.TryAddWithoutValidation(CapabilityHeaderName, capabilityToken);
 
             using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);

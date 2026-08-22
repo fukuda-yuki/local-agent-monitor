@@ -30,6 +30,8 @@ internal sealed class SkillRuntimeBridgeTransfer
 
     public ISkillInvocationV2RuntimeCapability RuntimeCapability { get; }
 
+    public CancellationToken WorkToken => concreteCapability.WorkToken;
+
     public int ExpectedBodyLength { get; }
 
     internal byte[] ExpectedBodySha256 { get; }

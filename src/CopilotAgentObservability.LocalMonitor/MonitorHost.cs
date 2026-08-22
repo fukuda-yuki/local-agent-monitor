@@ -231,6 +231,16 @@ internal static class MonitorHost
         // current-file route stays registered and forms its fixed discovery-unavailable 503, which
         // is what Gate 8 requires of an absent or mismatched generation.
         var skillRuntimeAdmission = options.SanitizedOnly ? null : new CopilotRuntimeAdmissionV1();
+        SkillRuntimeBridgeHolderV1? skillRuntimeBridgeHolder = null;
+        if (skillRuntimeAdmission is not null)
+        {
+            skillRuntimeBridgeHolder = new SkillRuntimeBridgeHolderV1();
+            builder.Services.AddSingleton(skillRuntimeBridgeHolder);
+            builder.Services.AddHostedService(services => new SkillRuntimeBridgeLifetimeV1(
+                services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>(),
+                skillRuntimeBridgeHolder,
+                skillRuntimeAdmission));
+        }
         if (skillDiscoveryRootGeneration is not null)
         {
             builder.Services.AddHostedService(_ =>
@@ -767,6 +777,22 @@ internal static class MonitorHost
                 app.Services.GetRequiredService<SkillProjectionReadService>(),
                 skillDiscoveryRootGeneration,
                 skillRuntimeAdmission);
+            SkillInvocationV2IngestRoute.Map(app, new SkillInvocationV2IngestRouteServicesV1(
+                skillRuntimeBridgeHolder!.TryConsume,
+                (facts, transfer, _) =>
+                {
+                    // Do not pass the work token to Task.Run: an already-cancelled generation would make
+                    // the awaited task throw TaskCanceledException, which the caller-abort filter does not
+                    // match, instead of returning the sanitized unavailable result required after transfer.
+                    return Task.Run(() => SkillInvocationV2IngestTransactionV1.Execute(
+                        options.DatabasePath,
+                        facts,
+                        skillRegistryAuthority,
+                        timeProvider,
+                        transfer.TrySealReplaySuccess,
+                        transfer.TrySealCommit,
+                        transfer.WorkToken));
+                }));
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());

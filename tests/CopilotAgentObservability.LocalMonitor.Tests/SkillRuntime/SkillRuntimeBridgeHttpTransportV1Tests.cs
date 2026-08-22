@@ -56,6 +56,8 @@ public sealed class SkillRuntimeBridgeHttpTransportV1Tests
         Assert.Equal(body, request.Body);
         var headerValues = Assert.Single(request.Headers, pair => pair.Key.Equals(SkillRuntimeBridgeHttpTransportV1.CapabilityHeaderName, StringComparison.OrdinalIgnoreCase)).Value;
         Assert.Equal([ValidToken], headerValues);
+        var versionHeaderValues = Assert.Single(request.Headers, pair => pair.Key.Equals("X-CAO-Session-Event-Version", StringComparison.OrdinalIgnoreCase)).Value;
+        Assert.Equal(["2"], versionHeaderValues);
     }
 
     [Fact]
