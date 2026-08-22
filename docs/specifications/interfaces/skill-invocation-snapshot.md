@@ -1353,6 +1353,11 @@ do not raise or reinterpret the general trace-ingest limit.
 
 For `POST /api/session-ingest/v2/events`, stop at the first stage:
 
+After the receipt miss, orders 15 and 16 classify the first terminal result returned
+by `SessionSkillInvocationParticipant.InsertOrVerify`; they do not prescribe that
+participant's internal check order, which Group 4 fixes as Session resolution, then
+Run resolution, then Event-conflict detection.
+
 | Order | Condition | Exact result | Writes |
 |---:|---|---|---|
 | 0 | wrong method on exact path | `405 method_not_allowed`, `Allow: POST` | zero |
