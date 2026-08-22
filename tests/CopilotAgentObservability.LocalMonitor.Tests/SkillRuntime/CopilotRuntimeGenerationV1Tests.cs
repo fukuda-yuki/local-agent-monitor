@@ -140,6 +140,110 @@ public sealed class CopilotRuntimeGenerationV1Tests
         Assert.Equal(0, generation.OutstandingCapabilityCount);
     }
 
+    [Fact]
+    public void CancelWork_AfterDisposal_IsNoOp()
+    {
+        var generation = NewAdmittedGeneration();
+        Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out var capability));
+        capability!.DisposeWorkCancellation();
+
+        capability.CancelWork();
+    }
+
+    [Fact]
+    public void DisposeWorkCancellation_AfterCancellation_IsSafe()
+    {
+        var generation = NewAdmittedGeneration();
+        Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out var capability));
+        capability!.CancelWork();
+
+        capability.DisposeWorkCancellation();
+    }
+
+    [Fact]
+    public void DisposeWorkCancellation_CalledTwice_IsSafe()
+    {
+        var generation = NewAdmittedGeneration();
+        Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out var capability));
+
+        capability!.DisposeWorkCancellation();
+        capability.DisposeWorkCancellation();
+    }
+
+    [Fact]
+    public void WorkToken_AfterDisposal_RemainsReadableWithCancellationState()
+    {
+        var generation = NewAdmittedGeneration();
+        Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out var capability));
+        capability!.CancelWork();
+        var tokenBeforeDisposal = capability.WorkToken;
+
+        capability.DisposeWorkCancellation();
+
+        Assert.Equal(tokenBeforeDisposal, capability.WorkToken);
+        Assert.True(capability.WorkToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void Invalidate_ConcurrentWithRelease_DoesNotThrow()
+    {
+        const int iterations = 1_000;
+        using var barrier = new Barrier(3);
+        var exceptions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        CopilotRuntimeGenerationV1? generation = null;
+        CopilotRuntimeOperationCapabilityV1? capability = null;
+
+        var invalidateThread = new Thread(() =>
+        {
+            for (var iteration = 0; iteration < iterations; iteration++)
+            {
+                barrier.SignalAndWait();
+                try
+                {
+                    generation!.Invalidate();
+                }
+                catch (Exception exception)
+                {
+                    exceptions.Enqueue(exception);
+                }
+
+                barrier.SignalAndWait();
+            }
+        });
+        var releaseThread = new Thread(() =>
+        {
+            for (var iteration = 0; iteration < iterations; iteration++)
+            {
+                barrier.SignalAndWait();
+                try
+                {
+                    capability!.Release();
+                }
+                catch (Exception exception)
+                {
+                    exceptions.Enqueue(exception);
+                }
+
+                barrier.SignalAndWait();
+            }
+        });
+
+        invalidateThread.Start();
+        releaseThread.Start();
+        for (var iteration = 0; iteration < iterations; iteration++)
+        {
+            generation = NewAdmittedGeneration();
+            Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out capability));
+            barrier.SignalAndWait();
+            barrier.SignalAndWait();
+        }
+
+        invalidateThread.Join();
+        releaseThread.Join();
+
+        Assert.Empty(exceptions);
+    }
+
     private static CopilotRuntimeGenerationV1 NewAdmittedGeneration() => new(new FakeSkillRuntimeClient());
 }
 

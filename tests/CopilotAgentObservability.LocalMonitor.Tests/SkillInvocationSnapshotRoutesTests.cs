@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillNative;
@@ -36,6 +37,10 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
 
     private WebApplication app = null!;
     private HttpClient client = null!;
+    private CopilotRuntimeAdmissionV1 runtimeAdmission = null!;
+    private CopilotRuntimeGenerationV1 generation = null!;
+    private StubNativeReader nativeReader = null!;
+    private HttpContext? currentContext;
 
     internal SkillHistoricalContentRouteResultV1 HistoricalResult { get; set; } =
         new(SkillHistoricalContentRouteOutcomeV1.Document, "{\"historical\":true}"u8.ToArray());
@@ -46,6 +51,8 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
     internal Func<HttpContext, IHttpMaxRequestBodySizeFeature?, IHttpMaxRequestBodySizeFeature?> FeatureOverride { get; set; } =
         static (_, feature) => feature;
 
+    internal Func<Stream, Stream> ResponseBodyOverride { get; set; } = static body => body;
+
     public async Task InitializeAsync()
     {
         var preflight = SkillDiscoveryRootPreflightV1.Run(
@@ -54,15 +61,16 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource)));
         var rootGeneration = new SkillDiscoveryRootGenerationV1(preflight);
 
-        var runtimeAdmission = new CopilotRuntimeAdmissionV1();
-        runtimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _);
+        runtimeAdmission = new CopilotRuntimeAdmissionV1();
+        generation = runtimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
+        nativeReader = new StubNativeReader();
 
         var orchestrator = new SkillCurrentFileOrchestratorV1(
             new StubHistoricalGate(),
             new StubAuthorizationGate(),
             runtimeAdmission,
             new StubDiscoveryGateway(),
-            new StubNativeReader());
+            nativeReader);
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -71,9 +79,20 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
 
         app.Use(async (context, next) =>
         {
+            currentContext = context;
             var replacement = FeatureOverride(context, context.Features.Get<IHttpMaxRequestBodySizeFeature>());
             context.Features.Set(replacement);
-            await next();
+            var responseBody = context.Response.Body;
+            context.Response.Body = ResponseBodyOverride(responseBody);
+            try
+            {
+                await next();
+            }
+            finally
+            {
+                context.Response.Body = responseBody;
+                currentContext = null;
+            }
         });
 
         SkillInvocationSnapshotRoutes.Map(app, new SkillInvocationSnapshotRouteServicesV1(
@@ -390,6 +409,80 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal("{\"error\":\"skill_current_file_missing\"}", await response.Content.ReadAsStringAsync());
         Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
+    public async Task CurrentFileRawResponse_HoldsCapabilityUntilTheResponseWriteCompletes()
+    {
+        var currentBody = "# current body\n"u8.ToArray();
+        nativeReader.Result = CurrentSkillNativeReadResultV1.Success(
+            currentBody,
+            SHA256.HashData(currentBody),
+            DateTimeOffset.UnixEpoch);
+        var writeGate = new BlockingWriteStream();
+        ResponseBodyOverride = body => writeGate.Attach(body);
+
+        var responseTask = client.SendAsync(
+            BuildCurrentFileRequest(ValidRequest, addCsrfHeader: true),
+            HttpCompletionOption.ResponseHeadersRead);
+        await writeGate.WriteStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, generation.OutstandingCapabilityCount);
+
+        writeGate.AllowWrite();
+        using var response = await responseTask;
+        await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
+    public async Task CurrentFilePreRuntimeFailures_AcquireNoCapability()
+    {
+        runtimeAdmission.InvalidateCurrentGeneration();
+
+        using var response = await PostCurrentFileAsync(ValidRequest);
+        await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
+    public async Task CurrentFileShutdownClosure_AcquiresNoCapabilityAndAborts()
+    {
+        runtimeAdmission.CloseForShutdown();
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => PostCurrentFileAsync(ValidRequest));
+
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+    }
+
+    [Fact]
+    public async Task CurrentFileCallerAbort_ReleasesTheAcquiredCapability()
+    {
+        nativeReader.BeforeRead = () => currentContext!.Abort();
+
+        await Assert.ThrowsAnyAsync<Exception>(() => PostCurrentFileAsync(ValidRequest));
+
+        Assert.True(SpinWait.SpinUntil(
+            () => generation.OutstandingCapabilityCount == 0,
+            TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public async Task CurrentFileResponseWriteException_ReleasesTheAcquiredCapability()
+    {
+        ResponseBodyOverride = body => new ThrowingWriteStream(body);
+
+        using var response = await PostCurrentFileAsync(ValidRequest);
+        await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.True(SpinWait.SpinUntil(
+            () => generation.OutstandingCapabilityCount == 0,
+            TimeSpan.FromSeconds(10)));
     }
 
     private Task<HttpResponseMessage> PostCurrentFileAsync(
@@ -512,8 +605,83 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
 
     private sealed class StubNativeReader : ICurrentSkillNativeFileReaderV1
     {
-        public CurrentSkillNativeReadResultV1 Read(CurrentSkillReadTargetV1 target, CancellationToken cancellationToken) =>
+        internal CurrentSkillNativeReadResultV1 Result { get; set; } =
             CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing);
+
+        internal Action? BeforeRead { get; set; }
+
+        public CurrentSkillNativeReadResultV1 Read(CurrentSkillReadTargetV1 target, CancellationToken cancellationToken)
+        {
+            BeforeRead?.Invoke();
+            return Result;
+        }
+    }
+
+    private class DelegatingWriteStream(Stream inner) : Stream
+    {
+        protected Stream Inner { get; } = inner;
+
+        public override bool CanRead => Inner.CanRead;
+        public override bool CanSeek => Inner.CanSeek;
+        public override bool CanWrite => Inner.CanWrite;
+        public override long Length => Inner.Length;
+        public override long Position { get => Inner.Position; set => Inner.Position = value; }
+        public override void Flush() => Inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => Inner.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) => Inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => Inner.Seek(offset, origin);
+        public override void SetLength(long value) => Inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => Inner.Write(buffer, offset, count);
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            Inner.WriteAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            Inner.WriteAsync(buffer, cancellationToken);
+    }
+
+    private sealed class BlockingWriteStream : DelegatingWriteStream
+    {
+        private readonly TaskCompletionSource writeStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource allowWrite = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private BlockingWriteStream(Stream inner)
+            : base(inner)
+        {
+        }
+
+        internal BlockingWriteStream()
+            : this(Stream.Null)
+        {
+        }
+
+        internal Task WriteStarted => writeStarted.Task;
+
+        internal BlockingWriteStream Attach(Stream inner) => new(inner)
+        {
+            sharedWriteStarted = writeStarted,
+            sharedAllowWrite = allowWrite
+        };
+
+        private TaskCompletionSource sharedWriteStarted = null!;
+        private TaskCompletionSource sharedAllowWrite = null!;
+
+        internal void AllowWrite() => allowWrite.TrySetResult();
+
+        public override async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            sharedWriteStarted.TrySetResult();
+            await sharedAllowWrite.Task.WaitAsync(cancellationToken);
+            await base.WriteAsync(buffer, cancellationToken);
+        }
+    }
+
+    private sealed class ThrowingWriteStream(Stream inner) : DelegatingWriteStream(inner)
+    {
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromException(new InvalidOperationException("Response write failed."));
     }
 
     private sealed class StubRuntimeClient : ICopilotSkillRuntimeClient

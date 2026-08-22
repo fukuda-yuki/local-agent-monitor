@@ -345,16 +345,13 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     }
 
     [Fact]
-    public async Task EveryPathReleasesTheRuntimeCapability()
+    public async Task ExecuteAsync_PostRuntimeResults_KeepTheRuntimeCapabilityOutstanding()
     {
         var configurations = new Action<Fixture>[]
         {
             _ => { },
             fixture => fixture.NativeReader.Result =
                 CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing),
-            fixture => fixture.Grant.SealRawResult = SkillInvocationSnapshotContentTerminalResult.Lost,
-            fixture => fixture.Grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Busy,
-            fixture => fixture.DiscoveryGateway.Outcome = new CopilotSkillDiscoveryOutcome.Unavailable(),
         };
 
         foreach (var configure in configurations)
@@ -362,8 +359,10 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             var fixture = new Fixture(handleSource);
             configure(fixture);
 
-            await fixture.ExecuteAsync();
+            var result = await fixture.ExecuteAsync();
 
+            Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
+            result.ReleaseRuntimeCapability?.Invoke();
             Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
         }
     }

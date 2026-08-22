@@ -42,6 +42,7 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
 
         var root = target.RetainedRoot;
         var openedHandles = new List<SafeFileHandle>(target.RelativeSegments.Count);
+        var pendingReadBuffer = new byte[MaximumReadBytes];
 
         try
         {
@@ -150,7 +151,7 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
             hooks?.AfterFinalMetadataCaptured?.Invoke(finalHandle);
             cancellationToken.ThrowIfCancellationRequested();
 
-            var (readTotal, readFailed) = ReadBounded(finalHandle, cancellationToken);
+            var (readTotal, readFailed) = ReadBounded(finalHandle, pendingReadBuffer, cancellationToken);
             if (readFailed)
             {
                 return CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.OtherNativeFailure);
@@ -213,10 +214,6 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
         }
     }
 
-    // The bounded read buffer is request-local state held in a field only so the final copy can
-    // happen after the post-read proofs; it is overwritten on every Read call and never shared.
-    private readonly byte[] pendingReadBuffer = new byte[MaximumReadBytes];
-
     private static bool TryProveRootIdentity(
         RetainedDiscoveryRootV1 root,
         out ulong volumeSerial,
@@ -261,7 +258,10 @@ internal sealed class WindowsCurrentSkillFileReaderV1 : ICurrentSkillNativeFileR
         return true;
     }
 
-    private (int TotalBytes, bool Failed) ReadBounded(SafeFileHandle handle, CancellationToken cancellationToken)
+    private static (int TotalBytes, bool Failed) ReadBounded(
+        SafeFileHandle handle,
+        byte[] pendingReadBuffer,
+        CancellationToken cancellationToken)
     {
         var bufferHandle = System.Runtime.InteropServices.GCHandle.Alloc(pendingReadBuffer, System.Runtime.InteropServices.GCHandleType.Pinned);
         try

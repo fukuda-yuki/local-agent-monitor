@@ -21,7 +21,6 @@ internal sealed class LinuxCurrentSkillFileReaderV1 : ICurrentSkillNativeFileRea
 
     private readonly Func<DateTimeOffset> readClock;
     private readonly CurrentSkillFileReaderHooksV1? hooks;
-    private readonly byte[] pendingReadBuffer = new byte[MaximumReadBytes];
 
     public LinuxCurrentSkillFileReaderV1(Func<DateTimeOffset>? readClock = null, CurrentSkillFileReaderHooksV1? hooks = null)
     {
@@ -43,6 +42,7 @@ internal sealed class LinuxCurrentSkillFileReaderV1 : ICurrentSkillNativeFileRea
         var root = target.RetainedRoot;
         var rootFd = root.Handle.DangerousGetHandle().ToInt32();
         var openedFds = new List<SafeFileHandle>(target.RelativeSegments.Count);
+        var pendingReadBuffer = new byte[MaximumReadBytes];
 
         try
         {
@@ -148,7 +148,7 @@ internal sealed class LinuxCurrentSkillFileReaderV1 : ICurrentSkillNativeFileRea
             hooks?.AfterFinalMetadataCaptured?.Invoke(openedFds[^1]);
             cancellationToken.ThrowIfCancellationRequested();
 
-            var (readTotal, readFailed) = ReadBounded(finalFd, cancellationToken);
+            var (readTotal, readFailed) = ReadBounded(finalFd, pendingReadBuffer, cancellationToken);
             if (readFailed)
             {
                 return CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.OtherNativeFailure);
@@ -233,7 +233,10 @@ internal sealed class LinuxCurrentSkillFileReaderV1 : ICurrentSkillNativeFileRea
         return current.ToByteArray().AsSpan().SequenceEqual(expected.ToByteArray());
     }
 
-    private (int TotalBytes, bool Failed) ReadBounded(int fd, CancellationToken cancellationToken)
+    private static (int TotalBytes, bool Failed) ReadBounded(
+        int fd,
+        byte[] pendingReadBuffer,
+        CancellationToken cancellationToken)
     {
         var bufferHandle = GCHandle.Alloc(pendingReadBuffer, GCHandleType.Pinned);
         try

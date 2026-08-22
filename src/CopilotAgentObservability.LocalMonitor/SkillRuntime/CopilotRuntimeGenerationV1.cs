@@ -17,9 +17,12 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
     private const int StateSealed = 1;
     private const int StateAbandoned = 2;
 
+    private readonly object workCancellationSync = new();
     private readonly CancellationTokenSource linkedWorkCancellation;
+    private readonly CancellationToken workToken;
     private int state = StateActive;
     private int releaseCalls;
+    private bool workCancellationDisposed;
 
     internal CopilotRuntimeOperationCapabilityV1(CopilotRuntimeGenerationV1 owner, CancellationToken callerToken)
     {
@@ -28,13 +31,14 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
         linkedWorkCancellation = callerToken.CanBeCanceled
             ? CancellationTokenSource.CreateLinkedTokenSource(callerToken)
             : new CancellationTokenSource();
+        workToken = linkedWorkCancellation.Token;
     }
 
     public CopilotRuntimeGenerationV1 Owner { get; }
 
     internal Guid Handle { get; }
 
-    public CancellationToken WorkToken => linkedWorkCancellation.Token;
+    public CancellationToken WorkToken => workToken;
 
     internal SkillRuntimeTerminalSealV1? WonSealKind { get; private set; }
 
@@ -68,15 +72,30 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
 
     internal void CancelWork()
     {
-        if (!linkedWorkCancellation.IsCancellationRequested)
+        lock (workCancellationSync)
         {
-            linkedWorkCancellation.Cancel();
+            if (!workCancellationDisposed && !linkedWorkCancellation.IsCancellationRequested)
+            {
+                linkedWorkCancellation.Cancel();
+            }
         }
     }
 
     internal bool TryBeginRelease() => Interlocked.Exchange(ref releaseCalls, 1) == 0;
 
-    internal void DisposeWorkCancellation() => linkedWorkCancellation.Dispose();
+    internal void DisposeWorkCancellation()
+    {
+        lock (workCancellationSync)
+        {
+            if (workCancellationDisposed)
+            {
+                return;
+            }
+
+            workCancellationDisposed = true;
+            linkedWorkCancellation.Dispose();
+        }
+    }
 }
 
 internal sealed class CopilotRuntimeGenerationV1

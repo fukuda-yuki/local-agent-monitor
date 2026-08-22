@@ -214,13 +214,22 @@ internal static class SkillInvocationSnapshotRoutes
                 .ExecuteAsync(sessionId, snapshotId, rootLease, context.RequestAborted)
                 .ConfigureAwait(false);
 
-            if (result.Disposition == SkillCurrentFileDispositionV1.AbortWithoutResponse)
+            try
             {
-                RawResponsePublication.Abort(context);
-                return;
-            }
+                if (result.Disposition == SkillCurrentFileDispositionV1.AbortWithoutResponse)
+                {
+                    RawResponsePublication.Abort(context);
+                    return;
+                }
 
-            await WriteBodyAsync(context, result.StatusCode, result.BodyUtf8).ConfigureAwait(false);
+                await WriteBodyAsync(context, result.StatusCode, result.BodyUtf8).ConfigureAwait(false);
+            }
+            finally
+            {
+                // The runtime capability outlives the orchestrator because the specification holds
+                // it through response completion, so the shutdown drain cannot dispose the client mid-write.
+                result.ReleaseRuntimeCapability?.Invoke();
+            }
         }
     }
 

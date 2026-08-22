@@ -58,6 +58,64 @@ public sealed class WindowsCurrentSkillFileReaderGateTests : IDisposable
     }
 
     [WindowsFact]
+    public void Read_ConcurrentCallsOnOneReader_ReturnEachFilesOwnBytes()
+    {
+        var firstBody = Enumerable.Repeat((byte)'A', 256_000).ToArray();
+        var secondBody = Enumerable.Repeat((byte)'B', 256_000).ToArray();
+        CreateNestedSkillFileBytes(["first"], firstBody);
+        CreateNestedSkillFileBytes(["second"], secondBody);
+        using var root = RetainRoot(rootPath);
+        var firstTarget = new CurrentSkillReadTargetV1(root, ["first", "SKILL.md"], "revision-1");
+        var secondTarget = new CurrentSkillReadTargetV1(root, ["second", "SKILL.md"], "revision-2");
+        using var readsCompleted = new Barrier(2);
+        var reader = new WindowsCurrentSkillFileReaderV1(
+            () => FixedReadAt,
+            new CurrentSkillFileReaderHooksV1
+            {
+                AfterReadCompleted = _ => readsCompleted.SignalAndWait(),
+            });
+        CurrentSkillNativeReadResultV1? firstResult = null;
+        CurrentSkillNativeReadResultV1? secondResult = null;
+        Exception? firstException = null;
+        Exception? secondException = null;
+
+        var firstThread = new Thread(() =>
+        {
+            try
+            {
+                firstResult = reader.Read(firstTarget, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                firstException = exception;
+            }
+        });
+        var secondThread = new Thread(() =>
+        {
+            try
+            {
+                secondResult = reader.Read(secondTarget, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                secondException = exception;
+            }
+        });
+
+        firstThread.Start();
+        secondThread.Start();
+        firstThread.Join();
+        secondThread.Join();
+
+        Assert.Null(firstException);
+        Assert.Null(secondException);
+        Assert.Equal(CurrentSkillNativeOutcomeV1.Success, firstResult!.Outcome);
+        Assert.Equal(CurrentSkillNativeOutcomeV1.Success, secondResult!.Outcome);
+        Assert.Equal(firstBody, firstResult.Body);
+        Assert.Equal(secondBody, secondResult.Body);
+    }
+
+    [WindowsFact]
     public void Missing_FinalSegment_ReturnsMissing()
     {
         Directory.CreateDirectory(rootPath);

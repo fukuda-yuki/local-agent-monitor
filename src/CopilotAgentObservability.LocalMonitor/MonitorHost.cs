@@ -155,9 +155,10 @@ internal static class MonitorHost
         // The Gate 8 root preflight runs before any store is opened so an invalid configuration
         // aborts startup without leaving a side effect behind. Receiver-only never reaches it:
         // --sanitized-only composes no discovery surface at all.
+        var skillHostShutdownGate = options.SanitizedOnly ? null : new SkillHostShutdownGateV1();
         var skillDiscoveryRootGeneration = options.SanitizedOnly
             ? null
-            : BuildSkillDiscoveryRootGeneration(options);
+            : BuildSkillDiscoveryRootGeneration(options, skillHostShutdownGate!);
 
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
         var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
@@ -230,7 +231,9 @@ internal static class MonitorHost
         // until the live producer chain certifies the bundled 1.0.65 runtime. Until then the
         // current-file route stays registered and forms its fixed discovery-unavailable 503, which
         // is what Gate 8 requires of an absent or mismatched generation.
-        var skillRuntimeAdmission = options.SanitizedOnly ? null : new CopilotRuntimeAdmissionV1();
+        var skillRuntimeAdmission = options.SanitizedOnly
+            ? null
+            : new CopilotRuntimeAdmissionV1(skillHostShutdownGate!);
         SkillRuntimeBridgeHolderV1? skillRuntimeBridgeHolder = null;
         if (skillRuntimeAdmission is not null)
         {
@@ -243,9 +246,10 @@ internal static class MonitorHost
                 skillRuntimeAdmission,
                 services.GetRequiredService<IHostApplicationLifetime>()));
         }
-        if (skillDiscoveryRootGeneration is not null || skillRuntimeAdmission is not null)
+        if (skillHostShutdownGate is not null)
         {
             builder.Services.AddHostedService(_ => new SkillHostShutdownCoordinatorV1(
+                skillHostShutdownGate,
                 skillDiscoveryRootGeneration,
                 skillRuntimeAdmission));
         }
@@ -2072,7 +2076,8 @@ internal static class MonitorHost
     }
 
     private static SkillDiscoveryRootGenerationV1? BuildSkillDiscoveryRootGeneration(
-        MonitorOptions options)
+        MonitorOptions options,
+        SkillHostShutdownGateV1 shutdownGate)
     {
         var preflight = SkillDiscoveryRootPreflightV1.Run(
             options.SkillDiscoveryProjectPaths,
@@ -2086,7 +2091,7 @@ internal static class MonitorHost
 
         // Zero configured roots is valid and simply omits the current-file service and POST.
         return preflight.Outcome == SkillDiscoveryRootPreflightOutcomeV1.Certified
-            ? new SkillDiscoveryRootGenerationV1(preflight)
+            ? new SkillDiscoveryRootGenerationV1(preflight, shutdownGate)
             : null;
     }
 

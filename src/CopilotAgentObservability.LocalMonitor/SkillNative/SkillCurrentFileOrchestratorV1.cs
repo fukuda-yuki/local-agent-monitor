@@ -18,7 +18,8 @@ internal enum SkillCurrentFileDispositionV1
 internal sealed record SkillCurrentFileResultV1(
     SkillCurrentFileDispositionV1 Disposition,
     int StatusCode,
-    byte[] BodyUtf8)
+    byte[] BodyUtf8,
+    Action? ReleaseRuntimeCapability = null)
 {
     internal static SkillCurrentFileResultV1 Abort() =>
         new(SkillCurrentFileDispositionV1.AbortWithoutResponse, 0, []);
@@ -169,15 +170,9 @@ internal sealed class SkillCurrentFileOrchestratorV1(
             return PreRuntimeSafe(grant, 503, DiscoveryUnavailableToken, callerToken);
         }
 
-        try
-        {
-            return await ExecuteWithRuntimeCapabilityAsync(
-                grant, authorization, capability, rootLease, callerToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            capability.Release();
-        }
+        var result = await ExecuteWithRuntimeCapabilityAsync(
+            grant, authorization, capability, rootLease, callerToken).ConfigureAwait(false);
+        return result with { ReleaseRuntimeCapability = capability.Release };
     }
 
     private async Task<SkillCurrentFileResultV1> ExecuteWithRuntimeCapabilityAsync(

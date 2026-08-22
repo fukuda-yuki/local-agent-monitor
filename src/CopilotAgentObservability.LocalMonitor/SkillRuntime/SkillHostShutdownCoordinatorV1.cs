@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 internal sealed class SkillHostShutdownCoordinatorV1(
+    SkillHostShutdownGateV1 shutdownGate,
     SkillDiscoveryRootGenerationV1? rootGeneration,
     CopilotRuntimeAdmissionV1? runtimeAdmission) : IHostedLifecycleService
 {
@@ -26,9 +27,10 @@ internal sealed class SkillHostShutdownCoordinatorV1(
 
     private async Task StopOnceAsync(CancellationToken cancellationToken)
     {
+        shutdownGate.TryStartNormalShutdown();
+        // The shared gate, not statement order, makes admission closure atomic. Each authority's
+        // own closed flag remains responsible for its drain bookkeeping.
         runtimeAdmission?.CloseForShutdown();
-        // These authorities have independent locks, so this order, rather than a shared gate,
-        // ensures a root-admitted request observes runtime admission as shutdown-closed.
         rootGeneration?.CloseAdmission();
 
         // Closure and drain cannot move to StopAsync: it runs after the web host stops, when an

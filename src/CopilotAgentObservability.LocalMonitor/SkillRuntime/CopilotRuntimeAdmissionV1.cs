@@ -11,12 +11,24 @@ internal enum CopilotRuntimeAcquisitionDispositionV1
 
 internal sealed class CopilotRuntimeAdmissionV1
 {
+    private readonly SkillHostShutdownGateV1 shutdownGate;
     private readonly object sync = new();
     private readonly List<Action> invalidationObservers = [];
     private CopilotRuntimeGenerationV1? currentGeneration;
     private GenerationDisposalGuard? currentGenerationDisposal;
     private Task? shutdownDrain;
     private bool shutdownClosed;
+
+    internal CopilotRuntimeAdmissionV1()
+        : this(new SkillHostShutdownGateV1())
+    {
+    }
+
+    internal CopilotRuntimeAdmissionV1(SkillHostShutdownGateV1 shutdownGate)
+    {
+        ArgumentNullException.ThrowIfNull(shutdownGate);
+        this.shutdownGate = shutdownGate;
+    }
 
     public bool IsShutdownClosed
     {
@@ -64,7 +76,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         lock (sync)
         {
             capability = null;
-            if (shutdownClosed)
+            if (shutdownGate.IsNormalShutdownStarted || shutdownClosed)
             {
                 return CopilotRuntimeAcquisitionDispositionV1.NormalShutdownClosed;
             }

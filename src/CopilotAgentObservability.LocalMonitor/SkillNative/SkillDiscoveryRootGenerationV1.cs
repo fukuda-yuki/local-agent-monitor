@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillNative;
 
@@ -51,6 +52,7 @@ internal sealed class SkillDiscoveryRootLeaseV1 : IDisposable
 internal sealed class SkillDiscoveryRootGenerationV1
 {
     private readonly SkillDiscoveryRootPreflightResultV1 preflight;
+    private readonly SkillHostShutdownGateV1 shutdownGate;
     private readonly object sync = new();
     private readonly TaskCompletionSource drained =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -60,8 +62,16 @@ internal sealed class SkillDiscoveryRootGenerationV1
     private bool rootsDisposed;
 
     internal SkillDiscoveryRootGenerationV1(SkillDiscoveryRootPreflightResultV1 preflight)
+        : this(preflight, new SkillHostShutdownGateV1())
+    {
+    }
+
+    internal SkillDiscoveryRootGenerationV1(
+        SkillDiscoveryRootPreflightResultV1 preflight,
+        SkillHostShutdownGateV1 shutdownGate)
     {
         ArgumentNullException.ThrowIfNull(preflight);
+        ArgumentNullException.ThrowIfNull(shutdownGate);
 
         if (preflight.Outcome != SkillDiscoveryRootPreflightOutcomeV1.Certified || preflight.RootSet is null)
         {
@@ -71,6 +81,7 @@ internal sealed class SkillDiscoveryRootGenerationV1
         }
 
         this.preflight = preflight;
+        this.shutdownGate = shutdownGate;
     }
 
     // The composition fact that selects the native reader. Unlike the revision and the canonical
@@ -103,7 +114,7 @@ internal sealed class SkillDiscoveryRootGenerationV1
     {
         lock (sync)
         {
-            if (admissionClosed)
+            if (shutdownGate.IsNormalShutdownStarted || admissionClosed)
             {
                 lease = null;
                 return false;
