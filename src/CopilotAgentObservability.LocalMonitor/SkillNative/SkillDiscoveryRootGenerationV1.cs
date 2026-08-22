@@ -132,22 +132,32 @@ internal sealed class SkillDiscoveryRootGenerationV1
         }
     }
 
-    internal async Task DrainAndDisposeRootsAsync()
+    internal async Task DrainAsync()
     {
         CloseAdmission();
         await drained.Task.ConfigureAwait(false);
+    }
 
+    internal Task DisposeRootsAsync()
+    {
         lock (sync)
         {
             if (rootsDisposed)
             {
-                return;
+                return Task.CompletedTask;
             }
 
             rootsDisposed = true;
         }
 
         preflight.Dispose();
+        return Task.CompletedTask;
+    }
+
+    internal async Task DrainAndDisposeRootsAsync()
+    {
+        await DrainAsync().ConfigureAwait(false);
+        await DisposeRootsAsync().ConfigureAwait(false);
     }
 
     internal void ReleaseLease()

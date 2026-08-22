@@ -74,7 +74,7 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
         this.monotonicClockTicks = monotonicClockTicks ?? throw new ArgumentNullException(nameof(monotonicClockTicks));
         this.randomTokenSource = randomTokenSource ?? throw new ArgumentNullException(nameof(randomTokenSource));
-        admission.RegisterInvalidationObserver(OnRuntimeGenerationInvalidated);
+        admission.RegisterInvalidationObserver(ClearPendingEntriesAndReleaseCapabilities);
     }
 
     internal int PendingCount
@@ -225,7 +225,7 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         }
     }
 
-    public void OnRuntimeGenerationInvalidated()
+    public void ClearPendingEntriesAndReleaseCapabilities()
     {
         PendingEntry[] doomed;
         lock (sync)

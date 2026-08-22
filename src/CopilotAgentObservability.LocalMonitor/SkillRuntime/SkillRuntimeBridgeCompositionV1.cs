@@ -80,7 +80,7 @@ internal sealed class SkillRuntimeBridgeLifetimeV1(
         if (stoppedBridge is not null)
         {
             holder.Clear(stoppedBridge);
-            stoppedBridge.OnRuntimeGenerationInvalidated();
+            stoppedBridge.ClearPendingEntriesAndReleaseCapabilities();
         }
 
         Interlocked.Exchange(ref transport, null)?.Dispose();

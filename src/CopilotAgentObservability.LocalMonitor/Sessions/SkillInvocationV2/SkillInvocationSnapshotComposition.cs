@@ -3,7 +3,6 @@ using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
-using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
@@ -266,15 +265,4 @@ internal sealed class SkillDiscoveryGatewayAdapterV1(CopilotSdkSkillDiscoveryGat
         DiscoveryRootSetV1 roots,
         CancellationToken cancellationToken) =>
         gateway.DiscoverAsync(capability, roots, cancellationToken);
-}
-
-// Host shutdown for the discovery-root generation: close new root admission, let the requests that
-// already hold a lease finish their ordinary terminal result, and only then dispose the retained
-// root handles.
-internal sealed class SkillDiscoveryRootGenerationLifetimeV1(SkillDiscoveryRootGenerationV1 generation)
-    : IHostedService
-{
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-
-    public Task StopAsync(CancellationToken cancellationToken) => generation.DrainAndDisposeRootsAsync();
 }

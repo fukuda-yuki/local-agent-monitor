@@ -1,10 +1,16 @@
 using System.Net;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.SkillNative;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
+using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -42,6 +48,80 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
         await app.StartAsync();
 
         Assert.True(app.Services.GetRequiredService<SkillRuntimeBridgeHolderV1>().HasBridge);
+    }
+
+    [Fact]
+    public async Task RawDefaultHost_StopAsync_RunsCoordinatorStoppingBeforeHostedServiceStop()
+    {
+        using var temp = new MonitorTempDirectory();
+        CopilotRuntimeAdmissionV1? admission = null;
+        var probe = new ShutdownOrderProbe(() => admission!.IsShutdownClosed);
+        var options = new MonitorOptions(
+            temp.DatabasePath,
+            Url: "http://127.0.0.1:0",
+            SanitizedOnly: false,
+            MaxRequestBodyBytes: MonitorOptions.DefaultMaxRequestBodyBytes,
+            SkillDiscoveryDirectories: []);
+        await using var app = MonitorHost.Build(options, new MonitorHostTestOptions
+        {
+            TimeProvider = temp.TimeProvider,
+            UseUserSecrets = false,
+            AdditionalServices = services => services.AddHostedService(_ => probe),
+        });
+        admission = app.Services.GetRequiredService<CopilotRuntimeAdmissionV1>();
+        await app.StartAsync();
+
+        await app.StopAsync();
+
+        Assert.True(probe.SawShutdownClosedAtStop);
+    }
+
+    [Fact]
+    public async Task RawDefaultHost_CurrentFileRuntimeAcquisitionAfterShutdownClosure_AbortsWithoutResponseAndCompletesRetention()
+    {
+        using var temp = new MonitorTempDirectory();
+        using var root = new TempRootDirectory();
+        var grant = new ObservedRetentionGrant();
+        var historicalGate = new BlockingHistoricalGate(grant);
+        var options = new MonitorOptions(
+            temp.DatabasePath,
+            Url: "http://127.0.0.1:0",
+            SanitizedOnly: false,
+            MaxRequestBodyBytes: MonitorOptions.DefaultMaxRequestBodyBytes,
+            SkillDiscoveryDirectories: [root.Path]);
+        await using var app = MonitorHost.Build(options, new MonitorHostTestOptions
+        {
+            TimeProvider = temp.TimeProvider,
+            UseUserSecrets = false,
+            SkillCurrentFileHistoricalGate = historicalGate,
+            SkillCurrentAuthorizationGate = new AcquiredAuthorizationGate(),
+        });
+        await app.StartAsync();
+        var address = Assert.Single(app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses);
+        using var client = new HttpClient { BaseAddress = new Uri(address) };
+        var admission = app.Services.GetRequiredService<CopilotRuntimeAdmissionV1>();
+        admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
+        var coordinator = Assert.Single(app.Services.GetServices<IHostedService>()
+            .OfType<SkillHostShutdownCoordinatorV1>());
+        const string path = "/api/local-monitor/v1/sessions/11111111-1111-4111-8111-111111111111/skill-invocations/22222222-2222-4222-8222-222222222222/current-file-read";
+        using var request = JsonPost(path, "{\"schema_version\":\"local-skill-current-file-read.request.v1\"}");
+        request.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
+
+        var response = client.SendAsync(request);
+        await historicalGate.Entered;
+        var stopping = coordinator.StoppingAsync(CancellationToken.None);
+
+        Assert.True(admission.IsShutdownClosed);
+        Assert.False(stopping.IsCompleted);
+        historicalGate.Release();
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => response);
+        await stopping;
+
+        Assert.Equal(1, grant.CompleteWithoutRawCalls);
+        Assert.Equal(0, grant.SealRawCalls);
+        Assert.Equal(1, grant.DisposeCalls);
     }
 
     [Fact]
@@ -198,6 +278,98 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
             catch (IOException)
             {
             }
+        }
+    }
+
+    private sealed class ShutdownOrderProbe(Func<bool> isShutdownClosed) : IHostedService
+    {
+        internal bool SawShutdownClosedAtStop { get; private set; }
+
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            SawShutdownClosedAtStop = isShutdownClosed();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingHistoricalGate(ObservedRetentionGrant grant)
+        : ISkillCurrentFileHistoricalGateV1
+    {
+        private readonly TaskCompletionSource entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task Entered => entered.Task;
+
+        internal void Release() => release.TrySetResult();
+
+        public async Task<SkillCurrentFileHistoricalAdmissionV1> AdmitAsync(
+            Guid sessionId,
+            Guid snapshotId,
+            CancellationToken cancellationToken)
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            return new SkillCurrentFileHistoricalAdmissionV1(
+                SkillInvocationSnapshotContentOutcome.Granted,
+                grant);
+        }
+    }
+
+    private sealed class ObservedRetentionGrant : ISkillCurrentFileRetentionGrantV1
+    {
+        internal int CompleteWithoutRawCalls { get; private set; }
+
+        internal int SealRawCalls { get; private set; }
+
+        internal int DisposeCalls { get; private set; }
+
+        public SkillInvocationSnapshotContentFacts Facts { get; } = new(
+            Guid.Parse("22222222-2222-4222-8222-222222222222"),
+            "synthetic body",
+            "skills/SKILL.md",
+            new string('0', 64),
+            new string('1', 64),
+            14,
+            15,
+            DateTimeOffset.Parse("2026-08-22T00:00:00Z"));
+
+        public SkillInvocationSnapshotContentTerminalResult TrySealRawResponse()
+        {
+            SealRawCalls++;
+            return SkillInvocationSnapshotContentTerminalResult.Sealed;
+        }
+
+        public SkillInvocationSnapshotContentTerminalResult TryCompleteWithoutRaw()
+        {
+            CompleteWithoutRawCalls++;
+            return SkillInvocationSnapshotContentTerminalResult.CompletedWithoutRaw;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class AcquiredAuthorizationGate : ISkillCurrentAuthorizationGateV1
+    {
+        public SkillProjectionCurrentSdkClaimAuthorizationResult TryAcquire(Guid sessionId, Guid snapshotId) =>
+            SkillProjectionCurrentSdkClaimAuthorizationResult.ForAcquired(
+                new SkillProjectionCurrentSdkClaimAuthorization(
+                    "skill-name",
+                    "skillDirectories",
+                    new GenerationLease()));
+    }
+
+    private sealed class GenerationLease : ISkillRegistryGenerationLease
+    {
+        public void Dispose()
+        {
         }
     }
 }

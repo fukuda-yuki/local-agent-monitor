@@ -234,6 +234,7 @@ internal static class MonitorHost
         SkillRuntimeBridgeHolderV1? skillRuntimeBridgeHolder = null;
         if (skillRuntimeAdmission is not null)
         {
+            builder.Services.AddSingleton(skillRuntimeAdmission);
             skillRuntimeBridgeHolder = new SkillRuntimeBridgeHolderV1();
             builder.Services.AddSingleton(skillRuntimeBridgeHolder);
             builder.Services.AddHostedService(services => new SkillRuntimeBridgeLifetimeV1(
@@ -242,10 +243,11 @@ internal static class MonitorHost
                 skillRuntimeAdmission,
                 services.GetRequiredService<IHostApplicationLifetime>()));
         }
-        if (skillDiscoveryRootGeneration is not null)
+        if (skillDiscoveryRootGeneration is not null || skillRuntimeAdmission is not null)
         {
-            builder.Services.AddHostedService(_ =>
-                new SkillDiscoveryRootGenerationLifetimeV1(skillDiscoveryRootGeneration));
+            builder.Services.AddHostedService(_ => new SkillHostShutdownCoordinatorV1(
+                skillDiscoveryRootGeneration,
+                skillRuntimeAdmission));
         }
         builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath, skillRegistryAuthority));
         var summaryService = new MonitorSummaryService(projectionStore);
@@ -484,6 +486,7 @@ internal static class MonitorHost
             timeProvider,
             alertEngineStore as ISqliteAlertEngineTransactionParticipantV2);
         builder.Services.AddHostedService(_ => costApplication);
+        testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
         var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
@@ -777,7 +780,8 @@ internal static class MonitorHost
                 retentionCatalog,
                 app.Services.GetRequiredService<SkillProjectionReadService>(),
                 skillDiscoveryRootGeneration,
-                skillRuntimeAdmission);
+                skillRuntimeAdmission,
+                testOptions);
             SkillInvocationV2IngestRoute.Map(app, new SkillInvocationV2IngestRouteServicesV1(
                 skillRuntimeBridgeHolder!.TryConsume,
                 (facts, transfer, _) =>
@@ -2030,7 +2034,8 @@ internal static class MonitorHost
         RetentionCatalogStore retentionCatalog,
         SkillProjectionReadService skillProjectionReadService,
         SkillDiscoveryRootGenerationV1? rootGeneration,
-        CopilotRuntimeAdmissionV1? runtimeAdmission)
+        CopilotRuntimeAdmissionV1? runtimeAdmission,
+        MonitorHostTestOptions? testOptions)
     {
         SkillCurrentFileOrchestratorV1? orchestrator = null;
 
@@ -2045,8 +2050,10 @@ internal static class MonitorHost
             if (nativeReader is not null)
             {
                 orchestrator = new SkillCurrentFileOrchestratorV1(
-                    new SkillCurrentFileHistoricalGateV1(options.DatabasePath, retentionCatalog, timeProvider),
-                    new SkillCurrentAuthorizationGateV1(skillProjectionReadService, timeProvider),
+                    testOptions?.SkillCurrentFileHistoricalGate
+                        ?? new SkillCurrentFileHistoricalGateV1(options.DatabasePath, retentionCatalog, timeProvider),
+                    testOptions?.SkillCurrentAuthorizationGate
+                        ?? new SkillCurrentAuthorizationGateV1(skillProjectionReadService, timeProvider),
                     runtimeAdmission,
                     new SkillDiscoveryGatewayAdapterV1(new CopilotSdkSkillDiscoveryGateway(
                         static () => new CopilotSdkBundleClientV1(),
@@ -2569,6 +2576,12 @@ internal sealed class MonitorHostTestOptions
     public ILocalRepositoryReconciliationCheckpoint? LocalRepositoryReconciliationCheckpoint { get; init; }
 
     public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
+
+    public Action<IServiceCollection>? AdditionalServices { get; init; }
+
+    public ISkillCurrentFileHistoricalGateV1? SkillCurrentFileHistoricalGate { get; init; }
+
+    public ISkillCurrentAuthorizationGateV1? SkillCurrentAuthorizationGate { get; init; }
 }
 
 internal sealed record AnalysisStartPayload(

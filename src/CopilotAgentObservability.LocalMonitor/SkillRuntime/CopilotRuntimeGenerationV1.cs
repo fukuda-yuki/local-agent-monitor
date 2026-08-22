@@ -86,6 +86,8 @@ internal sealed class CopilotRuntimeGenerationV1
 
     private readonly object sync = new();
     private readonly Dictionary<Guid, CopilotRuntimeOperationCapabilityV1> outstandingCapabilities = [];
+    private readonly TaskCompletionSource drained =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool invalid;
     private bool admissionClosed;
 
@@ -215,8 +217,15 @@ internal sealed class CopilotRuntimeGenerationV1
         lock (sync)
         {
             admissionClosed = true;
+            if (outstandingCapabilities.Count == 0)
+            {
+                drained.TrySetResult();
+            }
         }
     }
+
+    internal Task WaitForDrainAsync(CancellationToken cancellationToken) =>
+        drained.Task.WaitAsync(cancellationToken);
 
     internal void ReleaseCapability(CopilotRuntimeOperationCapabilityV1 capability)
     {
@@ -229,6 +238,10 @@ internal sealed class CopilotRuntimeGenerationV1
         lock (sync)
         {
             outstandingCapabilities.Remove(capability.Handle);
+            if (admissionClosed && outstandingCapabilities.Count == 0)
+            {
+                drained.TrySetResult();
+            }
         }
 
         capability.DisposeWorkCancellation();
