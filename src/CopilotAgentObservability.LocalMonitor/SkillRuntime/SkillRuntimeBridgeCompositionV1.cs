@@ -11,6 +11,8 @@ internal sealed class SkillRuntimeBridgeHolderV1
 
     internal bool HasBridge => Volatile.Read(ref current) is not null;
 
+    internal SkillRuntimeCapabilityBridgeV1? CurrentBridge => Volatile.Read(ref current);
+
     public SkillRuntimeBridgeTransfer? TryConsume(string? token)
     {
         var bridge = Volatile.Read(ref current);

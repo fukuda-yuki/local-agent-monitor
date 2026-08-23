@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -100,6 +101,8 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
     }
 }
 
+internal enum CopilotRuntimeCandidatePhaseV1 { Raw, Ready, Published, Invalid }
+
 internal sealed class CopilotRuntimeGenerationV1
 {
     public const int AdmittedProtocolVersion = 3;
@@ -111,17 +114,44 @@ internal sealed class CopilotRuntimeGenerationV1
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool invalid;
     private bool admissionClosed;
+    private CopilotRuntimeCandidatePhaseV1 phase;
+    private readonly IAsyncDisposable analysisScope;
+    private Task? cleanupTask;
+    private readonly TaskCompletionSource cleanupCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal CopilotRuntimeGenerationV1(
         ICopilotSkillRuntimeClient client,
         SkillHostShutdownGateV1 shutdownGate,
-        CertifiedSkillProducerIdentityV1 certifiedIdentity)
+        CertifiedSkillProducerIdentityV1 certifiedIdentity,
+        IAsyncDisposable analysisScope)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
         this.shutdownGate = shutdownGate;
         Client = client;
         CertifiedIdentity = certifiedIdentity ?? throw new ArgumentNullException(nameof(certifiedIdentity));
         Identity = Guid.NewGuid();
+        this.analysisScope = analysisScope ?? throw new ArgumentNullException(nameof(analysisScope));
+        phase = CopilotRuntimeCandidatePhaseV1.Raw;
+    }
+
+    internal Task CleanupTask => cleanupCompleted.Task;
+
+    internal Task InvalidateAndCleanupAsync()
+    {
+        Invalidate();
+        CloseAdmissionForDrain();
+        lock (sync) return cleanupTask ??= CleanupCoreAsync();
+    }
+
+    private async Task CleanupCoreAsync()
+    {
+        try
+        {
+            await WaitForDrainAsync(CancellationToken.None).ConfigureAwait(false);
+            try { await Client.DisposeAsync().ConfigureAwait(false); } catch { }
+            try { await analysisScope.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+        finally { cleanupCompleted.TrySetResult(); }
     }
 
 
@@ -178,7 +208,8 @@ internal sealed class CopilotRuntimeGenerationV1
         lock (sync)
         {
             capability = null;
-            if (shutdownGate.IsNormalShutdownStarted || invalid || admissionClosed)
+            if (shutdownGate.IsNormalShutdownStarted || invalid || admissionClosed
+                || phase == CopilotRuntimeCandidatePhaseV1.Ready)
             {
                 return false;
             }
@@ -231,6 +262,7 @@ internal sealed class CopilotRuntimeGenerationV1
             }
 
             invalid = true;
+            phase = CopilotRuntimeCandidatePhaseV1.Invalid;
             admissionClosed = true;
             unsealed = [.. outstandingCapabilities.Values.Where(c => c.IsUnsealedUnderOwnerLock)];
         }
@@ -250,6 +282,26 @@ internal sealed class CopilotRuntimeGenerationV1
             {
                 drained.TrySetResult();
             }
+        }
+    }
+
+    internal bool TryMarkReady()
+    {
+        lock (sync)
+        {
+            if (invalid || phase != CopilotRuntimeCandidatePhaseV1.Raw || outstandingCapabilities.Count != 0) return false;
+            phase = CopilotRuntimeCandidatePhaseV1.Ready;
+            return true;
+        }
+    }
+
+    internal bool TryPublish()
+    {
+        lock (sync)
+        {
+            if (invalid || phase != CopilotRuntimeCandidatePhaseV1.Ready || outstandingCapabilities.Count != 0) return false;
+            phase = CopilotRuntimeCandidatePhaseV1.Published;
+            return true;
         }
     }
 

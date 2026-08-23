@@ -68,7 +68,7 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
     {
         var status = new CopilotRuntimeStatusObservationV1(version, 3, version);
 
-        Assert.True(CopilotSdkSkillDiscoveryGateway.TryCertifyAdmission(status, out var identity));
+        Assert.True(CopilotRuntimeIdentityCertifierV1.TryCertify(status, out var identity));
         Assert.Equal(version, identity!.SourceApplicationVersion);
         Assert.Equal(3, identity.ProtocolVersion);
         Assert.Equal(2, identity.RegistryRevision);
@@ -80,30 +80,9 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
     [InlineData("1.0.75", 3, "1.0.65")]
     public void Admission_RejectsUncertifiedOrDriftedIdentity(string version, int protocol, string? sessionStart)
     {
-        Assert.False(CopilotSdkSkillDiscoveryGateway.TryCertifyAdmission(
+        Assert.False(CopilotRuntimeIdentityCertifierV1.TryCertify(
             new CopilotRuntimeStatusObservationV1(version, protocol, sessionStart),
             out _));
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("sensitive-path-must-not-be-observed")]
-    public async Task EnvironmentOverridePresence_RejectsBeforeClientConstruction(string ignoredValue)
-    {
-        var factoryCalls = 0;
-        var gateway = new CopilotSdkSkillDiscoveryGateway(
-            () => { factoryCalls++; return new FakeSkillRuntimeClient(); },
-            new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1()),
-            name => string.Equals(name, "COPILOT_CLI_PATH", StringComparison.Ordinal));
-
-        var outcome = await gateway.AdmitRuntimeGenerationAsync(CancellationToken.None);
-
-        Assert.Equal(CopilotRuntimeAdmissionOutcome.NotAdmitted, outcome);
-        Assert.Equal(0, factoryCalls);
-        if (ignoredValue.Length > 0)
-        {
-            Assert.DoesNotContain(ignoredValue, outcome.ToString(), StringComparison.Ordinal);
-        }
     }
 
     [Fact]
@@ -126,9 +105,22 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
                 Assert.Contains(method.GetParameters(), parameter => parameter.ParameterType == typeof(ISkillInvocationV2RuntimeCapability));
             }
         });
-        Assert.Single(typeof(CopilotRuntimeGenerationV1).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic));
-        Assert.Single(typeof(CopilotRuntimeAdmissionV1).GetMethods(BindingFlags.Instance | BindingFlags.Public),
+        var generationConstructor = Assert.Single(
+            typeof(CopilotRuntimeGenerationV1).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic));
+        Assert.Contains(generationConstructor.GetParameters(), parameter =>
+            parameter.ParameterType == typeof(IAsyncDisposable) && !parameter.HasDefaultValue);
+        Assert.DoesNotContain(typeof(CopilotRuntimeAdmissionV1).GetMethods(BindingFlags.Instance | BindingFlags.Public),
             method => method.Name == "PublishAdmittedGeneration");
+        Assert.DoesNotContain(typeof(SkillRuntimeCapabilityBridgeV1).GetMethods(BindingFlags.Instance | BindingFlags.Public),
+            method => method.Name == "ForwardCallbackAsync");
+        Assert.Null(typeof(CopilotSdkSkillDiscoveryGateway).Assembly.GetType(
+            "CopilotAgentObservability.LocalMonitor.SkillRuntime.CopilotSdkBundleClientV1"));
+        Assert.DoesNotContain(typeof(CopilotSdkSkillDiscoveryGateway).GetMethods(BindingFlags.Instance | BindingFlags.Public),
+            method => method.Name is "AdmitRuntimeGenerationAsync" or "ReportSessionStartObservationAsync");
+        Assert.Empty(Assert.Single(typeof(CopilotSdkSkillDiscoveryGateway)
+            .GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)).GetParameters());
+        Assert.Equal(["DiscoverSkillsAsync"], typeof(ICopilotSkillRuntimeClient)
+            .GetMethods().Select(method => method.Name).Order(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -192,36 +184,6 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         Assert.NotEqual(facts65.RequestFingerprintSha256, facts75.RequestFingerprintSha256);
         Assert.Equal("1.0.65", facts65.ProducerTuple.SourceApplicationVersion);
         Assert.Equal("1.0.75", facts75.ProducerTuple.SourceApplicationVersion);
-    }
-
-    [Fact]
-    public async Task Admission1075_FreezesSameIdentityAndLaterSessionStartDriftInvalidates()
-    {
-        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
-        var client = new FakeSkillRuntimeClient { StatusResult = new CopilotRuntimeStatusObservationV1("1.0.75", 3, null) };
-        var gateway = new CopilotSdkSkillDiscoveryGateway(() => client, admission, _ => false);
-        Assert.Equal(CopilotRuntimeAdmissionOutcome.Admitted, await gateway.AdmitRuntimeGenerationAsync(CancellationToken.None));
-        Assert.True(admission.TryGetCurrentAdmittedGeneration(out var generation));
-        Assert.True(generation!.TryAcquireOperationCapability(CancellationToken.None, out var capability));
-        Assert.Same(generation.CertifiedIdentity, capability!.CertifiedIdentity);
-
-        await gateway.ReportSessionStartObservationAsync(generation, "1.0.65");
-
-        Assert.True(generation.IsInvalid);
-        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
-        capability.Release();
-    }
-
-    [Fact]
-    public async Task AbsentEnvironmentEntry_ReachesClientFactory()
-    {
-        var factoryCalls = 0;
-        var client = new FakeSkillRuntimeClient { StatusResult = new CopilotRuntimeStatusObservationV1("1.0.75", 3, null) };
-        var gateway = new CopilotSdkSkillDiscoveryGateway(() => { factoryCalls++; return client; },
-            new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1()), _ => false);
-
-        Assert.Equal(CopilotRuntimeAdmissionOutcome.Admitted, await gateway.AdmitRuntimeGenerationAsync(CancellationToken.None));
-        Assert.Equal(1, factoryCalls);
     }
 
     internal static CertifiedSkillProducerIdentityV1 TestIdentity(string version) => SkillInvocationV2TestIdentity.Create(version);

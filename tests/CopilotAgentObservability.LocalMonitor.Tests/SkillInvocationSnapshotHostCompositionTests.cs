@@ -2,6 +2,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.SkillNative;
+using CopilotAgentObservability.LocalMonitor.Projection;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -117,6 +120,106 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
         using var currentFile = await PostCurrentFileAsync(host);
         Assert.Equal(HttpStatusCode.NotFound, currentFile.StatusCode);
         Assert.Empty(await currentFile.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task ConfiguredRootWithRawAnalysisDisabledKeepsExactCurrentFileUnavailableResponse()
+    {
+        using var temp = new MonitorTempDirectory();
+        using var root = new TempRootDirectory();
+        var app = MonitorHost.Build(
+            BuildOptions(temp, [root.Path], sanitizedOnly: false),
+            new MonitorHostTestOptions
+            {
+                TimeProvider = temp.TimeProvider,
+                ConfigurationValues = new Dictionary<string, string?> { ["CopilotAnalysis:Enabled"] = "false" },
+                SkillCurrentFileHistoricalGate = new GrantedHistoricalGate(),
+                SkillCurrentAuthorizationGate = new GrantedAuthorizationGate(),
+            });
+        await app.StartAsync();
+        var address = Assert.Single(app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses);
+        await using var host = new RunningMonitorHost(
+            app, new HttpClient { BaseAddress = new Uri(address) }, address);
+
+        using var currentFile = await PostCurrentFileAsync(host);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, currentFile.StatusCode);
+        Assert.Equal(
+            "{\"error\":\"skill_current_file_discovery_unavailable\"}",
+            await currentFile.Content.ReadAsStringAsync());
+    }
+
+    private sealed class GrantedHistoricalGate : ISkillCurrentFileHistoricalGateV1
+    {
+        public Task<SkillCurrentFileHistoricalAdmissionV1> AdmitAsync(
+            Guid sessionId,
+            Guid snapshotId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new SkillCurrentFileHistoricalAdmissionV1(
+                SkillInvocationSnapshotContentOutcome.Granted,
+                new GrantedRetentionGrant(snapshotId)));
+    }
+
+    private sealed class GrantedRetentionGrant(Guid snapshotId) : ISkillCurrentFileRetentionGrantV1
+    {
+        public SkillInvocationSnapshotContentFacts Facts { get; } = new(
+            snapshotId,
+            "# synthetic\n",
+            @"C:\synthetic\SKILL.md",
+            new string('0', 64),
+            new string('1', 64),
+            1,
+            12,
+            DateTimeOffset.UnixEpoch);
+        public SkillInvocationSnapshotContentTerminalResult TrySealRawResponse() =>
+            SkillInvocationSnapshotContentTerminalResult.Sealed;
+        public SkillInvocationSnapshotContentTerminalResult TryCompleteWithoutRaw() =>
+            SkillInvocationSnapshotContentTerminalResult.CompletedWithoutRaw;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class GrantedAuthorizationGate : ISkillCurrentAuthorizationGateV1
+    {
+        public SkillProjectionCurrentSdkClaimAuthorizationResult TryAcquire(Guid sessionId, Guid snapshotId) =>
+            SkillProjectionCurrentSdkClaimAuthorizationResult.ForAcquired(
+                new SkillProjectionCurrentSdkClaimAuthorization("synthetic", "custom", new GrantedLease()));
+    }
+
+    private sealed class GrantedLease : ISkillRegistryGenerationLease
+    {
+        public void Dispose() { }
+    }
+
+    [Theory]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, true, false)]
+    public void RawAnalysisRootsExecution_IsComposedOnlyForAnExplicitSkillDirectory(
+        bool explicitDirectory,
+        bool projectOnly,
+        bool sanitizedOnly,
+        bool expected)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var root = new TempRootDirectory();
+        bool? observed = null;
+        var options = new MonitorOptions(
+            temp.DatabasePath,
+            Url: "http://127.0.0.1:0",
+            SanitizedOnly: sanitizedOnly,
+            MaxRequestBodyBytes: MonitorOptions.DefaultMaxRequestBodyBytes,
+            SkillDiscoveryProjectPaths: projectOnly ? [root.Path] : [],
+            SkillDiscoveryDirectories: explicitDirectory ? [root.Path] : []);
+
+        using var app = MonitorHost.Build(options, new MonitorHostTestOptions
+        {
+            TimeProvider = temp.TimeProvider,
+            AnalysisRootsExecutionEnabledObserver = value => observed = value,
+        });
+
+        Assert.Equal(expected, observed);
     }
 
     private static Task<HttpResponseMessage> PostCurrentFileAsync(RunningMonitorHost host)

@@ -37,6 +37,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using GitHub.Copilot;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
@@ -319,15 +320,57 @@ internal static class MonitorHost
         {
             builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer));
         }
+        var rootsExecutionContextFactory = CreateRootsExecutionContextFactory();
+        testOptions?.AnalysisRootsExecutionEnabledObserver?.Invoke(rootsExecutionContextFactory is not null);
         var analysisRunner = testOptions?.AnalysisRunner
             ?? new DotNetCopilotRawAnalysisRunner(
                 analysisStore,
                 projectionStore,
                 builder.Configuration,
                 new AnalysisSdkDirectoryOwner(new RetentionCatalogStore(retentionContext, timeProvider), timeProvider),
-                new CopilotAnalysisSdkExecutor(),
-                timeProvider);
+                testOptions?.AnalysisSdkExecutor ?? new CopilotAnalysisSdkExecutor(),
+                timeProvider,
+                skillHostShutdownGate?.StoppingToken ?? CancellationToken.None,
+                skillRuntimeAdmission,
+                rootsExecutionContextFactory);
         builder.Services.AddSingleton(analysisRunner);
+
+        Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? CreateRootsExecutionContextFactory()
+        {
+            if (options.SanitizedOnly
+                || options.SkillDiscoveryDirectories is not { Count: > 0 }
+                || skillDiscoveryRootGeneration is null
+                || skillRuntimeAdmission is null
+                || skillRuntimeBridgeHolder is null)
+            {
+                return null;
+            }
+
+            var nativeReader = SkillInvocationSnapshotComposition.CreateNativeReader(
+                skillDiscoveryRootGeneration.Platform, timeProvider);
+            if (nativeReader is null) return null;
+
+            return scope =>
+            {
+                var context = new CopilotAnalysisRootsExecutionContext(
+                    scope,
+                    skillDiscoveryRootGeneration,
+                    nativeReader,
+                    skillRuntimeAdmission,
+                    skillRuntimeBridgeHolder.CurrentBridge,
+                    sessionEventQueue,
+                    testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
+                    ownedDirectory => OwnedCopilotSdkClientV1.TryCreate(
+                        ownedDirectory,
+                        static clientOptions => new CopilotClient(clientOptions),
+                        static name => Environment.GetEnvironmentVariable(name) is not null,
+                        out var client) ? client : null,
+                    static name => Environment.GetEnvironmentVariable(name) is not null,
+                    skillHostShutdownGate!.StoppingToken);
+                testOptions?.AnalysisRootsExecutionContextObserver?.Invoke(context);
+                return context;
+            };
+        }
 
         if (testOptions?.StartProjectionWorker ?? true)
         {
@@ -2069,9 +2112,7 @@ internal static class MonitorHost
                     testOptions?.SkillCurrentAuthorizationGate
                         ?? new SkillCurrentAuthorizationGateV1(skillProjectionReadService, timeProvider),
                     runtimeAdmission,
-                    new SkillDiscoveryGatewayAdapterV1(new CopilotSdkSkillDiscoveryGateway(
-                        static () => new CopilotSdkBundleClientV1(),
-                        runtimeAdmission)),
+                    new SkillDiscoveryGatewayAdapterV1(new CopilotSdkSkillDiscoveryGateway()),
                     nativeReader);
             }
         }
@@ -2570,6 +2611,12 @@ internal sealed class MonitorHostTestOptions
     public IMonitorAnalysisStore? AnalysisStore { get; init; }
 
     public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
+
+    public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
+
+    public Action<CopilotAnalysisRootsExecutionContext>? AnalysisRootsExecutionContextObserver { get; init; }
+
+    public Action<bool>? AnalysisRootsExecutionEnabledObserver { get; init; }
 
     public bool StartProjectionWorker { get; init; } = true;
 

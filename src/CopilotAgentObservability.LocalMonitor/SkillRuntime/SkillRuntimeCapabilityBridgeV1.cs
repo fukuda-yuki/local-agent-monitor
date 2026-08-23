@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
-using GitHub.Copilot;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -74,7 +73,8 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
         this.monotonicClockTicks = monotonicClockTicks ?? throw new ArgumentNullException(nameof(monotonicClockTicks));
         this.randomTokenSource = randomTokenSource ?? throw new ArgumentNullException(nameof(randomTokenSource));
-        admission.RegisterInvalidationObserver(ClearPendingEntriesAndReleaseCapabilities);
+        admission.RegisterInvalidationObserver((CopilotRuntimeGenerationV1 candidate) =>
+            ClearPendingEntriesAndReleaseCapabilities(candidate));
     }
 
     internal int PendingCount
@@ -96,81 +96,44 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
 
     internal static byte[] CreateCryptographicToken() => RandomNumberGenerator.GetBytes(TokenByteLength);
 
-    public async Task<SkillRuntimeBridgeForwardOutcome> ForwardCallbackAsync(
+    public async Task<SkillRuntimeBridgeForwardOutcome> ForwardPreparedBodyAsync(
         CopilotRuntimeGenerationV1 owningGeneration,
-        string? nativeSessionId,
-        SkillInvokedEvent? sourceEvent,
+        ReadOnlyMemory<byte> preparedBodyUtf8,
         CancellationToken callerToken)
     {
         ArgumentNullException.ThrowIfNull(owningGeneration);
-
-        // Stale callback fence: only the callback's owning generation is admitted here; the
-        // bridge never reads the current pointer for forwarding, so a stale callback performs
-        // no serialization and never borrows a newer generation.
-        if (!owningGeneration.IsAdmitted)
+        if (callerToken.IsCancellationRequested || preparedBodyUtf8.IsEmpty
+            || preparedBodyUtf8.Length > OwnedSessionPreparedBufferV1.MaxAggregateBodyBytes
+            || !owningGeneration.TryAcquireOperationCapability(callerToken, out var capability))
         {
             return SkillRuntimeBridgeForwardOutcome.Unavailable;
         }
 
-        if (!owningGeneration.TryAcquireOperationCapability(callerToken, out var capability))
-        {
-            return SkillRuntimeBridgeForwardOutcome.Unavailable;
-        }
-
-        // The token struct stays readable after invalidation disposes its source; reading
-        // capability.WorkToken after an awaited release race would throw ObjectDisposedException.
         var workToken = capability.WorkToken;
-
         var registered = false;
         string? token = null;
         try
         {
-            if (!SkillInvocationNormalizedJsonV1.TryWriteCancellable(nativeSessionId, sourceEvent, capability, workToken, out var body))
-            {
-                return SkillRuntimeBridgeForwardOutcome.Unavailable;
-            }
-
             var tokenBytes = randomTokenSource();
-            if (tokenBytes is null || tokenBytes.Length != TokenByteLength)
-            {
-                return SkillRuntimeBridgeForwardOutcome.Unavailable;
-            }
-
+            if (tokenBytes is null || tokenBytes.Length != TokenByteLength) return SkillRuntimeBridgeForwardOutcome.Unavailable;
             token = EncodeBase64Url(tokenBytes);
-
-            var nowTicks = monotonicClockTicks();
             long expiresAtTicks;
-            try
-            {
-                expiresAtTicks = checked(nowTicks + EntryLifetimeTicks);
-            }
-            catch (OverflowException)
-            {
-                return SkillRuntimeBridgeForwardOutcome.Unavailable;
-            }
+            try { expiresAtTicks = checked(monotonicClockTicks() + EntryLifetimeTicks); }
+            catch (OverflowException) { return SkillRuntimeBridgeForwardOutcome.Unavailable; }
 
             lock (sync)
             {
-                PurgeExpiredUnderLock(nowTicks);
+                PurgeExpiredUnderLock(monotonicClockTicks());
                 if (pendingEntries.Count >= MaxPendingEntries || pendingEntries.ContainsKey(token))
-                {
                     return SkillRuntimeBridgeForwardOutcome.Unavailable;
-                }
-
-                pendingEntries[token] = new PendingEntry(capability, body.Length, SHA256.HashData(body), expiresAtTicks);
+                pendingEntries[token] = new PendingEntry(capability, preparedBodyUtf8.Length,
+                    SHA256.HashData(preparedBodyUtf8.Span), expiresAtTicks);
                 registered = true;
             }
 
             bool sent;
-            try
-            {
-                sent = await transport.SendAsync(token, body, workToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                sent = false;
-            }
-
+            try { sent = await transport.SendAsync(token, preparedBodyUtf8, workToken).ConfigureAwait(false); }
+            catch { sent = false; }
             if (!sent || workToken.IsCancellationRequested)
             {
                 RemoveUnconsumedEntry(token);
@@ -181,10 +144,7 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         }
         finally
         {
-            if (!registered)
-            {
-                capability.Release();
-            }
+            if (!registered) capability.Release();
         }
     }
 
@@ -238,6 +198,18 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         {
             entry.Capability.Release();
         }
+    }
+
+    private void ClearPendingEntriesAndReleaseCapabilities(CopilotRuntimeGenerationV1 candidate)
+    {
+        PendingEntry[] doomed;
+        lock (sync)
+        {
+            doomed = [.. pendingEntries.Values.Where(entry => ReferenceEquals(entry.Capability.Owner, candidate))];
+            foreach (var pair in pendingEntries.Where(pair => ReferenceEquals(pair.Value.Capability.Owner, candidate)).ToArray())
+                pendingEntries.Remove(pair.Key);
+        }
+        foreach (var entry in doomed) entry.Capability.Release();
     }
 
     internal static bool IsValidTokenGrammar(string? token)

@@ -129,7 +129,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     public async Task AMissingRuntimeGenerationIsTheFixedDiscoveryUnavailableBeforeAnySdkWork()
     {
         var fixture = new Fixture(handleSource);
-        fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+        fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
 
         var result = await fixture.ExecuteAsync();
 
@@ -232,7 +232,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     {
         var fixture = new Fixture(handleSource);
         fixture.NativeReader.Result = CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Oversized);
-        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
 
         var result = await fixture.ExecuteAsync();
 
@@ -291,7 +291,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     public async Task RawSuccessDiscardsRawAndSubstitutes503WhenTheRuntimeSealLoses()
     {
         var fixture = new Fixture(handleSource);
-        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
 
         var result = await fixture.ExecuteAsync();
 
@@ -305,7 +305,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     public async Task RawSuccessAbortsWhenBothTheRuntimeSealAndRetentionCompletionLose()
     {
         var fixture = new Fixture(handleSource);
-        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+        fixture.NativeReader.BeforeRead = () => fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
         fixture.Grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
 
         var result = await fixture.ExecuteAsync();
@@ -340,7 +340,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         fixture.Grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
         fixture.NativeReader.BeforeRead = () =>
         {
-            fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+            fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
             fixture.CallerAbort.Cancel();
         };
 
@@ -373,7 +373,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
                 fixture.Grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
                 break;
             case "runtime_generation_missing":
-                fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+                fixture.RuntimeAdmission.InvalidateCurrentTestGeneration();
                 break;
             case "normal_shutdown_closed":
                 fixture.RuntimeAdmission.CloseForShutdown();
@@ -751,7 +751,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             RootGeneration = new SkillDiscoveryRootGenerationV1(Preflight, shutdownGate);
 
             RuntimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
-            Generation = RuntimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
+            Generation = RuntimeAdmission.PublishReadyTestCandidate(new StubRuntimeClient(), out _);
 
             Grant = new FakeGrant(definitionPath);
             Historical = new FakeHistoricalGate(Grant);

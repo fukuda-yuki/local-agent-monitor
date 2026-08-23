@@ -14,6 +14,27 @@ public sealed class ClaudeIngestionConcurrencyTests
     private static readonly DateTimeOffset ObservedAt = DateTimeOffset.Parse("2026-07-13T00:00:00Z");
 
     [Fact]
+    public async Task AbandonedQueuedRequestIsDrainedWithoutPersistence()
+    {
+        using var temp = new MonitorTempDirectory();
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext);
+        store.CreateSchema();
+        var queue = new SessionEventQueue(capacity: 1);
+        Assert.True(queue.TryEnqueue(ClaudeEnvelope("abandoned-hook"), out var request));
+        Assert.True(request!.TryAbandon());
+        var worker = new SessionEventWriterWorker(
+            queue,
+            new SessionEventNormalizer(store, new FixedTimeProvider(ObservedAt)));
+
+        await worker.StartAsync(CancellationToken.None);
+        await request.Completion;
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.Equal(0, queue.Count);
+        Assert.Empty(store.ListMostRecent(10));
+    }
+
+    [Fact]
     public async Task DuplicateHookRequestsQueuedTogetherCommitOneSourceIdentity()
     {
         using var temp = new MonitorTempDirectory();

@@ -64,7 +64,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         var rootGeneration = new SkillDiscoveryRootGenerationV1(preflight, shutdownGate);
 
         runtimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
-        generation = runtimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
+        generation = runtimeAdmission.PublishReadyTestCandidate(new StubRuntimeClient(), out _);
         nativeReader = new StubNativeReader();
         grant = new StubGrant();
 
@@ -443,7 +443,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
     [Fact]
     public async Task CurrentFilePreRuntimeFailures_AcquireNoCapability()
     {
-        runtimeAdmission.InvalidateCurrentGeneration();
+        runtimeAdmission.InvalidateCurrentTestGeneration();
 
         using var response = await PostCurrentFileAsync(ValidRequest);
         await response.Content.ReadAsByteArrayAsync();

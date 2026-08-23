@@ -488,7 +488,8 @@ public sealed class SkillInvocationV2IngestRouteTests : IAsyncLifetime
 
     private TransferRegistration RegisterTransfer(byte[] expectedBody, bool invalidateOnConsume = false)
     {
-        var generation = new CopilotRuntimeGenerationV1(new StubRuntimeClient(), new SkillHostShutdownGateV1(), SkillInvocationV2TestIdentity.V1065);
+        var generation = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1())
+            .PublishReadyTestCandidate(new StubRuntimeClient(), out _);
         Assert.True(generation.TryAcquireOperationCapability(CancellationToken.None, out var capability));
         var transfer = new SkillRuntimeBridgeTransfer(
             capability,

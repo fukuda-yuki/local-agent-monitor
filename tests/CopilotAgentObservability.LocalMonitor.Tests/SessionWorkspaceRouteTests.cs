@@ -163,6 +163,7 @@ public sealed class SessionWorkspaceRouteTests
         var responseTask = host.Client.SendAsync(IngestRequest(json));
         var queued = await queue.Reader.ReadAsync();
         queue.MarkDequeued();
+        Assert.True(queued.TryClaim());
         new SessionEventNormalizer(store, new FixedTimeProvider(observedAt.AddMinutes(3))).NormalizeAndWrite(queued.Envelope);
         queued.Complete(SessionEventCommitStatus.Committed);
         using var response = await responseTask;

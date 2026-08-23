@@ -89,7 +89,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var roots = CreateRootGeneration(out _, gate);
         var admission = new CopilotRuntimeAdmissionV1(gate);
-        admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
+        admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
 
         Assert.True(gate.TryStartNormalShutdown());
 
@@ -111,7 +111,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var roots = CreateRootGeneration(out var preflight, gate);
         var admission = new CopilotRuntimeAdmissionV1(gate);
         var client = new FakeSkillRuntimeClient();
-        var generation = admission.PublishAdmittedGeneration(client, out _)!;
+        var generation = admission.PublishReadyTestCandidate(client, out _);
         Assert.True(roots.TryAcquireLease(out var rootLease));
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, roots, admission);
@@ -124,8 +124,8 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         Assert.Equal(
             CopilotRuntimeAcquisitionDispositionV1.NormalShutdownClosed,
             admission.AcquireCurrentFileCapability(CancellationToken.None, out _));
-        Assert.False(capability!.WorkToken.IsCancellationRequested);
-        Assert.False(generation.IsInvalid);
+        Assert.True(capability!.WorkToken.IsCancellationRequested);
+        Assert.True(generation.IsInvalid);
         Assert.False(stopping.IsCompleted);
         Assert.Equal(0, client.DisposeCalls);
         Assert.All(preflight.RetainedRoots, root => Assert.False(root.IsDisposed));
@@ -149,7 +149,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var roots = CreateRootGeneration(out _, gate);
         var admission = new CopilotRuntimeAdmissionV1(gate);
-        admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
+        admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
         Assert.True(roots.TryAcquireLease(out var rootLease));
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, roots, admission);
 
@@ -170,7 +170,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var admission = new CopilotRuntimeAdmissionV1(gate);
         var client = new FakeSkillRuntimeClient();
-        admission.PublishAdmittedGeneration(client, out _);
+        admission.PublishReadyTestCandidate(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, null, admission);
 
@@ -197,7 +197,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var admission = new CopilotRuntimeAdmissionV1(gate);
         var client = new FakeSkillRuntimeClient();
-        admission.PublishAdmittedGeneration(client, out _);
+        admission.PublishReadyTestCandidate(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, null, admission);
 
@@ -221,16 +221,15 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var admission = new CopilotRuntimeAdmissionV1(gate);
         var client = new FakeSkillRuntimeClient();
-        admission.PublishAdmittedGeneration(client, out _);
+        admission.PublishReadyTestCandidate(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, null, admission);
 
         var stopping = coordinator.StoppingAsync(CancellationToken.None);
 
-        Assert.False(capability!.WorkToken.IsCancellationRequested);
-        var removed = admission.InvalidateCurrentGeneration();
-        Assert.NotNull(removed);
-        await removed!.Client.DisposeAsync();
+        Assert.True(capability!.WorkToken.IsCancellationRequested);
+        var removed = admission.InvalidateCurrentTestGeneration();
+        Assert.Null(removed);
         Assert.True(capability.WorkToken.IsCancellationRequested);
         Assert.False(stopping.IsCompleted);
 
@@ -246,7 +245,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         var gate = new SkillHostShutdownGateV1();
         var admission = new CopilotRuntimeAdmissionV1(gate);
         var client = new FakeSkillRuntimeClient();
-        var generation = admission.PublishAdmittedGeneration(client, out _)!;
+        var generation = admission.PublishReadyTestCandidate(client, out _);
         var transport = new FakeBridgeTransport();
         var bridge = new SkillRuntimeCapabilityBridgeV1(
             admission,
@@ -266,18 +265,17 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         };
         Assert.Equal(
             SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await bridge.ForwardCallbackAsync(generation, "native-session", sourceEvent, CancellationToken.None));
+            await bridge.ForwardPreparedBodyAsync(generation, new byte[] { 1 }, CancellationToken.None));
         var token = Assert.Single(transport.Sends).Token;
         var coordinator = new SkillHostShutdownCoordinatorV1(gate, null, admission);
 
         var stopping = coordinator.StoppingAsync(CancellationToken.None);
 
-        Assert.False(stopping.IsCompleted);
-        Assert.Equal(1, bridge.PendingCount);
-        Assert.Equal(1, generation.OutstandingCapabilityCount);
-        Assert.Equal(0, client.DisposeCalls);
-        Assert.True(bridge.TryConsume(token, out var transfer));
-        transfer!.ReleaseTransferredCapability();
+        await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, bridge.PendingCount);
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.False(bridge.TryConsume(token, out _));
         await stopping.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(0, generation.OutstandingCapabilityCount);
@@ -289,7 +287,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     {
         var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient();
-        var generation = admission.PublishAdmittedGeneration(client, out _)!;
+        var generation = admission.PublishReadyTestCandidate(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
         using var cancellation = new CancellationTokenSource();
 
@@ -297,8 +295,8 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         cancellation.Cancel();
 
         Assert.False(drain.IsCompleted);
-        Assert.False(capability!.WorkToken.IsCancellationRequested);
-        Assert.False(generation.IsInvalid);
+        Assert.True(capability!.WorkToken.IsCancellationRequested);
+        Assert.True(generation.IsInvalid);
         Assert.Equal(0, client.DisposeCalls);
 
         capability.Release();
@@ -360,13 +358,12 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     {
         var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient();
-        admission.PublishAdmittedGeneration(client, out _);
+        admission.PublishReadyTestCandidate(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
 
         var shutdownDrain = admission.CloseForShutdownAndDrainAsync(CancellationToken.None);
-        var removed = admission.InvalidateCurrentGeneration();
-        Assert.NotNull(removed);
-        await removed!.Client.DisposeAsync();
+        var removed = admission.InvalidateCurrentTestGeneration();
+        Assert.Null(removed);
         capability!.Release();
         await shutdownDrain;
 
@@ -388,7 +385,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     {
         var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient { DisposeThrows = true };
-        admission.PublishAdmittedGeneration(client, out _);
+        admission.PublishReadyTestCandidate(client, out _);
 
         await admission.CloseForShutdownAndDrainAsync(CancellationToken.None);
 

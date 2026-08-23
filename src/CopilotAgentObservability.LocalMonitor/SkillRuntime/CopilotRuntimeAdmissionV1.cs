@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -14,11 +15,12 @@ internal sealed class CopilotRuntimeAdmissionV1
 {
     private readonly SkillHostShutdownGateV1 shutdownGate;
     private readonly object sync = new();
-    private readonly List<Action> invalidationObservers = [];
+    private readonly SemaphoreSlim publicationGate = new(1, 1);
+    private readonly List<Action<CopilotRuntimeGenerationV1>> candidateInvalidationObservers = [];
     private CopilotRuntimeGenerationV1? currentGeneration;
-    private GenerationDisposalGuard? currentGenerationDisposal;
     private Task? shutdownDrain;
     private bool shutdownClosed;
+    private readonly HashSet<CopilotRuntimeGenerationV1> unpublishedCandidates = [];
 
     internal CopilotRuntimeAdmissionV1(SkillHostShutdownGateV1 shutdownGate)
     {
@@ -37,16 +39,128 @@ internal sealed class CopilotRuntimeAdmissionV1
         }
     }
 
-    public void RegisterInvalidationObserver(Action observer)
+    public void RegisterInvalidationObserver(Action<CopilotRuntimeGenerationV1> observer)
     {
         ArgumentNullException.ThrowIfNull(observer);
-        lock (sync)
-        {
-            invalidationObservers.Add(observer);
-        }
+        lock (sync) candidateInvalidationObservers.Add(observer);
     }
 
     internal bool IsNormalShutdownStarted => shutdownGate.IsNormalShutdownStarted;
+
+    public CopilotRuntimeGenerationV1 CreateUnpublishedCandidate(
+        ICopilotSkillRuntimeClient client,
+        CertifiedSkillProducerIdentityV1 certifiedIdentity,
+        IAnalysisSdkDirectoryScope analysisScope,
+        IAsyncDisposable? analysisScopeOwner = null)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(analysisScope);
+        var candidate = new CopilotRuntimeGenerationV1(client, shutdownGate, certifiedIdentity, analysisScopeOwner ?? analysisScope);
+        lock (sync)
+        {
+            if (shutdownClosed || shutdownGate.IsNormalShutdownStarted)
+            {
+                _ = candidate.InvalidateAndCleanupAsync();
+                return candidate;
+            }
+            unpublishedCandidates.Add(candidate);
+        }
+
+        _ = ObserveLeaseLossAsync(candidate, analysisScope.LeaseLostToken);
+        return candidate;
+    }
+
+    public async Task<bool> PublishCandidateAsync(CopilotRuntimeGenerationV1 candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        await publicationGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            CopilotRuntimeGenerationV1? replaced;
+            var duplicate = false;
+            var claimed = false;
+            lock (sync)
+            {
+                duplicate = ReferenceEquals(currentGeneration, candidate);
+                claimed = !shutdownClosed && !shutdownGate.IsNormalShutdownStarted
+                    && !duplicate && unpublishedCandidates.Contains(candidate) && candidate.TryPublish();
+                replaced = currentGeneration;
+                if (claimed)
+                {
+                    unpublishedCandidates.Remove(candidate);
+                    currentGeneration = candidate;
+                }
+            }
+
+            if (!claimed)
+            {
+                if (duplicate) return false;
+                await DiscardCandidateAsync(candidate).ConfigureAwait(false);
+                return false;
+            }
+
+            if (replaced is not null)
+            {
+                replaced.Invalidate();
+                NotifyInvalidationObservers(replaced);
+                await replaced.InvalidateAndCleanupAsync().ConfigureAwait(false);
+            }
+            return true;
+        }
+        finally
+        {
+            publicationGate.Release();
+        }
+    }
+
+    public async Task<bool> DiscardCandidateAsync(CopilotRuntimeGenerationV1 candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        lock (sync)
+        {
+            unpublishedCandidates.Remove(candidate);
+            if (ReferenceEquals(currentGeneration, candidate))
+            {
+                currentGeneration = null;
+            }
+        }
+        candidate.Invalidate();
+        NotifyInvalidationObservers(candidate);
+        await candidate.InvalidateAndCleanupAsync().ConfigureAwait(false);
+        return true;
+    }
+
+    internal void InvalidateCandidate(CopilotRuntimeGenerationV1 candidate)
+    {
+        lock (sync)
+        {
+            unpublishedCandidates.Remove(candidate);
+            if (ReferenceEquals(currentGeneration, candidate))
+            {
+                currentGeneration = null;
+            }
+        }
+        candidate.Invalidate();
+        NotifyInvalidationObservers(candidate);
+        _ = candidate.InvalidateAndCleanupAsync();
+    }
+
+    private async Task ObserveLeaseLossAsync(CopilotRuntimeGenerationV1 candidate, CancellationToken leaseLostToken)
+    {
+        try { await Task.Delay(Timeout.InfiniteTimeSpan, leaseLostToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (leaseLostToken.IsCancellationRequested) { }
+        lock (sync)
+        {
+            unpublishedCandidates.Remove(candidate);
+            if (ReferenceEquals(currentGeneration, candidate))
+            {
+                currentGeneration = null;
+            }
+        }
+        candidate.Invalidate();
+        NotifyInvalidationObservers(candidate);
+        await candidate.InvalidateAndCleanupAsync().ConfigureAwait(false);
+    }
 
     public bool TryGetCurrentAdmittedGeneration([NotNullWhen(true)] out CopilotRuntimeGenerationV1? generation)
     {
@@ -89,90 +203,6 @@ internal sealed class CopilotRuntimeAdmissionV1
         }
     }
 
-    public CopilotRuntimeGenerationV1? PublishAdmittedGeneration(
-        ICopilotSkillRuntimeClient client,
-        CertifiedSkillProducerIdentityV1 certifiedIdentity,
-        out CopilotRuntimeGenerationV1? replacedGeneration)
-    {
-        ArgumentNullException.ThrowIfNull(client);
-        var generation = new CopilotRuntimeGenerationV1(client, shutdownGate, certifiedIdentity);
-        var generationDisposal = new GenerationDisposalGuard();
-        GenerationDisposalGuard? replacedDisposal;
-        lock (sync)
-        {
-            replacedGeneration = null;
-            if (shutdownGate.IsNormalShutdownStarted || shutdownClosed)
-            {
-                // Publication does not take ownership on refusal; the caller that supplied the
-                // client remains responsible for disposing it.
-                return null;
-            }
-
-            replacedGeneration = currentGeneration;
-            replacedDisposal = currentGenerationDisposal;
-            currentGeneration = generation;
-            currentGenerationDisposal = generationDisposal;
-        }
-
-        replacedGeneration?.Invalidate();
-        if (replacedGeneration is not null && !replacedDisposal!.TryClaim())
-        {
-            replacedGeneration = null;
-        }
-
-        NotifyInvalidationObservers();
-        return generation;
-    }
-
-
-    public CopilotRuntimeGenerationV1? InvalidateCurrentGeneration()
-    {
-        CopilotRuntimeGenerationV1? removed;
-        GenerationDisposalGuard? removedDisposal;
-        lock (sync)
-        {
-            removed = currentGeneration;
-            removedDisposal = currentGenerationDisposal;
-            currentGeneration = null;
-            currentGenerationDisposal = null;
-        }
-
-        removed?.Invalidate();
-        if (removed is not null)
-        {
-            NotifyInvalidationObservers();
-        }
-
-        return removed is not null && removedDisposal!.TryClaim() ? removed : null;
-    }
-
-    public CopilotRuntimeGenerationV1? InvalidateGenerationIfCurrent(CopilotRuntimeGenerationV1 generation)
-    {
-        ArgumentNullException.ThrowIfNull(generation);
-        CopilotRuntimeGenerationV1? removed;
-        GenerationDisposalGuard? removedDisposal;
-        lock (sync)
-        {
-            removed = null;
-            removedDisposal = null;
-            if (ReferenceEquals(currentGeneration, generation))
-            {
-                removed = currentGeneration;
-                removedDisposal = currentGenerationDisposal;
-                currentGeneration = null;
-                currentGenerationDisposal = null;
-            }
-        }
-
-        removed?.Invalidate();
-        if (removed is not null)
-        {
-            NotifyInvalidationObservers();
-        }
-
-        return removed is not null && removedDisposal!.TryClaim() ? removed : null;
-    }
-
     public void CloseForShutdown()
     {
         CopilotRuntimeGenerationV1? generation;
@@ -193,10 +223,18 @@ internal sealed class CopilotRuntimeAdmissionV1
             shutdownClosed = true;
             if (shutdownDrain is null)
             {
-                currentGeneration?.CloseAdmissionForDrain();
-                shutdownDrain = currentGeneration is null
-                    ? Task.CompletedTask
-                    : DrainAndDisposeClientAsync(currentGeneration, currentGenerationDisposal!);
+                var candidates = unpublishedCandidates.ToList();
+                unpublishedCandidates.Clear();
+                if (currentGeneration is not null && !candidates.Contains(currentGeneration))
+                    candidates.Insert(0, currentGeneration);
+                currentGeneration = null;
+                foreach (var candidate in candidates)
+                {
+                    candidate.Invalidate();
+                    NotifyInvalidationObservers(candidate);
+                }
+                var candidateDrain = Task.WhenAll(candidates.Select(candidate => candidate.InvalidateAndCleanupAsync()));
+                shutdownDrain = candidateDrain;
             }
 
             drain = shutdownDrain;
@@ -205,44 +243,18 @@ internal sealed class CopilotRuntimeAdmissionV1
         await drain.ConfigureAwait(false);
     }
 
-    private static async Task DrainAndDisposeClientAsync(
-        CopilotRuntimeGenerationV1 generation,
-        GenerationDisposalGuard disposal)
+    private void NotifyInvalidationObservers(CopilotRuntimeGenerationV1 generation)
     {
-        await generation.WaitForDrainAsync(CancellationToken.None).ConfigureAwait(false);
-        if (!disposal.TryClaim())
-        {
-            return;
-        }
-
-        try
-        {
-            await generation.Client.DisposeAsync().ConfigureAwait(false);
-        }
-        catch
-        {
-            // Runtime details remain unavailable when best-effort shutdown disposal fails.
-        }
-    }
-
-    private void NotifyInvalidationObservers()
-    {
-        Action[] observers;
+        Action<CopilotRuntimeGenerationV1>[] candidateObservers;
         lock (sync)
         {
-            observers = [.. invalidationObservers];
+            candidateObservers = [.. candidateInvalidationObservers];
         }
-
-        foreach (var observer in observers)
+        foreach (var observer in candidateObservers)
         {
-            observer();
+            try { observer(generation); }
+            catch { }
         }
     }
 
-    private sealed class GenerationDisposalGuard
-    {
-        private int claimed;
-
-        internal bool TryClaim() => Interlocked.Exchange(ref claimed, 1) == 0;
-    }
 }

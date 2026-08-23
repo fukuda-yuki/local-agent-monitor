@@ -1,400 +1,265 @@
-using System.Security.Cryptography;
-using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
-using CopilotAgentObservability.LocalMonitor.SkillRuntime;
-using GitHub.Copilot;
-using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
+using System.Text;
+using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.LocalMonitor.Tests;
+using CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
-namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
+namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 public sealed class SkillRuntimeCapabilityBridgeV1Tests
 {
     [Fact]
-    public async Task ForwardThenConsume_TransfersCapabilityWithBodyEvidence_ExactlyOnce()
+    public async Task PreparedBody_UsesOwningGenerationAndTransfersCapabilityExactlyOnce()
     {
-        var fixture = NewBridge();
+        var fixture = new Fixture();
+        var body = Encoding.UTF8.GetBytes("{\"prepared\":true}");
 
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded, outcome);
-        Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
-        Assert.Equal(1, fixture.Bridge.PendingCount);
-        var send = Assert.Single(fixture.Transport.Sends);
-
-        Assert.True(fixture.Bridge.TryConsume(send.Token, out var transfer));
-        Assert.NotNull(transfer);
-        Assert.Equal(send.Body.Length, transfer!.ExpectedBodyLength);
-        Assert.Equal(SHA256.HashData(send.Body), transfer.ExpectedBodySha256);
-        Assert.IsAssignableFrom<ISkillInvocationV2RuntimeCapability>(transfer.RuntimeCapability);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
-
-        Assert.False(fixture.Bridge.TryConsume(send.Token, out _));
-
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, body, CancellationToken.None));
+        Assert.True(fixture.Bridge.TryConsume(fixture.Transport.Token, out var transfer));
+        Assert.Equal(body.Length, transfer!.ExpectedBodyLength);
+        transfer.ReleaseTransferredCapability();
         transfer.ReleaseTransferredCapability();
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+a")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/a")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=a")]
-    public void TryConsume_TokenGrammarViolations_ReturnFalse(string? header)
+    [Fact]
+    public async Task ReplacedGeneration_CannotForwardPreparedBody()
     {
-        var fixture = NewBridge();
+        var fixture = new Fixture();
+        var stale = fixture.Generation;
+        fixture.Admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
 
-        Assert.False(fixture.Bridge.TryConsume(header, out _));
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await fixture.Bridge.ForwardPreparedBodyAsync(stale, new byte[] { 1 }, CancellationToken.None));
+        Assert.Equal(0, fixture.Transport.SendCalls);
     }
 
     [Fact]
-    public void EncodeBase64Url_32RandomBytes_IsExactly43UnpaddedUrlSafeCharacters()
+    public async Task Invalidation_ClearsPendingTokenAndReleasesCapability()
     {
-        for (var iteration = 0; iteration < 32; iteration++)
-        {
-            var token = SkillRuntimeCapabilityBridgeV1.EncodeBase64Url(RandomNumberGenerator.GetBytes(32));
-            AssertTokenGrammar(token);
-        }
+        var fixture = new Fixture();
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, new byte[] { 1 }, CancellationToken.None));
 
-        var slashAndPlusHeavy = new byte[32];
-        Array.Fill(slashAndPlusHeavy, (byte)0xff);
-        var encoded = SkillRuntimeCapabilityBridgeV1.EncodeBase64Url(slashAndPlusHeavy);
-        AssertTokenGrammar(encoded);
-        Assert.DoesNotContain('+', encoded);
-        Assert.DoesNotContain('/', encoded);
-        Assert.DoesNotContain('=', encoded);
+        await fixture.Admission.DiscardCandidateAsync(fixture.Generation);
+
+        Assert.False(fixture.Bridge.TryConsume(fixture.Transport.Token, out _));
+        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
     }
 
     [Fact]
-    public async Task PendingCapacity_64EntriesAdmitted_65thRefusedWithoutSend()
+    public async Task Invalidation_ClearsOnlyExactCandidatePendingEntries()
     {
-        var fixture = NewBridge();
-        foreach (var _ in Enumerable.Range(0, SkillRuntimeCapabilityBridgeV1.MaxPendingEntries))
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var tokenNumber = 0;
+        var transport = new CapturingTransport();
+        var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => 0, () =>
         {
-            var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-            Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded, outcome);
-        }
+            var bytes = new byte[32];
+            BitConverter.TryWriteBytes(bytes, ++tokenNumber);
+            return bytes;
+        });
+        var first = admission.CreateUnpublishedCandidate(new FakeSkillRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, new LocalScope());
+        var second = admission.CreateUnpublishedCandidate(new FakeSkillRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, new LocalScope());
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await bridge.ForwardPreparedBodyAsync(first, new byte[] { 1 }, CancellationToken.None));
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await bridge.ForwardPreparedBodyAsync(second, new byte[] { 2 }, CancellationToken.None));
 
-        Assert.Equal(SkillRuntimeCapabilityBridgeV1.MaxPendingEntries, fixture.Bridge.PendingCount);
+        await admission.DiscardCandidateAsync(first);
 
-        var refused = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, refused);
-        Assert.Equal(SkillRuntimeCapabilityBridgeV1.MaxPendingEntries, fixture.Bridge.PendingCount);
-        Assert.Equal(SkillRuntimeCapabilityBridgeV1.MaxPendingEntries, fixture.Transport.Sends.Count);
-        Assert.Equal(64, fixture.Generation.OutstandingCapabilityCount);
-
-        var consumed = fixture.Bridge.TryConsume(fixture.Transport.Sends[0].Token, out var transfer);
-        Assert.True(consumed);
-        transfer!.ReleaseTransferredCapability();
-
-        var admittedAgain = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded, admittedAgain);
-        Assert.Equal(SkillRuntimeCapabilityBridgeV1.MaxPendingEntries, fixture.Bridge.PendingCount);
+        Assert.False(bridge.TryConsume(transport.Tokens[0], out _));
+        Assert.True(bridge.TryConsume(transport.Tokens[1], out var retained));
+        retained!.ReleaseTransferredCapability();
+        Assert.Equal(0, first.OutstandingCapabilityCount);
+        Assert.Equal(0, second.OutstandingCapabilityCount);
     }
 
     [Fact]
-    public async Task PendingCapacity_ExpiredEntriesPurgedBeforeAdmissionCheck()
+    public async Task Replacement_ClearsOldBridgeEntryWithoutClearingNewEntryDuringOldCleanup()
     {
-        var fixture = NewBridge();
-        foreach (var _ in Enumerable.Range(0, SkillRuntimeCapabilityBridgeV1.MaxPendingEntries))
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var releaseOldClient = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tokenNumber = 0;
+        var transport = new CapturingTransport();
+        var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => 0, () =>
         {
-            Assert.Equal(
-                SkillRuntimeBridgeForwardOutcome.Forwarded,
-                await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        }
+            var bytes = new byte[32];
+            BitConverter.TryWriteBytes(bytes, ++tokenNumber);
+            return bytes;
+        });
+        var old = admission.CreateUnpublishedCandidate(new BlockingDisposeClient(releaseOldClient.Task),
+            SkillInvocationV2TestIdentity.V1065, new LocalScope());
+        Assert.True(old.TryMarkReady());
+        Assert.True(await admission.PublishCandidateAsync(old));
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await bridge.ForwardPreparedBodyAsync(old, new byte[] { 1 }, CancellationToken.None));
+        var replacement = admission.CreateUnpublishedCandidate(new FakeSkillRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, new LocalScope());
+        Assert.True(replacement.TryMarkReady());
 
-        fixture.Clock.NowTicks += SkillRuntimeCapabilityBridgeV1.EntryLifetimeTicks + 1;
+        var publishing = admission.PublishCandidateAsync(replacement);
+        await Task.Yield();
+        Assert.False(publishing.IsCompleted);
+        Assert.True(admission.TryGetCurrentAdmittedGeneration(out var current));
+        Assert.Same(replacement, current);
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await bridge.ForwardPreparedBodyAsync(replacement, new byte[] { 2 }, CancellationToken.None));
+        Assert.False(bridge.TryConsume(transport.Tokens[0], out _));
+        Assert.True(bridge.TryConsume(transport.Tokens[1], out var retained));
+        retained!.ReleaseTransferredCapability();
 
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        Assert.Equal(1, fixture.Bridge.PendingCount);
-        Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
+        releaseOldClient.SetResult();
+        Assert.True(await publishing);
     }
 
-    [Theory]
-    [InlineData(-1, true)]
-    [InlineData(0, false)]
-    [InlineData(1, false)]
-    public async Task EntryExpiry_ValidOnlyWhileNowStrictlyBeforeExpiresAt(long offsetTicks, bool consumable)
+    [Fact]
+    public async Task TransportFailure_ReleasesCapabilityAndLeavesNoToken()
     {
-        var fixture = NewBridge();
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        var token = Assert.Single(fixture.Transport.Sends).Token;
+        var fixture = new Fixture(sendResult: false);
 
-        fixture.Clock.NowTicks += SkillRuntimeCapabilityBridgeV1.EntryLifetimeTicks + offsetTicks;
-
-        Assert.Equal(consumable, fixture.Bridge.TryConsume(token, out var transfer));
-        if (consumable)
-        {
-            transfer!.ReleaseTransferredCapability();
-        }
-
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, new byte[] { 1 }, CancellationToken.None));
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
         Assert.Equal(0, fixture.Bridge.PendingCount);
     }
 
     [Fact]
-    public async Task PurgeExpired_RemovesEntriesAtOrPastLifetime()
+    public async Task PreparedBodyCapacity_Admits64AndRefuses65th()
     {
-        var fixture = NewBridge();
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        Assert.Equal(1, fixture.Bridge.PendingCount);
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var generation = admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
+        var transport = new FakeTransport(true);
+        var token = 0;
+        var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => 0, () =>
+        {
+            var bytes = new byte[32];
+            BitConverter.TryWriteBytes(bytes, token++);
+            return bytes;
+        });
 
-        fixture.Clock.NowTicks += SkillRuntimeCapabilityBridgeV1.EntryLifetimeTicks;
-        fixture.Bridge.PurgeExpired();
+        for (var index = 0; index < SkillRuntimeCapabilityBridgeV1.MaxPendingEntries; index++)
+            Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+                await bridge.ForwardPreparedBodyAsync(generation, new byte[] { 1 }, CancellationToken.None));
 
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await bridge.ForwardPreparedBodyAsync(generation, new byte[] { 1 }, CancellationToken.None));
+        Assert.Equal(SkillRuntimeCapabilityBridgeV1.MaxPendingEntries, transport.SendCalls);
     }
 
     [Fact]
-    public async Task ClockOverflow_AtExpiryComputation_ReturnsUnavailableWithoutSend()
+    public async Task ExpiredPreparedBodyTokenIsPurgedAndReleased()
     {
-        var fixture = NewBridge();
-        fixture.Clock.NowTicks = long.MaxValue - SkillRuntimeCapabilityBridgeV1.EntryLifetimeTicks + 1;
+        long now = 0;
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var generation = admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
+        var transport = new FakeTransport(true);
+        var bridge = new SkillRuntimeCapabilityBridgeV1(admission, transport, () => now, () => new byte[32]);
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await bridge.ForwardPreparedBodyAsync(generation, new byte[] { 1 }, CancellationToken.None));
 
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
+        now = SkillRuntimeCapabilityBridgeV1.EntryLifetimeTicks;
+        bridge.PurgeExpired();
 
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Empty(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(31)]
-    [InlineData(33)]
-    public async Task RngTokenSource_NullOrWrongLength_ReturnsUnavailableWithoutSend(int tokenLength)
-    {
-        var fixture = NewBridge(tokenSource: new FixedTokenSource { });
-        fixture.TokenSource.SetFallback(tokenLength == 0 ? null : new byte[tokenLength]);
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Empty(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(0, bridge.PendingCount);
+        Assert.Equal(0, generation.OutstandingCapabilityCount);
     }
 
     [Fact]
-    public async Task ForcedTokenCollision_SecondForwardRefused_FirstEntrySurvives()
+    public async Task DuplicateTokenKeepsFirstPreparedBodyEntry()
     {
-        var fixture = NewBridge(tokenSource: new FixedTokenSource());
-        var sharedBytes = RandomNumberGenerator.GetBytes(32);
-        fixture.TokenSource.SetFallback(sharedBytes);
-
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Unavailable,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-
-        Assert.Equal(1, fixture.Bridge.PendingCount);
-        Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
-        Assert.Single(fixture.Transport.Sends);
-
-        var token = SkillRuntimeCapabilityBridgeV1.EncodeBase64Url(sharedBytes);
-        Assert.True(fixture.Bridge.TryConsume(token, out var transfer));
+        var fixture = new Fixture();
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, new byte[] { 1 }, CancellationToken.None));
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, new byte[] { 2 }, CancellationToken.None));
+        Assert.True(fixture.Bridge.TryConsume(fixture.Transport.Token, out var transfer));
         transfer!.ReleaseTransferredCapability();
     }
 
     [Fact]
-    public async Task BodyPreflight_ExactlyAtLimit_Forwards()
+    public async Task InvalidPreparedBodyOrCancellationDoesNotSend()
     {
-        var fixture = NewBridge();
-        var sourceEvent = RequiredOnlyEvent();
-        sourceEvent.Data.Content = new string('a', ContentLengthForTotalBytes(SkillInvocationNormalizedJsonV1.MaxProducerBodyBytes));
+        var fixture = new Fixture();
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
 
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", sourceEvent, CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Forwarded, outcome);
-        Assert.Equal(SkillInvocationNormalizedJsonV1.MaxProducerBodyBytes, Assert.Single(fixture.Transport.Sends).Body.Length);
-    }
-
-    [Fact]
-    public async Task BodyPreflight_OneByteOverLimit_UnavailableWithoutSend()
-    {
-        var fixture = NewBridge();
-        var sourceEvent = RequiredOnlyEvent();
-        sourceEvent.Data.Content = new string('a', ContentLengthForTotalBytes(SkillInvocationNormalizedJsonV1.MaxProducerBodyBytes + 1));
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", sourceEvent, CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Empty(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    [Fact]
-    public async Task StaleCallback_OwningGenerationReplaced_ZeroSendAndNoBorrowing()
-    {
-        var fixture = NewBridge();
-        var staleGeneration = fixture.Generation;
-        var replacement = fixture.Admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
-        Assert.NotNull(replacement);
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(staleGeneration, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Empty(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, replacement!.OutstandingCapabilityCount);
-        Assert.Equal(0, staleGeneration.OutstandingCapabilityCount);
-    }
-
-    [Fact]
-    public async Task InvalidationAfterRegistration_RemovesTokenAndReleasesCapability()
-    {
-        var fixture = NewBridge();
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        var token = Assert.Single(fixture.Transport.Sends).Token;
-
-        fixture.Admission.InvalidateCurrentGeneration();
-
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-        Assert.False(fixture.Bridge.TryConsume(token, out _));
-    }
-
-    [Fact]
-    public async Task SerializerFailure_UnavailableWithoutSendAndCapabilityReleased()
-    {
-        var fixture = NewBridge();
-        var invalidEvent = RequiredOnlyEvent();
-        invalidEvent.Data.Content = "invalid-\ud800";
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", invalidEvent, CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Empty(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await fixture.Bridge.ForwardPreparedBodyAsync(
+                fixture.Generation,
+                new byte[OwnedSessionPreparedBufferV1.MaxAggregateBodyBytes + 1],
+                CancellationToken.None));
+        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable,
+            await fixture.Bridge.ForwardPreparedBodyAsync(fixture.Generation, new byte[] { 1 }, canceled.Token));
+        Assert.Equal(0, fixture.Transport.SendCalls);
     }
 
     [Theory]
-    [InlineData(FakeBridgeTransportBehavior.Refuse)]
-    [InlineData(FakeBridgeTransportBehavior.Throw)]
-    public async Task TransportFailure_RemovesEntryAndReleasesCapability(FakeBridgeTransportBehavior behavior)
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", true)]
+    public void TokenGrammar_IsStrict(string? token, bool expected) =>
+        Assert.Equal(expected, SkillRuntimeCapabilityBridgeV1.IsValidTokenGrammar(token));
+
+    private sealed class Fixture
     {
-        var fixture = NewBridge();
-        fixture.Transport.NextBehavior = behavior;
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Single(fixture.Transport.Sends);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    [Fact]
-    public async Task InvalidationDuringSend_RemovesUnconsumedEntryAndReportsUnavailable()
-    {
-        var fixture = NewBridge();
-        fixture.Transport.SendingCallback = (_, _, _) => fixture.Admission.InvalidateCurrentGeneration();
-
-        var outcome = await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None);
-
-        Assert.Equal(SkillRuntimeBridgeForwardOutcome.Unavailable, outcome);
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    [Fact]
-    public async Task CallerCancellationAfterForward_ConsumeReleasesAndRefuses()
-    {
-        var fixture = NewBridge();
-        using var callerCancellation = new CancellationTokenSource();
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), callerCancellation.Token));
-        var token = Assert.Single(fixture.Transport.Sends).Token;
-
-        callerCancellation.Cancel();
-
-        Assert.False(fixture.Bridge.TryConsume(token, out _));
-        Assert.Equal(0, fixture.Bridge.PendingCount);
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    [Fact]
-    public async Task ReleaseTransferredCapability_ManyThreads_ExactlyOnce()
-    {
-        var fixture = NewBridge();
-        Assert.Equal(
-            SkillRuntimeBridgeForwardOutcome.Forwarded,
-            await fixture.Bridge.ForwardCallbackAsync(fixture.Generation, "native-session", RequiredOnlyEvent(), CancellationToken.None));
-        Assert.True(fixture.Bridge.TryConsume(Assert.Single(fixture.Transport.Sends).Token, out var transfer));
-
-        Parallel.For(0, 64, _ => transfer!.ReleaseTransferredCapability());
-
-        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
-    }
-
-    private static void AssertTokenGrammar(string token)
-    {
-        Assert.Equal(SkillRuntimeCapabilityBridgeV1.TokenStringLength, token.Length);
-        Assert.All(token, c => Assert.True(
-            c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '-',
-            $"Unexpected token character '{c}'."));
-    }
-
-    private static int ContentLengthForTotalBytes(int totalBytes)
-    {
-        var baselineEvent = RequiredOnlyEvent();
-        baselineEvent.Data.Content = "a";
-        Assert.True(SkillInvocationNormalizedJsonV1.TryWrite("native-session", baselineEvent, out var baselineBody));
-        return totalBytes - Assert.IsType<byte[]>(baselineBody).Length + 1;
-    }
-
-    private static SkillInvokedEvent RequiredOnlyEvent() => new()
-    {
-        Id = Guid.Parse("018f0f4e-7b2a-4c11-8a3b-123456789abc"),
-        Timestamp = new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
-        Data = new SkillInvokedData
-        {
-            Name = "skill-name",
-            Path = "skills/SKILL.md",
-            Content = "body"
-        }
-    };
-
-    private static BridgeFixture NewBridge(FixedTokenSource? tokenSource = null) => new(tokenSource);
-
-    private sealed class BridgeFixture
-    {
-        public BridgeFixture(FixedTokenSource? fixedTokenSource)
+        internal Fixture(bool sendResult = true)
         {
             Admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
-            Generation = Admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _)!;
-            Transport = new FakeBridgeTransport();
-            Clock = new ManualClock();
-            TokenSource = fixedTokenSource ?? new FixedTokenSource();
-            Func<byte[]?> tokenSource = fixedTokenSource is null
-                ? static () => RandomNumberGenerator.GetBytes(SkillRuntimeCapabilityBridgeV1.TokenByteLength)
-                : TokenSource.Next;
-            Bridge = new SkillRuntimeCapabilityBridgeV1(Admission, Transport, Clock.Ticks, tokenSource);
+            Transport = new FakeTransport(sendResult);
+            Bridge = new SkillRuntimeCapabilityBridgeV1(Admission, Transport, () => 0, () => new byte[32]);
+            Generation = Admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
         }
 
-        public CopilotRuntimeAdmissionV1 Admission { get; }
-        public CopilotRuntimeGenerationV1 Generation { get; }
-        public FakeBridgeTransport Transport { get; }
-        public ManualClock Clock { get; }
-        public FixedTokenSource TokenSource { get; }
-        public SkillRuntimeCapabilityBridgeV1 Bridge { get; }
+        internal CopilotRuntimeAdmissionV1 Admission { get; }
+        internal FakeTransport Transport { get; }
+        internal SkillRuntimeCapabilityBridgeV1 Bridge { get; }
+        internal CopilotRuntimeGenerationV1 Generation { get; }
+    }
+
+    private sealed class FakeTransport(bool sendResult) : ISkillRuntimeBridgeTransport
+    {
+        internal string? Token { get; private set; }
+        internal int SendCalls { get; private set; }
+        public Task<bool> SendAsync(string capabilityToken, ReadOnlyMemory<byte> bodyUtf8, CancellationToken cancellationToken)
+        {
+            Token = capabilityToken;
+            SendCalls++;
+            return Task.FromResult(sendResult);
+        }
+    }
+
+    private sealed class CapturingTransport : ISkillRuntimeBridgeTransport
+    {
+        internal List<string> Tokens { get; } = [];
+        public Task<bool> SendAsync(string capabilityToken, ReadOnlyMemory<byte> bodyUtf8, CancellationToken cancellationToken)
+        {
+            Tokens.Add(capabilityToken);
+            return Task.FromResult(true);
+        }
+    }
+
+    private sealed class LocalScope : IAnalysisSdkDirectoryScope
+    {
+        public string ChildDirectory => "synthetic";
+        public CancellationToken LeaseLostToken => CancellationToken.None;
+        public bool IsLeaseLost => false;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class BlockingDisposeClient(Task release) : ICopilotSkillRuntimeClient
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<CopilotRuntimeStatusObservationV1?> GetStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<CopilotRuntimeStatusObservationV1?>(null);
+        public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> DiscoverSkillsAsync(
+            IReadOnlyList<string> projectPaths, IReadOnlyList<string> skillDirectories,
+            CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>([]);
+        public Task<GitHub.Copilot.CopilotSession> CreateSessionAsync(
+            GitHub.Copilot.SessionConfig config, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public void RecordSessionStartCopilotVersion(string? copilotVersion) { }
+        public async ValueTask DisposeAsync() => await release;
     }
 }

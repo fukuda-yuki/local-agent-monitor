@@ -101,7 +101,7 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
             .Features.Get<IServerAddressesFeature>()!.Addresses);
         using var client = new HttpClient { BaseAddress = new Uri(address) };
         var admission = app.Services.GetRequiredService<CopilotRuntimeAdmissionV1>();
-        admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
+        admission.PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
         var coordinator = Assert.Single(app.Services.GetServices<IHostedService>()
             .OfType<SkillHostShutdownCoordinatorV1>());
         const string path = "/api/local-monitor/v1/sessions/11111111-1111-4111-8111-111111111111/skill-invocations/22222222-2222-4222-8222-222222222222/current-file-read";
