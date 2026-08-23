@@ -1,8 +1,12 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Analysis;
+using CopilotAgentObservability.LocalMonitor.Ingestion;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillNative;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using Microsoft.AspNetCore.Builder;
@@ -220,6 +224,95 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
         });
 
         Assert.Equal(expected, observed);
+    }
+
+    [Fact]
+    public async Task RawAnalysisRootsExecution_PassesOnlyTheExplicitTestExecutionDriver()
+    {
+        var driver = new CompositionExecutionDriver();
+        var defaultObserved = await CaptureRootsExecutionContextAsync(driver: null);
+        var injectedObserved = await CaptureRootsExecutionContextAsync(driver);
+
+        Assert.Null(defaultObserved.ExecutionDriver);
+        Assert.Same(driver, injectedObserved.ExecutionDriver);
+    }
+
+    private static async Task<CopilotAnalysisRootsExecutionContext> CaptureRootsExecutionContextAsync(
+        IOwnedSessionExecutionDriverV1? driver)
+    {
+        const string traceId = "trace-driver-composition";
+        using var temp = new MonitorTempDirectory();
+        using var root = new TempRootDirectory();
+        var store = new RawTelemetryStore(
+            temp.DatabasePath, temp.RetentionContext, temp.TimeProvider,
+            RawTelemetryStoreConnectionOptions.MonitorWriter);
+        store.CreateMonitorSchema();
+        var record = new RawTelemetryRecord(
+            Id: null,
+            Source: RawTelemetrySources.RawOtlp,
+            TraceId: traceId,
+            ReceivedAt: DateTimeOffset.UnixEpoch.AddMinutes(1),
+            ResourceAttributesJson: null,
+            PayloadJson: "{}");
+        var rawRecordId = store.Insert(record);
+        store.ApplyProjection(
+            rawRecordId,
+            record.Source,
+            record.ReceivedAt,
+            new MonitorRecordProjection(
+                traceId,
+                "synthetic",
+                0,
+                [new MonitorTraceContribution(traceId, "synthetic", null, null, null, null, null, 0, 0, 0, null, null, null)]),
+            DateTimeOffset.UnixEpoch.AddMinutes(2));
+        var observed = new TaskCompletionSource<CopilotAnalysisRootsExecutionContext>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var app = MonitorHost.Build(
+            BuildOptions(temp, [root.Path], sanitizedOnly: false),
+            new MonitorHostTestOptions
+            {
+                TimeProvider = temp.TimeProvider,
+                AnalysisSdkExecutor = new RejectingCompositionExecutor(),
+                OwnedSessionExecutionDriver = driver,
+                AnalysisRootsExecutionContextObserver = context => observed.TrySetResult(context),
+            });
+        await app.StartAsync();
+        var address = Assert.Single(app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses);
+        await using var host = new RunningMonitorHost(
+            app, new HttpClient { BaseAddress = new Uri(address) }, address);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/traces/{traceId}/analysis")
+        {
+            Content = JsonContent.Create(new { focus = "latency" }),
+        };
+        request.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
+        using var response = await host.Client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        return await observed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private sealed class CompositionExecutionDriver : IOwnedSessionExecutionDriverV1
+    {
+        public Task ExecuteAsync(IOwnedCopilotSessionV1 session, string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class RejectingCompositionExecutor : ICopilotAnalysisSdkExecutor
+    {
+        public Task<CopilotAnalysisExecutionResult> ExecuteAsync(
+            string childDirectory,
+            CopilotAnalysisExecutionSettings settings,
+            CopilotAnalysisToolRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromException<CopilotAnalysisExecutionResult>(new InvalidOperationException("unexpected non-roots execution"));
+
+        public Task<CopilotAnalysisExecutionResult> ExecuteAsync(
+            string childDirectory,
+            CopilotAnalysisExecutionSettings settings,
+            CopilotAnalysisToolRequest request,
+            CopilotAnalysisRootsExecutionContext context,
+            CancellationToken cancellationToken) =>
+            Task.FromException<CopilotAnalysisExecutionResult>(new InvalidOperationException("composition stop"));
     }
 
     private static Task<HttpResponseMessage> PostCurrentFileAsync(RunningMonitorHost host)

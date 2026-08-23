@@ -117,12 +117,88 @@ public sealed class CopilotAnalysisSdkExecutorTests
         Assert.Null(fixture.Client.Sessions[0].Prompt);
         Assert.True(fixture.Client.Sessions[0].DisposedBeforeNextCreate);
         Assert.Equal("unchanged prompt", fixture.Client.Sessions[1].Prompt);
+        Assert.Equal(1, fixture.Client.Sessions[1].SendCalls);
         Assert.Equal(0, fixture.Queue.Count);
         Assert.Empty(fixture.Transport.Bodies);
 
         Assert.True(await fixture.Admission.DiscardCandidateAsync(candidate));
         Assert.Equal(1, fixture.Client.DisposeCalls);
         Assert.Equal(1, fixture.Scope.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task ExactSkillCommandDriver_SendsOnlyThePreparedNonblankPrompt()
+    {
+        var session = new CommandSession(new OwnedSkillCommandPromptV1("in-memory skill prompt"));
+        var driver = new ExactSkillCommandExecutionDriverV1("retained");
+
+        await driver.ExecuteAsync(session, "ordinary prompt", TimeSpan.FromSeconds(17), CancellationToken.None);
+
+        Assert.Equal("retained", session.RequestedSkillName);
+        Assert.Equal("in-memory skill prompt", session.Prompt);
+        Assert.Equal(TimeSpan.FromSeconds(17), session.Timeout);
+        Assert.Equal(1, session.SendCalls);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ExactSkillCommandDriver_RejectsMissingOrBlankPreparedPromptWithoutSending(string? prompt)
+    {
+        var session = new CommandSession(prompt is null ? null : new OwnedSkillCommandPromptV1(prompt));
+        var driver = new ExactSkillCommandExecutionDriverV1("retained");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            driver.ExecuteAsync(session, "ordinary prompt", TimeSpan.FromSeconds(17), CancellationToken.None));
+
+        Assert.Equal("The retained Skill command could not be invoked.", error.Message);
+        Assert.Equal(0, session.SendCalls);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RootsEnabledUsesInjectedOwnedSessionExecutionDriver()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture();
+        var driver = new RecordingExecutionDriver(complete: true);
+
+        var result = await new CopilotAnalysisSdkExecutor().ExecuteAsync(
+                fixture.Scope.ChildDirectory,
+                new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+                new CopilotAnalysisToolRequest("unchanged prompt", data),
+                fixture.Context with { ExecutionDriver = driver }, CancellationToken.None);
+
+        Assert.Equal(1, driver.Calls);
+        Assert.Equal("unchanged prompt", driver.Prompt);
+        Assert.Same(fixture.Client.Sessions[1], driver.Session);
+        Assert.Equal(0, fixture.Client.Sessions[1].SendCalls);
+        Assert.True(await fixture.Admission.DiscardCandidateAsync(result.UnpublishedCandidate!));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_InjectedDriverFailureDiscardsCandidateWithoutImportOrPublicationSuffix()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture();
+        var failure = new OperationCanceledException("driver failure");
+        var driver = new RecordingExecutionDriver(complete: false, failure);
+
+        var evidence = new List<OwnedSessionExecutionEvidenceV1>();
+        var observed = await Assert.ThrowsAsync<OperationCanceledException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { ExecutionDriver = driver, ExecutionEvidenceObserver = evidence.Add }, CancellationToken.None));
+
+        Assert.Same(failure, observed);
+        Assert.Equal(1, driver.Calls);
+        Assert.Equal(0, fixture.Client.Sessions[1].SendCalls);
+        Assert.Equal(["execution.dispose", "client.dispose", "scope.dispose"], fixture.Order);
+        Assert.Empty(fixture.Transport.Bodies);
+        Assert.Equal(0, fixture.Queue.Count);
+        Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
+        Assert.Empty(evidence);
     }
 
     [Theory]
@@ -134,6 +210,8 @@ public sealed class CopilotAnalysisSdkExecutorTests
         using var fixture = new OwnedFixture(refuseTransport
             ? OwnedFailure.ImportTransportRefused
             : OwnedFailure.OneInvocation);
+        var evidence = new List<OwnedSessionExecutionEvidenceV1>();
+        var context = fixture.Context with { ExecutionEvidenceObserver = evidence.Add };
         using var workerCancellation = new CancellationTokenSource();
         var worker = Task.Run(async () =>
         {
@@ -155,14 +233,14 @@ public sealed class CopilotAnalysisSdkExecutorTests
             await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
                 fixture.Scope.ChildDirectory,
                 new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-                new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None));
+                new CopilotAnalysisToolRequest("unchanged prompt", data), context, CancellationToken.None));
         }
         else
         {
             result = await new CopilotAnalysisSdkExecutor().ExecuteAsync(
                 fixture.Scope.ChildDirectory,
                 new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-                new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None);
+                new CopilotAnalysisToolRequest("unchanged prompt", data), context, CancellationToken.None);
         }
         workerCancellation.Cancel();
         await worker;
@@ -178,9 +256,27 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Assert.Equal(1, fixture.Client.DisposeCalls);
             Assert.Equal(1, fixture.Scope.DisposeCalls);
             Assert.Null(fixture.Transport.ConsumedCandidate);
+            Assert.Empty(evidence);
         }
         else
         {
+            Assert.Empty(evidence);
+            var observed = Assert.IsType<OwnedSessionExecutionEvidenceV1>(result!.ExecutionEvidence);
+            Assert.Equal("1.0.65", observed.SourceApplicationVersion);
+            Assert.Equal(3, observed.ProtocolVersion);
+            Assert.Equal(1, observed.ClientStartCount);
+            Assert.Equal(1, observed.StatusObservationCount);
+            Assert.Equal(1, observed.ProbeSessionCount);
+            Assert.Equal(1, observed.ExecutionSessionCount);
+            Assert.Equal(1, observed.RetainedRootCount);
+            Assert.Equal(1, observed.RetainedSkillCount);
+            Assert.Equal(1, observed.PreparedInvocationCount);
+            Assert.True(observed.SameClient);
+            Assert.True(observed.ExactToolUnion);
+            Assert.True(observed.RetainedOnlyInventory);
+            Assert.True(observed.ProbeNativeReproof);
+            Assert.True(observed.ExecutionNativeReproof);
+            Assert.True(observed.CallbackNativeReproof);
             var candidate = Assert.IsType<CopilotRuntimeGenerationV1>(result!.UnpublishedCandidate);
             Assert.Same(candidate, fixture.Transport.ConsumedCandidate);
             Assert.Equal("result", result.ResultMarkdown);
@@ -200,17 +296,20 @@ public sealed class CopilotAnalysisSdkExecutorTests
     {
         await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
         using var fixture = new OwnedFixture(failure);
+        var evidence = new List<OwnedSessionExecutionEvidenceV1>();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
             fixture.Scope.ChildDirectory,
             new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-            new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None));
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { ExecutionEvidenceObserver = evidence.Add }, CancellationToken.None));
 
         Assert.Equal(1, fixture.Client.DisposeCalls);
         Assert.Equal(1, fixture.Scope.DisposeCalls);
         Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
         Assert.Equal(0, fixture.Queue.Count);
         Assert.Empty(fixture.Transport.Bodies);
+        Assert.Empty(evidence);
     }
 
     [Theory]
@@ -226,11 +325,13 @@ public sealed class CopilotAnalysisSdkExecutorTests
     {
         await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
         using var fixture = new OwnedFixture(control: new OwnedExecutionControl(phase));
+        var evidence = new List<OwnedSessionExecutionEvidenceV1>();
 
         var execution = new CopilotAnalysisSdkExecutor().ExecuteAsync(
             fixture.Scope.ChildDirectory,
             new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-            new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None);
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { ExecutionEvidenceObserver = evidence.Add }, CancellationToken.None);
 
         await fixture.Control!.Barrier.Entered;
         if (authority == CancellationAuthority.HostStopping) fixture.StopHost();
@@ -248,6 +349,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         Assert.Equal(phase == OwnedExecutionPhase.Probe ? 1 : 2, fixture.Client.Sessions.Count);
         Assert.Equal(phase == OwnedExecutionPhase.Import ? 1 : 0, fixture.Transport.Bodies.Count);
         Assert.DoesNotContain(fixture.Order, entry => entry.StartsWith("v1:", StringComparison.Ordinal));
+        Assert.Empty(evidence);
     }
 
     [Fact]
@@ -548,6 +650,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
     {
         public string SessionId { get; } = sessionId;
         public string? Prompt { get; private set; }
+        public int SendCalls { get; private set; }
         public int DisposeCalls { get; private set; }
         public bool DisposedBeforeNextCreate { get; set; }
         public CancellationToken LastOperationToken { get; private set; }
@@ -573,6 +676,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         }
         public async Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
         {
+            SendCalls++;
             Prompt = prompt;
             LastOperationToken = cancellationToken;
             Assert.True(execution);
@@ -584,6 +688,14 @@ public sealed class CopilotAnalysisSdkExecutorTests
             config.OnEvent!(new AssistantMessageEvent { Data = new AssistantMessageData { MessageId = "message", Content = "result" } });
             config.OnEvent!(CreateTerminalEvent(failure != OwnedFailure.ExecutionUnsuccessfulTerminal));
         }
+        internal void CompleteWithoutDirectSend(string prompt)
+        {
+            Prompt = prompt;
+            config.OnEvent!(new AssistantMessageEvent { Data = new AssistantMessageData { MessageId = "message", Content = "result" } });
+            config.OnEvent!(CreateTerminalEvent(success: true));
+        }
+        public Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken) =>
+            Task.FromResult<OwnedSkillCommandPromptV1?>(null);
         public ValueTask DisposeAsync()
         {
             DisposeCalls++;
@@ -627,6 +739,48 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Timestamp = DateTimeOffset.Parse("2026-01-02T03:04:07Z"),
             Data = new SessionTaskCompleteData { Success = success }
         };
+    }
+
+    private sealed class RecordingExecutionDriver(bool complete, Exception? failure = null) : IOwnedSessionExecutionDriverV1
+    {
+        public int Calls { get; private set; }
+        public string? Prompt { get; private set; }
+        public IOwnedCopilotSessionV1? Session { get; private set; }
+
+        public Task ExecuteAsync(IOwnedCopilotSessionV1 session, string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            Calls++;
+            Prompt = prompt;
+            Session = session;
+            if (failure is not null) return Task.FromException(failure);
+            if (complete) Assert.IsType<FakeOwnedSession>(session).CompleteWithoutDirectSend(prompt);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CommandSession(OwnedSkillCommandPromptV1? commandPrompt) : IOwnedCopilotSessionV1
+    {
+        public string SessionId => "command-session";
+        public string? RequestedSkillName { get; private set; }
+        public string? Prompt { get; private set; }
+        public TimeSpan? Timeout { get; private set; }
+        public int SendCalls { get; private set; }
+        public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CopilotDiscoveredSkillFactV1>?>([]);
+        public Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
+        {
+            RequestedSkillName = skillName;
+            return Task.FromResult(commandPrompt);
+        }
+        public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            SendCalls++;
+            Prompt = prompt;
+            Timeout = timeout;
+            return Task.CompletedTask;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingTransport(bool refuse, List<string> order, OwnedExecutionControl? control = null) : ISkillRuntimeBridgeTransport

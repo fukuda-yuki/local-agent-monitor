@@ -231,7 +231,7 @@ internal static class MonitorHost
         builder.Services.AddSingleton(skillRegistryAuthority);
 
         // The runtime admission exists on every raw-default host, but no generation is admitted
-        // until the live producer chain certifies the bundled 1.0.65 runtime. Until then the
+        // until the owned producer chain certifies a tuple accepted by the artifact registry. Until then the
         // current-file route stays registered and forms its fixed discovery-unavailable 503, which
         // is what Gate 8 requires of an absent or mismatched generation.
         var skillRuntimeAdmission = options.SanitizedOnly
@@ -366,7 +366,9 @@ internal static class MonitorHost
                         static name => Environment.GetEnvironmentVariable(name) is not null,
                         out var client) ? client : null,
                     static name => Environment.GetEnvironmentVariable(name) is not null,
-                    skillHostShutdownGate!.StoppingToken);
+                    skillHostShutdownGate!.StoppingToken,
+                    ExecutionDriver: testOptions?.OwnedSessionExecutionDriver,
+                    ExecutionEvidenceObserver: testOptions?.OwnedSessionExecutionEvidenceObserver);
                 testOptions?.AnalysisRootsExecutionContextObserver?.Invoke(context);
                 return context;
             };
@@ -845,14 +847,21 @@ internal static class MonitorHost
                     // Do not pass the work token to Task.Run: an already-cancelled generation would make
                     // the awaited task throw TaskCanceledException, which the caller-abort filter does not
                     // match, instead of returning the sanitized unavailable result required after transfer.
-                    return Task.Run(() => SkillInvocationV2IngestTransactionV1.Execute(
-                        options.DatabasePath,
-                        facts,
-                        skillRegistryAuthority,
-                        timeProvider,
-                        transfer.TrySealReplaySuccess,
-                        transfer.TrySealCommit,
-                        transfer.WorkToken));
+                    return Task.Run(() =>
+                    {
+                        var result = SkillInvocationV2IngestTransactionV1.Execute(
+                            options.DatabasePath,
+                            facts,
+                            skillRegistryAuthority,
+                            timeProvider,
+                            transfer.TrySealReplaySuccess,
+                            transfer.TrySealCommit,
+                            transfer.WorkToken);
+                        SkillInvocationV2CommittedObservationV1.Notify(
+                            result,
+                            testOptions?.SkillInvocationV2CommittedObserver);
+                        return result;
+                    });
                 }));
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
@@ -2614,6 +2623,10 @@ internal sealed class MonitorHostTestOptions
 
     public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
 
+    public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
+
+    public Action<OwnedSessionExecutionEvidenceV1>? OwnedSessionExecutionEvidenceObserver { get; init; }
+
     public Action<CopilotAnalysisRootsExecutionContext>? AnalysisRootsExecutionContextObserver { get; init; }
 
     public Action<bool>? AnalysisRootsExecutionEnabledObserver { get; init; }
@@ -2661,6 +2674,8 @@ internal sealed class MonitorHostTestOptions
     public ISkillCurrentAuthorizationGateV1? SkillCurrentAuthorizationGate { get; init; }
 
     public Action<SkillDiscoveryRootGenerationV1?>? SkillDiscoveryRootGenerationObserver { get; init; }
+
+    public Action<SkillInvocationV2CommittedIdentityV1>? SkillInvocationV2CommittedObserver { get; init; }
 }
 
 internal sealed record AnalysisStartPayload(

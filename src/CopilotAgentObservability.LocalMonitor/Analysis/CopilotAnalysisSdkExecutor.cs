@@ -112,8 +112,12 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken, context.AnalysisScope.LeaseLostToken, context.HostStoppingToken);
+                var clientStartCount = 0;
+                var statusObservationCount = 0;
                 await ownedClient.StartAsync(linked.Token).ConfigureAwait(false);
+                clientStartCount++;
                 var status = await ownedClient.GetStatusAsync(linked.Token).ConfigureAwait(false);
+                statusObservationCount++;
                 if (!CopilotRuntimeIdentityCertifierV1.TryCertify(status, out var identity))
                     throw new InvalidOperationException("The bundled Copilot runtime could not be certified.");
 
@@ -130,14 +134,15 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                 var roots = rootLease.RootSet.SkillDirectoryKeys;
                 var proof = new RetainedRootOwnedSessionSkillProofProviderV1(
                     rootLease, context.NativeReader, workToken);
-                var inventory = await ProbeAsync(ownedClient, baseline, roots, identity, proof,
+                var probe = await ProbeAsync(ownedClient, baseline, roots, identity, proof,
                     workToken, () => context.Admission.InvalidateCandidate(candidate)).ConfigureAwait(false);
 
-                var result = await ExecuteOwnedSessionAsync(ownedClient, baseline, roots, inventory,
+                var result = await ExecuteOwnedSessionAsync(ownedClient, baseline, roots, probe.Inventory,
                     proof, identity, candidate, request.Prompt, settings.TimeoutSeconds,
-                    context, workToken).ConfigureAwait(false);
+                    context, context.ExecutionDriver ?? DefaultOwnedSessionExecutionDriverV1.Instance,
+                    clientStartCount, statusObservationCount, probe.SessionCount, probe.Client, workToken).ConfigureAwait(false);
                 succeeded = true;
-                return new(result, candidate);
+                return new(result.Markdown, candidate, result.Evidence);
             }
             catch
             {
@@ -171,7 +176,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         }
     }
 
-    private static async Task<OwnedSessionFrozenSkillInventoryV1> ProbeAsync(
+    private static async Task<(OwnedSessionFrozenSkillInventoryV1 Inventory, int SessionCount, IOwnedCopilotClientV1 Client)> ProbeAsync(
         IOwnedCopilotClientV1 client,
         SessionConfig baseline,
         IReadOnlyList<string> roots,
@@ -186,9 +191,11 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             baseline, roots, callbackState.OnEvent);
         IOwnedCopilotSessionV1? session = null;
         OwnedSessionFrozenSkillInventoryV1? inventory = null;
+        var sessionCount = 0;
         try
         {
             session = await client.CreateSessionAsync(config, cancellationToken).ConfigureAwait(false);
+            sessionCount++;
             await session.EnsureSkillsLoadedAsync(cancellationToken).ConfigureAwait(false);
             var facts = await session.ListSkillsAsync(cancellationToken).ConfigureAwait(false);
             inventory = OwnedSessionSdkPolicyV1.TryFreezeProbeInventory(facts, roots, proofProvider);
@@ -199,8 +206,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         }
         if (session is null || !callbackState.TryClose(session.SessionId))
             throw new InvalidOperationException("The probe session identity is unavailable.");
-        return inventory
-            ?? throw new InvalidOperationException("The probe inventory could not be certified.");
+        return (inventory ?? throw new InvalidOperationException("The probe inventory could not be certified."), sessionCount, client);
     }
 
     private sealed class ProbeCallbackStateV1(string sourceVersion, Action invalidateCandidate)
@@ -256,7 +262,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                 or SessionErrorEvent or ModelCallFailureEvent or AbortEvent;
     }
 
-    private static async Task<string> ExecuteOwnedSessionAsync(
+    private static async Task<(string Markdown, OwnedSessionExecutionEvidenceV1 Evidence)> ExecuteOwnedSessionAsync(
         IOwnedCopilotClientV1 client,
         SessionConfig baseline,
         IReadOnlyList<string> roots,
@@ -267,6 +273,11 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         string prompt,
         int timeoutSeconds,
         CopilotAnalysisRootsExecutionContext context,
+        IOwnedSessionExecutionDriverV1 executionDriver,
+        int clientStartCount,
+        int statusObservationCount,
+        int probeSessionCount,
+        IOwnedCopilotClientV1 probeClient,
         CancellationToken cancellationToken)
     {
         var final = new StringBuilder();
@@ -311,17 +322,32 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                 }
                 catch { callbackState.Poison(); }
             });
+        var baselineTools = baseline.AvailableTools?.ToList() ?? [];
+        var executionTools = config.AvailableTools?.ToList() ?? [];
+        var exactToolUnion = baselineTools.Count > 0
+            && baselineTools.All(static tool => tool.StartsWith("custom:", StringComparison.Ordinal))
+            && executionTools.Count == baselineTools.Count + 2
+            && executionTools.Distinct(StringComparer.Ordinal).Count() == executionTools.Count
+            && baselineTools.All(executionTools.Contains)
+            && executionTools.Contains("builtin:skill", StringComparer.Ordinal)
+            && executionTools.Contains("builtin:task_complete", StringComparer.Ordinal);
 
         OwnedSessionPreparedImportV1? prepared;
+        var executionInventoryCount = 0;
+        var executionSessionCount = 0;
+        var executionInventoryCertified = false;
         await using (var session = await client.CreateSessionAsync(config, cancellationToken).ConfigureAwait(false))
         {
+            executionSessionCount++;
             await session.EnsureSkillsLoadedAsync(cancellationToken).ConfigureAwait(false);
             var facts = await session.ListSkillsAsync(cancellationToken).ConfigureAwait(false);
+            executionInventoryCount = facts?.Count ?? 0;
             if (!OwnedSessionSdkPolicyV1.ValidateExecutionInventory(inventory, facts, proofProvider))
                 throw new InvalidOperationException("The execution inventory could not be certified.");
+            executionInventoryCertified = true;
             if (!callbackState.TryBindCreatedSession(session.SessionId))
                 throw new InvalidOperationException("The execution session identity is unavailable.");
-            await session.SendAndWaitAsync(prompt, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
+            await executionDriver.ExecuteAsync(session, prompt, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
                 .ConfigureAwait(false);
         }
         prepared = callbackState.TryFreeze();
@@ -336,10 +362,28 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             if (!await importer.ImportAsync(candidate, prepared, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("The completed session could not be imported.");
         }
+        var evidence = new OwnedSessionExecutionEvidenceV1(
+            identity.SourceApplicationVersion,
+            identity.ProtocolVersion,
+            ClientStartCount: clientStartCount,
+            StatusObservationCount: statusObservationCount,
+            ProbeSessionCount: probeSessionCount,
+            ExecutionSessionCount: executionSessionCount,
+            RetainedRootCount: roots.Count,
+            RetainedSkillCount: inventory.Retained.Count,
+            ProbeInventoryCount: inventory.Probe.Count,
+            ExecutionInventoryCount: executionInventoryCount,
+            PreparedInvocationCount: prepared.Bodies.Count,
+            SameClient: ReferenceEquals(probeClient, client),
+            ExactToolUnion: exactToolUnion,
+            RetainedOnlyInventory: executionInventoryCertified,
+            ProbeNativeReproof: inventory.Retained.Count > 0,
+            ExecutionNativeReproof: executionInventoryCertified,
+            CallbackNativeReproof: prepared.Bodies.Count > 0);
         lock (final)
-            return final.Length == 0
+            return (final.Length == 0
                 ? "Copilot SDK analysis completed without a textual result."
-                : final.ToString();
+                : final.ToString(), evidence);
     }
 
     private static byte[] SerializeEnvelope(CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope? envelope) =>

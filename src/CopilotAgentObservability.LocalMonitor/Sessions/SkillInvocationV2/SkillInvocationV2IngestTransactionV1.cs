@@ -17,7 +17,22 @@ internal enum SkillInvocationV2IngestOutcomeV1
 
 internal sealed record SkillInvocationV2IngestResultV1(
     SkillInvocationV2IngestOutcomeV1 Outcome,
-    bool TerminalSealAttempted);
+    bool TerminalSealAttempted,
+    SkillInvocationV2CommittedIdentityV1? CommittedIdentity = null);
+
+internal sealed record SkillInvocationV2CommittedIdentityV1(Guid SessionId, Guid SnapshotId);
+
+internal static class SkillInvocationV2CommittedObservationV1
+{
+    internal static void Notify(
+        SkillInvocationV2IngestResultV1 result,
+        Action<SkillInvocationV2CommittedIdentityV1>? observer)
+    {
+        if (result.Outcome == SkillInvocationV2IngestOutcomeV1.Committed
+            && result.CommittedIdentity is not null)
+            observer?.Invoke(result.CommittedIdentity);
+    }
+}
 
 internal static class SkillInvocationV2IngestTransactionV1
 {
@@ -195,10 +210,11 @@ internal static class SkillInvocationV2IngestTransactionV1
             }
 
             SessionSkillInvocationWriteOutcome writeOutcome;
+            SessionSkillInvocationInsertedIdentity? insertedIdentity;
             try
             {
                 var write = BuildWrite(facts, writeAt, expiresAt);
-                writeOutcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write);
+                writeOutcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write, out insertedIdentity);
             }
             catch (SqliteException exception) when (IsBusy(exception))
             {
@@ -241,7 +257,9 @@ internal static class SkillInvocationV2IngestTransactionV1
             try
             {
                 transaction.Commit();
-                return new(SkillInvocationV2IngestOutcomeV1.Committed, true);
+                if (insertedIdentity is null) return Unavailable(true);
+                return new(SkillInvocationV2IngestOutcomeV1.Committed, true,
+                    new(insertedIdentity.SessionId, insertedIdentity.SnapshotId));
             }
             catch (SqliteException exception) when (IsBusy(exception))
             {

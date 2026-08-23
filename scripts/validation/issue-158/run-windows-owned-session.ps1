@@ -1,0 +1,83 @@
+[CmdletBinding()]
+param([string]$CandidateSha,[switch]$OperatorAuthorized)
+try {
+ Set-StrictMode -Version Latest
+ $ErrorActionPreference='Stop'
+ function Block([string]$Code){Write-Output "windows_result=BLOCKED check=$Code";exit 1}
+ if(-not$OperatorAuthorized){Block 'operator_authorization'}
+ if([string]::IsNullOrWhiteSpace($CandidateSha)-or$CandidateSha-cnotmatch'^[0-9a-f]{40}$'){Block 'candidate_sha'}
+ $processEnvironment=[Environment]::GetEnvironmentVariables('Process')
+ if(@($processEnvironment.Keys|Where-Object{[string]::Equals([string]$_,'COPILOT_CLI_PATH',[StringComparison]::OrdinalIgnoreCase)}).Count-ne0){Block 'copilot_cli_path'}
+ . (Join-Path $PSScriptRoot 'common.ps1')
+ $repo=Get-Issue158PhysicalPath (Join-Path $PSScriptRoot '..\..\..')
+ $temp=Get-Issue158PhysicalPath ([IO.Path]::GetTempPath())
+ $runId=([Guid]::NewGuid().ToString('N')).ToLowerInvariant()
+ $runtime=Join-Path $temp ('cao-issue158-runtime-'+$runId)
+ $result=Join-Path $temp ('cao-issue158-result-'+$runId)
+ $resultFile='result.json'
+ $runtimeMarker='issue158-'+[Guid]::NewGuid().ToString('N')
+ $runtimeCreated=$false;$resultCreated=$false;$runtimeOwned=$false;$resultOwned=$false
+ function Remove-Owned([string]$Path,[string]$Kind,[bool]$RuntimeMayBeAbsent=$false){
+  $lexical=Get-Issue158LexicalPath $Path;$physical=Get-Issue158PhysicalPath $Path
+  if($lexical-cne$physical-or-not(Test-Issue158Within $physical $temp)){throw 'cleanup'}
+  $runtimeIdentity=Get-Issue158PhysicalPath $runtime $RuntimeMayBeAbsent
+  $resultIdentity=Get-Issue158PhysicalPath $result
+  [void](Get-Issue158Owner $physical $runId $CandidateSha $Kind $runtimeIdentity $resultIdentity)
+  Remove-Item -LiteralPath $physical -Recurse -Force
+  if(Test-Path -LiteralPath $physical){throw 'cleanup'}
+ }
+ function Remove-Partial([string]$Path,[string]$Kind){
+  $lexical=Get-Issue158LexicalPath $Path;$physical=Get-Issue158PhysicalPath $Path
+  if($lexical -cne $physical -or [IO.Path]::GetDirectoryName($physical) -cne $temp -or [IO.Path]::GetFileName($physical) -cne ("cao-issue158-$Kind-$runId")){throw 'cleanup'}
+  $rootItem=Get-Item -LiteralPath $physical -Force
+  if(-not$rootItem.PSIsContainer-or$rootItem.LinkType-or($rootItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'cleanup'}
+  $children=@(Get-ChildItem -LiteralPath $physical -Force)
+  if($children.Count-gt1){throw 'cleanup'}
+  if($children.Count-eq1){$owner=$children[0];if($owner.Name-cne$script:Issue158OwnerName-or$owner.PSIsContainer-or$owner.LinkType-or($owner.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'cleanup'};Remove-Item -LiteralPath $owner.FullName -Force}
+  Remove-Item -LiteralPath $physical -Force
+  if(Test-Path -LiteralPath $physical){throw 'cleanup'}
+ }
+ if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){Block 'path_collision'}
+ [void](New-Item -ItemType Directory -Path $runtime)
+ $runtimeCreated=$true
+ [void](New-Item -ItemType Directory -Path $result)
+ $resultCreated=$true
+ Write-Issue158Owner $runtime $runId $CandidateSha runtime (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result)
+ $runtimeOwned=$true
+ Write-Issue158Owner $result $runId $CandidateSha result (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result)
+ $resultOwned=$true
+ $preflightOutput=& (Join-Path $PSScriptRoot 'preflight.ps1') -CandidateSha $CandidateSha -RuntimeDirectory $runtime -ResultDirectory $result -OperatorAuthorized 2>$null
+ if($LASTEXITCODE-ne0-or($preflightOutput-join'')-cne'preflight_result=PASSED'){throw 'preflight'}
+ $testProject=Join-Path $repo 'tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj'
+ $psi=[Diagnostics.ProcessStartInfo]::new('dotnet');$psi.UseShellExecute=$false;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
+ foreach($argument in @('test',$testProject,'--no-restore','--filter','Issue158Lane=WindowsOwnedSession','--logger','console;verbosity=minimal')){$psi.ArgumentList.Add($argument)}
+ $psi.Environment['CAO_ISSUE158_OPERATOR_AUTHORIZED']='issue-158-windows-owned-session-v1'
+ $psi.Environment['CAO_ISSUE158_CANDIDATE_SHA']=$CandidateSha
+ $psi.Environment['CAO_ISSUE158_RUN_ID']=$runId
+ $psi.Environment['CAO_ISSUE158_RUNTIME_DIRECTORY']=$runtime
+ $psi.Environment['CAO_ISSUE158_RESULT_DIRECTORY']=$result
+ $psi.Environment['CAO_ISSUE158_RESULT_FILE']=$resultFile
+ $psi.Environment['CAO_ISSUE158_RUNTIME_MARKER']=$runtimeMarker
+ [void]$psi.Environment.Remove('COPILOT_CLI_PATH')
+ $process=[Diagnostics.Process]::Start($psi);$stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd();$process.WaitForExit()
+ if($process.ExitCode-ne0-or$stderr.Length-ne0-or$stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
+ Remove-Owned $runtime runtime
+ $scanOutput=& (Join-Path $PSScriptRoot 'scan-leaks.ps1') -CandidateSha $CandidateSha -RuntimeDirectory $runtime -ResultDirectory $result -ResultFileName $resultFile -Lane windows_owned_session -ExpectedCleanupComplete:$false 2>$null
+ if($LASTEXITCODE-ne0-or($scanOutput-join'')-cne'scan_result=PASSED'){throw 'scan'}
+ $preparedBytes=[IO.File]::ReadAllBytes((Join-Path $result $resultFile))
+ $prepared=Get-Issue158ValidatedResult $preparedBytes $CandidateSha windows_owned_session $runtimeMarker $false
+ $retained=$prepared.Json
+ Remove-Owned $result result $true
+ if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){throw 'cleanup'}
+ $retained.checks.cleanup_complete=$true
+ $finalText=$retained|ConvertTo-Json -Compress -Depth 8
+ $finalBytes=[Text.UTF8Encoding]::new($false).GetBytes($finalText)
+ [void](Get-Issue158ValidatedResult $finalBytes $CandidateSha windows_owned_session $runtimeMarker $true)
+ Write-Output $finalText
+ exit 0
+} catch {
+ try{if($null-ne(Get-Variable runtimeCreated -ErrorAction SilentlyContinue)-and$runtimeCreated-and(Test-Path -LiteralPath $runtime)){if($runtimeOwned){Remove-Owned $runtime runtime}else{Remove-Partial $runtime runtime}}}catch{}
+ try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{}
+ Write-Output 'windows_result=BLOCKED check=internal'
+ exit 1
+}

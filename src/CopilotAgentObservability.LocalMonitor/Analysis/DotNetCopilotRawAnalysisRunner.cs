@@ -136,6 +136,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             Exception? primaryFailure = null;
             AnalysisSdkScopeOwnership? scopeOwnership = null;
             CopilotAnalysisExecutionResult? executionResult = null;
+            Action<OwnedSessionExecutionEvidenceV1>? executionEvidenceObserver = null;
             InstructionFindingHandoffV1? instructionFindingHandoff = null;
             try
             {
@@ -151,6 +152,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 else
                 {
                     var rootsContext = rootsExecutionContextFactory(scope);
+                    executionEvidenceObserver = rootsContext.ExecutionEvidenceObserver;
                     scopeOwnership = rootsContext.ScopeOwnership ?? new AnalysisSdkScopeOwnership(scope);
                     executionResult = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), request,
                         rootsContext with { ScopeOwnership = scopeOwnership }, leaseCancellation.Token);
@@ -196,7 +198,14 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                     : analysisStore.CompleteInstructionDiagnosisRun(context.RunId, operationToken, fence, completedExecution.ResultMarkdown, instructionFindingHandoff, completedAt);
                 durablyCompleted = true;
                 if (candidate is not null)
-                    _ = await skillRuntimeAdmission!.PublishCandidateAsync(candidate).ConfigureAwait(false);
+                {
+                    var published = await skillRuntimeAdmission!.PublishCandidateAsync(candidate).ConfigureAwait(false);
+                    if (published && completedExecution.ExecutionEvidence is not null && executionEvidenceObserver is not null)
+                    {
+                        try { executionEvidenceObserver(completedExecution.ExecutionEvidence); }
+                        catch { }
+                    }
+                }
             }
             catch
             {

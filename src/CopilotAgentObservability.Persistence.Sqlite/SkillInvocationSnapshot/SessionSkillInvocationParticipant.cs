@@ -16,6 +16,8 @@ internal enum SessionSkillInvocationWriteOutcome
     EventConflict,
 }
 
+internal sealed record SessionSkillInvocationInsertedIdentity(Guid SessionId, Guid SnapshotId);
+
 internal sealed record SessionSkillInvocationWrite(
     string SourceAdapter,
     string SourceSurface,
@@ -62,8 +64,15 @@ internal static class SessionSkillInvocationParticipant
     internal static SessionSkillInvocationWriteOutcome InsertOrVerify(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        SessionSkillInvocationWrite write)
+        SessionSkillInvocationWrite write) => InsertOrVerify(connection, transaction, write, out _);
+
+    internal static SessionSkillInvocationWriteOutcome InsertOrVerify(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SessionSkillInvocationWrite write,
+        out SessionSkillInvocationInsertedIdentity? insertedIdentity)
     {
+        insertedIdentity = null;
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(write);
@@ -102,6 +111,8 @@ internal static class SessionSkillInvocationParticipant
 
         InsertSnapshot(connection, transaction, write, sessionId, isAvailable ? runId : null, claimId, contentItemId, payloadSha256, documentSha256);
         InsertReceipt(connection, transaction, write, payloadSha256, documentSha256);
+
+        insertedIdentity = new(Guid.Parse(sessionId), write.SnapshotId);
 
         return SessionSkillInvocationWriteOutcome.Inserted;
     }

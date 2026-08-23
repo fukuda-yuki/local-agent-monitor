@@ -70,11 +70,33 @@ internal sealed record CopilotAnalysisRootsExecutionContext(
     Func<string, IOwnedCopilotClientV1?> OwnedClientFactory,
     Func<string, bool> EnvironmentEntryPresent,
     CancellationToken HostStoppingToken,
-    AnalysisSdkScopeOwnership? ScopeOwnership = null);
+    AnalysisSdkScopeOwnership? ScopeOwnership = null,
+    IOwnedSessionExecutionDriverV1? ExecutionDriver = null,
+    Action<OwnedSessionExecutionEvidenceV1>? ExecutionEvidenceObserver = null);
+
+internal sealed record OwnedSessionExecutionEvidenceV1(
+    string SourceApplicationVersion,
+    int ProtocolVersion,
+    int ClientStartCount,
+    int StatusObservationCount,
+    int ProbeSessionCount,
+    int ExecutionSessionCount,
+    int RetainedRootCount,
+    int RetainedSkillCount,
+    int ProbeInventoryCount,
+    int ExecutionInventoryCount,
+    int PreparedInvocationCount,
+    bool SameClient,
+    bool ExactToolUnion,
+    bool RetainedOnlyInventory,
+    bool ProbeNativeReproof,
+    bool ExecutionNativeReproof,
+    bool CallbackNativeReproof);
 
 internal sealed record CopilotAnalysisExecutionResult(
     string ResultMarkdown,
-    CopilotRuntimeGenerationV1? UnpublishedCandidate = null)
+    CopilotRuntimeGenerationV1? UnpublishedCandidate = null,
+    OwnedSessionExecutionEvidenceV1? ExecutionEvidence = null)
 {
     internal bool OwnsAnalysisScope => UnpublishedCandidate is not null;
 }

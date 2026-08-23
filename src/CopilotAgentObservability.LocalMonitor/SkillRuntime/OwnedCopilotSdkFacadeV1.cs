@@ -1,4 +1,5 @@
 using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -17,6 +18,36 @@ internal interface IOwnedCopilotSessionV1 : IAsyncDisposable
     Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken);
     Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken);
+    Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken) =>
+        Task.FromResult<OwnedSkillCommandPromptV1?>(null);
+}
+
+internal sealed record OwnedSkillCommandPromptV1(string Prompt);
+
+internal sealed class ExactSkillCommandExecutionDriverV1(string skillName) : IOwnedSessionExecutionDriverV1
+{
+    public async Task ExecuteAsync(IOwnedCopilotSessionV1 session, string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var invocation = await session.InvokeExactSkillCommandAsync(skillName, cancellationToken).ConfigureAwait(false);
+        if (invocation is null || string.IsNullOrWhiteSpace(invocation.Prompt))
+            throw new InvalidOperationException("The retained Skill command could not be invoked.");
+        await session.SendAndWaitAsync(invocation.Prompt, timeout, cancellationToken).ConfigureAwait(false);
+    }
+}
+
+internal interface IOwnedSessionExecutionDriverV1
+{
+    Task ExecuteAsync(IOwnedCopilotSessionV1 session, string prompt, TimeSpan timeout, CancellationToken cancellationToken);
+}
+
+internal sealed class DefaultOwnedSessionExecutionDriverV1 : IOwnedSessionExecutionDriverV1
+{
+    internal static DefaultOwnedSessionExecutionDriverV1 Instance { get; } = new();
+
+    private DefaultOwnedSessionExecutionDriverV1() { }
+
+    public Task ExecuteAsync(IOwnedCopilotSessionV1 session, string prompt, TimeSpan timeout, CancellationToken cancellationToken) =>
+        session.SendAndWaitAsync(prompt, timeout, cancellationToken);
 }
 
 internal sealed class OwnedCopilotSdkClientV1 : IOwnedCopilotClientV1, ICopilotSkillRuntimeClient
@@ -109,6 +140,29 @@ internal sealed class OwnedCopilotSdkSessionV1(CopilotSession session) : IOwnedC
         _ = await session.SendAndWaitAsync(
             new MessageOptions { Prompt = prompt, AgentMode = AgentMode.Autopilot }, timeout, cancellationToken)
             .ConfigureAwait(false);
+
+    public async Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
+    {
+#pragma warning disable GHCP001
+        var commands = await session.Rpc.Commands.ListAsync(new CommandsListRequest
+        {
+            IncludeSkills = true,
+            IncludeBuiltins = false,
+            IncludeClientCommands = false,
+        }, cancellationToken).ConfigureAwait(false);
+        var matches = commands.Commands
+            .Where(command => string.Equals(command.Name, skillName, StringComparison.Ordinal)
+                && command.Kind == SlashCommandKind.Skill)
+            .ToArray();
+        if (matches.Length != 1) return null;
+        var result = await session.Rpc.Commands.InvokeAsync(skillName, string.Empty, cancellationToken).ConfigureAwait(false);
+        return result is SlashCommandInvocationResultAgentPrompt agentPrompt
+            && agentPrompt.RuntimeSettingsChanged != true
+            && !string.IsNullOrWhiteSpace(agentPrompt.Prompt)
+            ? new OwnedSkillCommandPromptV1(agentPrompt.Prompt)
+            : null;
+#pragma warning restore GHCP001
+    }
 
     public ValueTask DisposeAsync() => session.DisposeAsync();
 }

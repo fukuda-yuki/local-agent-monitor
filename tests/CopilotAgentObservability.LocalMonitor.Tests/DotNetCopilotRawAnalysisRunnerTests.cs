@@ -276,7 +276,8 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.True(ownership.TryTransferToExecutor());
         Assert.True(ownership.TryTransferToCandidate());
         var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(), SkillInvocationV2TestIdentity.V1065, scope, ownership);
-        var executor = new FakeExecutor { Result = new("done", candidate) };
+        var observations = new List<OwnedSessionExecutionEvidenceV1>();
+        var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
         var store = new FakeStore(Run());
         admission.CloseForShutdown();
         var raw = temp.CreateRawStore();
@@ -284,13 +285,68 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build();
         var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw), configuration,
             new FakeOwner(scope), executor, temp.TimeProvider, skillRuntimeAdmission: admission,
-            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with { Admission = admission, ScopeOwnership = ownership });
+            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with { Admission = admission, ScopeOwnership = ownership, ExecutionEvidenceObserver = observations.Add });
 
         await runner.RunAsync(Context(), CancellationToken.None);
 
         Assert.Equal(1, store.CompleteCount);
         Assert.Null(store.FinishedStatus);
         Assert.Equal(1, scope.DisposeCount);
+        Assert.Empty(observations);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_PublishedEvidenceNotifiesOnceAndObserverFailureCannotUndoPublication(bool observerThrows)
+    {
+        using var temp = new MonitorTempDirectory();
+        var scope = new FakeScope("owned-child");
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var ownership = new AnalysisSdkScopeOwnership(scope);
+        Assert.True(ownership.TryTransferToExecutor());
+        Assert.True(ownership.TryTransferToCandidate());
+        var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(), SkillInvocationV2TestIdentity.V1065, scope, ownership);
+        Assert.True(candidate.TryMarkReady());
+        var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
+        var calls = 0;
+        var store = new FakeStore(Run());
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build();
+        var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw), configuration,
+            new FakeOwner(scope), executor, temp.TimeProvider, skillRuntimeAdmission: admission,
+            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with
+            {
+                Admission = admission,
+                ScopeOwnership = ownership,
+                ExecutionEvidenceObserver = _ => { calls++; if (observerThrows) throw new InvalidOperationException("test"); },
+            });
+
+        await runner.RunAsync(Context(), CancellationToken.None);
+
+        Assert.Equal(1, calls);
+        Assert.True(admission.TryGetCurrentAdmittedGeneration(out var current));
+        Assert.Same(candidate, current);
+        Assert.Equal(1, store.CompleteCount);
+        Assert.Null(store.FinishedStatus);
+    }
+
+    [Fact]
+    public async Task RunAsync_EvidenceWithoutCandidateDoesNotNotify()
+    {
+        using var temp = new MonitorTempDirectory();
+        var scope = new FakeScope("owned-child");
+        var executor = new FakeExecutor { Result = new("done", ExecutionEvidence: Evidence()) };
+        var calls = 0;
+        var store = new FakeStore(Run());
+        var runner = CreateRunner(temp, store, new FakeOwner(scope), executor,
+            opened => CreateRootsContext(opened) with { ExecutionEvidenceObserver = _ => calls++ });
+
+        await runner.RunAsync(Context(), CancellationToken.None);
+
+        Assert.Equal(0, calls);
+        Assert.Equal(1, store.CompleteCount);
     }
 
     [Fact]
@@ -360,6 +416,10 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         var admission = new CopilotRuntimeAdmissionV1(shutdownGate);
         return new(scope, null!, null!, admission, null, new Sessions.SessionEventQueue(), TimeSpan.FromSeconds(1), _ => null, _ => false, CancellationToken.None);
     }
+
+    private static OwnedSessionExecutionEvidenceV1 Evidence() => new(
+        "1.0.75", 3, 1, 1, 1, 1, 1, 1, 1, 1, 2,
+        true, true, true, true, true, true);
 
     private static MonitorAnalysisContext Context() => new(7, "trace", null, "span", MonitorAnalysisFocus.Errors, OperationToken: new MonitorAnalysisOperationToken([1]));
     private static MonitorAnalysisRun Run(string? RequestedAtText = null, string TraceId = "trace", MonitorAnalysisFocus Focus = MonitorAnalysisFocus.Errors) => new(7, TraceId, null, "span", Focus, MonitorAnalysisStatus.Queued, RequestedAtText ?? RequestedAt.ToString("O"), null, null);

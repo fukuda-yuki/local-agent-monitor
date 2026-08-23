@@ -26,7 +26,11 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
 
         var result = Execute(database, facts, authority, clock);
 
-        Assert.Equal(new SkillInvocationV2IngestResultV1(SkillInvocationV2IngestOutcomeV1.Committed, true), result);
+        Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, result.Outcome);
+        Assert.True(result.TerminalSealAttempted);
+        var committedIdentity = Assert.IsType<SkillInvocationV2CommittedIdentityV1>(result.CommittedIdentity!);
+        Assert.Equal(Guid.Parse(Scalar(database, "SELECT session_id FROM skill_invocation_snapshots;")!.ToString()!), committedIdentity.SessionId);
+        Assert.Equal(Guid.Parse(Scalar(database, "SELECT snapshot_id FROM skill_invocation_snapshots;")!.ToString()!), committedIdentity.SnapshotId);
         Assert.Equal(1, clock.CallCount);
         Assert.Equal(facts.RequestFingerprintSha256, Scalar(database, "SELECT request_fingerprint_sha256 FROM skill_invocation_snapshot_receipts;"));
         AssertRows(database, 1, "skill_invocation_snapshot_receipts", "skill_invocation_snapshots", "session_events",
@@ -60,6 +64,26 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
         Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", Scalar(database, "SELECT normalization_version FROM session_events;"));
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", facts.ProducerTuple.PayloadSchema);
         Assert.Equal("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", Scalar(database, "SELECT schema_fingerprint FROM session_events;"));
+    }
+
+    [Fact]
+    public void Execute_TwoFreshInvocationsExposeOneResolvedSessionAndDistinctSnapshots()
+    {
+        using var database = new TestDatabase();
+        var authority = new RegistryAuthority();
+        var first = Execute(database, Derive(AvailablePayload), authority, new CountingTimeProvider(WriteAt));
+        var secondRequest = ValidRequest(AvailablePayload);
+        var secondJson = Encoding.UTF8.GetString(secondRequest)
+            .Replace("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", StringComparison.Ordinal)
+            .Replace("run-1", "run-2", StringComparison.Ordinal);
+        var secondFacts = SkillInvocationV2IngestRequestFactsV1.Derive(
+            SkillInvocationV2Parser.Parse(Encoding.UTF8.GetBytes(secondJson), new RuntimeCapability()));
+        var second = Execute(database, secondFacts, authority, new CountingTimeProvider(WriteAt.AddSeconds(1)));
+
+        var firstIdentity = Assert.IsType<SkillInvocationV2CommittedIdentityV1>(first.CommittedIdentity!);
+        var secondIdentity = Assert.IsType<SkillInvocationV2CommittedIdentityV1>(second.CommittedIdentity!);
+        Assert.Equal(firstIdentity.SessionId, secondIdentity.SessionId);
+        Assert.NotEqual(firstIdentity.SnapshotId, secondIdentity.SnapshotId);
     }
 
     [Fact]
