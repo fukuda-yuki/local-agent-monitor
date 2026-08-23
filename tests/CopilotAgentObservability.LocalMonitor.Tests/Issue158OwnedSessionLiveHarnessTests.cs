@@ -19,6 +19,10 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class Issue158OwnedSessionLiveHarnessTests
 {
+    private const string ExpectedSyntheticSkillName = "issue158-synthetic";
+    private const string ExpectedSyntheticCompletionToken = "ISSUE158_RETAINED_ROOT_OK";
+    private const string ExpectedSyntheticSkillDocument = "---\nname: issue158-synthetic\ndescription: Return the exact token ISSUE158_RETAINED_ROOT_OK when invoked.\nuser-invocable: true\n---\n\nReturn exactly ISSUE158_RETAINED_ROOT_OK, then call task_complete as the final action with successful synthetic completion.\n";
+
     [WindowsOwnedSessionLiveFact]
     [Trait("Issue158Lane", "WindowsOwnedSession")]
     public async Task WindowsOwnedSession_TraversesTheProductionHost()
@@ -29,6 +33,42 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [Fact]
     public void DefaultDiscoveryIsSkipped() =>
         Assert.NotNull(new WindowsOwnedSessionLiveFactAttribute().Skip);
+
+    [Fact]
+    public void SyntheticSkillFixtureCarriesTheProvenInvocationAndTerminalContract()
+    {
+        Assert.Equal(ExpectedSyntheticSkillName, Issue158WindowsOwnedSessionLane.SyntheticSkillName);
+        Assert.Equal(ExpectedSyntheticCompletionToken, Issue158WindowsOwnedSessionLane.SyntheticCompletionToken);
+        Assert.Equal(ExpectedSyntheticSkillDocument, Issue158WindowsOwnedSessionLane.SyntheticSkillDocument);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void ExactSyntheticSkillFixtureContractRejectsEveryReviewedMutation(int mutation)
+    {
+        var name = ExpectedSyntheticSkillName;
+        var token = ExpectedSyntheticCompletionToken;
+        var document = ExpectedSyntheticSkillDocument;
+        switch (mutation)
+        {
+            case 0: name = "issue158-drift"; break;
+            case 1: token = "ISSUE158_RETAINED_ROOT_DRIFT"; break;
+            case 2: document = document.Replace("user-invocable: true\n---\n\n", "---\n\nuser-invocable: true\n", StringComparison.Ordinal); break;
+            case 3: document = document.Replace("user-invocable: true\n", "user-invocable: true\nextra: synthetic\n", StringComparison.Ordinal); break;
+            case 4: document = document.Replace("as the final action with successful synthetic completion.", "before successful synthetic completion.", StringComparison.Ordinal); break;
+            default: throw new InvalidOperationException();
+        }
+        Assert.False(MatchesSyntheticSkillFixtureContract(name, token, document));
+    }
+
+    private static bool MatchesSyntheticSkillFixtureContract(string name, string token, string document) =>
+        name == ExpectedSyntheticSkillName
+        && token == ExpectedSyntheticCompletionToken
+        && document == ExpectedSyntheticSkillDocument;
 
     [Fact]
     public async Task BodyGateRejectsBeforeFactoryConstruction()
@@ -457,6 +497,13 @@ internal sealed record Issue158WindowsLaneGate(
 
 internal static class Issue158WindowsOwnedSessionLane
 {
+    internal const string SyntheticSkillName = "issue158-synthetic";
+    internal const string SyntheticCompletionToken = "ISSUE158_RETAINED_ROOT_OK";
+    internal const string SyntheticSkillDocument = "---\nname: " + SyntheticSkillName
+        + "\ndescription: Return the exact token " + SyntheticCompletionToken
+        + " when invoked.\nuser-invocable: true\n---\n\nReturn exactly " + SyntheticCompletionToken
+        + ", then call task_complete as the final action with successful synthetic completion.\n";
+
     internal static Task RunAfterGateAsync(Func<Issue158WindowsLaneGate> readCurrentGate, Func<Issue158WindowsLaneGate, Task> factory)
     {
         var gate = readCurrentGate();
@@ -471,16 +518,14 @@ internal static class Issue158WindowsOwnedSessionLane
 
     private static async Task ExecuteAsync(Issue158WindowsLaneGate gate)
     {
-        const string skillName = "issue158-synthetic";
         const string traceId = "issue158-synthetic-trace";
-        const string skillDocument = "---\nname: issue158-synthetic\ndescription: synthetic validation skill\n---\nReturn the synthetic validation completion.\n";
         var databasePath = Path.Combine(gate.RuntimeDirectory, "monitor.db");
         var analysisDirectory = Path.Combine(gate.RuntimeDirectory, "analysis");
         var skillRoot = Path.Combine(gate.RuntimeDirectory, "skills");
-        var skillDirectory = Path.Combine(skillRoot, skillName);
+        var skillDirectory = Path.Combine(skillRoot, SyntheticSkillName);
         Directory.CreateDirectory(analysisDirectory);
         Directory.CreateDirectory(skillDirectory);
-        await File.WriteAllTextAsync(Path.Combine(skillDirectory, "SKILL.md"), skillDocument);
+        await File.WriteAllTextAsync(Path.Combine(skillDirectory, "SKILL.md"), SyntheticSkillDocument);
 
         var timeProvider = TimeProvider.System;
         var retention = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, timeProvider);
@@ -506,7 +551,7 @@ internal static class Issue158WindowsOwnedSessionLane
                 ["CopilotAnalysis:Enabled"] = "true",
                 ["CopilotAnalysis:BaseDirectory"] = analysisDirectory,
             },
-            OwnedSessionExecutionDriver = new ExactSkillCommandExecutionDriverV1(skillName),
+            OwnedSessionExecutionDriver = new ExactSkillCommandExecutionDriverV1(SyntheticSkillName),
             SkillInvocationV2CommittedObserver = identity => { lock (identityLock) identities.Add(identity); },
             OwnedSessionExecutionEvidenceObserver = item => { lock (identityLock) evidence.Add(item); },
         });
@@ -560,8 +605,8 @@ internal static class Issue158WindowsOwnedSessionLane
             if (!metadata.IsSuccessStatusCode || !historical.IsSuccessStatusCode || !current.IsSuccessStatusCode)
                 throw new InvalidOperationException("route_matrix");
             await Issue158RouteDocuments.ValidateMetadataAsync(metadata.Content, identity, certified.SourceApplicationVersion, timeout.Token);
-            await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, skillDocument, timeout.Token);
-            await Issue158RouteDocuments.ValidateCurrentAsync(current.Content, identity.SnapshotId, skillDocument, timeout.Token);
+            await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token);
+            await Issue158RouteDocuments.ValidateCurrentAsync(current.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token);
             while (Count(databasePath, "skill_invocation_snapshots") != 2
                 || Count(databasePath, "monitor_skill_invocations") != 2)
                 await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
