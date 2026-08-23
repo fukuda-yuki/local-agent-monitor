@@ -62,7 +62,7 @@ try {
  if($LASTEXITCODE-ne0-or($preflightOutput-join'')-cne'preflight_result=PASSED'){throw 'preflight'}
  $testProject=Join-Path $repo 'tests\CopilotAgentObservability.LocalMonitor.Tests\CopilotAgentObservability.LocalMonitor.Tests.csproj'
  $psi=[Diagnostics.ProcessStartInfo]::new('dotnet');$psi.UseShellExecute=$false;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
- foreach($argument in @('test',$testProject,'--no-restore','--filter','Issue158Lane=WindowsOwnedSession','--logger','console;verbosity=minimal')){$psi.ArgumentList.Add($argument)}
+ foreach($argument in @('test',$testProject,'-p:CopilotCliVersion=1.0.75','--filter','Issue158Lane=WindowsOwnedSession','--logger','console;verbosity=minimal')){$psi.ArgumentList.Add($argument)}
  $psi.Environment['CAO_ISSUE158_OPERATOR_AUTHORIZED']='issue-158-windows-owned-session-v1'
  $psi.Environment['CAO_ISSUE158_CANDIDATE_SHA']=$CandidateSha
  $psi.Environment['CAO_ISSUE158_RUN_ID']=$runId
