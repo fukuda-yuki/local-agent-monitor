@@ -344,5 +344,8 @@ public sealed class SkillInvocationV2ParserTests
         return corrupt;
     }
 
-    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

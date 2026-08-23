@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -95,5 +96,8 @@ public sealed class SkillInvocationV2IsolationIntegrationTests
         },
     };
 
-    private sealed class OpaqueRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class OpaqueRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

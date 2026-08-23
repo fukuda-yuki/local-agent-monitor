@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using GitHub.Copilot;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
@@ -11,11 +12,6 @@ internal static class SkillInvocationNormalizedJsonV1
 {
     private const string SourceAdapter = "copilot-sdk-stream";
     private const string SourceSurface = "copilot-sdk";
-    private const string SourceApplicationVersion = "1.0.65";
-    private const string AdapterVersion = "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1";
-    private const string NormalizationVersion = "github-copilot-sdk.skill-invoked.normalize.v1";
-    private const string PayloadSchema = "github-copilot-sdk.skill-invoked.v1";
-    private const string SchemaFingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string EventType = "skill.invoked";
 
     public const int MaxProducerBodyBytes = 8_388_608;
@@ -32,8 +28,10 @@ internal static class SkillInvocationNormalizedJsonV1
     public static bool TryWrite(
         string? nativeSessionId,
         SkillInvokedEvent? sourceEvent,
+        ISkillInvocationV2RuntimeCapability runtimeCapability,
         [NotNullWhen(true)] out byte[]? bodyUtf8)
     {
+        ArgumentNullException.ThrowIfNull(runtimeCapability);
         bodyUtf8 = null;
         if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, out var envelope))
         {
@@ -43,7 +41,7 @@ internal static class SkillInvocationNormalizedJsonV1
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
         {
-            WriteEnvelope(writer, envelope);
+            WriteEnvelope(writer, envelope, runtimeCapability.CertifiedIdentity);
         }
 
         bodyUtf8 = buffer.WrittenSpan.ToArray();
@@ -53,9 +51,11 @@ internal static class SkillInvocationNormalizedJsonV1
     public static bool TryWriteCancellable(
         string? nativeSessionId,
         SkillInvokedEvent? sourceEvent,
+        ISkillInvocationV2RuntimeCapability runtimeCapability,
         CancellationToken cancellationToken,
         [NotNullWhen(true)] out byte[]? bodyUtf8)
     {
+        ArgumentNullException.ThrowIfNull(runtimeCapability);
         bodyUtf8 = null;
         if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, out var envelope))
         {
@@ -70,7 +70,7 @@ internal static class SkillInvocationNormalizedJsonV1
         var buffer = new BoundedUtf8JsonBuffer(MaxProducerBodyBytes, cancellationToken);
         try
         {
-            WriteEnvelopeBounded(buffer, envelope, cancellationToken);
+            WriteEnvelopeBounded(buffer, envelope, runtimeCapability.CertifiedIdentity, cancellationToken);
         }
         catch (BoundedBufferOverflowException)
         {
@@ -93,17 +93,18 @@ internal static class SkillInvocationNormalizedJsonV1
     private static void WriteEnvelopeBounded(
         BoundedUtf8JsonBuffer buffer,
         SkillInvocationSdkV1NormalizedEnvelope envelope,
+        CertifiedSkillProducerIdentityV1 identity,
         CancellationToken cancellationToken)
     {
         buffer.Append("{\"schema_version\":2"u8);
         AppendStringProperty(buffer, "source_adapter", SourceAdapter, cancellationToken);
         AppendStringProperty(buffer, "source_surface", SourceSurface, cancellationToken);
         AppendStringProperty(buffer, "native_session_id", envelope.NativeSessionId, cancellationToken);
-        AppendStringProperty(buffer, "source_application_version", SourceApplicationVersion, cancellationToken);
-        AppendStringProperty(buffer, "adapter_version", AdapterVersion, cancellationToken);
-        AppendStringProperty(buffer, "normalization_version", NormalizationVersion, cancellationToken);
-        AppendStringProperty(buffer, "payload_schema", PayloadSchema, cancellationToken);
-        AppendStringProperty(buffer, "schema_fingerprint", SchemaFingerprint, cancellationToken);
+        AppendStringProperty(buffer, "source_application_version", identity.SourceApplicationVersion, cancellationToken);
+        AppendStringProperty(buffer, "adapter_version", identity.AdapterVersion, cancellationToken);
+        AppendStringProperty(buffer, "normalization_version", identity.NormalizationVersion, cancellationToken);
+        AppendStringProperty(buffer, "payload_schema", identity.PayloadSchema, cancellationToken);
+        AppendStringProperty(buffer, "schema_fingerprint", identity.SchemaFingerprint, cancellationToken);
         buffer.Append(",\"events\":[{"u8);
         AppendStringProperty(buffer, "source_event_id", envelope.SourceEventId, cancellationToken, first: true);
         AppendNullableStringProperty(buffer, "source_parent_event_id", envelope.SourceParentEventId, cancellationToken);
@@ -213,18 +214,18 @@ internal static class SkillInvocationNormalizedJsonV1
         return end;
     }
 
-    private static void WriteEnvelope(Utf8JsonWriter writer, SkillInvocationSdkV1NormalizedEnvelope envelope)
+    private static void WriteEnvelope(Utf8JsonWriter writer, SkillInvocationSdkV1NormalizedEnvelope envelope, CertifiedSkillProducerIdentityV1 identity)
     {
         writer.WriteStartObject();
         writer.WriteNumber("schema_version", 2);
         writer.WriteString("source_adapter", SourceAdapter);
         writer.WriteString("source_surface", SourceSurface);
         writer.WriteString("native_session_id", envelope.NativeSessionId);
-        writer.WriteString("source_application_version", SourceApplicationVersion);
-        writer.WriteString("adapter_version", AdapterVersion);
-        writer.WriteString("normalization_version", NormalizationVersion);
-        writer.WriteString("payload_schema", PayloadSchema);
-        writer.WriteString("schema_fingerprint", SchemaFingerprint);
+        writer.WriteString("source_application_version", identity.SourceApplicationVersion);
+        writer.WriteString("adapter_version", identity.AdapterVersion);
+        writer.WriteString("normalization_version", identity.NormalizationVersion);
+        writer.WriteString("payload_schema", identity.PayloadSchema);
+        writer.WriteString("schema_fingerprint", identity.SchemaFingerprint);
         writer.WriteStartArray("events");
         writer.WriteStartObject();
         writer.WriteString("source_event_id", envelope.SourceEventId);
@@ -240,6 +241,7 @@ internal static class SkillInvocationNormalizedJsonV1
         writer.WriteEndArray();
         writer.WriteEndObject();
     }
+
 
     private static void WritePayload(Utf8JsonWriter writer, SkillInvocationSdkV1NormalizedPayload payload)
     {

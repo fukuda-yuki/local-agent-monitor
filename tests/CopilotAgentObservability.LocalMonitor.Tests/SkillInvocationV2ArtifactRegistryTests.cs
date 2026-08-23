@@ -15,19 +15,22 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     private const string RegistryFingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
 
     [Fact]
-    public void Load_ExposesOnlyTheExactEmbeddedR0001AcceptedTuple()
+    public void Load_ExposesOnlyTheExactEmbeddedR0002AcceptedTuples()
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
 
-        Assert.Equal(1, registry.CurrentRevision);
+        Assert.Equal(2, registry.CurrentRevision);
         Assert.Equal(SchemaFingerprint, registry.SchemaFingerprint);
-        var entry = Assert.Single(registry.Entries);
+        Assert.Equal(2, registry.History.Count);
+        var entry = registry.CurrentEntries[0];
         Assert.Equal("1.0.65", entry.Tuple.SourceApplicationVersion);
         Assert.Equal("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", entry.Tuple.AdapterVersion);
         Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", entry.Tuple.NormalizationVersion);
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", entry.Tuple.PayloadSchema);
         Assert.Equal(SchemaFingerprint, entry.Tuple.SchemaFingerprint);
         Assert.Equal(SkillInvocationV2CompatibilityDisposition.Accepted, entry.Disposition);
+        Assert.Equal("1.0.75", registry.CurrentEntries[1].Tuple.SourceApplicationVersion);
+        Assert.All(registry.CurrentEntries, current => Assert.Equal(SkillInvocationV2CompatibilityDisposition.Accepted, current.Disposition));
         Assert.True(registry.IsAccepted(entry.Tuple));
         Assert.False(registry.IsAccepted(entry.Tuple with { SourceApplicationVersion = "1.0.66" }));
         Assert.Same(registry, SkillInvocationV2ArtifactRegistry.Load());
@@ -125,8 +128,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
             SampleIdentity());
         var capability = new ThrowingRuntimeCapability();
         var sourceEnvelopes = new[] { envelope };
-        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability, SampleNativeSessionId);
-        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SampleNativeSessionId);
+        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability, SkillInvocationV2TestIdentity.V1065, SampleNativeSessionId);
+        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SkillInvocationV2TestIdentity.V1065, SampleNativeSessionId);
         sourceEnvelopes[0] = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
             SkillInvocationPayloadState.Missing,
@@ -141,6 +144,19 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var serialized = JsonSerializer.Serialize(batch);
 
         Assert.DoesNotContain("RuntimeCapability", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("CertifiedIdentity", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProtocolVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("RegistryRevision", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("SourceApplicationVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("AdapterVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("NormalizationVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("PayloadSchema", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("SchemaFingerprint", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("1.0.65", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.normalize.v1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.v1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", batch.ToString(), StringComparison.Ordinal);
     }
@@ -162,7 +178,7 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
             SkillInvocationPayloadReason.None,
             AvailableFacts(),
             identity);
-        var batch = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), "native-SENTINEL-VALUE");
+        var batch = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SkillInvocationV2TestIdentity.V1065, "native-SENTINEL-VALUE");
 
         Assert.DoesNotContain("SENTINEL", batch.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("SENTINEL", JsonSerializer.Serialize(batch), StringComparison.Ordinal);
@@ -286,6 +302,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
 
     private sealed class ThrowingRuntimeCapability : ISkillInvocationV2RuntimeCapability
     {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+
         public override string ToString() => "runtime-capability-must-not-leak";
 
         public override int GetHashCode() => throw new InvalidOperationException("Capability hash must not be observed.");

@@ -33,12 +33,13 @@ internal sealed record SkillInvocationV2IngestRequestFactsV1(
         var contentDocumentSha256 = SkillInvocationSnapshotContentDocumentV1.ContentDocumentSha256(contentDocument);
         var stateToken = SkillInvocationPayloadTokensV1.StateToken(envelope.PayloadState);
         var reasonToken = SkillInvocationPayloadTokensV1.ReasonToken(envelope.PayloadReason);
+        var certifiedIdentity = batch.CertifiedIdentity;
         var producerTuple = new SkillRegistryProducerTuple(
-            SkillInvocationV2Parser.SourceApplicationVersion,
-            SkillInvocationV2Parser.AdapterVersion,
-            SkillInvocationV2Parser.NormalizationVersion,
-            SkillInvocationV2Parser.PayloadSchema,
-            SkillInvocationV2Parser.SchemaFingerprint);
+            certifiedIdentity.SourceApplicationVersion,
+            certifiedIdentity.AdapterVersion,
+            certifiedIdentity.NormalizationVersion,
+            certifiedIdentity.PayloadSchema,
+            certifiedIdentity.SchemaFingerprint);
         var identity = envelope.Identity;
         var claimFacts = envelope.ClaimFacts;
         var payloadBytes = checked((ulong)payloadTokenUtf8.Length);
@@ -53,11 +54,11 @@ internal sealed record SkillInvocationV2IngestRequestFactsV1(
             identity.TraceId,
             identity.SpanId,
             identity.OccurredAt,
-            SkillInvocationV2Parser.SourceApplicationVersion,
-            SkillInvocationV2Parser.AdapterVersion,
-            SkillInvocationV2Parser.NormalizationVersion,
-            SkillInvocationV2Parser.PayloadSchema,
-            SkillInvocationV2Parser.SchemaFingerprint,
+            certifiedIdentity.SourceApplicationVersion,
+            certifiedIdentity.AdapterVersion,
+            certifiedIdentity.NormalizationVersion,
+            certifiedIdentity.PayloadSchema,
+            certifiedIdentity.SchemaFingerprint,
             payloadSha256,
             payloadBytes,
             stateToken,

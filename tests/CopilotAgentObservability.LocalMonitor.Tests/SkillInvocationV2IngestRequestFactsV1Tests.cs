@@ -95,10 +95,11 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
     {
         var parsed = SkillInvocationV2Parser.Parse(ValidRequest(AvailablePayload), new TestRuntimeCapability());
         var envelope = Assert.Single(parsed.AcceptedEnvelopes);
-        var emptyBatch = new ParsedSkillInvocationV2Batch([], new TestRuntimeCapability(), "native-session");
+        var emptyBatch = new ParsedSkillInvocationV2Batch([], new TestRuntimeCapability(), SkillInvocationV2TestIdentity.V1065, "native-session");
         var twoEnvelopeBatch = new ParsedSkillInvocationV2Batch(
             [envelope, envelope],
             new TestRuntimeCapability(),
+            SkillInvocationV2TestIdentity.V1065,
             "native-session");
 
         Assert.Throws<ArgumentException>(() => SkillInvocationV2IngestRequestFactsV1.Derive(emptyBatch));
@@ -243,5 +244,8 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
     private static string LowercaseSha256(ReadOnlySpan<byte> value) =>
         Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();
 
-    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

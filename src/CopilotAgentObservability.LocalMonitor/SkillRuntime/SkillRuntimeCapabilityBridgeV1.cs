@@ -125,7 +125,7 @@ internal sealed class SkillRuntimeCapabilityBridgeV1
         string? token = null;
         try
         {
-            if (!SkillInvocationNormalizedJsonV1.TryWriteCancellable(nativeSessionId, sourceEvent, workToken, out var body))
+            if (!SkillInvocationNormalizedJsonV1.TryWriteCancellable(nativeSessionId, sourceEvent, capability, workToken, out var body))
             {
                 return SkillRuntimeBridgeForwardOutcome.Unavailable;
             }

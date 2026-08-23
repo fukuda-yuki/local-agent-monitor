@@ -51,18 +51,26 @@ internal sealed class CopilotSdkSkillDiscoveryGateway
 {
     private readonly Func<ICopilotSkillRuntimeClient> clientFactory;
     private readonly CopilotRuntimeAdmissionV1 admission;
+    private readonly Func<string, bool> environmentEntryPresent;
 
     public CopilotSdkSkillDiscoveryGateway(
         Func<ICopilotSkillRuntimeClient> clientFactory,
-        CopilotRuntimeAdmissionV1 admission)
+        CopilotRuntimeAdmissionV1 admission,
+        Func<string, bool>? environmentEntryPresent = null)
     {
         this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.admission = admission ?? throw new ArgumentNullException(nameof(admission));
+        this.environmentEntryPresent = environmentEntryPresent ?? IsProcessEnvironmentEntryPresent;
     }
 
     public async Task<CopilotRuntimeAdmissionOutcome> AdmitRuntimeGenerationAsync(CancellationToken cancellationToken)
     {
         if (admission.IsShutdownClosed)
+        {
+            return CopilotRuntimeAdmissionOutcome.NotAdmitted;
+        }
+
+        if (environmentEntryPresent("COPILOT_CLI_PATH"))
         {
             return CopilotRuntimeAdmissionOutcome.NotAdmitted;
         }
@@ -94,7 +102,7 @@ internal sealed class CopilotSdkSkillDiscoveryGateway
             status = null;
         }
 
-        if (!CertifiesAdmission(status))
+        if (!TryCertifyAdmission(status, out var certifiedIdentity))
         {
             var removed = admission.InvalidateCurrentGeneration();
             if (removed is not null)
@@ -106,7 +114,7 @@ internal sealed class CopilotSdkSkillDiscoveryGateway
             return CopilotRuntimeAdmissionOutcome.NotAdmitted;
         }
 
-        var published = admission.PublishAdmittedGeneration(client, out var replaced);
+        var published = admission.PublishAdmittedGeneration(client, certifiedIdentity, out var replaced);
         if (published is null)
         {
             await DisposeClientAsync(client).ConfigureAwait(false);
@@ -172,11 +180,46 @@ internal sealed class CopilotSdkSkillDiscoveryGateway
     }
 
     internal static bool CertifiesAdmission(CopilotRuntimeStatusObservationV1? status)
-        => status is not null
-            && string.Equals(status.Version, CopilotRuntimeGenerationV1.AdmittedCopilotVersion, StringComparison.Ordinal)
-            && status.ProtocolVersion == CopilotRuntimeGenerationV1.AdmittedProtocolVersion
-            && (status.SessionStartCopilotVersion is null
-                || string.Equals(status.SessionStartCopilotVersion, CopilotRuntimeGenerationV1.AdmittedCopilotVersion, StringComparison.Ordinal));
+        => TryCertifyAdmission(status, out _);
+
+    internal static bool TryCertifyAdmission(
+        CopilotRuntimeStatusObservationV1? status,
+        [NotNullWhen(true)] out CertifiedSkillProducerIdentityV1? identity)
+    {
+        identity = null;
+        if (status?.Version is null
+            || status.ProtocolVersion != CopilotRuntimeGenerationV1.AdmittedProtocolVersion
+            || status.SessionStartCopilotVersion is not null
+                && !string.Equals(status.SessionStartCopilotVersion, status.Version, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        SkillInvocationV2ArtifactRegistry registry;
+        try { registry = SkillInvocationV2ArtifactRegistry.Load(); }
+        catch (InvalidOperationException) { return false; }
+
+        var matches = registry.CurrentEntries.Where(entry =>
+            entry.Disposition == SkillInvocationV2CompatibilityDisposition.Accepted
+            && string.Equals(entry.Tuple.SourceApplicationVersion, status.Version, StringComparison.Ordinal)).ToArray();
+        if (matches.Length != 1) return false;
+
+        var tuple = matches[0].Tuple;
+        identity = new CertifiedSkillProducerIdentityV1(tuple.SourceApplicationVersion, status.ProtocolVersion.Value,
+            tuple.AdapterVersion, tuple.NormalizationVersion, tuple.PayloadSchema, tuple.SchemaFingerprint,
+            registry.CurrentRevision);
+        return true;
+    }
+
+    private static bool IsProcessEnvironmentEntryPresent(string name)
+    {
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Process))
+        {
+            if (entry.Key is string key && string.Equals(key, name, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
 
     private static async ValueTask DisposeClientAsync(ICopilotSkillRuntimeClient client)
     {

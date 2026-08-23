@@ -40,6 +40,8 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
 
     public CancellationToken WorkToken => workToken;
 
+    public CertifiedSkillProducerIdentityV1 CertifiedIdentity => Owner.CertifiedIdentity;
+
     internal SkillRuntimeTerminalSealV1? WonSealKind { get; private set; }
 
     public bool TrySealV2NonCommitResponse() => Owner.TrySealCapability(this, SkillRuntimeTerminalSealV1.V2NonCommitResponse);
@@ -100,7 +102,6 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
 
 internal sealed class CopilotRuntimeGenerationV1
 {
-    public const string AdmittedCopilotVersion = "1.0.65";
     public const int AdmittedProtocolVersion = 3;
 
     private readonly SkillHostShutdownGateV1 shutdownGate;
@@ -113,21 +114,25 @@ internal sealed class CopilotRuntimeGenerationV1
 
     internal CopilotRuntimeGenerationV1(
         ICopilotSkillRuntimeClient client,
-        SkillHostShutdownGateV1 shutdownGate)
+        SkillHostShutdownGateV1 shutdownGate,
+        CertifiedSkillProducerIdentityV1 certifiedIdentity)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
         this.shutdownGate = shutdownGate;
         Client = client;
+        CertifiedIdentity = certifiedIdentity ?? throw new ArgumentNullException(nameof(certifiedIdentity));
         Identity = Guid.NewGuid();
-        FrozenVersion = AdmittedCopilotVersion;
-        FrozenProtocolVersion = AdmittedProtocolVersion;
     }
+
 
     public ICopilotSkillRuntimeClient Client { get; }
 
-    public string FrozenVersion { get; }
+    public CertifiedSkillProducerIdentityV1 CertifiedIdentity { get; }
 
-    public int FrozenProtocolVersion { get; }
+    public string FrozenVersion => CertifiedIdentity.SourceApplicationVersion;
+
+    public int FrozenProtocolVersion => CertifiedIdentity.ProtocolVersion;
+
 
     // Opaque on purpose: the identity is a same-process correlation key and is never emitted
     // in logs, metrics, responses, persistence, or fingerprints.

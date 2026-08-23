@@ -4,11 +4,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
-public interface ISkillInvocationV2RuntimeCapability
+internal interface ISkillInvocationV2RuntimeCapability
 {
+    CertifiedSkillProducerIdentityV1 CertifiedIdentity { get; }
 }
 
 public sealed class SkillInvocationV2RawPayloadEvidence
@@ -226,17 +228,19 @@ public sealed class SkillInvocationV2AcceptedEnvelope
         };
 }
 
-public sealed class ParsedSkillInvocationV2Batch
+internal sealed class ParsedSkillInvocationV2Batch
 {
     private readonly ReadOnlyCollection<SkillInvocationV2AcceptedEnvelope> acceptedEnvelopes;
 
     public ParsedSkillInvocationV2Batch(
         IEnumerable<SkillInvocationV2AcceptedEnvelope> acceptedEnvelopes,
         ISkillInvocationV2RuntimeCapability runtimeCapability,
+        CertifiedSkillProducerIdentityV1 certifiedIdentity,
         string nativeSessionId)
     {
         ArgumentNullException.ThrowIfNull(acceptedEnvelopes);
         ArgumentNullException.ThrowIfNull(runtimeCapability);
+        ArgumentNullException.ThrowIfNull(certifiedIdentity);
         ArgumentException.ThrowIfNullOrEmpty(nativeSessionId);
 
         var ownedEnvelopes = acceptedEnvelopes.ToArray();
@@ -247,6 +251,7 @@ public sealed class ParsedSkillInvocationV2Batch
 
         this.acceptedEnvelopes = Array.AsReadOnly(ownedEnvelopes);
         RuntimeCapability = runtimeCapability;
+        CertifiedIdentity = certifiedIdentity;
         NativeSessionId = nativeSessionId;
     }
 
@@ -255,6 +260,9 @@ public sealed class ParsedSkillInvocationV2Batch
 
     [JsonIgnore]
     public ISkillInvocationV2RuntimeCapability RuntimeCapability { get; }
+
+    [JsonIgnore]
+    public CertifiedSkillProducerIdentityV1 CertifiedIdentity { get; }
 
     [JsonIgnore]
     public string NativeSessionId { get; }

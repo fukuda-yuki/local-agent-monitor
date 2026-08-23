@@ -1,6 +1,7 @@
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 

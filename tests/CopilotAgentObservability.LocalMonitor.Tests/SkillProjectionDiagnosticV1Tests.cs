@@ -9,7 +9,7 @@ public sealed class SkillProjectionDiagnosticV1Tests
     public void Diagnose_RealRegistryYieldsCurrentForTheAcceptedProductionTuple()
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
-        var tuple = Assert.Single(registry.Entries).Tuple;
+        var tuple = registry.CurrentEntries[0].Tuple;
 
         var outcome = SkillProjectionDiagnosticV1.Diagnose(isSnapshotAvailable: true, tuple);
 
@@ -20,7 +20,7 @@ public sealed class SkillProjectionDiagnosticV1Tests
     public void Diagnose_TupleAbsentFromGreatestRevisionIsInvalid()
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
-        var missingTuple = Assert.Single(registry.Entries).Tuple with { SourceApplicationVersion = "9.9.9" };
+        var missingTuple = registry.CurrentEntries[0].Tuple with { SourceApplicationVersion = "9.9.9" };
 
         var outcome = SkillProjectionDiagnosticV1.Diagnose(isSnapshotAvailable: true, missingTuple);
 

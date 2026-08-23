@@ -258,7 +258,7 @@ public sealed class CopilotRuntimeGenerationV1Tests
     }
 
     private static CopilotRuntimeGenerationV1 NewAdmittedGeneration() =>
-        new(new FakeSkillRuntimeClient(), new SkillHostShutdownGateV1());
+        new(new FakeSkillRuntimeClient(), new SkillHostShutdownGateV1(), SkillInvocationV2TestIdentity.V1065);
 }
 
 public sealed class CopilotRuntimeAdmissionV1Tests

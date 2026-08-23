@@ -37,6 +37,8 @@
                       LogicalName="CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256" />
     <EmbeddedResource Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0001.json"
                       LogicalName="CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0001.json" />
+    <EmbeddedResource Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0002.json"
+                      LogicalName="CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0002.json" />
   </ItemGroup>
 
 </Project>

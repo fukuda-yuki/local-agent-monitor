@@ -2,18 +2,14 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
-public static class SkillInvocationV2Parser
+internal static class SkillInvocationV2Parser
 {
     internal const string SourceAdapter = "copilot-sdk-stream";
     internal const string SourceSurface = "copilot-sdk";
-    internal const string SourceApplicationVersion = "1.0.65";
-    internal const string AdapterVersion = "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1";
-    internal const string NormalizationVersion = "github-copilot-sdk.skill-invoked.normalize.v1";
-    internal const string PayloadSchema = "github-copilot-sdk.skill-invoked.v1";
-    internal const string SchemaFingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string EventType = "skill.invoked";
 
     private static readonly HashSet<string> EnvelopeProperties = new(StringComparer.Ordinal)
@@ -48,6 +44,8 @@ public static class SkillInvocationV2Parser
         ISkillInvocationV2RuntimeCapability runtimeCapability)
     {
         ArgumentNullException.ThrowIfNull(runtimeCapability);
+        var certifiedIdentity = runtimeCapability.CertifiedIdentity;
+        ArgumentNullException.ThrowIfNull(certifiedIdentity);
 
         var state = new ParseState();
         try
@@ -70,7 +68,7 @@ public static class SkillInvocationV2Parser
             }
             else
             {
-                ReadEnvelope(ref reader, state);
+                ReadEnvelope(ref reader, state, certifiedIdentity);
             }
 
             while (reader.Read())
@@ -94,10 +92,10 @@ public static class SkillInvocationV2Parser
         }
 
         var envelope = state.Payloads[0].Build(requestUtf8);
-        return new ParsedSkillInvocationV2Batch([envelope], runtimeCapability, state.NativeSessionId!);
+        return new ParsedSkillInvocationV2Batch([envelope], runtimeCapability, certifiedIdentity, state.NativeSessionId!);
     }
 
-    private static void ReadEnvelope(ref Utf8JsonReader reader, ParseState state)
+    private static void ReadEnvelope(ref Utf8JsonReader reader, ParseState state, CertifiedSkillProducerIdentityV1 identity)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
@@ -143,19 +141,19 @@ public static class SkillInvocationV2Parser
                     state.NativeSessionId = nativeSessionId;
                     break;
                 case "source_application_version":
-                    RequireExactString(ref reader, state, SourceApplicationVersion);
+                    RequireExactString(ref reader, state, identity.SourceApplicationVersion);
                     break;
                 case "adapter_version":
-                    RequireExactString(ref reader, state, AdapterVersion);
+                    RequireExactString(ref reader, state, identity.AdapterVersion);
                     break;
                 case "normalization_version":
-                    RequireExactString(ref reader, state, NormalizationVersion);
+                    RequireExactString(ref reader, state, identity.NormalizationVersion);
                     break;
                 case "payload_schema":
-                    RequireExactString(ref reader, state, PayloadSchema);
+                    RequireExactString(ref reader, state, identity.PayloadSchema);
                     break;
                 case "schema_fingerprint":
-                    RequireExactString(ref reader, state, SchemaFingerprint);
+                    RequireExactString(ref reader, state, identity.SchemaFingerprint);
                     break;
                 case "events":
                     ReadEvents(ref reader, state);

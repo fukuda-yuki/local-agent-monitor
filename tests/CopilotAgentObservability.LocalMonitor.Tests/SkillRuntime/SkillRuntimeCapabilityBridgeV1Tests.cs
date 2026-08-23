@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 

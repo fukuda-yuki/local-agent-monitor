@@ -23,26 +23,36 @@ public sealed record SkillInvocationV2CompatibilityRegistryEntry(
     SkillInvocationV2CompatibilityTuple Tuple,
     SkillInvocationV2CompatibilityDisposition Disposition);
 
+public sealed record SkillInvocationV2CompatibilityRegistryRevision(
+    int Revision,
+    IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries);
+
 public sealed class SkillInvocationV2ArtifactRegistry
 {
     private const string SchemaResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
     private const string SidecarResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
     private const string RegistryR0001ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0001.json";
+    private const string RegistryR0002ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0002.json";
     private const string SchemaFingerprintValue = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string RegistryR0001Fingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
+    private const string RegistryR0002Fingerprint = "069f6d78383f6e4114474010f105507b19ed0bb1c50e9899e6d893948f33efd6";
     private const int SchemaByteLength = 980;
     private const int SidecarByteLength = 65;
     private const int RegistryR0001ByteLength = 431;
+    private const int RegistryR0002ByteLength = 771;
     private static readonly Lazy<SkillInvocationV2ArtifactRegistry> Current = new(LoadEmbedded);
 
     private readonly ReadOnlyCollection<SkillInvocationV2CompatibilityRegistryEntry> entries;
+    private readonly ReadOnlyCollection<SkillInvocationV2CompatibilityRegistryRevision> history;
 
     private SkillInvocationV2ArtifactRegistry(
         int currentRevision,
+        IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision> history,
         IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries)
     {
         CurrentRevision = currentRevision;
         this.entries = Array.AsReadOnly(entries.ToArray());
+        this.history = Array.AsReadOnly(history.ToArray());
     }
 
     public int CurrentRevision { get; }
@@ -50,6 +60,10 @@ public sealed class SkillInvocationV2ArtifactRegistry
     public string SchemaFingerprint => SchemaFingerprintValue;
 
     public IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries => entries;
+
+    public IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> CurrentEntries => entries;
+
+    public IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision> History => history;
 
     public static SkillInvocationV2ArtifactRegistry Load() => Current.Value;
 
@@ -65,7 +79,11 @@ public sealed class SkillInvocationV2ArtifactRegistry
         return LoadForArtifactValidation(
             ReadResource(assembly, SchemaResourceName),
             ReadResource(assembly, SidecarResourceName),
-            new Dictionary<int, byte[]> { [1] = ReadResource(assembly, RegistryR0001ResourceName) });
+            new Dictionary<int, byte[]>
+            {
+                [1] = ReadResource(assembly, RegistryR0001ResourceName),
+                [2] = ReadResource(assembly, RegistryR0002ResourceName)
+            });
     }
 
     private static SkillInvocationV2ArtifactRegistry LoadForArtifactValidation(
@@ -84,27 +102,42 @@ public sealed class SkillInvocationV2ArtifactRegistry
             throw InvalidArtifact();
         }
 
-        if (registryHistory.Count != 1 || !registryHistory.TryGetValue(1, out var registryR0001))
+        if (registryHistory.Count != 2
+            || !registryHistory.TryGetValue(1, out var registryR0001)
+            || !registryHistory.TryGetValue(2, out var registryR0002)
+            || registryR0001 is null
+            || registryR0002 is null)
         {
             throw InvalidArtifact();
         }
 
         ValidateArtifactStructureForTesting(schemaBytes, sidecarBytes, registryHistory);
         AssertExactTextArtifact(registryR0001, RegistryR0001ByteLength, RegistryR0001Fingerprint);
-        var parsedEntries = ParseRegistry(registryR0001, expectedRevision: 1, SchemaFingerprintValue);
-        if (parsedEntries.Count != 1
-            || parsedEntries[0].Disposition != SkillInvocationV2CompatibilityDisposition.Accepted
-            || parsedEntries[0].Tuple != new SkillInvocationV2CompatibilityTuple(
+        AssertExactTextArtifact(registryR0002, RegistryR0002ByteLength, RegistryR0002Fingerprint);
+        var r0001Entries = ParseRegistry(registryR0001, expectedRevision: 1, SchemaFingerprintValue);
+        var r0002Entries = ParseRegistry(registryR0002, expectedRevision: 2, SchemaFingerprintValue);
+        var firstTuple = new SkillInvocationV2CompatibilityTuple(
                 "1.0.65",
                 "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
                 "github-copilot-sdk.skill-invoked.normalize.v1",
                 "github-copilot-sdk.skill-invoked.v1",
-                SchemaFingerprintValue))
+                SchemaFingerprintValue);
+        var secondTuple = firstTuple with { SourceApplicationVersion = "1.0.75" };
+        if (r0001Entries.Count != 1
+            || r0001Entries[0] != new SkillInvocationV2CompatibilityRegistryEntry(firstTuple, SkillInvocationV2CompatibilityDisposition.Accepted)
+            || r0002Entries.Count != 2
+            || r0002Entries[0] != new SkillInvocationV2CompatibilityRegistryEntry(firstTuple, SkillInvocationV2CompatibilityDisposition.Accepted)
+            || r0002Entries[1] != new SkillInvocationV2CompatibilityRegistryEntry(secondTuple, SkillInvocationV2CompatibilityDisposition.Accepted))
         {
             throw InvalidArtifact();
         }
 
-        return new SkillInvocationV2ArtifactRegistry(1, parsedEntries);
+        var history = new[]
+        {
+            new SkillInvocationV2CompatibilityRegistryRevision(1, Array.AsReadOnly(r0001Entries.ToArray())),
+            new SkillInvocationV2CompatibilityRegistryRevision(2, Array.AsReadOnly(r0002Entries.ToArray()))
+        };
+        return new SkillInvocationV2ArtifactRegistry(2, history, r0002Entries);
     }
 
     internal static void ValidateArtifactStructureForTesting(

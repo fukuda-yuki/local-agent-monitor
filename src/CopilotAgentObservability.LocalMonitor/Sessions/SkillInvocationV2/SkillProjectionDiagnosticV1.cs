@@ -71,10 +71,8 @@ public static class SkillProjectionDiagnosticV1
         }
 
         var registry = SkillInvocationV2ArtifactRegistry.Load();
-        var history = new[]
-        {
-            new SkillProjectionDiagnosticV1RegistryRevision(registry.CurrentRevision, registry.Entries)
-        };
+        var history = registry.History.Select(revision =>
+            new SkillProjectionDiagnosticV1RegistryRevision(revision.Revision, revision.Entries)).ToArray();
 
         return Diagnose(isSnapshotAvailable, tuple, history);
     }

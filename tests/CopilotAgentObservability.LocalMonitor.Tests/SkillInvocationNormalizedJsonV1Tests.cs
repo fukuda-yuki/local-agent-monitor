@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -224,5 +225,8 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

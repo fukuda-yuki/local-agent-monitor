@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -90,10 +91,11 @@ internal sealed class CopilotRuntimeAdmissionV1
 
     public CopilotRuntimeGenerationV1? PublishAdmittedGeneration(
         ICopilotSkillRuntimeClient client,
+        CertifiedSkillProducerIdentityV1 certifiedIdentity,
         out CopilotRuntimeGenerationV1? replacedGeneration)
     {
         ArgumentNullException.ThrowIfNull(client);
-        var generation = new CopilotRuntimeGenerationV1(client, shutdownGate);
+        var generation = new CopilotRuntimeGenerationV1(client, shutdownGate, certifiedIdentity);
         var generationDisposal = new GenerationDisposalGuard();
         GenerationDisposalGuard? replacedDisposal;
         lock (sync)
@@ -121,6 +123,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         NotifyInvalidationObservers();
         return generation;
     }
+
 
     public CopilotRuntimeGenerationV1? InvalidateCurrentGeneration()
     {
