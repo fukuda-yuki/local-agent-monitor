@@ -22,6 +22,10 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     private const string DefinitionPath = @"C:\skills\review\SKILL.md";
     private const string HistoricalBody = "# review\n";
 
+    // The orchestrator reads the grant's facts once for the scan and once to serialize the raw
+    // response, so the second access is the request's entry into response serialization.
+    private const int SerializationFactsAccessOrdinal = 2;
+
     private readonly TempHandleSource handleSource = new();
 
     public void Dispose() => handleSource.Dispose();
@@ -89,6 +93,8 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             Assert.Equal(0, fixture.Grant.SealRawCalls);
             Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
             Assert.False(fixture.DiscoveryGateway.WasCalled);
+            Assert.False(fixture.NativeReader.WasCalled);
+            Assert.Equal(0, fixture.AuthorizationGate.IssuedLeaseCount);
         }
     }
 
@@ -172,8 +178,8 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         var unsafeFixture = new Fixture(handleSource);
         unsafeFixture.DiscoveryGateway.Outcome = new CopilotSkillDiscoveryOutcome.Discovered(
         [
-            MatchingFact(),
-            MatchingFact(description: "a second distinct row for the same target")
+            MatchingFact(DefinitionPath),
+            MatchingFact(DefinitionPath, "a second distinct row for the same target")
         ]);
 
         var unsafeResult = await unsafeFixture.ExecuteAsync();
@@ -344,6 +350,305 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         Assert.Empty(result.BodyUtf8);
     }
 
+    // #154 is one opaque capability the request holds across its whole SDK and native lifetime, so
+    // every arm that acquired it must hand it back exactly once, whatever the request's own result.
+    [Theory]
+    [InlineData("raw_success")]
+    [InlineData("post_runtime_safe_error")]
+    [InlineData("post_runtime_retention_loss")]
+    [InlineData("runtime_generation_missing")]
+    [InlineData("normal_shutdown_closed")]
+    public async Task AnAcceptedCurrentAuthorizationIsHeldAcrossTheRequestAndReleasedExactlyOnce(string arm)
+    {
+        using var fixture = new Fixture(handleSource);
+        switch (arm)
+        {
+            case "post_runtime_safe_error":
+                fixture.NativeReader.Result =
+                    CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing);
+                break;
+            case "post_runtime_retention_loss":
+                fixture.NativeReader.Result =
+                    CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing);
+                fixture.Grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
+                break;
+            case "runtime_generation_missing":
+                fixture.RuntimeAdmission.InvalidateCurrentGeneration();
+                break;
+            case "normal_shutdown_closed":
+                fixture.RuntimeAdmission.CloseForShutdown();
+                break;
+        }
+
+        var result = await fixture.ExecuteAsync();
+
+        var expected = arm switch
+        {
+            "raw_success" => (SkillCurrentFileDispositionV1.Respond, 200),
+            "post_runtime_safe_error" => (SkillCurrentFileDispositionV1.Respond, 404),
+            "runtime_generation_missing" => (SkillCurrentFileDispositionV1.Respond, 503),
+            _ => (SkillCurrentFileDispositionV1.AbortWithoutResponse, 0),
+        };
+        Assert.Equal(expected, (result.Disposition, result.StatusCode));
+        Assert.Equal(1, fixture.AuthorizationGate.IssuedLeaseCount);
+        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
+        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
+        Assert.Equal(1, fixture.Grant.DisposeCalls);
+        Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
+        result.ReleaseRuntimeCapability?.Invoke();
+        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+    }
+
+    // The registry generation the acceptance was taken from can be superseded while the request is
+    // still running. The capability is what stops that from reaching an in-flight request: the
+    // publication cannot swap the pointer until the request releases it, so the request finishes on
+    // exactly the generation it was accepted under.
+    [Fact]
+    public async Task ARegistryPublicationBegunAfterAcceptanceCannotTakeEffectUntilTheCapabilityIsReleased()
+    {
+        using var fixture = new Fixture(handleSource);
+        var provider = new SkillInvocationV2RegistryProviderV1();
+        fixture.AuthorizationGate.LeaseFactory = () =>
+        {
+            var capture = provider.CaptureGeneration();
+            Assert.NotNull(capture);
+            Assert.True(provider.TryAcquireGenerationReadLease(capture!, out var lease));
+            return lease!;
+        };
+
+        var publicationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? publication = null;
+        var publicationCompletedWhileHeld = true;
+        var leasesHeldAtTerminal = -1;
+
+        fixture.NativeReader.Result = SuccessRead("# current review\n");
+        fixture.NativeReader.BeforeRead = () =>
+        {
+            publication = Task.Run(() =>
+            {
+                publicationEntered.SetResult();
+                provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+            });
+            publicationEntered.Task.GetAwaiter().GetResult();
+        };
+        fixture.Grant.OnTerminalAttempt = () =>
+        {
+            leasesHeldAtTerminal = provider.OutstandingLeaseCount;
+            publicationCompletedWhileHeld = publication!.IsCompleted;
+        };
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.Equal(200, result.StatusCode);
+        Assert.Equal(1, leasesHeldAtTerminal);
+        Assert.False(publicationCompletedWhileHeld);
+
+        // The release has already happened by the time ExecuteAsync returned, so the publication is
+        // free to finish immediately; the bound only keeps a regression that never releases from
+        // hanging the suite instead of failing it.
+        await publication!.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(0, provider.OutstandingLeaseCount);
+        result.ReleaseRuntimeCapability?.Invoke();
+    }
+
+    // Retention loss becomes authoritative only where a store-backed terminal operation proves it,
+    // so a loss injected during discovery does not stop the scan or the read: the request runs to
+    // its candidate and is refused at the completion it was always going to need.
+    [Fact]
+    public async Task RetentionGrantLossDuringDiscoveryIsProvedOnlyAtTheTerminalCompletionAndAborts()
+    {
+        using var fixture = new Fixture(handleSource);
+        var injected = false;
+        fixture.NativeReader.Result = CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing);
+        fixture.DiscoveryGateway.DuringDiscovery = () =>
+        {
+            injected = true;
+            fixture.Grant.Lose();
+        };
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.True(injected);
+        Assert.True(fixture.NativeReader.WasCalled);
+        AssertRetentionLossAbort(fixture, result);
+    }
+
+    [Fact]
+    public async Task RetentionGrantLossAfterDiscoveryBeforeResultEnumerationIsProvedOnlyAtTheTerminalCompletionAndAborts()
+    {
+        using var fixture = new Fixture(handleSource);
+        var injected = false;
+        fixture.NativeReader.Result = CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Missing);
+        fixture.DiscoveryGateway.AfterDiscoveryBeforeResultEnumeration = () =>
+        {
+            injected = true;
+            fixture.Grant.Lose();
+        };
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.True(injected);
+        Assert.True(fixture.NativeReader.WasCalled);
+        AssertRetentionLossAbort(fixture, result);
+    }
+
+    // The native stages are entered through the production walker's own hooks, so the fence each
+    // test names is the fence the walker actually reached rather than one the fixture asserts.
+    [WindowsFact]
+    public async Task RetentionGrantLossDuringTheNativeReadIsProvedOnlyAtTheTerminalCompletionAndAborts() =>
+        await AssertRetentionLossAtNativeFenceAbortsAsync(NativeReadFence.BeforeBoundedRead);
+
+    [WindowsFact]
+    public async Task RetentionGrantLossAtThePostReadReproofIsProvedOnlyAtTheTerminalCompletionAndAborts() =>
+        await AssertRetentionLossAtNativeFenceAbortsAsync(NativeReadFence.AfterReadBeforeReproof);
+
+    // Serialization has the complete candidate buffered but has authorized nothing, so a loss here
+    // still lets the runtime seal be attempted first; only the Retention raw seal can refuse it,
+    // and the won seal is then abandoned rather than sent.
+    [Fact]
+    public async Task RetentionGrantLossDuringResponseSerializationAbandonsTheWonRuntimeSealWithNoOutput()
+    {
+        using var fixture = new Fixture(handleSource);
+        var injected = false;
+        fixture.NativeReader.Result = SuccessRead("# current review\n");
+        fixture.Grant.OnFactsAccess = ordinal =>
+        {
+            if (ordinal != SerializationFactsAccessOrdinal) return;
+            injected = true;
+            fixture.Grant.Lose();
+        };
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.True(injected);
+        Assert.Equal(SerializationFactsAccessOrdinal, fixture.Grant.FactsAccessCount);
+        Assert.Equal(SkillCurrentFileDispositionV1.AbortWithoutResponse, result.Disposition);
+        Assert.Equal(0, result.StatusCode);
+        Assert.Empty(result.BodyUtf8);
+        Assert.Equal(["seal_raw"], fixture.Grant.CallOrder);
+        Assert.Equal(0, fixture.Grant.CompleteWithoutRawCalls);
+        Assert.Equal(SkillRuntimeTerminalSealV1.Response, fixture.LastCapability!.WonSealKind);
+        Assert.False(fixture.LastCapability.TryAbandonWonSeal());
+        AssertRequestScopedResourcesReleasedOnce(fixture, result);
+    }
+
+    // The two terminal orders diverge only here: a safe error proves Retention first, so a loss
+    // that lands immediately before the seal never reaches TrySealResponse, while raw success has
+    // already won the runtime seal and can only abandon it.
+    [Theory]
+    [InlineData("safe_error")]
+    [InlineData("raw_success")]
+    public async Task RetentionGrantLossImmediatelyBeforeTheResponseTerminalSealAbortsWithoutASubstitute(string arm)
+    {
+        using var fixture = new Fixture(handleSource);
+        fixture.NativeReader.Result = arm == "safe_error"
+            ? CurrentSkillNativeReadResultV1.Failure(CurrentSkillNativeOutcomeV1.Oversized)
+            : SuccessRead("# current review\n");
+
+        var injected = false;
+        fixture.Grant.OnTerminalAttempt = () =>
+        {
+            if (injected) return;
+            injected = true;
+            fixture.Grant.Lose();
+        };
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.True(injected);
+        Assert.True(fixture.NativeReader.WasCalled);
+        Assert.Equal(SkillCurrentFileDispositionV1.AbortWithoutResponse, result.Disposition);
+        Assert.Equal(0, result.StatusCode);
+        Assert.Empty(result.BodyUtf8);
+
+        if (arm == "safe_error")
+        {
+            Assert.Equal(["complete_without_raw"], fixture.Grant.CallOrder);
+            Assert.Null(fixture.LastCapability!.WonSealKind);
+        }
+        else
+        {
+            Assert.Equal(["seal_raw"], fixture.Grant.CallOrder);
+            Assert.Equal(SerializationFactsAccessOrdinal, fixture.Grant.FactsAccessCount);
+            Assert.Equal(SkillRuntimeTerminalSealV1.Response, fixture.LastCapability!.WonSealKind);
+            Assert.False(fixture.LastCapability.TryAbandonWonSeal());
+        }
+
+        AssertRequestScopedResourcesReleasedOnce(fixture, result);
+    }
+
+    private enum NativeReadFence
+    {
+        BeforeBoundedRead,
+        AfterReadBeforeReproof
+    }
+
+    private static async Task AssertRetentionLossAtNativeFenceAbortsAsync(NativeReadFence fence)
+    {
+        // Invalid UTF-8 keeps the candidate on the buffered safe-error arm, where the terminal
+        // order is Retention first, while both walker hooks still run exactly as they do for a
+        // readable file.
+        using var root = new RealSkillRoot([0xC3, 0x28, 0xA0]);
+        var openedHandles = new List<nint>();
+        var closedHandles = new List<nint>();
+        var reachedFence = false;
+        Fixture? pending = null;
+        void Inject()
+        {
+            reachedFence = true;
+            pending!.Grant.Lose();
+        }
+
+        var hooks = new CurrentSkillFileReaderHooksV1
+        {
+            AfterFinalMetadataCaptured = _ =>
+            {
+                if (fence == NativeReadFence.BeforeBoundedRead) Inject();
+            },
+            AfterReadCompleted = _ =>
+            {
+                if (fence == NativeReadFence.AfterReadBeforeReproof) Inject();
+            },
+            HandleOpened = handle => openedHandles.Add(handle),
+            HandleClosed = handle => closedHandles.Add(handle),
+        };
+
+        using var fixture = new Fixture(root, hooks);
+        pending = fixture;
+
+        var result = await fixture.ExecuteAsync();
+
+        Assert.True(reachedFence);
+        Assert.Equal(2, openedHandles.Count);
+        Assert.Equal(openedHandles.AsEnumerable().Reverse(), closedHandles);
+        AssertRetentionLossAbort(fixture, result);
+    }
+
+    // Every Retention-loss stage owes the same closing invariants: the safe error was refused
+    // before any runtime seal was attempted, nothing was started on the wire, and no candidate byte
+    // survived the abort.
+    private static void AssertRetentionLossAbort(Fixture fixture, SkillCurrentFileResultV1 result)
+    {
+        Assert.Equal(SkillCurrentFileDispositionV1.AbortWithoutResponse, result.Disposition);
+        Assert.Equal(0, result.StatusCode);
+        Assert.Empty(result.BodyUtf8);
+        Assert.Equal(1, fixture.Grant.CompleteWithoutRawCalls);
+        Assert.Equal(0, fixture.Grant.SealRawCalls);
+        Assert.Null(fixture.LastCapability!.WonSealKind);
+        AssertRequestScopedResourcesReleasedOnce(fixture, result);
+    }
+
+    private static void AssertRequestScopedResourcesReleasedOnce(Fixture fixture, SkillCurrentFileResultV1 result)
+    {
+        Assert.Equal(1, fixture.Grant.DisposeCalls);
+        Assert.Equal(1, fixture.AuthorizationGate.IssuedLeaseCount);
+        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
+        Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
+        Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
+        result.ReleaseRuntimeCapability!();
+        Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+    }
+
     [Fact]
     public async Task ExecuteAsync_PostRuntimeResults_KeepTheRuntimeCapabilityOutstanding()
     {
@@ -408,28 +713,55 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             ReadAt);
     }
 
-    private static CopilotDiscoveredSkillFactV1 MatchingFact(string? description = null) =>
-        new(SkillName, SkillSource, DefinitionPath, null, description, null, true, true);
+    private static CopilotDiscoveredSkillFactV1 MatchingFact(string definitionPath, string? description = null) =>
+        new(SkillName, SkillSource, definitionPath, null, description, null, true, true);
 
-    private sealed class Fixture
+    private sealed class Fixture : IDisposable
     {
         internal Fixture(TempHandleSource handleSource)
+            : this(
+                SkillDiscoveryRootPreflightV1.Run(
+                    [],
+                    [RootPath],
+                    new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource))),
+                DefinitionPath)
+        {
+            NativeReader.Result = SuccessRead("# current review\n");
+            Reader = NativeReader;
+        }
+
+        // The staged native-read matrix needs the production walker's own hooks to prove which
+        // fence a request had reached, so this arm binds a real retained root and the real reader
+        // instead of the stub pair the ordering tests use.
+        internal Fixture(RealSkillRoot root, CurrentSkillFileReaderHooksV1 hooks)
+            : this(
+                SkillDiscoveryRootPreflightV1.Run(
+                    [],
+                    [root.RootPath],
+                    new CertifiedDiscoveryPlatformV1(
+                        SkillProducerPathKeyPlatform.Windows, new WindowsDiscoveryRootOpenerV1())),
+                root.DefinitionPath) =>
+            Reader = new WindowsCurrentSkillFileReaderV1(() => ReadAt, hooks);
+
+        private Fixture(SkillDiscoveryRootPreflightResultV1 preflight, string definitionPath)
         {
             var shutdownGate = new SkillHostShutdownGateV1();
-            Preflight = SkillDiscoveryRootPreflightV1.Run(
-                [],
-                [RootPath],
-                new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource)));
+            Preflight = preflight;
+            Assert.Equal(SkillDiscoveryRootPreflightOutcomeV1.Certified, Preflight.Outcome);
             RootGeneration = new SkillDiscoveryRootGenerationV1(Preflight, shutdownGate);
 
             RuntimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
             Generation = RuntimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
 
-            Grant = new FakeGrant();
+            Grant = new FakeGrant(definitionPath);
             Historical = new FakeHistoricalGate(Grant);
             AuthorizationGate = new FakeAuthorizationGate();
-            DiscoveryGateway = new FakeDiscoveryGateway { Outcome = new CopilotSkillDiscoveryOutcome.Discovered([MatchingFact()]) };
-            NativeReader = new FakeNativeReader { Result = SuccessRead("# current review\n") };
+            DiscoveryGateway = new FakeDiscoveryGateway
+            {
+                Outcome = new CopilotSkillDiscoveryOutcome.Discovered([MatchingFact(definitionPath)])
+            };
+            NativeReader = new FakeNativeReader();
+            Reader = NativeReader;
         }
 
         internal SkillDiscoveryRootPreflightResultV1 Preflight { get; }
@@ -450,6 +782,8 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         internal FakeNativeReader NativeReader { get; }
 
+        internal ICurrentSkillNativeFileReaderV1 Reader { get; }
+
         internal CancellationTokenSource CallerAbort { get; } = new();
 
         internal CopilotRuntimeOperationCapabilityV1? LastCapability { get; private set; }
@@ -457,7 +791,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         internal async Task<SkillCurrentFileResultV1> ExecuteAsync()
         {
             var orchestrator = new SkillCurrentFileOrchestratorV1(
-                Historical, AuthorizationGate, RuntimeAdmission, DiscoveryGateway, NativeReader);
+                Historical, AuthorizationGate, RuntimeAdmission, DiscoveryGateway, Reader);
 
             Assert.True(RootGeneration.TryAcquireLease(out var lease));
             using (lease)
@@ -467,11 +801,56 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
                 return result;
             }
         }
+
+        public void Dispose()
+        {
+            CallerAbort.Dispose();
+            Preflight.Dispose();
+        }
+    }
+
+    // A real retained discovery root whose only candidate is <root>\review\SKILL.md.
+    private sealed class RealSkillRoot : IDisposable
+    {
+        internal RealSkillRoot(byte[] skillFileBytes)
+        {
+            RootPath = Path.Combine(Path.GetTempPath(), $"cao-orchestrator-root-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path.Combine(RootPath, "review"));
+            DefinitionPath = Path.Combine(RootPath, "review", "SKILL.md");
+            File.WriteAllBytes(DefinitionPath, skillFileBytes);
+        }
+
+        internal string RootPath { get; }
+
+        internal string DefinitionPath { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(RootPath, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 
     private sealed class FakeGrant : ISkillCurrentFileRetentionGrantV1
     {
         private readonly List<string> callOrder = [];
+        private readonly SkillInvocationSnapshotContentFacts facts;
+
+        internal FakeGrant(string definitionPath) =>
+            facts = new(
+                SnapshotId,
+                HistoricalBody,
+                definitionPath,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                Encoding.UTF8.GetByteCount(HistoricalBody),
+                Encoding.UTF8.GetByteCount(definitionPath),
+                ReadAt);
 
         internal SkillInvocationSnapshotContentTerminalResult SealRawResult { get; set; } =
             SkillInvocationSnapshotContentTerminalResult.Sealed;
@@ -483,20 +862,39 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         internal int CompleteWithoutRawCalls { get; private set; }
 
+        internal int DisposeCalls { get; private set; }
+
+        // The candidate is serialized from these facts, so the access ordinal is the fixture's
+        // handle on "the request is inside response serialization with the candidate buffered".
+        internal int FactsAccessCount { get; private set; }
+
+        internal Action<int>? OnFactsAccess { get; set; }
+
+        internal Action? OnTerminalAttempt { get; set; }
+
         internal IReadOnlyList<string> CallOrder => callOrder;
 
-        public SkillInvocationSnapshotContentFacts Facts { get; } = new(
-            SnapshotId,
-            HistoricalBody,
-            DefinitionPath,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "1111111111111111111111111111111111111111111111111111111111111111",
-            Encoding.UTF8.GetByteCount(HistoricalBody),
-            Encoding.UTF8.GetByteCount(DefinitionPath),
-            ReadAt);
+        // The store-backed grant reports loss only through a terminal operation, so a lost grant
+        // is modelled the one way the orchestrator can observe it.
+        internal void Lose()
+        {
+            SealRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
+            CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
+        }
+
+        public SkillInvocationSnapshotContentFacts Facts
+        {
+            get
+            {
+                FactsAccessCount++;
+                OnFactsAccess?.Invoke(FactsAccessCount);
+                return facts;
+            }
+        }
 
         public SkillInvocationSnapshotContentTerminalResult TrySealRawResponse()
         {
+            OnTerminalAttempt?.Invoke();
             SealRawCalls++;
             callOrder.Add("seal_raw");
             return SealRawResult;
@@ -504,12 +902,17 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         public SkillInvocationSnapshotContentTerminalResult TryCompleteWithoutRaw()
         {
+            OnTerminalAttempt?.Invoke();
             CompleteWithoutRawCalls++;
             callOrder.Add("complete_without_raw");
             return CompleteWithoutRawResult;
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class FakeHistoricalGate(FakeGrant grant) : ISkillCurrentFileHistoricalGateV1
@@ -528,12 +931,25 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
     private sealed class FakeAuthorizationGate : ISkillCurrentAuthorizationGateV1
     {
+        private readonly List<CountingGenerationLease> issued = [];
+
         internal SkillRegistryCurrentAuthorizationOutcome Outcome { get; set; } =
             SkillRegistryCurrentAuthorizationOutcome.Acquired;
 
         internal string? SkillSource { get; set; } = SkillCurrentFileOrchestratorV1Tests.SkillSource;
 
         internal bool WasCalled { get; private set; }
+
+        // #154 stays a single opaque capability: the fixture only chooses which lease object the
+        // acquired authorization carries, never re-decides currentness.
+        internal Func<ISkillRegistryGenerationLease>? LeaseFactory { get; set; }
+
+        internal int IssuedLeaseCount => issued.Count;
+
+        internal int ReleasedLeaseCount => issued.Count(lease => lease.ReleaseCalls > 0);
+
+        internal int MaximumReleaseCallsOnOneLease =>
+            issued.Count == 0 ? 0 : issued.Max(lease => lease.ReleaseCalls);
 
         public SkillProjectionCurrentSdkClaimAuthorizationResult TryAcquire(Guid sessionId, Guid snapshotId)
         {
@@ -547,15 +963,26 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
                 SkillRegistryCurrentAuthorizationOutcome.Unavailable =>
                     SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable,
                 _ => SkillProjectionCurrentSdkClaimAuthorizationResult.ForAcquired(
-                    new SkillProjectionCurrentSdkClaimAuthorization(SkillName, SkillSource, new StubGenerationLease()))
+                    new SkillProjectionCurrentSdkClaimAuthorization(SkillName, SkillSource, AcquireLease()))
             };
+        }
+
+        private ISkillRegistryGenerationLease AcquireLease()
+        {
+            var lease = new CountingGenerationLease(LeaseFactory?.Invoke());
+            issued.Add(lease);
+            return lease;
         }
     }
 
-    private sealed class StubGenerationLease : ISkillRegistryGenerationLease
+    private sealed class CountingGenerationLease(ISkillRegistryGenerationLease? inner) : ISkillRegistryGenerationLease
     {
+        internal int ReleaseCalls { get; private set; }
+
         public void Dispose()
         {
+            ReleaseCalls++;
+            inner?.Dispose();
         }
     }
 
@@ -569,6 +996,10 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         internal CopilotRuntimeOperationCapabilityV1? ObservedCapability { get; private set; }
 
+        internal Action? DuringDiscovery { get; set; }
+
+        internal Action? AfterDiscoveryBeforeResultEnumeration { get; set; }
+
         public Task<CopilotSkillDiscoveryOutcome> DiscoverAsync(
             CopilotRuntimeOperationCapabilityV1 capability,
             DiscoveryRootSetV1 roots,
@@ -576,12 +1007,15 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         {
             WasCalled = true;
             ObservedCapability = capability;
+            DuringDiscovery?.Invoke();
             if (ExceptionToThrow is not null)
             {
                 return Task.FromException<CopilotSkillDiscoveryOutcome>(ExceptionToThrow);
             }
 
-            return Task.FromResult(Outcome);
+            var outcome = Outcome;
+            AfterDiscoveryBeforeResultEnumeration?.Invoke();
+            return Task.FromResult(outcome);
         }
     }
 
@@ -592,10 +1026,17 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         internal Action? BeforeRead { get; set; }
 
+        internal Action? AfterRead { get; set; }
+
+        internal bool WasCalled { get; private set; }
+
         public CurrentSkillNativeReadResultV1 Read(CurrentSkillReadTargetV1 target, CancellationToken cancellationToken)
         {
+            WasCalled = true;
             BeforeRead?.Invoke();
-            return Result;
+            var result = Result;
+            AfterRead?.Invoke();
+            return result;
         }
     }
 

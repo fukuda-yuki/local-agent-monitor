@@ -40,6 +40,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
     private CopilotRuntimeAdmissionV1 runtimeAdmission = null!;
     private CopilotRuntimeGenerationV1 generation = null!;
     private StubNativeReader nativeReader = null!;
+    private StubGrant grant = null!;
     private HttpContext? currentContext;
 
     internal SkillHistoricalContentRouteResultV1 HistoricalResult { get; set; } =
@@ -65,9 +66,10 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         runtimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
         generation = runtimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
         nativeReader = new StubNativeReader();
+        grant = new StubGrant();
 
         var orchestrator = new SkillCurrentFileOrchestratorV1(
-            new StubHistoricalGate(),
+            new StubHistoricalGate(grant),
             new StubAuthorizationGate(),
             runtimeAdmission,
             new StubDiscoveryGateway(),
@@ -486,6 +488,35 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             TimeSpan.FromSeconds(10)));
     }
 
+    // The orchestrator's no-response abort has to survive the route: a Retention loss proved at the
+    // terminal boundary must leave the transport with no status line, no header, and no entity byte
+    // rather than being relabelled into any of the route's ordinary responses.
+    [Theory]
+    [InlineData("safe_error")]
+    [InlineData("raw_success")]
+    public async Task CurrentFileRetentionLoss_WritesNoStatusHeaderOrEntityByte(string arm)
+    {
+        if (arm == "raw_success")
+        {
+            var currentBody = "# current body\n"u8.ToArray();
+            nativeReader.Result = CurrentSkillNativeReadResultV1.Success(
+                currentBody, SHA256.HashData(currentBody), DateTimeOffset.UnixEpoch);
+        }
+
+        grant.CompleteWithoutRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
+        grant.SealRawResult = SkillInvocationSnapshotContentTerminalResult.Lost;
+        CountingWriteStream? entity = null;
+        ResponseBodyOverride = body => entity = new CountingWriteStream(body);
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => PostCurrentFileAsync(ValidRequest));
+
+        Assert.NotNull(entity);
+        Assert.Equal(0, entity!.BytesWritten);
+        Assert.True(SpinWait.SpinUntil(
+            () => generation.OutstandingCapabilityCount == 0,
+            TimeSpan.FromSeconds(10)));
+    }
+
     private Task<HttpResponseMessage> PostCurrentFileAsync(
         string body,
         string? csrfHeader = "local-monitor",
@@ -546,7 +577,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         }
     }
 
-    private sealed class StubHistoricalGate : ISkillCurrentFileHistoricalGateV1
+    private sealed class StubHistoricalGate(StubGrant grant) : ISkillCurrentFileHistoricalGateV1
     {
         public Task<SkillCurrentFileHistoricalAdmissionV1> AdmitAsync(
             Guid sessionId,
@@ -554,7 +585,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             CancellationToken cancellationToken) =>
             Task.FromResult(new SkillCurrentFileHistoricalAdmissionV1(
                 SkillInvocationSnapshotContentOutcome.Granted,
-                new StubGrant()));
+                grant));
     }
 
     private sealed class StubGrant : ISkillCurrentFileRetentionGrantV1
@@ -569,11 +600,15 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             26,
             DateTimeOffset.UnixEpoch);
 
-        public SkillInvocationSnapshotContentTerminalResult TrySealRawResponse() =>
+        internal SkillInvocationSnapshotContentTerminalResult SealRawResult { get; set; } =
             SkillInvocationSnapshotContentTerminalResult.Sealed;
 
-        public SkillInvocationSnapshotContentTerminalResult TryCompleteWithoutRaw() =>
+        internal SkillInvocationSnapshotContentTerminalResult CompleteWithoutRawResult { get; set; } =
             SkillInvocationSnapshotContentTerminalResult.CompletedWithoutRaw;
+
+        public SkillInvocationSnapshotContentTerminalResult TrySealRawResponse() => SealRawResult;
+
+        public SkillInvocationSnapshotContentTerminalResult TryCompleteWithoutRaw() => CompleteWithoutRawResult;
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
@@ -683,6 +718,23 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             ReadOnlyMemory<byte> buffer,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromException(new InvalidOperationException("Response write failed."));
+    }
+
+    // Counts what actually reached the response body so a no-response abort can be proved by the
+    // absence of entity bytes rather than only by the client-side transport failure.
+    private sealed class CountingWriteStream(Stream inner) : DelegatingWriteStream(inner)
+    {
+        private long written;
+
+        internal long BytesWritten => Interlocked.Read(ref written);
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Add(ref written, buffer.Length);
+            return base.WriteAsync(buffer, cancellationToken);
+        }
     }
 
     private sealed class StubRuntimeClient : ICopilotSkillRuntimeClient

@@ -717,11 +717,25 @@ internal sealed class GenericRouteContentClock(DateTimeOffset start) : TimeProvi
     private DateTimeOffset now = start;
     private ControlledTimer? leaseExpiryNotification;
     private bool fireOnArm;
+    private int timerArmCount;
+    private int leaseExpiryArmCount;
 
     internal DateTimeOffset UtcNow
     {
         get { lock (gate) { return now; } }
         set { lock (gate) { now = value; } }
+    }
+
+    // A renewed operation grant replaces its expiry notification, so the arming counts are the
+    // observable that separates "the original two-minute notification" from "a rescheduled one".
+    internal int TimerArmCount
+    {
+        get { lock (gate) { return timerArmCount; } }
+    }
+
+    internal int LeaseExpiryArmCount
+    {
+        get { lock (gate) { return leaseExpiryArmCount; } }
     }
 
     public override DateTimeOffset GetUtcNow() => UtcNow;
@@ -757,10 +771,16 @@ internal sealed class GenericRouteContentClock(DateTimeOffset start) : TimeProvi
 
     private void Armed(ControlledTimer timer, TimeSpan dueTime)
     {
+        lock (gate)
+        {
+            timerArmCount++;
+        }
+
         if (dueTime != RetentionV1Constants.LeaseDuration) return;
         bool fire;
         lock (gate)
         {
+            leaseExpiryArmCount++;
             leaseExpiryNotification = timer;
             fire = fireOnArm;
             fireOnArm = false;

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -259,6 +260,83 @@ public sealed class SkillInvocationSnapshotContentReaderTests
         Assert.Null(result.Lease);
         Assert.Null(result.Facts);
         Assert.Equal(0, database.Count("retention_leases"));
+    }
+
+    // Current-file takes one fixed two-minute operation grant and deliberately makes no renewal
+    // call at the general one-minute renewal deadline. The deadline is crossed on a clock that
+    // never advances by itself, so the three ticks are the exact boundary rather than a sample of
+    // it, and every renewal observable is read at that tick.
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task Current_file_makes_no_renewal_call_at_the_one_minute_renewal_deadline(int deadlineTickOffset)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-c14-{deadlineTickOffset}");
+        var clock = new GenericRouteContentClock(DefaultValidationAt);
+        var gate = new SkillCurrentFileHistoricalGateV1(
+            database.Path, new RetentionCatalogStore(database.Path, clock), clock);
+
+        var admission = await gate.AdmitAsync(write.NewSessionId, write.SnapshotId, CancellationToken.None);
+
+        Assert.Equal(SkillInvocationSnapshotContentOutcome.Granted, admission.Outcome);
+        await using var grant = admission.Grant!;
+        var admittedLease = LeaseRow(database);
+        Assert.Equal("operation", database.ScalarText("SELECT lease_kind FROM retention_leases;"));
+        Assert.Equal(
+            FormatTimestamp(DefaultValidationAt + RetentionV1Constants.LeaseDuration),
+            database.ScalarText("SELECT expires_at FROM retention_leases;"));
+        Assert.Equal(1, clock.LeaseExpiryArmCount);
+        Assert.Equal(1, clock.TimerArmCount);
+
+        clock.UtcNow = DefaultValidationAt
+            + RetentionV1Constants.LeaseRenewalDeadline
+            + TimeSpan.FromTicks(deadlineTickOffset);
+
+        Assert.Equal(1, database.Count("retention_leases"));
+        Assert.Equal(admittedLease, LeaseRow(database));
+        Assert.Equal(1, clock.LeaseExpiryArmCount);
+        Assert.Equal(1, clock.TimerArmCount);
+
+        // The request keeps running on the original grant: its terminal proof still succeeds and
+        // stays one-shot, so no replacement grant was substituted underneath it.
+        Assert.Equal(SkillInvocationSnapshotContentTerminalResult.Sealed, grant.TrySealRawResponse());
+        Assert.Equal(SkillInvocationSnapshotContentTerminalResult.Lost, grant.TrySealRawResponse());
+        Assert.Equal(SkillInvocationSnapshotContentTerminalResult.Lost, grant.TryCompleteWithoutRaw());
+    }
+
+    // The unrenewed grant's authority still ends at the originally published two-minute expiry. A
+    // renewal at the one-minute deadline would have pushed this boundary out, so the exact-expiry
+    // tick is what makes the absence of renewal observable rather than merely asserted.
+    [Theory]
+    [InlineData(-1, (int)SkillInvocationSnapshotContentTerminalResult.Sealed)]
+    [InlineData(0, (int)SkillInvocationSnapshotContentTerminalResult.Lost)]
+    [InlineData(1, (int)SkillInvocationSnapshotContentTerminalResult.Lost)]
+    public async Task The_unrenewed_operation_grant_is_still_governed_by_its_original_expiry(
+        int expiryTickOffset,
+        int expected)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-c15-{expiryTickOffset}");
+        var clock = new GenericRouteContentClock(DefaultValidationAt);
+        var gate = new SkillCurrentFileHistoricalGateV1(
+            database.Path, new RetentionCatalogStore(database.Path, clock), clock);
+
+        var admission = await gate.AdmitAsync(write.NewSessionId, write.SnapshotId, CancellationToken.None);
+
+        Assert.Equal(SkillInvocationSnapshotContentOutcome.Granted, admission.Outcome);
+        await using var grant = admission.Grant!;
+
+        clock.UtcNow = DefaultValidationAt + RetentionV1Constants.LeaseRenewalDeadline;
+        Assert.Equal(1, clock.LeaseExpiryArmCount);
+
+        clock.UtcNow = DefaultValidationAt
+            + RetentionV1Constants.LeaseDuration
+            + TimeSpan.FromTicks(expiryTickOffset);
+
+        Assert.Equal((SkillInvocationSnapshotContentTerminalResult)expected, grant.TrySealRawResponse());
+        Assert.Equal(1, clock.LeaseExpiryArmCount);
     }
 
     [Fact]
@@ -560,6 +638,10 @@ public sealed class SkillInvocationSnapshotContentReaderTests
     private static string FormatTimestamp(DateTimeOffset value) =>
         value.ToUniversalTime().ToString(TimestampFormat, CultureInfo.InvariantCulture);
 
+    private static string LeaseRow(TestDatabase database) =>
+        database.ScalarText(
+            "SELECT item_id||'|'||lease_kind||'|'||owner||'|'||generation||'|'||expires_at FROM retention_leases;");
+
     private sealed class FixedTimeProvider(DateTimeOffset instant) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => instant;
@@ -635,6 +717,14 @@ public sealed class SkillInvocationSnapshotContentReaderTests
             using var command = connection.CreateCommand();
             command.CommandText = $"SELECT COUNT(*) FROM {table};";
             return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        internal string ScalarText(string sql)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ?? string.Empty;
         }
 
         private void InstallComponent()
