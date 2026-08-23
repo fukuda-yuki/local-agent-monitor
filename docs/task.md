@@ -31,7 +31,7 @@
 | --- | --- | --- |
 | Local Repository catalog / Session assignment (Issue #156) | **DC156-01–19 READY_FOR_IMPLEMENTATION** | [Local Repository Catalog and Session Assignment](specifications/interfaces/local-repository-catalog.md) と [DC156-12–19 executable closure](specifications/interfaces/local-repository-catalog-executable.md) が exact locator、`local_repository_catalog:1`、admission、assignment、immutable locator/head、durable receipt、virtual scope、raw-expiry metadata、backup vector の complete authority。#134だけが`GET /api/local-monitor/v1/repositories`を所有し、#156/#161/#134は一つの`ILocalRepositoryScopeSnapshotService`を共有する。Issue #152は未解決、frozen API/SSEとraw-default-only境界は不変。 |
 | Current-valid Skill projection (Issue #154) | **DC154-01 base implementation complete / D083 current-read extension pending** | immutableなtrace-version base observationに対して、単一`SourceCompatibilityReconciler`だけがsame-retained-input decoder revisionまたはexact-token registry revisionをappend-only supersessionとして追加する。`missing + resolved = missing`を維持し、OTel armのcompatibility revision、即時claim invalidation、exact frontier、generation、queue、receiptをatomicにする。独立`skill_projection:1`のbase schema、OTel generation worker、trace-generation非依存SDK Session/Event claim subspace、単一read authorityは実装済み。D083は完全なr0001 tuple/greatest-complete registryによるpoint diagnosticと別のopaque current-generation authorization capabilityを同じ#154 authorityへ追加するが、このextensionは未実装であり、#158はregistry/generation/claim table readerを追加しない。cross-arm mergeはexact trace+span双方を必須とし、旧pre-release Skill rowはcopy/backfill/dual pathなし、Issue #152は未解決のまま。正本は[Source Compatibility Reconciliation](specifications/layers/source-compatibility-reconciliation.md)と[Skill Projection](specifications/layers/skill-projection.md)。 |
-| Skill invocation snapshot (Issues #119/#157/#158) | **D083 decision-closed / frozen v1 READY / #119 nonregistered parser and #158 implementation/release gated** | [Skill Invocation Snapshot Interface](specifications/interfaces/skill-invocation-snapshot.md) が単一正本。凍結`POST /api/session-ingest/v1/events`は`skill.started | skill.completed`をsupported、`skill.invoked`をunsupportedとし、他のshape/enum/limit/status/error/response bytesは不変。D083はno-`model` outer/payload wire、exact status/media/405、immutable r0001 schema/registry、29-field equality receipt、sole canonical Event-content carrier、total classification/nullability、fresh success writers、CLI-only discovery rootsと独立Windows/Linux native gateを含む8群を確定した。tracked promotion後も、authorized #117/#119/#124/#156/#157/#158/#161 reconciliation/readbackが#119 dispatch gateであり、#119はその後もroute/writeなしのparser/handoffだけを実装可能とする。#158 codeはintegrated Session14 -> D081/D082 archive、Retention terminal/equality実装、#119 handoffの全join後に限り、host activation/releaseはfocused/platform/signed-in bundled-1.0.65 live/full-validation/reviewをさらに要求する。#154は唯一のclaim/current-authorization authority、sanitized export/importはnamespace/empty carrierを完全除外し、fallback/compatibility/dual pathなし。実装完了は未主張でIssue #152も未解決。 |
+| Skill invocation snapshot (Issues #119/#157/#158) | **D086 producer decision-closed / frozen v1 READY / #119 parser-handoff conditional / owned-session importer implementation and final evidence pending** | [Skill Invocation Snapshot Interface](specifications/interfaces/skill-invocation-snapshot.md) が単一正本。D083のwire/schema/receipt/store/read契約を維持し、D086はproducerをLocal Monitor所有raw-analysis execution Sessionの同期・非durableなowned-session post-completion buffer/importへ置換した。#119 parser/handoffはmandatory live-Issue reconciliation/readback後だけ実装可能。T0bがsame-client probe/execution topologyとexact tupleを証明してからだけr0002/producer実装へ進む。全retained inventory pathはprompt前、各invocation pathはinvoked時にnative opener/leaseで証明する。positive invocationだけがv2 callbacks -> one-event v1 SessionStart -> one-event v1 task-completeを書き、zero invocationはv2/v1 writeなしでgeneration publicationのみ可能。0..64 callbacks、aggregate 8,388,608 bytes、valid-prefix failure、zero roots `404`、roots/current generationなしexact `503 skill_current_file_discovery_unavailable`を確定済み。実装、Windows/Linux/live/full validation、独立review、release evidenceは未完了で、Issue #152も未解決。 |
 | Versioned pricing registry and estimator (Issue #94) | **完了（local candidate validated）** | functional `def9311659328c473566d54476b81dddafa6638d` と accepted #88/#89 test-integrity revisions を含む immutable candidate `7e688fecdeecd81013f3c9097719d45e412245f4` で、GitHub Copilot / Claude Code の明示 billing mode、exact model ID、session-effective timestamp、provenance 付き quantity を入力にする source-neutral domain を spec-first で実装した。missing / unknown は zero にせず `partial` / `not-estimable`、registry/override は append/supersede、recalculation は新規 immutable record とする。USD/minor-unit-2 registry v1、canonical `pricing.catalog-snapshot.v1` と estimate-bound SHA、strict snapshot/estimate consumer、producer/consumer 共通 byte/document 上限、4,096-unit lowercase-HTTPS source-reference safety、identity-bearing collection order/digest、exact raw golden、schema drift、dynamic exact-decimal rejectionを focused `162/162` で検証した。final build は 0 warning/error、full solution は `8,651/8,651`、0 failed/skipped。review hardening 前の `8556/8556` と初回の共有 #88 Playwright timeout は evidence に保持する。Codex App は v1 で subscription/contract unknown。#95 UI、budget alert、通知、currency conversion、invoice/enterprise 推測、#80 receipt/lifecycle、legacy dashboard calculator migration は含めない。Evidence: [Issue #94 sprint](sprints/issue-94-pricing-registry/README.md)。 |
 | Estimated-cost analytics and budget alerts (Issue #95) | **実装中（spec-first / P2 foundation fixed）** | P1 immutable candidate `07dc219c4f5c5ef56e7810a23c6466a52e90aa97` に completed #92 evidence と #94 evidence を統合した clean P2 foundation `245de89b0d016012a68e29ed00309c9cc768e81a` から開始した。#94 exact canonical bytes と durable configuration/commit/recalculation/estimate/head history を append-only とする `pricing` component v1 に保持し、最大32件・15分の transient preview receipt だけを expiry / successful consumption で owner-delete する。active-head-only analytics、session/day/period budget rule、同じ #80 engine/store の additive v2、#83 lifecycle-v1、#84 version-aware UI、#85 export-v1 coexistence、#88 backup/restore compatibilityを実装する。#80/#83/#84/#85/#88 は互換修正のため再オープン済み。current #61 mapping は genuine positive pricing authority を持たない外部 prerequisite として記録するが、direct live row `91-L-095` の最終分類は candidate-bound execution 後にだけ確定し、synthetic result を live pass にしない。最終 candidate/evidence SHA と検証結果は freeze 後に記録する。 |
 | User-controlled retention mutation (Issue #90) | **完了（local implementation / validation）** | Canonical contract に従い exact Session/item reads、preview/confirmation、atomic pin/unpin/delete-now、operation/history reads、Local Monitor UI、navigation-only Canvas handoff、Playwright を実装した。validated candidate `4d966472bdbe1ccc27f57c05f3afc268025ed37a` は build 0 warnings/errors、full solution 6,496/6,496（0 failed/skipped）で成功し、独立レビューも PASS。repository-safe evidence と #91/#88 handoff は [Issue #90 closeout](sprints/issue-90-retention-mutation/milestones/M1-integration-security-closeout/review.md) に記録した。push / PR / external Issue closure は未実施。 |
@@ -124,30 +124,25 @@
   as #95 materialize their own exact-SHA rows and handoff under that accepted
   contract; this is extension work, not unfinished #91 implementation.
 
-- **Issue #158 live Skill producer blockers:** the v2 ingest route and its stage
-  table, receipt/registry/commit orchestration, bridge, and loopback sender are
-  implemented and tested on this branch. The live producer half is not
-  implemented and is blocked by three distinct issues: the bundled runtime
-  self-reports `1.0.75`, while r0001 admits only `1.0.65` with
-  `ProtocolVersion` `3`, so certification cannot succeed on this machine; SDK
-  1.0.4 requires `BaseDirectory` or `SessionFs`, plus per-session
-  `AvailableTools`, for `CopilotClientMode.Empty`, and the specification names
-  neither; and SDK 1.0.4 offers no side-effect-free subscription to a session
-  another process owns: `session.On<T>` is scoped to one `CopilotSession`, and
-  while `CopilotClient.ResumeSessionAsync` exists it is not a read-only attach
-  -- it sends `session.resume` and re-applies session configuration such as
-  model, system message, tools, hooks, working directory, and skill
-  directories, and concurrent access to one session is outside the SDK's
-  stated guarantees. The Group 5 producer topology therefore cannot be
-  composed from SDK 1.0.4's public contract for a Copilot CLI or VS Code
-  session the Local Monitor does not own. A related record is corrected here:
-  `OnEvent` is available on `SessionConfig` through `SessionConfigBase`, so a
-  handler can be installed before session creation; that does not change the
-  blocker, because it still only observes the session it is attached to. The
-  last blocker needs a product decision on the owning
-  specification's Group 5 producer model. Consequently, the registered v2
-  `POST` returns its exact stage-1 `503 local_monitor_ui_unavailable` with zero
-  writes, which is the specified behavior when no generation is admitted.
+- **Issue #158 owned-session Skill producer (implementation/evidence pending):**
+  D086 resolves the former foreign-session blocker without claiming external
+  CLI/VS Code capture. Versioned T0b must first certify one signed-in bundled
+  client and the prompt-free inventory-probe -> distinct DisabledSkills-frozen
+  execution Session topology, including native retained-root-only inventory and
+  invocation. The probe retains only exact source-qualified custom raw-analysis
+  tools; the roots-configured execution Session adds exactly `builtin:skill` and
+  `builtin:task_complete`, with no wildcard, other built-in, MCP, plugin,
+  ambient discovery, or Skill-metadata widening. Production uses the ordinary
+  prompt in `AgentMode.Autopilot`; deterministic T0b alone invokes the exact
+  admitted retained command via `executionSession.Rpc.Commands.InvokeAsync` and
+  requires matching typed invocation then task completion. Only the owned
+  execution Session may feed the synchronous,
+  non-durable owned-session post-completion buffer/import. r0002, producer
+  implementation, Windows/Linux and signed-in live evidence, full validation,
+  independent review, and release remain pending. Until a roots-configured
+  generation publishes, the registered current-file path retains exact `503
+  skill_current_file_discovery_unavailable`; with zero roots the service/POST is absent and
+  the outer result is `404`.
 
 - **Issue #88 restore/backup consumer:** preserve the five
   `retention-restore-handoff/v1` tombstone, no-resurrection, retention-clock,

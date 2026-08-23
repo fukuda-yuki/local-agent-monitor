@@ -145,7 +145,7 @@ Frozen `POST /api/session-ingest/v1/events` supports `skill.started` and
 `skill.completed`; `skill.invoked` is unsupported and follows the existing
 unsupported-event behavior. This correction changes no other v1 route, wire,
 enum, limit, status mapping, error entity, success or Workspace response byte.
-D083 closes the remaining product decisions in
+D083 closes the wire/store/read product decisions in
 [Skill Invocation Snapshot](interfaces/skill-invocation-snapshot.md), but does
 not claim implementation or release. The nonregistered #119 parser/handoff
 follows mandatory live-Issue reconciliation. #158 runtime work waits for the
@@ -165,6 +165,30 @@ The receiver-only/`--sanitized-only` host composes or registers none of that
 producer, bridge, #119 sink, #158 writer/service or route set. The paths are
 absent/nonmatching rather than delegated to a frozen-v1 handler or mapped to a
 metadata/service-unavailable fallback.
+
+D086 supersedes only the producer topology. External CLI/VS Code sessions are
+never enumerated, resumed, attached to, or read for history. Only a Local
+Monitor-owned completed raw-analysis session may supply the synchronous,
+non-durable owned-session post-completion buffer/import. Explicit
+`--skill-discovery-directory` roots are the sole Skill provenance. A prompt-
+free probe Session freezes non-retained names into a separate execution
+Session's `DisabledSkills`; collision, missing/unverifiable path, drift,
+disable failure, or enabled non-retained inventory is rejected before prompt.
+The probe retains only the existing exact source-qualified custom raw-analysis
+tool entries. With retained roots, the execution Session exposes exactly those
+entries plus `builtin:skill` and `builtin:task_complete`. Wildcards, all other
+built-ins, MCP tools, plugins, and ambient instruction/config discovery remain
+unavailable, and a retained Skill's `allowed-tools` metadata cannot widen that
+exact allowlist. Production sends only the ordinary requested prompt with
+`AgentMode.Autopilot`; deterministic T0b alone resolves and invokes the exact
+admitted retained command through `executionSession.Rpc.Commands.InvokeAsync`.
+Every retained inventory path requires native opener/lease proof before prompt,
+and every later invocation path is re-proved when invoked. Zero roots leaves the current-file service/POST absent (outer
+`404`); configured roots without a successfully published current generation
+retain exact `503 skill_current_file_discovery_unavailable` after the earlier
+current-file gates. No buffered body, callback
+object, token, path, runtime generation, or importer state is persisted,
+logged, measured, backed up, or included in sanitized evidence.
 Once activated, raw-default keeps v2 registered through an absent/mismatched
 runtime generation and fails it at stage 1 with exact
 `503 local_monitor_ui_unavailable` before body read. Metadata and historical

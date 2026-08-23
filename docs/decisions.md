@@ -3894,6 +3894,107 @@ inferred join, second Skill/#154/Retention authority, raw-content logging,
 repository-safe raw carrier, #152 resolution, or claim that any engineering or
 release gate is complete.
 
+## D086: Skill snapshots use only Local Monitor-owned completed analysis sessions
+
+Status: Accepted (2026-08-23)
+
+Issue #158 supersedes only D083 Group 5's producer/topology clauses and the
+raw-analysis rule that disabled every Skill. D083 remains authoritative for the
+wire, parser/handoff, schema, receipt, persistence, classification, raw owner,
+read routes, native current-file proof, Retention, and security contracts.
+
+External GitHub Copilot CLI and VS Code sessions remain unavailable and
+unobserved. The product does not enumerate, resume, attach to, or read history
+from a foreign session. `ResumeSessionAsync` mutates session configuration and
+does not prove exclusive ownership or the resumed runtime identity. The sole
+producer is a raw-default Local Monitor raw-analysis session created and
+exclusively owned through completion by one admitted `CopilotClient`.
+
+Before r0002 or producer startup code, versioned gate T0b must prove on that
+same signed-in bundled client: exact status Version and integer
+ProtocolVersion, matching `SessionStartData.CopilotVersion`, callback
+registration before both session creations, prompt-free probe inventory,
+execution `DisabledSkills`, retained-root-only execution inventory/invocation,
+and exact task completion. Deterministic T0b alone resolves the exact admitted
+enabled/user-invocable retained-skill command through the SDK commands API,
+invokes it with `executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-
+producing result, sends that exact returned prompt with `AgentMode.Autopilot`,
+and proves an exact matching typed retained `SkillInvoked` followed by an exact
+typed task-complete event. T0b is expected to certify exact CLI
+versions `1.0.65` and `1.0.75`, SDK package/assembly `1.0.4/1.0.4.0`, protocol
+`3`, adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v1`; immutable contiguous r0002 may
+admit only complete exact tuples actually proved. Failure stops r0002, startup
+code, integration, and release. r0001 remains byte-identical historical
+authority and is not an admission fallback.
+
+An admitted analysis creates one current-file-invisible candidate containing
+the exact client, certified identity, and retained directory scope. With
+explicit `--skill-discovery-directory` roots, it enables Skills, disables
+configuration discovery, skips custom instructions, supplies no plugin or
+instruction directories, and uses only exact retained Skill directories.
+Those roots are the sole allowed Skill provenance. On the same certified client
+it first creates and disposes a prompt-free inventory-probe Session whose
+callback is registered before creation. The probe retains only the existing
+exact source-qualified custom raw-analysis tool entries and does not require
+either admitted built-in. It rejects collisions and missing or
+unverifiable paths, then freezes every non-retained Skill name into
+`SessionConfig.DisabledSkills` for a distinct owned execution Session, also
+with its callback registered before creation. Before any prompt, execution
+inventory must show no enabled non-retained Skill and no inventory drift or
+inability to disable. Before prompt, every retained inventory path is proved
+with the existing native retained-root opener and lease; each later invocation
+path is re-proved when invoked, never trusted from SDK path strings. Only the
+execution Session produces callbacks/import. With retained roots it preserves
+the exact custom entries and adds exactly `builtin:skill` and
+`builtin:task_complete`. Wildcards, every other built-in, MCP tools, plugins,
+ambient instruction/config discovery, and widening by a retained Skill's
+`allowed-tools` metadata remain forbidden. Production sends the ordinary
+requested prompt with `AgentMode.Autopilot`, never forces an arbitrary retained
+Skill invocation, and uses the exact typed task-complete event as terminal.
+With zero roots, analysis runs with Skills disabled, retains no generation, and
+the current-file service/POST remains absent (outer `404`).
+
+The candidate registers its callback before session creation and, under one
+lock, accepts exactly one matching SessionStart, zero through 64 SkillInvoked
+callbacks in assigned ordinal order, then exact same-session task completion.
+Each callback prepares one complete one-event v2 UTF-8 body from the immutable
+candidate identity. The process-memory-only aggregate is capped at 8,388,608
+complete body bytes. Any malformed, out-of-order, mismatched, 65th, oversized,
+post-terminal, cancellation, root, identity, or lease failure poisons it.
+
+Before exact completion there is no HTTP send or persistence. The
+**owned-session post-completion buffer/import** is synchronous and non-durable:
+zero invocations perform no v2 or v1 writes. For one or more invocations, after
+completion it sends prepared v2 bodies sequentially with same-candidate
+capabilities and fresh body-bound tokens, without reserialization or retry;
+then it awaits one-event v1 SessionStart and one-event v1 task-complete writes.
+Any failure stops immediately, releases capabilities exactly once, fails the
+analysis, disposes the failed candidate, preserves only the valid already-
+committed prefix, and leaves the preceding current generation in place. There
+is no durable queue or importer receipt, startup recovery, or automatic retry.
+
+Only after all required imports succeed and the SDK session is disposed may
+the exact candidate publish atomically as current; publication order, not
+analysis start order, defines the latest successful generation. Zero Skill
+invocations write no snapshot, receipt, or Session events, but with configured
+roots a successful completed analysis may still publish its generation for
+current-file discovery. With roots but no published generation, the existing
+current-file route returns exact `503 skill_current_file_discovery_unavailable` after its
+earlier gates. Replacement, failure, refusal, lease loss, and shutdown reject
+new capabilities, cancel unsealed work, drain capabilities, dispose the client,
+then dispose the retained directory scope, exactly once.
+
+D086 adds no option, wire/schema/receipt/storage shape, #154 authority,
+foreign producer, direct writer, fallback, compatibility path, backfill,
+durable importer state, or external CLI/VS Code capture. Implementation,
+platform/live evidence, full validation, independent review, and release remain
+pending.
+
+The current canonical decision order is D079 -> D080 -> D081 -> D082 -> D083
+-> D085 -> D086. D086 is placed adjacent to the D083 text it narrowly
+supersedes; this placement does not reorder D085's Retention lock authority.
+
 ## D085: Exact admitted lease tuple is the Retention publication-lock order
 
 Status: Accepted (2026-08-15)

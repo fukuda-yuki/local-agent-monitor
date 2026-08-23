@@ -1280,10 +1280,27 @@ directory and not a cleanup target. For each analysis run, the catalog must,
 before any filesystem or SDK operation, reserve one opaque generated child
 directly below that exact canonical parent. The child is the only directory
 passed to the SDK: both the SDK base directory and runtime working directory
-are that child. The SDK client uses empty mode and each Session allows only the
-exact source-qualified run-scoped custom tool declarations; wildcard custom,
-ambient built-in, MCP, plugin, instruction, and environment capabilities are
-not enabled. The Session working directory and large-tool-output spill
+are that child. The SDK client uses empty mode. The prompt-free inventory-probe
+Session allows only the existing exact source-qualified run-scoped custom raw-
+analysis tool declarations. With explicitly retained
+`--skill-discovery-directory` roots, the distinct execution Session preserves
+those exact declarations and adds exactly `builtin:skill` and
+`builtin:task_complete`. Skills then freeze non-retained names in the
+distinct execution Session's `DisabledSkills`; the execution inventory rejects
+enabled non-retained Skills, drift, disable failure, unverifiable paths, or
+collisions before prompt send. Every retained inventory path passes native
+retained-root opener/lease proof before prompt, and every later invocation path
+is re-proved when invoked;
+configuration discovery and custom instructions remain disabled and no plugin
+or instruction directory is supplied. A retained Skill's `allowed-tools`
+metadata cannot widen the exact allowlist. With no roots, Skills remain
+disabled. Wildcard custom, every other built-in, MCP, plugin, ambient
+instruction/config discovery, and environment capabilities are not enabled.
+Production sends the ordinary requested prompt with `AgentMode.Autopilot` and
+does not force a retained Skill invocation; deterministic T0b alone resolves
+and invokes the exact admitted retained command through
+`executionSession.Rpc.Commands.InvokeAsync` and sends its exact prompt-producing
+result with `AgentMode.Autopilot`. The Session working directory and large-tool-output spill
 directory are the same child, and every unexpected permission request is denied
 without user interaction. Its
 `analysis_sdk_directory` item uses the exact persisted owning

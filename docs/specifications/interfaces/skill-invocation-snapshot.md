@@ -1,14 +1,15 @@
 # Skill Invocation Snapshot Interface
 
-Status: **D083 decision-closed; #119 nonregistered foundation ready after the mandatory live-Issue readback; #158 implementation and release gated**
+Status: **D086 producer decision-closed; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation and release evidence pending**
 
 This specification is the detailed authority for Issues #119, #157, and #158.
 It defines the frozen Session-ingest v1 correction, the exact Skill-only v2
 transport and runtime-capability boundary, the `skill_invocation_snapshot:1`
 component, historical content reads, and explicit bounded current-file reads.
 
-D083 resolves all eight remaining Product Owner choices. No product contract
-is left for an implementation to infer. Canonical promotion does not itself
+D083 resolves the eight wire/store/read choices. D086 supersedes only its
+Group 5 producer/topology clauses and the affected raw-analysis no-Skill rule.
+No product contract is left for an implementation to infer. Canonical promotion does not itself
 prove the prerequisite implementations, platform walkers, signed-in live
 runtime, focused/full validation, or independent review required below.
 
@@ -708,7 +709,94 @@ The closed accepted set preserves that graph; persisted selected ID and exact
 
 ## Group 5 — bundled CLI, application, SDK, and adapter identity
 
-### Current contract
+### D086 current producer contract
+
+The only producer is a raw-default Local Monitor raw-analysis session created,
+run, completed, and disposed by one exclusively owned `CopilotClient`. External
+Copilot CLI/VS Code sessions remain unavailable and unobserved. Do not list,
+resume, attach to, or read history from foreign sessions; in particular,
+`ResumeSessionAsync` is configuration-mutating and cannot certify ownership or
+the resumed runtime identity.
+
+Versioned T0b precedes r0002 and all producer startup code. On one same signed-
+in bundled client it proves exact Version/ProtocolVersion status, matching
+SessionStart version, pre-creation callback registration on both sessions,
+prompt-free probe inventory, execution `DisabledSkills`, retained-root-only
+execution inventory/invocation, and exact task completion. Deterministic T0b
+alone resolves the exact admitted enabled/user-invocable retained-skill command
+through the SDK commands API, invokes it with
+`executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-producing result,
+sends that exact returned prompt with `AgentMode.Autopilot`, and observes an
+exact matching typed retained `SkillInvoked` followed by an exact typed task-
+complete event. The candidate tuples are CLI
+`1.0.65` and `1.0.75`, SDK/package `1.0.4/1.0.4.0`, protocol `3`, adapter
+`copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v1`; r0002 admits only complete
+exact tuples T0b actually certifies. Failure leaves r0001 unchanged and stops
+r0002, startup implementation, integration, and release. r0001 is historical
+authority, never a fallback.
+
+One admitted analysis candidate freezes the certified identity and owns the
+exact client plus retained directory scope while remaining invisible to
+current-file readers. With explicit `--skill-discovery-directory` roots it sets
+`EnableSkills=true`, `EnableConfigDiscovery=false`, and
+`SkipCustomInstructions=true`, supplies no plugin/instruction directories, and
+uses exact retained Skill directories. These explicit roots are the sole Skill
+provenance. The same certified client first creates and disposes a prompt-free
+inventory-probe Session with `OnEvent` registered before creation. That probe
+retains only the existing exact source-qualified custom raw-analysis tool
+entries and does not require `builtin:skill` or `builtin:task_complete`. It
+rejects
+name collisions and missing/unverifiable paths, then freezes all non-retained
+Skill names into `SessionConfig.DisabledSkills` for a distinct owned execution
+Session, whose `OnEvent` is also registered before creation. Before any prompt,
+execution inventory must contain no enabled non-retained Skill and no drift or
+inability to disable. Before prompt, every retained inventory path passes the
+existing native retained-root opener and lease proof; each later invocation
+path is re-proved when invoked, not trusted from SDK strings. Only
+the execution Session can produce callbacks/import. With retained roots, its
+tool allowlist is exactly the same source-qualified custom raw-analysis entries
+plus `builtin:skill` and `builtin:task_complete`. Wildcards, every other built-in,
+MCP tools, plugins, and ambient instruction/config discovery remain unavailable;
+a retained Skill's `allowed-tools` metadata cannot widen the exact allowlist.
+Production sends the ordinary requested prompt with `AgentMode.Autopilot`, does
+not force an arbitrary retained Skill invocation, and treats only the exact
+typed task-complete event as terminal. With no roots, Skills are disabled, no generation is retained, and
+the current-file service/POST is absent (outer `404`).
+
+The callback installed before session creation accepts under one lock exactly
+one matching SessionStart, 0..64 SkillInvoked callbacks with assigned ordinals,
+then exact same-session task completion. Callback time prepares each complete
+one-event v2 UTF-8 body from the frozen identity and retains only those opaque
+bytes. The aggregate cap is exactly 8,388,608 complete body bytes. Any malformed,
+out-of-order, mismatched, 65th, oversized, post-terminal, cancellation, root,
+identity, or lease failure poisons the candidate.
+
+Before completion it sends and persists nothing. The **owned-session
+post-completion buffer/import** is synchronous, process-memory-only, and non-
+durable. Zero invocations perform no v2 or v1 writes. With one or more
+invocations, after completion it sequentially obtains same-candidate
+capabilities and fresh body-bound tokens and sends exact prepared v2 bytes
+without reserialization or retry. Only after all v2 events succeed does it
+enqueue and await one-event v1 SessionStart followed by one-event v1 task-complete. A
+failure stops at once, preserves only the valid committed prefix, releases each
+capability exactly once, fails the analysis, destroys the failed candidate, and
+keeps the prior current generation. There is no durable queue or importer
+receipt, startup recovery, or automatic retry.
+
+After complete import and SDK session disposal, the exact candidate atomically
+becomes current; publication order defines the latest successful generation.
+Zero invocations write no snapshot, receipt, or Session events, while a
+successful roots-configured analysis may publish a current-file generation.
+Roots with no published generation retain the existing exact `503
+skill_current_file_discovery_unavailable` result after earlier gates. Replacement, failure,
+refusal, lease loss, and shutdown reject new capabilities, cancel unsealed work,
+drain capabilities, dispose client, then dispose retained scope, exactly once.
+
+### D083 r0001 historical producer contract (superseded by D086)
+
+The following text records the frozen r0001 topology and artifact identity. It
+does not authorize the current producer or release policy.
 
 The only r0001 producer composition is:
 
@@ -1206,7 +1294,7 @@ events
 | `source_adapter` | string `copilot-sdk-stream` |
 | `source_surface` | string `copilot-sdk` |
 | `native_session_id` | exact `CopilotSession.sessionId`; 1..256 Unicode scalars, no U+0000, at most 1,024 strict UTF-8 bytes |
-| `source_application_version` | string `1.0.65` obtained from the same-client runtime rule in Group 5 |
+| `source_application_version` | exact Version from the same-client certified tuple (r0001 historical `1.0.65`; current r0002 exact admitted tuple) |
 | `adapter_version` | string `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` |
 | `normalization_version` | string `github-copilot-sdk.skill-invoked.normalize.v1` |
 | `payload_schema` | string `github-copilot-sdk.skill-invoked.v1` |
@@ -2643,7 +2731,7 @@ mutation. Until that separate promotion, no such exception exists.
    native work. Retention completion-without-raw sends it, while lost/busy
    aborts with no response; both release every acquired capability and neither
    fabricates a runtime seal. Also prove zero roots still means
-   current-file route absence and no runtime mismatch relabels 1.0.65 or hides
+   current-file route absence and no runtime mismatch relabels an admitted exact version or hides
    stored evidence. Runtime-generation REDs publish mismatch/reconnect before
    callback admission, after bridge registration/before loopback send, during
    send/before route consume, after consume/before #119 parse/handoff, at each
@@ -2876,11 +2964,13 @@ mutation. Until that separate promotion, no such exception exists.
    disposal/no-retention matrix. Windows and
    Linux gates may release independently; unsupported targets prove route
    absence while historical routes remain byte-identical.
-10. Live gate: same bundled, signed-in runtime reports exact Version `1.0.65`
-    and integer ProtocolVersion 3; one
-   synthetic non-sensitive nine-property `skill.invoked` observation and one
-   discovery are mapped through SDK 1.0.4, committed/replayed, and read without
-   retaining raw user data/path evidence. Global CLI 1.0.75 is not used.
+10. Versioned T0b and final live gates: the same bundled, signed-in client must
+    prove each exact r0002 tuple it admits (`1.0.65` and `1.0.75`, protocol 3),
+    matching SessionStart identity, prompt-free inventory probe, distinct
+    DisabledSkills-frozen execution Session, retained-root-only inventory and
+    invocation, exact completion, owned-session post-completion import, and one
+    discovery without retaining raw user data/path evidence. An unproved tuple
+    is not admitted; no global or externally selected CLI is used.
 11. Update and review the derived public workflow only with the implemented
     flags; run Markdown/link checks plus an exact stale search proving no #158
    workflow still names an obsolete dotted discovery configuration-key alias,
@@ -2902,7 +2992,7 @@ does not yet exist: a clean tracked spec commit; the ordered integrated
 direct archive facts -> #161 `local_archive:1` implementation/backup/restore
 evidence; the separate Retention implementation/test result; the nonregistered
 #119 parser/handoff result; actual Windows/Linux native walker matrices; a
-signed-in bundled-1.0.65 live observation; full repository validation; and code
+signed-in bundled exact-tuple T0b/final live observation; full repository validation; and code
 review. Those are release gates, not open Product Owner choices. If any gate
 disproves the pinned contract, stop and return for a new versioned decision; do
 not add fallback, compatibility, or backfill.
