@@ -16,6 +16,19 @@ try {
  $result=Join-Path $temp ('cao-issue158-result-'+$runId)
  $resultFile='result.json'
  $runtimeMarker='issue158-'+[Guid]::NewGuid().ToString('N')
+ $hadRunId=$processEnvironment.Contains('CAO_ISSUE158_RUN_ID');$priorRunId=if($hadRunId){[string]$processEnvironment['CAO_ISSUE158_RUN_ID']}else{$null}
+ $hadRuntimeMarker=$processEnvironment.Contains('CAO_ISSUE158_RUNTIME_MARKER');$priorRuntimeMarker=if($hadRuntimeMarker){[string]$processEnvironment['CAO_ISSUE158_RUNTIME_MARKER']}else{$null}
+ $identityEnvironmentBound=$false
+ function Restore-IdentityEnvironment {
+  if(-not$identityEnvironmentBound){return}
+  [Environment]::SetEnvironmentVariable('CAO_ISSUE158_RUN_ID',$(if($hadRunId){$priorRunId}else{$null}),'Process')
+  [Environment]::SetEnvironmentVariable('CAO_ISSUE158_RUNTIME_MARKER',$(if($hadRuntimeMarker){$priorRuntimeMarker}else{$null}),'Process')
+  $script:identityEnvironmentBound=$false
+ }
+ if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){Block 'path_collision'}
+ [Environment]::SetEnvironmentVariable('CAO_ISSUE158_RUN_ID',$runId,'Process')
+ [Environment]::SetEnvironmentVariable('CAO_ISSUE158_RUNTIME_MARKER',$runtimeMarker,'Process')
+ $identityEnvironmentBound=$true
  $runtimeCreated=$false;$resultCreated=$false;$runtimeOwned=$false;$resultOwned=$false
  function Remove-Owned([string]$Path,[string]$Kind,[bool]$RuntimeMayBeAbsent=$false){
   $lexical=Get-Issue158LexicalPath $Path;$physical=Get-Issue158PhysicalPath $Path
@@ -37,7 +50,6 @@ try {
   Remove-Item -LiteralPath $physical -Force
   if(Test-Path -LiteralPath $physical){throw 'cleanup'}
  }
- if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){Block 'path_collision'}
  [void](New-Item -ItemType Directory -Path $runtime)
  $runtimeCreated=$true
  [void](New-Item -ItemType Directory -Path $result)
@@ -73,11 +85,13 @@ try {
  $finalText=$retained|ConvertTo-Json -Compress -Depth 8
  $finalBytes=[Text.UTF8Encoding]::new($false).GetBytes($finalText)
  [void](Get-Issue158ValidatedResult $finalBytes $CandidateSha windows_owned_session $runtimeMarker $true)
+ Restore-IdentityEnvironment
  Write-Output $finalText
  exit 0
 } catch {
  try{if($null-ne(Get-Variable runtimeCreated -ErrorAction SilentlyContinue)-and$runtimeCreated-and(Test-Path -LiteralPath $runtime)){if($runtimeOwned){Remove-Owned $runtime runtime}else{Remove-Partial $runtime runtime}}}catch{}
  try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{}
+ try{if($null-ne(Get-Command Restore-IdentityEnvironment -ErrorAction SilentlyContinue)){Restore-IdentityEnvironment}}catch{}
  Write-Output 'windows_result=BLOCKED check=internal'
  exit 1
 }
