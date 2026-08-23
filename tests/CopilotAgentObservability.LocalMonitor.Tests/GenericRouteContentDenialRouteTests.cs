@@ -54,12 +54,65 @@ public sealed class GenericRouteContentDenialRouteTests
     }
 
     [Fact]
+    public async Task ANonSkillEventReturnsItsExactFrozen200Bytes()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(WriteAt);
+        temp.TimeProvider = clock;
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
+        var identity = GenericRouteContentDenialTests.InsertNonSkillEvent(
+            temp.DatabasePath, "native-route-allowed");
+
+        using var response = await host.Client.GetAsync(
+            $"/sessions/{identity.SessionId:D}/events/{identity.EventId:D}/content");
+
+        await AssertExactEntityAsync(
+            response,
+            HttpStatusCode.OK,
+            $$"""{"event_id":"{{identity.EventId:D}}","content_kind":"user_prompt","content":"{\u0022message\u0022:\u0022synthetic\u0022}","captured_at":"2026-01-01T00:00:00+00:00","expires_at":"2026-04-01T00:00:00+00:00"}""");
+    }
+
+    // The store hands the route a lost grant when the expiry notification comes due while the
+    // committed handle is still hidden, and the route's frozen v1 410 bytes must be exact there too.
+    [Fact]
+    public async Task AnExpiryNotificationDueWhileTheHandleIsHiddenReturnsTheExact410()
+    {
+        using var temp = new MonitorTempDirectory();
+        var clock = new GenericRouteContentClock(WriteAt);
+        temp.TimeProvider = clock;
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
+        var identity = GenericRouteContentDenialTests.InsertNonSkillEvent(
+            temp.DatabasePath, "native-route-hidden-handle");
+        clock.FireOnceWhenTheLeaseExpiryNotificationArms();
+
+        using var response = await host.Client.GetAsync(
+            $"/sessions/{identity.SessionId:D}/events/{identity.EventId:D}/content");
+
+        await AssertExactEntityAsync(
+            response,
+            HttpStatusCode.Gone,
+            """{"error":"raw_content_expired","content_state":"expired_pending_deletion"}""");
+    }
+
+    [Fact]
     public void TheThreeOwnedEntitiesHaveTheirExactByteLengths()
     {
         Assert.Equal(43, "{\"error\":\"session_event_content_not_found\"}"u8.Length);
         Assert.Equal(30, "{\"error\":\"session_store_busy\"}"u8.Length);
         Assert.Equal(37, "{\"error\":\"session_store_unavailable\"}"u8.Length);
     }
+
+    // The deterministic clock cannot advance a background worker, and a worker's own timer must not
+    // be mistaken for the access lease's arming, so none of them run for these two cases.
+    private static MonitorHostTestOptions QuietHost() => new()
+    {
+        StartWriter = false,
+        StartProjectionWorker = false,
+        StartSessionWriter = false,
+        StartSessionOtelEnrichment = false,
+        StartLocalRepositoryCatalogHostedService = false,
+        UseUserSecrets = false,
+    };
 
     private static async Task AssertExactEntityAsync(
         HttpResponseMessage response,

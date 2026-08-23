@@ -69,7 +69,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task ThePolicyCheckAndTheContentSelectionShareOneImmediateTransaction()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-one-transaction");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-one-transaction");
 
         var statements = new List<string>();
         var store = database.CreateStore(statements.Add);
@@ -102,7 +102,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task ANonSkillEventStillGrantsItsFrozenContent()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-allowed");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-allowed");
 
         var result = await database.CreateStore().ReadGenericRouteContentAsync(
             identity.SessionId, identity.EventId, CancellationToken.None);
@@ -122,7 +122,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task AMalformedStorageIsTheSanitizedUnavailableResult()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-malformed");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-malformed");
         database.Execute("ALTER TABLE session_events RENAME TO session_events_moved;");
 
         var result = await database.CreateStore().ReadGenericRouteContentAsync(
@@ -136,7 +136,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task ATypeChangeCommittedBeforeThePolicyReadDeniesTheRequest()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-preexisting-change");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-preexisting-change");
         database.Execute(
             $"UPDATE session_events SET type='skill.invoked' WHERE event_id='{identity.EventId:D}';");
 
@@ -155,7 +155,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task ATypeChangeAttemptedInsideTheTransactionCannotCommit(string observedStatement)
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-racing-change");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-racing-change");
 
         var policyObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var mutationAttempted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -222,7 +222,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task AMissingContentRowIsDeniedBeforeAnyLeaseIsInserted()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-missing-content");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-missing-content");
         var leasesBefore = database.Count("retention_leases");
 
         // The Event still reports readable content, but the content row is gone, so the Retention
@@ -241,7 +241,7 @@ public sealed class GenericRouteContentDenialTests
     public async Task ASelectorFailureAfterTheLeaseRollsTheUncommittedLeaseBack()
     {
         using var database = new TestDatabase();
-        var identity = InsertNonSkillEvent(database, "native-selector-failure");
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-selector-failure");
         var leasesBefore = database.Count("retention_leases");
 
         var catalog = new RetentionCatalogStore(database.RetentionContext, new FixedTimeProvider(WriteAt));
@@ -267,6 +267,156 @@ public sealed class GenericRouteContentDenialTests
         Assert.Null(result.Lease);
         Assert.Equal(leasesBefore, database.Count("retention_leases"));
     }
+
+    // The terminal proof re-reads the clock, so the buffered non-Skill 200 is authorized by the
+    // exact expiry tick rather than by the moment the lease was granted.
+    [Theory]
+    [InlineData(-1, (int)SessionContentTerminalResult.Sealed)]
+    [InlineData(0, (int)SessionContentTerminalResult.Lost)]
+    [InlineData(1, (int)SessionContentTerminalResult.Lost)]
+    public async Task TheBufferedSealIsDecidedAtTheExactLeaseExpiryTick(int expiryTickOffset, int expected)
+    {
+        using var database = new TestDatabase();
+        var identity = InsertNonSkillEvent(database.DatabasePath, $"native-seal-tick{expiryTickOffset}");
+        var clock = new GenericRouteContentClock(WriteAt);
+
+        var result = await database.CreateStore(clock).ReadGenericRouteContentAsync(
+            identity.SessionId, identity.EventId, CancellationToken.None);
+
+        Assert.Equal(SessionGenericRouteContentDisposition.Granted, result.Disposition);
+        await using (result.Lease!.ConfigureAwait(false))
+        {
+            using (var reference = result.Lease.AcquireContentReference())
+            {
+                Assert.Equal(NonSkillContentJson, reference.Content.ContentJson);
+            }
+
+            clock.UtcNow = LeaseExpiryTick(expiryTickOffset);
+            Assert.Equal((SessionContentTerminalResult)expected, result.Lease.TrySealRawResponse());
+        }
+    }
+
+    // A due expiry notification is the only authority that retires a still-published grant before
+    // the terminal proof runs, so its boundary is pinned by the one observable it alone changes:
+    // whether the buffered content is still acquirable once the notification has run.
+    [Theory]
+    [InlineData(-1, true)]
+    [InlineData(0, false)]
+    public async Task AnExpiryNotificationRetiresThePublishedGrantOnlyFromItsExactExpiryTick(
+        int expiryTickOffset,
+        bool remainsUsable)
+    {
+        using var database = new TestDatabase();
+        var identity = InsertNonSkillEvent(database.DatabasePath, $"native-notify-tick{expiryTickOffset}");
+        var clock = new GenericRouteContentClock(WriteAt);
+
+        var result = await database.CreateStore(clock).ReadGenericRouteContentAsync(
+            identity.SessionId, identity.EventId, CancellationToken.None);
+
+        Assert.Equal(SessionGenericRouteContentDisposition.Granted, result.Disposition);
+        await using (result.Lease!.ConfigureAwait(false))
+        {
+            clock.UtcNow = LeaseExpiryTick(expiryTickOffset);
+            clock.FireLeaseExpiryNotification();
+
+            if (!remainsUsable)
+            {
+                Assert.Throws<InvalidOperationException>(() => result.Lease.AcquireContentReference());
+                Assert.Equal(SessionContentTerminalResult.Lost, result.Lease.TrySealRawResponse());
+                return;
+            }
+
+            using (var reference = result.Lease.AcquireContentReference())
+            {
+                Assert.Equal(NonSkillContentJson, reference.Content.ContentJson);
+            }
+
+            Assert.Equal(SessionContentTerminalResult.Sealed, result.Lease.TrySealRawResponse());
+        }
+    }
+
+    [Fact]
+    public async Task AnExpiryNotificationDueWhileTheHandleIsHiddenNeverPublishesTheGrant()
+    {
+        using var database = new TestDatabase();
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-hidden-handle");
+        var clock = new GenericRouteContentClock(WriteAt);
+        clock.FireOnceWhenTheLeaseExpiryNotificationArms();
+
+        var result = await database.CreateStore(clock).ReadGenericRouteContentAsync(
+            identity.SessionId, identity.EventId, CancellationToken.None);
+
+        Assert.Equal(SessionGenericRouteContentDisposition.Denied, result.Disposition);
+        Assert.Null(result.Lease);
+    }
+
+    // The item's own lease expiry can cross while the caller's transaction is still open, either
+    // before the content selection or at the commit. Neither window may publish the grant: the
+    // committed handle has to fail its publication proof instead of handing the caller content it
+    // no longer holds a live lease for.
+    [Theory]
+    [InlineData("SELECT c.event_id,c.content_kind,c.content_json")]
+    [InlineData("COMMIT")]
+    public async Task ALeaseExpiryCrossedInsideTheTransactionNeverPublishesTheGrant(string injectedStatement)
+    {
+        using var database = new TestDatabase();
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-expiry-in-transaction");
+        var clock = new GenericRouteContentClock(WriteAt);
+        var crossed = false;
+
+        var store = database.CreateStore(clock, statement =>
+        {
+            if (crossed || !statement.Contains(injectedStatement, StringComparison.Ordinal)) return;
+            crossed = true;
+            clock.UtcNow = LeaseExpiryTick(0);
+        });
+
+        var result = await store.ReadGenericRouteContentAsync(
+            identity.SessionId, identity.EventId, CancellationToken.None);
+
+        Assert.True(crossed, "the injected expiry window was never entered");
+        Assert.Equal(SessionGenericRouteContentDisposition.Denied, result.Disposition);
+        Assert.Null(result.Lease);
+    }
+
+    // The value-publication proof is the last fence before the internal pre-publication buffer would
+    // become caller-accessible. The clock crosses the lease expiry after the selector has already
+    // produced the value and after the pre-consumption re-proof has passed, so only this fence can
+    // still refuse it.
+    [Fact]
+    public async Task ALeaseExpiryCrossedAtValuePublicationNeverHandsOverTheBufferedContent()
+    {
+        using var database = new TestDatabase();
+        var identity = InsertNonSkillEvent(database.DatabasePath, "native-expiry-value-publication");
+        var clock = new GenericRouteContentClock(WriteAt);
+        var catalog = new RetentionCatalogStore(
+            database.RetentionContext,
+            clock,
+            new ExpiryCrossingBoundaryCheckpoint(
+                clock, RetentionReadBoundaryCheckpoint.AfterValueSelector, LeaseExpiryTick(0)));
+
+        var request = new RetentionReadRequest(
+            new(database.RetentionContext.StoreInstanceId, RetentionStoreKind.SessionEventContent, identity.EventId.ToString("D")),
+            RetentionReadKind.Access,
+            WriteAt,
+            ExpectedRevision: null);
+
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        var result = await catalog.ReadWithinCallerTransactionAsync(
+            connection,
+            transaction,
+            request,
+            (_, _, _, _) => ValueTask.FromResult<string?>(NonSkillContentJson),
+            CancellationToken.None);
+
+        Assert.Equal(RetentionReadDisposition.LeaseLost, result.Disposition);
+        Assert.Null(result.Lease);
+    }
+
+    private static DateTimeOffset LeaseExpiryTick(int offset) =>
+        WriteAt + RetentionV1Constants.LeaseDuration + TimeSpan.FromTicks(offset);
 
     private const string NonSkillContentJson = """{"message":"synthetic"}""";
 
@@ -316,7 +466,7 @@ public sealed class GenericRouteContentDenialTests
     // directly rather than by mutating a Skill write, because the Session 14 child trigger makes a
     // session_events row immutable while a snapshot references it -- which is exactly why no
     // supported path can turn an existing non-Skill Event into a Skill one.
-    private static (Guid SessionId, Guid EventId) InsertNonSkillEvent(TestDatabase database, string nativeSessionId)
+    internal static (Guid SessionId, Guid EventId) InsertNonSkillEvent(string databasePath, string nativeSessionId)
     {
         var sessionId = Guid.CreateVersion7();
         var eventId = Guid.CreateVersion7();
@@ -326,7 +476,7 @@ public sealed class GenericRouteContentDenialTests
         var ownerToken = new byte[32];
         Random.Shared.NextBytes(ownerToken);
 
-        using var connection = database.Open();
+        using var connection = Open(databasePath);
         using var transaction = connection.BeginTransaction();
 
         Execute(connection, transaction,
@@ -376,7 +526,7 @@ public sealed class GenericRouteContentDenialTests
             ("$expires_at", expiresAt),
             ("$owner_token", ownerToken));
 
-        new RetentionCatalogStore(database.DatabasePath, new FixedTimeProvider(WriteAt))
+        new RetentionCatalogStore(databasePath, new FixedTimeProvider(WriteAt))
             .RegisterSessionEventContent(
                 connection,
                 transaction,
@@ -392,6 +542,20 @@ public sealed class GenericRouteContentDenialTests
 
         transaction.Commit();
         return (sessionId, eventId);
+    }
+
+    private static SqliteConnection Open(string databasePath)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA foreign_keys=ON;";
+        pragma.ExecuteNonQuery();
+        return connection;
     }
 
     private static void Execute(
@@ -471,19 +635,13 @@ public sealed class GenericRouteContentDenialTests
                     _ => { },
                     statementObserver);
 
-        internal SqliteConnection Open()
-        {
-            var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-            {
-                DataSource = DatabasePath,
-                Pooling = false,
-            }.ToString());
-            connection.Open();
-            using var pragma = connection.CreateCommand();
-            pragma.CommandText = "PRAGMA foreign_keys=ON;";
-            pragma.ExecuteNonQuery();
-            return connection;
-        }
+        internal SqliteSessionStore CreateStore(TimeProvider timeProvider) =>
+            new(DatabasePath, retentionContext, timeProvider);
+
+        internal SqliteSessionStore CreateStore(TimeProvider timeProvider, Action<string> statementObserver) =>
+            new(DatabasePath, retentionContext, timeProvider, _ => { }, statementObserver);
+
+        internal SqliteConnection Open() => GenericRouteContentDenialTests.Open(DatabasePath);
 
         internal SqliteConnection OpenWithoutBusyTimeout()
         {
@@ -534,5 +692,105 @@ public sealed class GenericRouteContentDenialTests
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class ExpiryCrossingBoundaryCheckpoint(
+        GenericRouteContentClock clock,
+        RetentionReadBoundaryCheckpoint target,
+        DateTimeOffset crossedAt) : IRetentionReadBoundaryCheckpoint
+    {
+        public void Reached(RetentionReadBoundaryCheckpoint checkpoint)
+        {
+            if (checkpoint == target) clock.UtcNow = crossedAt;
+        }
+    }
+}
+
+// Group 6's expiry matrix has to enter the lease-expiry and hidden-handle windows at an exact tick
+// instead of hoping to observe them, so this clock never moves on its own and never fires a timer
+// on its own. Only the access lease's own two-minute arming is tracked: it is the single timer the
+// Retention expiry notification arms for this route, which keeps the hook off every unrelated timer
+// a composed host also creates.
+internal sealed class GenericRouteContentClock(DateTimeOffset start) : TimeProvider
+{
+    private readonly object gate = new();
+    private DateTimeOffset now = start;
+    private ControlledTimer? leaseExpiryNotification;
+    private bool fireOnArm;
+
+    internal DateTimeOffset UtcNow
+    {
+        get { lock (gate) { return now; } }
+        set { lock (gate) { now = value; } }
+    }
+
+    public override DateTimeOffset GetUtcNow() => UtcNow;
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        var timer = new ControlledTimer(this, callback, state);
+        timer.Change(dueTime, period);
+        return timer;
+    }
+
+    // Fires the notification synchronously on the arming thread, which is inside Activate before the
+    // committed handle has left its hidden state.
+    internal void FireOnceWhenTheLeaseExpiryNotificationArms()
+    {
+        lock (gate)
+        {
+            fireOnArm = true;
+        }
+    }
+
+    internal void FireLeaseExpiryNotification()
+    {
+        ControlledTimer timer;
+        lock (gate)
+        {
+            timer = leaseExpiryNotification
+                ?? throw new InvalidOperationException("No lease expiry notification has been armed.");
+        }
+
+        timer.Fire();
+    }
+
+    private void Armed(ControlledTimer timer, TimeSpan dueTime)
+    {
+        if (dueTime != RetentionV1Constants.LeaseDuration) return;
+        bool fire;
+        lock (gate)
+        {
+            leaseExpiryNotification = timer;
+            fire = fireOnArm;
+            fireOnArm = false;
+        }
+
+        if (fire) timer.Fire();
+    }
+
+    internal sealed class ControlledTimer(GenericRouteContentClock clock, TimerCallback callback, object? state) : ITimer
+    {
+        private int disposed;
+
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            if (Volatile.Read(ref disposed) != 0) return false;
+            if (dueTime != Timeout.InfiniteTimeSpan) clock.Armed(this, dueTime);
+            return true;
+        }
+
+        internal void Fire()
+        {
+            if (Volatile.Read(ref disposed) == 0) callback(state);
+        }
+
+        public void Dispose() => Interlocked.Exchange(ref disposed, 1);
+
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+            return ValueTask.CompletedTask;
+        }
     }
 }
