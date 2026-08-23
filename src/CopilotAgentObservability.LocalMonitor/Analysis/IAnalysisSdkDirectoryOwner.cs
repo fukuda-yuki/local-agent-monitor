@@ -72,7 +72,32 @@ internal sealed record CopilotAnalysisRootsExecutionContext(
     CancellationToken HostStoppingToken,
     AnalysisSdkScopeOwnership? ScopeOwnership = null,
     IOwnedSessionExecutionDriverV1? ExecutionDriver = null,
-    Action<OwnedSessionExecutionEvidenceV1>? ExecutionEvidenceObserver = null);
+    Action<OwnedSessionExecutionEvidenceV1>? ExecutionEvidenceObserver = null,
+    Action<OwnedSessionExecutionCheckpointV1>? ExecutionCheckpointObserver = null);
+
+internal enum OwnedSessionExecutionCheckpointV1
+{
+    ClientStarted,
+    IdentityCertified,
+    CandidateCreated,
+    ProbeCertified,
+    ExecutionInventoryCertified,
+    DriverCompleted,
+    CallbacksFrozen,
+    ImportCompleted,
+    CandidateReady,
+    CandidatePublished,
+}
+
+internal static class OwnedSessionExecutionCheckpointObservationV1
+{
+    internal static void Notify(Action<OwnedSessionExecutionCheckpointV1>? observer, OwnedSessionExecutionCheckpointV1 checkpoint)
+    {
+        if (observer is null) return;
+        try { observer(checkpoint); }
+        catch { }
+    }
+}
 
 internal sealed record OwnedSessionExecutionEvidenceV1(
     string SourceApplicationVersion,

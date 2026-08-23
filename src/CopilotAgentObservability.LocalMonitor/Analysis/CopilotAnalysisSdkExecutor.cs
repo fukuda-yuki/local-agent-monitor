@@ -116,15 +116,18 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                 var statusObservationCount = 0;
                 await ownedClient.StartAsync(linked.Token).ConfigureAwait(false);
                 clientStartCount++;
+                OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ClientStarted);
                 var status = await ownedClient.GetStatusAsync(linked.Token).ConfigureAwait(false);
                 statusObservationCount++;
                 if (!CopilotRuntimeIdentityCertifierV1.TryCertify(status, out var identity))
                     throw new InvalidOperationException("The bundled Copilot runtime could not be certified.");
+                OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.IdentityCertified);
 
                 if (!scopeOwnership.TryTransferToCandidate())
                     throw new InvalidOperationException("The analysis directory ownership is invalid.");
                 candidate = context.Admission.CreateUnpublishedCandidate(
                     ownedClient.RuntimeClient, identity, context.AnalysisScope, scopeOwnership);
+                OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidateCreated);
                 if (!candidate.TryAcquireOperationCapability(linked.Token, out lifecycle))
                     throw new InvalidOperationException("The candidate lifecycle is unavailable.");
                 var workToken = lifecycle.WorkToken;
@@ -136,6 +139,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                     rootLease, context.NativeReader, workToken);
                 var probe = await ProbeAsync(ownedClient, baseline, roots, identity, proof,
                     workToken, () => context.Admission.InvalidateCandidate(candidate)).ConfigureAwait(false);
+                OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ProbeCertified);
 
                 var result = await ExecuteOwnedSessionAsync(ownedClient, baseline, roots, probe.Inventory,
                     proof, identity, candidate, request.Prompt, settings.TimeoutSeconds,
@@ -173,6 +177,8 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
                 await context.Admission.DiscardCandidateAsync(candidate).ConfigureAwait(false);
                 throw new InvalidOperationException("The candidate was not ready for publication.");
             }
+            if (succeeded && candidate is not null)
+                OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidateReady);
         }
     }
 
@@ -345,14 +351,17 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             if (!OwnedSessionSdkPolicyV1.ValidateExecutionInventory(inventory, facts, proofProvider))
                 throw new InvalidOperationException("The execution inventory could not be certified.");
             executionInventoryCertified = true;
+            OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified);
             if (!callbackState.TryBindCreatedSession(session.SessionId))
                 throw new InvalidOperationException("The execution session identity is unavailable.");
             await executionDriver.ExecuteAsync(session, prompt, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
                 .ConfigureAwait(false);
+            OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.DriverCompleted);
         }
         prepared = callbackState.TryFreeze();
         if (prepared is null)
             throw new InvalidOperationException("The execution session did not complete successfully.");
+        OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CallbacksFrozen);
         if (!candidate.IsAdmitted)
             throw new InvalidOperationException("The candidate lifecycle was lost.");
         if (prepared.Bodies.Count != 0)
@@ -362,6 +371,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             if (!await importer.ImportAsync(candidate, prepared, cancellationToken).ConfigureAwait(false))
                 throw new InvalidOperationException("The completed session could not be imported.");
         }
+        OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ImportCompleted);
         var evidence = new OwnedSessionExecutionEvidenceV1(
             identity.SourceApplicationVersion,
             identity.ProtocolVersion,

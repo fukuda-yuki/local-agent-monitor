@@ -211,7 +211,8 @@ public sealed class CopilotAnalysisSdkExecutorTests
             ? OwnedFailure.ImportTransportRefused
             : OwnedFailure.OneInvocation);
         var evidence = new List<OwnedSessionExecutionEvidenceV1>();
-        var context = fixture.Context with { ExecutionEvidenceObserver = evidence.Add };
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        var context = fixture.Context with { ExecutionEvidenceObserver = evidence.Add, ExecutionCheckpointObserver = checkpoints.Add };
         using var workerCancellation = new CancellationTokenSource();
         var worker = Task.Run(async () =>
         {
@@ -257,9 +258,22 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Assert.Equal(1, fixture.Scope.DisposeCalls);
             Assert.Null(fixture.Transport.ConsumedCandidate);
             Assert.Empty(evidence);
+            Assert.Equal(
+                [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified,
+                    OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified,
+                    OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified, OwnedSessionExecutionCheckpointV1.DriverCompleted,
+                    OwnedSessionExecutionCheckpointV1.CallbacksFrozen],
+                checkpoints);
         }
         else
         {
+            Assert.Equal(
+                [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified,
+                    OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified,
+                    OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified, OwnedSessionExecutionCheckpointV1.DriverCompleted,
+                    OwnedSessionExecutionCheckpointV1.CallbacksFrozen, OwnedSessionExecutionCheckpointV1.ImportCompleted,
+                    OwnedSessionExecutionCheckpointV1.CandidateReady],
+                checkpoints);
             Assert.Empty(evidence);
             var observed = Assert.IsType<OwnedSessionExecutionEvidenceV1>(result!.ExecutionEvidence);
             Assert.Equal("1.0.65", observed.SourceApplicationVersion);
@@ -297,12 +311,13 @@ public sealed class CopilotAnalysisSdkExecutorTests
         await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
         using var fixture = new OwnedFixture(failure);
         var evidence = new List<OwnedSessionExecutionEvidenceV1>();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
             fixture.Scope.ChildDirectory,
             new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
             new CopilotAnalysisToolRequest("unchanged prompt", data),
-            fixture.Context with { ExecutionEvidenceObserver = evidence.Add }, CancellationToken.None));
+            fixture.Context with { ExecutionEvidenceObserver = evidence.Add, ExecutionCheckpointObserver = checkpoints.Add }, CancellationToken.None));
 
         Assert.Equal(1, fixture.Client.DisposeCalls);
         Assert.Equal(1, fixture.Scope.DisposeCalls);
@@ -310,6 +325,53 @@ public sealed class CopilotAnalysisSdkExecutorTests
         Assert.Equal(0, fixture.Queue.Count);
         Assert.Empty(fixture.Transport.Bodies);
         Assert.Empty(evidence);
+        OwnedSessionExecutionCheckpointV1[] expected = failure switch
+        {
+            OwnedFailure.Status => [OwnedSessionExecutionCheckpointV1.ClientStarted],
+            OwnedFailure.ProbeUnexpectedRelevantEvent => [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified, OwnedSessionExecutionCheckpointV1.CandidateCreated],
+            OwnedFailure.ExecutionCreate => [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified, OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified],
+            OwnedFailure.ExecutionSend => [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified, OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified, OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified],
+            OwnedFailure.ExecutionUnsuccessfulTerminal => [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified, OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified, OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified, OwnedSessionExecutionCheckpointV1.DriverCompleted],
+            _ => throw new InvalidOperationException(),
+        };
+        Assert.Equal(expected, checkpoints);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadinessRefusalStopsAtImportCompleted()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture(OwnedFailure.OneInvocation);
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        using var workerCancellation = new CancellationTokenSource();
+        var worker = Task.Run(async () =>
+        {
+            while (!workerCancellation.IsCancellationRequested)
+            {
+                SessionEventWriteRequest request;
+                try { request = await fixture.Queue.Reader.ReadAsync(workerCancellation.Token); }
+                catch (OperationCanceledException) { break; }
+                fixture.Queue.MarkDequeued();
+                Assert.True(request.TryClaim());
+                request.Complete(SessionEventCommitStatus.Committed);
+            }
+        });
+        Action<OwnedSessionExecutionCheckpointV1> observer = checkpoint =>
+        {
+            checkpoints.Add(checkpoint);
+            if (checkpoint == OwnedSessionExecutionCheckpointV1.ImportCompleted) fixture.Transport.ConsumedCandidate!.Invalidate();
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { ExecutionCheckpointObserver = observer }, CancellationToken.None));
+        workerCancellation.Cancel();
+        await worker;
+
+        Assert.Equal(OwnedSessionExecutionCheckpointV1.ImportCompleted, checkpoints[^1]);
+        Assert.DoesNotContain(OwnedSessionExecutionCheckpointV1.CandidateReady, checkpoints);
     }
 
     [Theory]

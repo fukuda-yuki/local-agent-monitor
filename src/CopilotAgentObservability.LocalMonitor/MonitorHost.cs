@@ -368,7 +368,8 @@ internal static class MonitorHost
                     static name => Environment.GetEnvironmentVariable(name) is not null,
                     skillHostShutdownGate!.StoppingToken,
                     ExecutionDriver: testOptions?.OwnedSessionExecutionDriver,
-                    ExecutionEvidenceObserver: testOptions?.OwnedSessionExecutionEvidenceObserver);
+                    ExecutionEvidenceObserver: testOptions?.OwnedSessionExecutionEvidenceObserver,
+                    ExecutionCheckpointObserver: testOptions?.OwnedSessionExecutionCheckpointObserver);
                 testOptions?.AnalysisRootsExecutionContextObserver?.Invoke(context);
                 return context;
             };
@@ -2626,6 +2627,8 @@ internal sealed class MonitorHostTestOptions
     public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
 
     public Action<OwnedSessionExecutionEvidenceV1>? OwnedSessionExecutionEvidenceObserver { get; init; }
+
+    public Action<OwnedSessionExecutionCheckpointV1>? OwnedSessionExecutionCheckpointObserver { get; init; }
 
     public Action<CopilotAnalysisRootsExecutionContext>? AnalysisRootsExecutionContextObserver { get; init; }
 

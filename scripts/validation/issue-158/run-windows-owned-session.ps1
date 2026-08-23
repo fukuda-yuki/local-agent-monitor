@@ -50,6 +50,16 @@ try {
   Remove-Item -LiteralPath $physical -Force
   if(Test-Path -LiteralPath $physical){throw 'cleanup'}
  }
+ function Get-BlockerCode {
+  $children=@(Get-ChildItem -LiteralPath $result -Force);if($children.Count-cne2-or@($children|Where-Object{$_.Name-cnotin@($script:Issue158OwnerName,'blocker.json')}).Count-ne0){throw 'blocker'}
+  [void](Get-Issue158Owner $result $runId $CandidateSha result (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result))
+  $path=Join-Path $result 'blocker.json';$item=Get-Item -LiteralPath $path -Force;if($item.PSIsContainer-or$item.LinkType-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or$item.Length-gt4096-or(Get-Issue158LexicalPath $path)-cne(Get-Issue158PhysicalPath $path)){throw 'blocker'}
+  $bytes=[IO.File]::ReadAllBytes($path);[void][Text.UTF8Encoding]::new($false,$true).GetString($bytes);$document=$null
+  try{$document=[Text.Json.JsonDocument]::Parse([ReadOnlyMemory[byte]]::new($bytes));if($document.RootElement.ValueKind-ne[Text.Json.JsonValueKind]::Object){throw 'blocker'};$keys=@('schema_version','candidate_sha','terminal_status','last_checkpoint');$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$value=@{};foreach($property in $document.RootElement.EnumerateObject()){if(-not$seen.Add($property.Name)-or$property.Name-cnotin$keys-or$property.Value.ValueKind-ne[Text.Json.JsonValueKind]::String){throw 'blocker'};$value[$property.Name]=$property.Value.GetString()};if($seen.Count-cne$keys.Count){throw 'blocker'}}finally{if($null-ne$document){$document.Dispose()}}
+  if($value.schema_version-cne'issue-158-windows-blocker.v1'-or$value.candidate_sha-cne$CandidateSha-or$value.terminal_status-cnotin@('failed','canceled','timed_out')){throw 'blocker'}
+  $checkpoints=@('client_started','identity_certified','candidate_created','probe_certified','execution_inventory_certified','driver_completed','callbacks_frozen','import_completed','candidate_ready','candidate_published');if($value.last_checkpoint-cne'none'-and$value.last_checkpoint-cnotin$checkpoints){throw 'blocker'}
+  if($value.last_checkpoint-ceq'none'){return ($value.terminal_status+'_before_checkpoint')};return ($value.terminal_status+'_after_'+$value.last_checkpoint)
+ }
  [void](New-Item -ItemType Directory -Path $runtime)
  $runtimeCreated=$true
  [void](New-Item -ItemType Directory -Path $result)
@@ -72,7 +82,8 @@ try {
  $psi.Environment['CAO_ISSUE158_RUNTIME_MARKER']=$runtimeMarker
  [void]$psi.Environment.Remove('COPILOT_CLI_PATH')
  $process=[Diagnostics.Process]::Start($psi);$stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd();$process.WaitForExit()
- if($process.ExitCode-ne0-or$stderr.Length-ne0-or$stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
+ $blockedCode='internal';if($process.ExitCode-ne0){try{$blockedCode=Get-BlockerCode}catch{};throw 'test_process'}
+ if($stderr.Length-ne0-or$stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
  Remove-Owned $runtime runtime
  $scanOutput=& (Join-Path $PSScriptRoot 'scan-leaks.ps1') -CandidateSha $CandidateSha -RuntimeDirectory $runtime -ResultDirectory $result -ResultFileName $resultFile -Lane windows_owned_session -ExpectedCleanupComplete:$false 2>$null
  if($LASTEXITCODE-ne0-or($scanOutput-join'')-cne'scan_result=PASSED'){throw 'scan'}
@@ -89,9 +100,11 @@ try {
  Write-Output $finalText
  exit 0
 } catch {
- try{if($null-ne(Get-Variable runtimeCreated -ErrorAction SilentlyContinue)-and$runtimeCreated-and(Test-Path -LiteralPath $runtime)){if($runtimeOwned){Remove-Owned $runtime runtime}else{Remove-Partial $runtime runtime}}}catch{}
- try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{}
- try{if($null-ne(Get-Command Restore-IdentityEnvironment -ErrorAction SilentlyContinue)){Restore-IdentityEnvironment}}catch{}
- Write-Output 'windows_result=BLOCKED check=internal'
+ $cleanupComplete=$true
+ try{if($null-ne(Get-Variable runtimeCreated -ErrorAction SilentlyContinue)-and$runtimeCreated-and(Test-Path -LiteralPath $runtime)){if($runtimeOwned){Remove-Owned $runtime runtime}else{Remove-Partial $runtime runtime}}}catch{$cleanupComplete=$false}
+ try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{$cleanupComplete=$false}
+ try{if($null-ne(Get-Command Restore-IdentityEnvironment -ErrorAction SilentlyContinue)){Restore-IdentityEnvironment}}catch{$cleanupComplete=$false}
+ if(($null-ne(Get-Variable runtime -ErrorAction SilentlyContinue)-and(Test-Path -LiteralPath $runtime))-or($null-ne(Get-Variable result -ErrorAction SilentlyContinue)-and(Test-Path -LiteralPath $result))){$cleanupComplete=$false}
+ $code=if($cleanupComplete-and$null-ne(Get-Variable blockedCode -ErrorAction SilentlyContinue)){$blockedCode}else{'internal'};Write-Output "windows_result=BLOCKED check=$code"
  exit 1
 }

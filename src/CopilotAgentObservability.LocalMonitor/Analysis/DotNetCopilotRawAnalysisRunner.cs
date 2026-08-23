@@ -137,6 +137,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             AnalysisSdkScopeOwnership? scopeOwnership = null;
             CopilotAnalysisExecutionResult? executionResult = null;
             Action<OwnedSessionExecutionEvidenceV1>? executionEvidenceObserver = null;
+            Action<OwnedSessionExecutionCheckpointV1>? executionCheckpointObserver = null;
             InstructionFindingHandoffV1? instructionFindingHandoff = null;
             try
             {
@@ -153,6 +154,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 {
                     var rootsContext = rootsExecutionContextFactory(scope);
                     executionEvidenceObserver = rootsContext.ExecutionEvidenceObserver;
+                    executionCheckpointObserver = rootsContext.ExecutionCheckpointObserver;
                     scopeOwnership = rootsContext.ScopeOwnership ?? new AnalysisSdkScopeOwnership(scope);
                     executionResult = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), request,
                         rootsContext with { ScopeOwnership = scopeOwnership }, leaseCancellation.Token);
@@ -205,6 +207,8 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                         try { executionEvidenceObserver(completedExecution.ExecutionEvidence); }
                         catch { }
                     }
+                    if (published)
+                        OwnedSessionExecutionCheckpointObservationV1.Notify(executionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidatePublished);
                 }
             }
             catch

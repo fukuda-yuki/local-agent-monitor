@@ -237,8 +237,20 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
         Assert.Same(driver, injectedObserved.ExecutionDriver);
     }
 
+    [Fact]
+    public async Task RawAnalysisRootsExecution_PassesOnlyTheExplicitCheckpointObserver()
+    {
+        Action<OwnedSessionExecutionCheckpointV1> observer = _ => { };
+        var defaultObserved = await CaptureRootsExecutionContextAsync(driver: null);
+        var injectedObserved = await CaptureRootsExecutionContextAsync(driver: null, observer);
+
+        Assert.Null(defaultObserved.ExecutionCheckpointObserver);
+        Assert.Same(observer, injectedObserved.ExecutionCheckpointObserver);
+    }
+
     private static async Task<CopilotAnalysisRootsExecutionContext> CaptureRootsExecutionContextAsync(
-        IOwnedSessionExecutionDriverV1? driver)
+        IOwnedSessionExecutionDriverV1? driver,
+        Action<OwnedSessionExecutionCheckpointV1>? checkpointObserver = null)
     {
         const string traceId = "trace-driver-composition";
         using var temp = new MonitorTempDirectory();
@@ -274,6 +286,7 @@ public sealed class SkillInvocationSnapshotHostCompositionTests
                 TimeProvider = temp.TimeProvider,
                 AnalysisSdkExecutor = new RejectingCompositionExecutor(),
                 OwnedSessionExecutionDriver = driver,
+                OwnedSessionExecutionCheckpointObserver = checkpointObserver,
                 AnalysisRootsExecutionContextObserver = context => observed.TrySetResult(context),
             });
         await app.StartAsync();

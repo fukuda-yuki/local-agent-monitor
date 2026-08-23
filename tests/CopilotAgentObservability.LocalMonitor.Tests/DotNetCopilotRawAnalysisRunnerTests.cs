@@ -145,6 +145,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
 
         Assert.Equal(0, store.CompleteCount);
         Assert.Equal(MonitorAnalysisStatus.Failed, store.FinishedStatus);
+        Assert.Equal(1, scope.DisposeCount);
         Assert.Equal("Local analysis ownership could not be established.", store.FinishedMessage);
         Assert.Equal(1, scope.DisposeCount);
     }
@@ -277,6 +278,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.True(ownership.TryTransferToCandidate());
         var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(), SkillInvocationV2TestIdentity.V1065, scope, ownership);
         var observations = new List<OwnedSessionExecutionEvidenceV1>();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
         var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
         var store = new FakeStore(Run());
         admission.CloseForShutdown();
@@ -285,7 +287,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build();
         var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw), configuration,
             new FakeOwner(scope), executor, temp.TimeProvider, skillRuntimeAdmission: admission,
-            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with { Admission = admission, ScopeOwnership = ownership, ExecutionEvidenceObserver = observations.Add });
+            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with { Admission = admission, ScopeOwnership = ownership, ExecutionEvidenceObserver = observations.Add, ExecutionCheckpointObserver = checkpoints.Add });
 
         await runner.RunAsync(Context(), CancellationToken.None);
 
@@ -293,6 +295,35 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.Null(store.FinishedStatus);
         Assert.Equal(1, scope.DisposeCount);
         Assert.Empty(observations);
+        Assert.Empty(checkpoints);
+    }
+
+    [Fact]
+    public async Task RunAsync_PublicationThrowDoesNotEmitPublishedCheckpoint()
+    {
+        using var temp = new MonitorTempDirectory();
+        var scope = new FakeScope("owned-child") { DisposeException = new InvalidOperationException("synthetic") };
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var ownership = new AnalysisSdkScopeOwnership(scope);
+        Assert.True(ownership.TryTransferToExecutor());
+        Assert.True(ownership.TryTransferToCandidate());
+        var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(), SkillInvocationV2TestIdentity.V1065, scope, ownership);
+        var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
+        admission.CloseForShutdown();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        var store = new FakeStore(Run());
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build();
+        var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw), configuration,
+            new FakeOwner(scope), executor, temp.TimeProvider, skillRuntimeAdmission: admission,
+            rootsExecutionContextFactory: openedScope => CreateRootsContext(openedScope) with { Admission = admission, ScopeOwnership = ownership, ExecutionCheckpointObserver = checkpoints.Add });
+
+        await runner.RunAsync(Context(), CancellationToken.None);
+
+        Assert.Empty(checkpoints);
+        Assert.Null(store.FinishedStatus);
+        Assert.Equal(1, scope.DisposeCount);
     }
 
     [Theory]
@@ -310,6 +341,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.True(candidate.TryMarkReady());
         var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
         var calls = 0;
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
         var store = new FakeStore(Run());
         var raw = temp.CreateRawStore();
         raw.CreateSchema();
@@ -321,11 +353,13 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
                 Admission = admission,
                 ScopeOwnership = ownership,
                 ExecutionEvidenceObserver = _ => { calls++; if (observerThrows) throw new InvalidOperationException("test"); },
+                ExecutionCheckpointObserver = checkpoint => { checkpoints.Add(checkpoint); if (observerThrows) throw new InvalidOperationException("test"); },
             });
 
         await runner.RunAsync(Context(), CancellationToken.None);
 
         Assert.Equal(1, calls);
+        Assert.Equal([OwnedSessionExecutionCheckpointV1.CandidatePublished], checkpoints);
         Assert.True(admission.TryGetCurrentAdmittedGeneration(out var current));
         Assert.Same(candidate, current);
         Assert.Equal(1, store.CompleteCount);

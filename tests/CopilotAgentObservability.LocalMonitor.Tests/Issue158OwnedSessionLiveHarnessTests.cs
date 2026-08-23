@@ -65,6 +65,49 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         Assert.False(MatchesSyntheticSkillFixtureContract(name, token, document));
     }
 
+    [Fact]
+    public void CheckpointWireLiteralsAreClosedAndOrdered()
+    {
+        Assert.Equal(
+            ["client_started", "identity_certified", "candidate_created", "probe_certified", "execution_inventory_certified", "driver_completed", "callbacks_frozen", "import_completed", "candidate_ready", "candidate_published"],
+            Enum.GetValues<OwnedSessionExecutionCheckpointV1>().Select(Issue158WindowsBlocker.CheckpointWire));
+    }
+
+    [Fact]
+    public void CheckpointObserverIsOptionalAndCannotChangeExecution()
+    {
+        OwnedSessionExecutionCheckpointObservationV1.Notify(null, OwnedSessionExecutionCheckpointV1.ClientStarted);
+        OwnedSessionExecutionCheckpointObservationV1.Notify(_ => throw new InvalidOperationException(), OwnedSessionExecutionCheckpointV1.ClientStarted);
+    }
+
+    [Fact]
+    public void BlockerDocumentIsStrictAndSanitized()
+    {
+        var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(4, document.RootElement.EnumerateObject().Count());
+        Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
+        Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
+    }
+
+    [Theory]
+    [InlineData(3, "failed")]
+    [InlineData(4, "canceled")]
+    [InlineData(5, "timed_out")]
+    public void BlockerTerminalStatusMapsEveryClosedTerminalDistinctly(int status, string expected) =>
+        Assert.Equal(expected, Issue158WindowsBlocker.TerminalWire(new MonitorAnalysisRun(1, "trace", null, null, MonitorAnalysisFocus.Latency, (MonitorAnalysisStatus)status, "synthetic", null, null)));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void BlockerTerminalStatusRejectsMissingOrNonterminal(int? status)
+    {
+        MonitorAnalysisRun? run = status is null ? null : new(1, "trace", null, null, MonitorAnalysisFocus.Latency, (MonitorAnalysisStatus)status.Value, "synthetic", null, null);
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.TerminalWire(run));
+    }
+
     private static bool MatchesSyntheticSkillFixtureContract(string name, string token, string document) =>
         name == ExpectedSyntheticSkillName
         && token == ExpectedSyntheticCompletionToken
@@ -539,6 +582,7 @@ internal static class Issue158WindowsOwnedSessionLane
             timeProvider.GetUtcNow());
         var identities = new List<SkillInvocationV2CommittedIdentityV1>();
         var evidence = new List<OwnedSessionExecutionEvidenceV1>();
+        OwnedSessionExecutionCheckpointV1? lastCheckpoint = null;
         var identityLock = new object();
         var options = new MonitorOptions(databasePath, "http://127.0.0.1:0", false,
             MonitorOptions.DefaultMaxRequestBodyBytes, SkillDiscoveryDirectories: [skillRoot]);
@@ -554,6 +598,7 @@ internal static class Issue158WindowsOwnedSessionLane
             OwnedSessionExecutionDriver = new ExactSkillCommandExecutionDriverV1(SyntheticSkillName),
             SkillInvocationV2CommittedObserver = identity => { lock (identityLock) identities.Add(identity); },
             OwnedSessionExecutionEvidenceObserver = item => { lock (identityLock) evidence.Add(item); },
+            OwnedSessionExecutionCheckpointObserver = checkpoint => { lock (identityLock) lastCheckpoint = checkpoint; },
         });
         var analysisStore = app.Services.GetRequiredService<IMonitorAnalysisStore>();
         await app.StartAsync();
@@ -574,12 +619,29 @@ internal static class Issue158WindowsOwnedSessionLane
             var runId = start.RootElement.GetProperty("run_id").GetInt64();
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
             MonitorAnalysisRun? run;
-            do
+            try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
+                do
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
+                    run = analysisStore.GetRun(runId);
+                } while (run?.Status is MonitorAnalysisStatus.Queued or MonitorAnalysisStatus.Running);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
                 run = analysisStore.GetRun(runId);
-            } while (run?.Status is MonitorAnalysisStatus.Queued or MonitorAnalysisStatus.Running);
-            if (run?.Status != MonitorAnalysisStatus.Succeeded) throw new InvalidOperationException("analysis_terminal");
+                OwnedSessionExecutionCheckpointV1? snapshot;
+                lock (identityLock) snapshot = lastCheckpoint;
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot);
+                throw;
+            }
+            if (run?.Status != MonitorAnalysisStatus.Succeeded)
+            {
+                OwnedSessionExecutionCheckpointV1? snapshot;
+                lock (identityLock) snapshot = lastCheckpoint;
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot);
+                throw new InvalidOperationException("analysis_terminal");
+            }
 
             OwnedSessionExecutionEvidenceV1[] executionEvidence;
             lock (identityLock) executionEvidence = [.. evidence];
@@ -648,6 +710,54 @@ internal static class Issue158WindowsOwnedSessionLane
         command.Parameters.AddWithValue("$expected", expected);
         return (long)command.ExecuteScalar()!;
     }
+}
+
+internal static class Issue158WindowsBlocker
+{
+    internal const string FileName = "blocker.json";
+
+    internal static string CheckpointWire(OwnedSessionExecutionCheckpointV1 checkpoint) => checkpoint switch
+    {
+        OwnedSessionExecutionCheckpointV1.ClientStarted => "client_started",
+        OwnedSessionExecutionCheckpointV1.IdentityCertified => "identity_certified",
+        OwnedSessionExecutionCheckpointV1.CandidateCreated => "candidate_created",
+        OwnedSessionExecutionCheckpointV1.ProbeCertified => "probe_certified",
+        OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified => "execution_inventory_certified",
+        OwnedSessionExecutionCheckpointV1.DriverCompleted => "driver_completed",
+        OwnedSessionExecutionCheckpointV1.CallbacksFrozen => "callbacks_frozen",
+        OwnedSessionExecutionCheckpointV1.ImportCompleted => "import_completed",
+        OwnedSessionExecutionCheckpointV1.CandidateReady => "candidate_ready",
+        OwnedSessionExecutionCheckpointV1.CandidatePublished => "candidate_published",
+        _ => throw new InvalidOperationException("checkpoint"),
+    };
+
+    internal static string TerminalWire(MonitorAnalysisRun? run) => run?.Status switch
+    {
+        MonitorAnalysisStatus.Failed => "failed",
+        MonitorAnalysisStatus.Canceled => "canceled",
+        MonitorAnalysisStatus.TimedOut => "timed_out",
+        _ => throw new InvalidOperationException("analysis_terminal"),
+    };
+
+    internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint)
+    {
+        if (candidateSha.Length != 40 || candidateSha.Any(static value => !char.IsAsciiHexDigitLower(value))
+            || terminalStatus is not ("failed" or "canceled" or "timed_out"))
+            throw new InvalidOperationException("blocker");
+        return JsonSerializer.Serialize(new
+        {
+            schema_version = "issue-158-windows-blocker.v1",
+            candidate_sha = candidateSha,
+            terminal_status = terminalStatus,
+            last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
+        });
+    }
+
+    internal static Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint) =>
+        File.WriteAllTextAsync(
+            Path.Combine(gate.ResultDirectory, FileName),
+            Serialize(gate.CandidateSha, terminalStatus, checkpoint),
+            new UTF8Encoding(false));
 }
 
 internal sealed record Issue158WindowsObservedResult(
