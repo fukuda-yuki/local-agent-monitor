@@ -87,7 +87,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         await stopping;
 
         Assert.Equal(1, client.DisposeCalls);
-        Assert.All(preflight.RetainedRoots, root => Assert.False(root.IsDisposed));
+        Assert.All(preflight.RetainedRoots, root => Assert.True(root.IsDisposed));
 
         await coordinator.StopAsync(CancellationToken.None);
 
@@ -252,6 +252,34 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
         Assert.All(preflight.RetainedRoots, root => Assert.False(root.IsDisposed));
 
         rootLease!.Dispose();
+    }
+
+    [Fact]
+    public async Task StoppingAsync_CancelledOuterWaitThenStopAsync_WaitsForLeaseBeforeDisposingRoots()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var roots = CreateRootGeneration(out var preflight, gate);
+        Assert.True(roots.TryAcquireLease(out var rootLease));
+        using var cancellation = new CancellationTokenSource();
+        var coordinator = new SkillHostShutdownCoordinatorV1(gate, roots, null);
+
+        var stopping = coordinator.StoppingAsync(cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => stopping.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var stop = coordinator.StopAsync(CancellationToken.None);
+
+        Assert.False(stop.IsCompleted);
+        Assert.Equal(1, roots.OutstandingLeaseCount);
+        Assert.All(preflight.RetainedRoots, root => Assert.False(root.IsDisposed));
+
+        rootLease!.Dispose();
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+        await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.All(preflight.RetainedRoots, root => Assert.True(root.IsDisposed));
     }
 
     [Fact]

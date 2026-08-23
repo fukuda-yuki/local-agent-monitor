@@ -67,7 +67,7 @@ internal sealed class FakeSkillRuntimeClient : ICopilotSkillRuntimeClient
     }
 
     public Task<CopilotSession> CreateSessionAsync(SessionConfig config, CancellationToken cancellationToken)
-        => Task.FromResult<CopilotSession>(null!);
+        => throw new NotSupportedException("CreateSessionAsync is not supported by this test double.");
 
     public void RecordSessionStartCopilotVersion(string? copilotVersion)
         => Volatile.Write(ref recordedSessionStartCopilotVersion, copilotVersion);

@@ -149,7 +149,7 @@ internal sealed class SkillDiscoveryRootGenerationV1
         await drained.Task.ConfigureAwait(false);
     }
 
-    internal Task DisposeRootsAsync()
+    private Task DisposeRootsAsync()
     {
         lock (sync)
         {

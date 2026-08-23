@@ -19,13 +19,16 @@ internal sealed class SkillHostShutdownCoordinatorV1(
 
     public Task StoppingAsync(CancellationToken cancellationToken)
     {
+        Task shutdown;
         lock (sync)
         {
-            return shutdownTask ??= StopOnceAsync(cancellationToken);
+            shutdown = shutdownTask ??= ShutdownOnceAsync();
         }
+
+        return shutdown.WaitAsync(cancellationToken);
     }
 
-    private async Task StopOnceAsync(CancellationToken cancellationToken)
+    private async Task ShutdownOnceAsync()
     {
         shutdownGate.TryStartNormalShutdown();
         // The shared gate, not statement order, makes admission closure atomic. Each authority's
@@ -37,12 +40,20 @@ internal sealed class SkillHostShutdownCoordinatorV1(
         // in-flight request can no longer reach its ordinary terminal completion.
         var runtimeDrain = runtimeAdmission?.CloseForShutdownAndDrainAsync(CancellationToken.None)
             ?? Task.CompletedTask;
-        var rootDrain = rootGeneration?.DrainAsync() ?? Task.CompletedTask;
-        await Task.WhenAll(rootDrain, runtimeDrain).WaitAsync(cancellationToken).ConfigureAwait(false);
+        var rootDrainAndDisposal = rootGeneration?.DrainAndDisposeRootsAsync() ?? Task.CompletedTask;
+        await Task.WhenAll(rootDrainAndDisposal, runtimeDrain).ConfigureAwait(false);
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) =>
-        rootGeneration?.DisposeRootsAsync() ?? Task.CompletedTask;
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        Task? shutdown;
+        lock (sync)
+        {
+            shutdown = shutdownTask;
+        }
+
+        return shutdown?.WaitAsync(cancellationToken) ?? Task.CompletedTask;
+    }
 
     public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

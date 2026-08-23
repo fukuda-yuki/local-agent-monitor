@@ -325,6 +325,31 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     }
 
     [Fact]
+    public async Task PublishAdmittedGeneration_AfterSharedShutdownGateStarts_RefusesWithoutInvalidatingCurrentGeneration()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var admission = new CopilotRuntimeAdmissionV1(gate);
+        var currentGeneration = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _)!;
+        Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
+        var refusedClient = new FakeSkillRuntimeClient();
+        Assert.True(gate.TryStartNormalShutdown());
+
+        var refusedGeneration = admission.PublishAdmittedGeneration(refusedClient, out var replacedGeneration);
+
+        Assert.Null(refusedGeneration);
+        Assert.Null(replacedGeneration);
+        Assert.True(admission.TryGetCurrentAdmittedGeneration(out var stillCurrent));
+        Assert.Same(currentGeneration, stillCurrent);
+        Assert.False(currentGeneration.IsInvalid);
+        Assert.False(capability!.WorkToken.IsCancellationRequested);
+        Assert.Equal(0, refusedClient.DisposeCalls);
+
+        await refusedClient.DisposeAsync();
+        Assert.Equal(1, refusedClient.DisposeCalls);
+        capability.Release();
+    }
+
+    [Fact]
     public void InvalidateCurrentGeneration_RemovesInvalidatesAndNotifies()
     {
         var admission = new CopilotRuntimeAdmissionV1();

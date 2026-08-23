@@ -102,8 +102,10 @@ internal sealed class CopilotRuntimeAdmissionV1
         lock (sync)
         {
             replacedGeneration = null;
-            if (shutdownClosed)
+            if (shutdownGate.IsNormalShutdownStarted || shutdownClosed)
             {
+                // Publication does not take ownership on refusal; the caller that supplied the
+                // client remains responsible for disposing it.
                 return null;
             }
 
