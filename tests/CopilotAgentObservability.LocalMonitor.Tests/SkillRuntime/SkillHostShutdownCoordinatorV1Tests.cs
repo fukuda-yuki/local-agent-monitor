@@ -13,6 +13,55 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     public void Dispose() => handleSource.Dispose();
 
     [Fact]
+    public void BuildFailureAfterRootPreflightDisposesRetainedRoots()
+    {
+        using var temp = new MonitorTempDirectory();
+        RetainedDiscoveryRootV1[]? retainedRoots = null;
+        var options = CreateMonitorOptions(temp);
+        var testOptions = new MonitorHostTestOptions
+        {
+            TimeProvider = temp.TimeProvider,
+            SkillDiscoveryRootGenerationObserver = generation =>
+            {
+                Assert.NotNull(generation);
+                Assert.True(generation.TryAcquireLease(out var lease));
+                retainedRoots = lease!.RetainedRoots.ToArray();
+                lease.Dispose();
+            },
+            AdditionalServices = _ => throw new InvalidOperationException("build failed after root preflight")
+        };
+
+        Assert.Throws<InvalidOperationException>(() => MonitorHost.Build(options, testOptions));
+
+        Assert.NotNull(retainedRoots);
+        Assert.All(retainedRoots, root => Assert.True(root.IsDisposed));
+    }
+
+    [Fact]
+    public async Task DisposingBuiltHostWithoutStartingDisposesRetainedRoots()
+    {
+        using var temp = new MonitorTempDirectory();
+        RetainedDiscoveryRootV1[]? retainedRoots = null;
+        var testOptions = new MonitorHostTestOptions
+        {
+            TimeProvider = temp.TimeProvider,
+            SkillDiscoveryRootGenerationObserver = generation =>
+            {
+                Assert.NotNull(generation);
+                Assert.True(generation.TryAcquireLease(out var lease));
+                retainedRoots = lease!.RetainedRoots.ToArray();
+                lease.Dispose();
+            }
+        };
+        var app = MonitorHost.Build(CreateMonitorOptions(temp), testOptions);
+
+        await app.DisposeAsync();
+
+        Assert.NotNull(retainedRoots);
+        Assert.All(retainedRoots, root => Assert.True(root.IsDisposed));
+    }
+
+    [Fact]
     public async Task TryStartNormalShutdown_ConcurrentCallers_ReturnsTrueExactlyOnce()
     {
         const int callerCount = 8;
@@ -143,6 +192,30 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     }
 
     [Fact]
+    public async Task DisposeAsync_ReusesStoppingDrainAndDisposesOnce()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var admission = new CopilotRuntimeAdmissionV1(gate);
+        var client = new FakeSkillRuntimeClient();
+        admission.PublishAdmittedGeneration(client, out _);
+        Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
+        var coordinator = new SkillHostShutdownCoordinatorV1(gate, null, admission);
+
+        var stopping = coordinator.StoppingAsync(CancellationToken.None);
+        var firstDisposal = coordinator.DisposeAsync().AsTask();
+        var secondDisposal = coordinator.DisposeAsync().AsTask();
+
+        Assert.Same(stopping, firstDisposal);
+        Assert.Same(firstDisposal, secondDisposal);
+        Assert.False(stopping.IsCompleted);
+
+        capability!.Release();
+        await Task.WhenAll(stopping, firstDisposal, secondDisposal);
+
+        Assert.Equal(1, client.DisposeCalls);
+    }
+
+    [Fact]
     public async Task StoppingAsync_RacingRuntimeInvalidation_PreservesCancellationAndDrainSemantics()
     {
         var gate = new SkillHostShutdownGateV1();
@@ -214,7 +287,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     [Fact]
     public async Task CloseForShutdownAndDrainAsync_CancellationDoesNotBoundInnerDrain()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient();
         var generation = admission.PublishAdmittedGeneration(client, out _)!;
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
@@ -285,7 +358,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     [Fact]
     public async Task CloseForShutdownAndDrainAsync_ConcurrentInvalidationDisposesGenerationClientOnce()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient();
         admission.PublishAdmittedGeneration(client, out _);
         Assert.True(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out var capability));
@@ -303,7 +376,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     [Fact]
     public async Task CloseForShutdownAndDrainAsync_NoGeneration_ReturnsImmediately()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
 
         await admission.CloseForShutdownAndDrainAsync(CancellationToken.None);
 
@@ -313,7 +386,7 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
     [Fact]
     public async Task CloseForShutdownAndDrainAsync_DisposalFailureDoesNotEscape()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient { DisposeThrows = true };
         admission.PublishAdmittedGeneration(client, out _);
 
@@ -332,10 +405,15 @@ public sealed class SkillHostShutdownCoordinatorV1Tests : IDisposable
             new CertifiedDiscoveryPlatformV1(
                 SkillProducerPathKeyPlatform.Windows,
                 new StubOpener(handleSource)));
-        return shutdownGate is null
-            ? new SkillDiscoveryRootGenerationV1(preflight)
-            : new SkillDiscoveryRootGenerationV1(preflight, shutdownGate);
+        return new SkillDiscoveryRootGenerationV1(preflight, shutdownGate ?? new SkillHostShutdownGateV1());
     }
+
+    private static MonitorOptions CreateMonitorOptions(MonitorTempDirectory temp) => new(
+        temp.DatabasePath,
+        Url: "http://127.0.0.1:0",
+        SanitizedOnly: false,
+        MaxRequestBodyBytes: MonitorOptions.DefaultMaxRequestBodyBytes,
+        SkillDiscoveryDirectories: [temp.Path]);
 
     private sealed class StubOpener(TempHandleSource handleSource) : IDiscoveryRootOpenerV1
     {

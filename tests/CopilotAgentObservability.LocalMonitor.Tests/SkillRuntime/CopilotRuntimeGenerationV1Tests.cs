@@ -257,7 +257,8 @@ public sealed class CopilotRuntimeGenerationV1Tests
         Assert.Empty(exceptions);
     }
 
-    private static CopilotRuntimeGenerationV1 NewAdmittedGeneration() => new(new FakeSkillRuntimeClient());
+    private static CopilotRuntimeGenerationV1 NewAdmittedGeneration() =>
+        new(new FakeSkillRuntimeClient(), new SkillHostShutdownGateV1());
 }
 
 public sealed class CopilotRuntimeAdmissionV1Tests
@@ -265,7 +266,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void FreshAdmission_HasNoCurrentGeneration()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
 
         Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
         Assert.False(admission.TryAcquireCurrentFileCapability(CancellationToken.None, out _));
@@ -275,7 +276,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void PublishAdmittedGeneration_MakesItCurrentAndAdmitted()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient();
 
         var generation = admission.PublishAdmittedGeneration(client, out var replaced);
@@ -292,7 +293,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void PublishAdmittedGeneration_InvalidatesReplacedGeneration_AndNotifiesObservers()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var firstClient = new FakeSkillRuntimeClient();
         var secondClient = new FakeSkillRuntimeClient();
         var firstGeneration = admission.PublishAdmittedGeneration(firstClient, out _);
@@ -314,7 +315,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void PublishAdmittedGeneration_AfterShutdownClose_ReturnsNull()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         admission.CloseForShutdown();
 
         var generation = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out var replaced);
@@ -352,7 +353,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void InvalidateCurrentGeneration_RemovesInvalidatesAndNotifies()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var generation = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
         var observerNotifications = 0;
         admission.RegisterInvalidationObserver(() => observerNotifications++);
@@ -370,7 +371,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void InvalidateGenerationIfCurrent_StaleGeneration_KeepsNewerCurrent()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var staleGeneration = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
         var newerGeneration = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
 
@@ -387,7 +388,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void InvalidateGenerationIfCurrent_CurrentGeneration_RemovesAndInvalidates()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var generation = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
         var observerNotifications = 0;
         admission.RegisterInvalidationObserver(() => observerNotifications++);
@@ -403,7 +404,7 @@ public sealed class CopilotRuntimeAdmissionV1Tests
     [Fact]
     public void CloseForShutdown_DrainClosesCurrentGeneration_AndBlocksCapabilityAcquisition()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var generation = admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _);
 
         admission.CloseForShutdown();

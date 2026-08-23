@@ -415,13 +415,14 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     {
         internal Fixture(TempHandleSource handleSource)
         {
+            var shutdownGate = new SkillHostShutdownGateV1();
             Preflight = SkillDiscoveryRootPreflightV1.Run(
                 [],
                 [RootPath],
                 new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource)));
-            RootGeneration = new SkillDiscoveryRootGenerationV1(Preflight);
+            RootGeneration = new SkillDiscoveryRootGenerationV1(Preflight, shutdownGate);
 
-            RuntimeAdmission = new CopilotRuntimeAdmissionV1();
+            RuntimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
             Generation = RuntimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
 
             Grant = new FakeGrant();

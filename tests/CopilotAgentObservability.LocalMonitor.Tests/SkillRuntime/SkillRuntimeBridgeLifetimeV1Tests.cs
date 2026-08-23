@@ -30,7 +30,7 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
         var lifetime = new SkillRuntimeBridgeLifetimeV1(
             new FakeServer(new FeatureCollection()),
             holder,
-            new CopilotRuntimeAdmissionV1(),
+            new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1()),
             applicationLifetime);
 
         await lifetime.StartAsync(CancellationToken.None);
@@ -105,7 +105,7 @@ public sealed class SkillRuntimeBridgeLifetimeV1Tests
         var lifetime = new SkillRuntimeBridgeLifetimeV1(
             new FakeServer(features),
             holder,
-            new CopilotRuntimeAdmissionV1(),
+            new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1()),
             applicationLifetime);
         return (lifetime, applicationLifetime);
     }

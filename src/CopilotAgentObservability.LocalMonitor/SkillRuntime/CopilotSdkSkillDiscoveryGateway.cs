@@ -68,6 +68,12 @@ internal sealed class CopilotSdkSkillDiscoveryGateway
         }
 
         var client = clientFactory();
+        if (admission.IsNormalShutdownStarted || admission.IsShutdownClosed)
+        {
+            await DisposeClientAsync(client).ConfigureAwait(false);
+            return CopilotRuntimeAdmissionOutcome.NotAdmitted;
+        }
+
         try
         {
             await client.StartAsync(cancellationToken).ConfigureAwait(false);

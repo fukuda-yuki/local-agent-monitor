@@ -61,11 +61,6 @@ internal sealed class SkillDiscoveryRootGenerationV1
     private bool admissionClosed;
     private bool rootsDisposed;
 
-    internal SkillDiscoveryRootGenerationV1(SkillDiscoveryRootPreflightResultV1 preflight)
-        : this(preflight, new SkillHostShutdownGateV1())
-    {
-    }
-
     internal SkillDiscoveryRootGenerationV1(
         SkillDiscoveryRootPreflightResultV1 preflight,
         SkillHostShutdownGateV1 shutdownGate)

@@ -59,9 +59,10 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
             [],
             [RootPath],
             new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource)));
-        var rootGeneration = new SkillDiscoveryRootGenerationV1(preflight);
+        var shutdownGate = new SkillHostShutdownGateV1();
+        var rootGeneration = new SkillDiscoveryRootGenerationV1(preflight, shutdownGate);
 
-        runtimeAdmission = new CopilotRuntimeAdmissionV1();
+        runtimeAdmission = new CopilotRuntimeAdmissionV1(shutdownGate);
         generation = runtimeAdmission.PublishAdmittedGeneration(new StubRuntimeClient(), out _)!;
         nativeReader = new StubNativeReader();
 

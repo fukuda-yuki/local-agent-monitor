@@ -111,11 +111,6 @@ internal sealed class CopilotRuntimeGenerationV1
     private bool invalid;
     private bool admissionClosed;
 
-    internal CopilotRuntimeGenerationV1(ICopilotSkillRuntimeClient client)
-        : this(client, new SkillHostShutdownGateV1())
-    {
-    }
-
     internal CopilotRuntimeGenerationV1(
         ICopilotSkillRuntimeClient client,
         SkillHostShutdownGateV1 shutdownGate)

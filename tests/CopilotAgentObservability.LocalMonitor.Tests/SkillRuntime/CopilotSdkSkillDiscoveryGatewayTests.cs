@@ -12,7 +12,7 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
     [Fact]
     public async Task Admit_ShutdownClosed_NotAdmittedWithoutClientCreation()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         admission.CloseForShutdown();
         var factoryCalls = 0;
         var gateway = new CopilotSdkSkillDiscoveryGateway(() => { factoryCalls++; return new FakeSkillRuntimeClient(); }, admission);
@@ -21,6 +21,23 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
 
         Assert.Equal(CopilotRuntimeAdmissionOutcome.NotAdmitted, outcome);
         Assert.Equal(0, factoryCalls);
+    }
+
+    [Fact]
+    public async Task Admit_SharedShutdownGateStarted_NotAdmittedAndCandidateDisposed()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var admission = new CopilotRuntimeAdmissionV1(gate);
+        var client = new FakeSkillRuntimeClient { StatusResult = CertifiedStatus() };
+        var gateway = new CopilotSdkSkillDiscoveryGateway(() => client, admission);
+        Assert.True(gate.TryStartNormalShutdown());
+
+        var outcome = await gateway.AdmitRuntimeGenerationAsync(CancellationToken.None);
+
+        Assert.Equal(CopilotRuntimeAdmissionOutcome.NotAdmitted, outcome);
+        Assert.Equal(0, client.StartCalls);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
     }
 
     [Fact]
@@ -95,7 +112,7 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
     [Fact]
     public async Task Admit_SecondCertifiedRuntime_ReplacesInvalidatesAndDisposesPrevious()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var firstClient = new FakeSkillRuntimeClient { StatusResult = CertifiedStatus() };
         var secondClient = new FakeSkillRuntimeClient { StatusResult = CertifiedStatus() };
         var clients = new Queue<FakeSkillRuntimeClient>([firstClient, secondClient]);
@@ -116,7 +133,7 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
     [Fact]
     public async Task Admit_ShutdownBetweenCertificationAndPublish_NotAdmittedAndClientDisposed()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient
         {
             StatusResult = CertifiedStatus(),
@@ -274,7 +291,7 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
     [Fact]
     public async Task ReportSessionStart_MismatchOnReplacedGeneration_LeavesNewerGenerationUntouched()
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var firstClient = new FakeSkillRuntimeClient { StatusResult = CertifiedStatus() };
         var secondClient = new FakeSkillRuntimeClient { StatusResult = CertifiedStatus() };
         var clients = new Queue<FakeSkillRuntimeClient>([firstClient, secondClient]);
@@ -350,7 +367,7 @@ public sealed class CopilotSdkSkillDiscoveryGatewayTests
     private static (CopilotSdkSkillDiscoveryGateway Gateway, CopilotRuntimeAdmissionV1 Admission, FakeSkillRuntimeClient Client) NewGateway(
         CopilotRuntimeStatusObservationV1? status)
     {
-        var admission = new CopilotRuntimeAdmissionV1();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
         var client = new FakeSkillRuntimeClient { StatusResult = status };
         var gateway = new CopilotSdkSkillDiscoveryGateway(() => client, admission);
         return (gateway, admission, client);

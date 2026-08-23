@@ -6,7 +6,7 @@ namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 internal sealed class SkillHostShutdownCoordinatorV1(
     SkillHostShutdownGateV1 shutdownGate,
     SkillDiscoveryRootGenerationV1? rootGeneration,
-    CopilotRuntimeAdmissionV1? runtimeAdmission) : IHostedLifecycleService
+    CopilotRuntimeAdmissionV1? runtimeAdmission) : IHostedLifecycleService, IAsyncDisposable
 {
     private readonly object sync = new();
     private Task? shutdownTask;
@@ -18,15 +18,9 @@ internal sealed class SkillHostShutdownCoordinatorV1(
     public Task StartedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task StoppingAsync(CancellationToken cancellationToken)
-    {
-        Task shutdown;
-        lock (sync)
-        {
-            shutdown = shutdownTask ??= ShutdownOnceAsync();
-        }
+        => GetOrStartShutdownTask().WaitAsync(cancellationToken);
 
-        return shutdown.WaitAsync(cancellationToken);
-    }
+    public ValueTask DisposeAsync() => new(GetOrStartShutdownTask());
 
     private async Task ShutdownOnceAsync()
     {
@@ -56,4 +50,12 @@ internal sealed class SkillHostShutdownCoordinatorV1(
     }
 
     public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    private Task GetOrStartShutdownTask()
+    {
+        lock (sync)
+        {
+            return shutdownTask ??= ShutdownOnceAsync();
+        }
+    }
 }

@@ -1,5 +1,6 @@
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.LocalMonitor.SkillNative;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using Microsoft.Win32.SafeHandles;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -16,8 +17,8 @@ public sealed class SkillDiscoveryRootGenerationV1Tests : IDisposable
         var noRoots = SkillDiscoveryRootPreflightV1.Run([], [], certifiedPlatform: null);
         var unsupported = SkillDiscoveryRootPreflightV1.Run([ProjectRoot], [], certifiedPlatform: null);
 
-        Assert.Throws<ArgumentException>(() => new SkillDiscoveryRootGenerationV1(noRoots));
-        Assert.Throws<ArgumentException>(() => new SkillDiscoveryRootGenerationV1(unsupported));
+        Assert.Throws<ArgumentException>(() => new SkillDiscoveryRootGenerationV1(noRoots, new SkillHostShutdownGateV1()));
+        Assert.Throws<ArgumentException>(() => new SkillDiscoveryRootGenerationV1(unsupported, new SkillHostShutdownGateV1()));
     }
 
     [Fact]
@@ -167,7 +168,7 @@ public sealed class SkillDiscoveryRootGenerationV1Tests : IDisposable
             new CertifiedDiscoveryPlatformV1(SkillProducerPathKeyPlatform.Windows, new StubOpener(handleSource)));
 
         Assert.Equal(SkillDiscoveryRootPreflightOutcomeV1.Certified, preflight.Outcome);
-        return new SkillDiscoveryRootGenerationV1(preflight);
+        return new SkillDiscoveryRootGenerationV1(preflight, new SkillHostShutdownGateV1());
     }
 
     private sealed class StubOpener(TempHandleSource handleSource) : IDiscoveryRootOpenerV1

@@ -378,7 +378,7 @@ public sealed class SkillRuntimeCapabilityBridgeV1Tests
     {
         public BridgeFixture(FixedTokenSource? fixedTokenSource)
         {
-            Admission = new CopilotRuntimeAdmissionV1();
+            Admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
             Generation = Admission.PublishAdmittedGeneration(new FakeSkillRuntimeClient(), out _)!;
             Transport = new FakeBridgeTransport();
             Clock = new ManualClock();

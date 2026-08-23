@@ -19,11 +19,6 @@ internal sealed class CopilotRuntimeAdmissionV1
     private Task? shutdownDrain;
     private bool shutdownClosed;
 
-    internal CopilotRuntimeAdmissionV1()
-        : this(new SkillHostShutdownGateV1())
-    {
-    }
-
     internal CopilotRuntimeAdmissionV1(SkillHostShutdownGateV1 shutdownGate)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
@@ -49,6 +44,8 @@ internal sealed class CopilotRuntimeAdmissionV1
             invalidationObservers.Add(observer);
         }
     }
+
+    internal bool IsNormalShutdownStarted => shutdownGate.IsNormalShutdownStarted;
 
     public bool TryGetCurrentAdmittedGeneration([NotNullWhen(true)] out CopilotRuntimeGenerationV1? generation)
     {

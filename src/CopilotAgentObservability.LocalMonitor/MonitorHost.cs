@@ -159,6 +159,8 @@ internal static class MonitorHost
         var skillDiscoveryRootGeneration = options.SanitizedOnly
             ? null
             : BuildSkillDiscoveryRootGeneration(options, skillHostShutdownGate!);
+        using var skillDiscoveryRootOwnership = new SkillDiscoveryRootOwnershipGuard(skillDiscoveryRootGeneration);
+        testOptions?.SkillDiscoveryRootGenerationObserver?.Invoke(skillDiscoveryRootGeneration);
 
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
         var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
@@ -248,10 +250,13 @@ internal static class MonitorHost
         }
         if (skillHostShutdownGate is not null)
         {
-            builder.Services.AddHostedService(_ => new SkillHostShutdownCoordinatorV1(
+            var shutdownCoordinator = new SkillHostShutdownCoordinatorV1(
                 skillHostShutdownGate,
                 skillDiscoveryRootGeneration,
-                skillRuntimeAdmission));
+                skillRuntimeAdmission);
+            builder.Services.AddSingleton<SkillHostShutdownCoordinatorV1>(_ => shutdownCoordinator);
+            builder.Services.AddHostedService(services =>
+                services.GetRequiredService<SkillHostShutdownCoordinatorV1>());
         }
         builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath, skillRegistryAuthority));
         var summaryService = new MonitorSummaryService(projectionStore);
@@ -493,6 +498,10 @@ internal static class MonitorHost
         testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
+        if (skillHostShutdownGate is not null)
+        {
+            _ = app.Services.GetRequiredService<SkillHostShutdownCoordinatorV1>();
+        }
         var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
         _ = app.Services.GetRequiredService<RuntimeBackupMonitorLease>();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
@@ -1780,6 +1789,7 @@ internal static class MonitorHost
         app.MapFallback(WriteUnsupportedEndpointAsync)
             .WithMetadata(LocalRepositoryRoutes.FallbackMarker);
 
+        skillDiscoveryRootOwnership.Transfer();
         return app;
     }
 
@@ -2093,6 +2103,21 @@ internal static class MonitorHost
         return preflight.Outcome == SkillDiscoveryRootPreflightOutcomeV1.Certified
             ? new SkillDiscoveryRootGenerationV1(preflight, shutdownGate)
             : null;
+    }
+
+    private sealed class SkillDiscoveryRootOwnershipGuard(SkillDiscoveryRootGenerationV1? generation) : IDisposable
+    {
+        private bool ownsGeneration = generation is not null;
+
+        public void Transfer() => ownsGeneration = false;
+
+        public void Dispose()
+        {
+            if (ownsGeneration)
+            {
+                generation!.DrainAndDisposeRootsAsync().GetAwaiter().GetResult();
+            }
+        }
     }
 
     private static bool IsValidHostHeader(string? host)
@@ -2587,6 +2612,8 @@ internal sealed class MonitorHostTestOptions
     public ISkillCurrentFileHistoricalGateV1? SkillCurrentFileHistoricalGate { get; init; }
 
     public ISkillCurrentAuthorizationGateV1? SkillCurrentAuthorizationGate { get; init; }
+
+    public Action<SkillDiscoveryRootGenerationV1?>? SkillDiscoveryRootGenerationObserver { get; init; }
 }
 
 internal sealed record AnalysisStartPayload(
