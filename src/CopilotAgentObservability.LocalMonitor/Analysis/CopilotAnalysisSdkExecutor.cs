@@ -366,13 +366,29 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             throw new InvalidOperationException("The execution session did not complete successfully.");
         OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CallbacksFrozen);
         if (!candidate.IsAdmitted)
+        {
+            OwnedSessionPostFreezeOutcomeObservationV1.Notify(context.PostFreezeFailureObserver, OwnedSessionPostFreezeOutcomeV1.CandidateNotAdmitted);
             throw new InvalidOperationException("The candidate lifecycle was lost.");
+        }
         if (prepared.Bodies.Count != 0)
         {
             var importer = new OwnedSessionPostCompletionImporterV1(
                 context.Bridge!, context.SessionEventQueue, context.CommitTimeout);
-            if (!await importer.ImportAsync(candidate, prepared, cancellationToken).ConfigureAwait(false))
+            OwnedSessionPostFreezeOutcomeV1 outcome;
+            try
+            {
+                outcome = await importer.ImportAsync(candidate, prepared, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                OwnedSessionPostFreezeOutcomeObservationV1.Notify(context.PostFreezeFailureObserver, OwnedSessionPostFreezeOutcomeV1.UnexpectedImportException);
+                throw;
+            }
+            if (outcome != OwnedSessionPostFreezeOutcomeV1.Success)
+            {
+                OwnedSessionPostFreezeOutcomeObservationV1.Notify(context.PostFreezeFailureObserver, outcome);
                 throw new InvalidOperationException("The completed session could not be imported.");
+            }
         }
         OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ImportCompleted);
         var evidence = new OwnedSessionExecutionEvidenceV1(

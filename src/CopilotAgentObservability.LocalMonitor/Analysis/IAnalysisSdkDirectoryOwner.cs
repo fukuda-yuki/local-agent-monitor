@@ -74,7 +74,8 @@ internal sealed record CopilotAnalysisRootsExecutionContext(
     IOwnedSessionExecutionDriverV1? ExecutionDriver = null,
     Action<OwnedSessionExecutionEvidenceV1>? ExecutionEvidenceObserver = null,
     Action<OwnedSessionExecutionCheckpointV1>? ExecutionCheckpointObserver = null,
-    Action<OwnedSessionDiagnosticEventV1>? OwnedSessionDiagnosticObserver = null);
+    Action<OwnedSessionDiagnosticEventV1>? OwnedSessionDiagnosticObserver = null,
+    Action<OwnedSessionPostFreezeOutcomeV1>? PostFreezeFailureObserver = null);
 
 internal enum OwnedSessionDiagnosticEventV1
 {

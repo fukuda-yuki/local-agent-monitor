@@ -94,6 +94,22 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         Enum.GetValues<OwnedSessionDiagnosticEventV1>().Take(2).Select(value => Issue158WindowsBlocker.PhaseWire(value)));
 
     [Fact]
+    public void PostFreezeWireMapsEveryClosedFailureAndSuccessToNone() => Assert.Equal(
+        ["none", "candidate_not_admitted", "prepared_body_rejected", "candidate_lost_during_first_v2", "first_v2_forward_unavailable", "candidate_lost_during_later_v2", "later_v2_forward_unavailable", "start_envelope_rejected", "terminal_envelope_rejected", "start_validation_rejected", "start_queue_refused", "start_commit_busy", "start_commit_failed", "start_commit_timeout", "start_commit_canceled", "terminal_validation_rejected", "terminal_queue_refused", "terminal_commit_busy", "terminal_commit_failed", "terminal_commit_timeout", "terminal_commit_canceled", "unexpected_import_exception"],
+        Enum.GetValues<OwnedSessionPostFreezeOutcomeV1>().Select(value => Issue158WindowsBlocker.PostFreezeWire(value)));
+
+    [Fact]
+    public void PostFreezeCaptureRetainsOnlyFirstValueUnderConcurrentReports()
+    {
+        var sync = new object();
+        OwnedSessionPostFreezeOutcomeV1? captured = null;
+        Issue158PostFreezeFailureCapture.Capture(sync, ref captured, OwnedSessionPostFreezeOutcomeV1.PreparedBodyRejected);
+        Parallel.ForEach(Enum.GetValues<OwnedSessionPostFreezeOutcomeV1>().Skip(1),
+            value => Issue158PostFreezeFailureCapture.Capture(sync, ref captured, value));
+        Assert.Equal(OwnedSessionPostFreezeOutcomeV1.PreparedBodyRejected, captured);
+    }
+
+    [Fact]
     public void BlockerSerializationCarriesEveryClosedReason()
     {
         foreach (var reason in Enum.GetValues<OwnedSessionDiagnosticEventV1>().Skip(2))
@@ -124,12 +140,13 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     {
         var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
         using var document = JsonDocument.Parse(json);
-        Assert.Equal(6, document.RootElement.EnumerateObject().Count());
-        Assert.Equal("issue-158-windows-blocker.v2", document.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal(7, document.RootElement.EnumerateObject().Count());
+        Assert.Equal("issue-158-windows-blocker.v3", document.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
         Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("poison_reason").GetString());
+        Assert.Equal("none", document.RootElement.GetProperty("post_freeze_failure").GetString());
     }
 
     [Theory]
@@ -627,6 +644,7 @@ internal static class Issue158WindowsOwnedSessionLane
         OwnedSessionExecutionCheckpointV1? lastCheckpoint = null;
         OwnedSessionDiagnosticEventV1? driverPhase = null;
         OwnedSessionDiagnosticEventV1? poisonReason = null;
+        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null;
         var identityLock = new object();
         var options = new MonitorOptions(databasePath, "http://127.0.0.1:0", false,
             MonitorOptions.DefaultMaxRequestBodyBytes, SkillDiscoveryDirectories: [skillRoot]);
@@ -643,6 +661,8 @@ internal static class Issue158WindowsOwnedSessionLane
             SkillInvocationV2CommittedObserver = identity => { lock (identityLock) identities.Add(identity); },
             OwnedSessionExecutionEvidenceObserver = item => { lock (identityLock) evidence.Add(item); },
             OwnedSessionExecutionCheckpointObserver = checkpoint => { lock (identityLock) lastCheckpoint = checkpoint; },
+            OwnedSessionPostFreezeFailureObserver = outcome =>
+                Issue158PostFreezeFailureCapture.Capture(identityLock, ref postFreezeFailure, outcome),
             OwnedSessionDiagnosticObserver = diagnostic =>
             {
                 lock (identityLock)
@@ -686,8 +706,9 @@ internal static class Issue158WindowsOwnedSessionLane
                 OwnedSessionExecutionCheckpointV1? snapshot;
                 OwnedSessionDiagnosticEventV1? phaseSnapshot;
                 OwnedSessionDiagnosticEventV1? reasonSnapshot;
-                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; }
-                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot);
+                OwnedSessionPostFreezeOutcomeV1? postFreezeSnapshot;
+                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot, postFreezeSnapshot);
                 throw;
             }
             if (run?.Status != MonitorAnalysisStatus.Succeeded)
@@ -695,8 +716,9 @@ internal static class Issue158WindowsOwnedSessionLane
                 OwnedSessionExecutionCheckpointV1? snapshot;
                 OwnedSessionDiagnosticEventV1? phaseSnapshot;
                 OwnedSessionDiagnosticEventV1? reasonSnapshot;
-                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; }
-                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot);
+                OwnedSessionPostFreezeOutcomeV1? postFreezeSnapshot;
+                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot, postFreezeSnapshot);
                 throw new InvalidOperationException("analysis_terminal");
             }
 
@@ -769,6 +791,15 @@ internal static class Issue158WindowsOwnedSessionLane
     }
 }
 
+internal static class Issue158PostFreezeFailureCapture
+{
+    internal static void Capture(object sync, ref OwnedSessionPostFreezeOutcomeV1? captured,
+        OwnedSessionPostFreezeOutcomeV1 outcome)
+    {
+        lock (sync) captured ??= outcome;
+    }
+}
+
 internal static class Issue158WindowsBlocker
 {
     internal const string FileName = "blocker.json";
@@ -797,22 +828,24 @@ internal static class Issue158WindowsBlocker
     };
 
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint)
-        => Serialize(candidateSha, terminalStatus, checkpoint, null, null);
+        => Serialize(candidateSha, terminalStatus, checkpoint, null, null, null);
 
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
-        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason)
+        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
+        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null)
     {
         if (candidateSha.Length != 40 || candidateSha.Any(static value => !char.IsAsciiHexDigitLower(value))
             || terminalStatus is not ("failed" or "canceled" or "timed_out"))
             throw new InvalidOperationException("blocker");
         return JsonSerializer.Serialize(new
         {
-            schema_version = "issue-158-windows-blocker.v2",
+            schema_version = "issue-158-windows-blocker.v3",
             candidate_sha = candidateSha,
             terminal_status = terminalStatus,
             last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
             driver_phase = PhaseWire(phase),
             poison_reason = PoisonWire(reason),
+            post_freeze_failure = PostFreezeWire(postFreezeFailure),
         });
     }
 
@@ -845,11 +878,16 @@ internal static class Issue158WindowsBlocker
         _ => throw new InvalidOperationException("reason"),
     };
 
+    internal static string PostFreezeWire(OwnedSessionPostFreezeOutcomeV1? outcome) => outcome is null
+        ? "none"
+        : OwnedSessionPostFreezeOutcomeObservationV1.Wire(outcome.Value);
+
     internal static Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
-        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason) =>
+        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
+        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure) =>
         File.WriteAllTextAsync(
             Path.Combine(gate.ResultDirectory, FileName),
-            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason),
+            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason, postFreezeFailure),
             new UTF8Encoding(false));
 }
 

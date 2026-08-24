@@ -105,11 +105,13 @@ public sealed class CopilotAnalysisSdkExecutorTests
     {
         await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
         using var fixture = new OwnedFixture();
+        var postFreezeFailures = new List<OwnedSessionPostFreezeOutcomeV1>();
 
         var result = await new CopilotAnalysisSdkExecutor().ExecuteAsync(
             fixture.Scope.ChildDirectory,
             new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
-            new CopilotAnalysisToolRequest("unchanged prompt", data), fixture.Context, CancellationToken.None);
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { PostFreezeFailureObserver = postFreezeFailures.Add }, CancellationToken.None);
 
         Assert.Equal("result", result.ResultMarkdown);
         var candidate = Assert.IsType<CopilotRuntimeGenerationV1>(result.UnpublishedCandidate);
@@ -121,6 +123,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         Assert.Equal(1, fixture.Client.Sessions[1].SendCalls);
         Assert.Equal(0, fixture.Queue.Count);
         Assert.Empty(fixture.Transport.Bodies);
+        Assert.Empty(postFreezeFailures);
 
         Assert.True(await fixture.Admission.DiscardCandidateAsync(candidate));
         Assert.Equal(1, fixture.Client.DisposeCalls);
@@ -266,7 +269,13 @@ public sealed class CopilotAnalysisSdkExecutorTests
             : OwnedFailure.OneInvocation);
         var evidence = new List<OwnedSessionExecutionEvidenceV1>();
         var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
-        var context = fixture.Context with { ExecutionEvidenceObserver = evidence.Add, ExecutionCheckpointObserver = checkpoints.Add };
+        var postFreezeFailures = new List<OwnedSessionPostFreezeOutcomeV1>();
+        var context = fixture.Context with
+        {
+            ExecutionEvidenceObserver = evidence.Add,
+            ExecutionCheckpointObserver = checkpoints.Add,
+            PostFreezeFailureObserver = postFreezeFailures.Add,
+        };
         using var workerCancellation = new CancellationTokenSource();
         var worker = Task.Run(async () =>
         {
@@ -318,6 +327,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Assert.Equal(1, fixture.Scope.DisposeCalls);
             Assert.Null(fixture.Transport.ConsumedCandidate);
             Assert.Empty(evidence);
+            Assert.Equal([OwnedSessionPostFreezeOutcomeV1.FirstV2ForwardUnavailable], postFreezeFailures);
             Assert.Equal(
                 [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified,
                     OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified,
@@ -327,6 +337,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         }
         else
         {
+            Assert.Empty(postFreezeFailures);
             Assert.Equal(
                 [OwnedSessionExecutionCheckpointV1.ClientStarted, OwnedSessionExecutionCheckpointV1.IdentityCertified,
                     OwnedSessionExecutionCheckpointV1.CandidateCreated, OwnedSessionExecutionCheckpointV1.ProbeCertified,
@@ -358,6 +369,80 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Assert.Equal(0, fixture.Scope.DisposeCalls);
             Assert.True(await fixture.Admission.DiscardCandidateAsync(candidate));
         }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_UnexpectedImporterExceptionReportsClosedOutcomeAndRethrowsSameException()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture(OwnedFailure.OneInvocation);
+        var observed = new List<OwnedSessionPostFreezeOutcomeV1>();
+
+        var exception = await Assert.ThrowsAsync<NullReferenceException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { SessionEventQueue = null!, PostFreezeFailureObserver = observed.Add }, CancellationToken.None));
+
+        Assert.NotNull(exception);
+        Assert.Equal([OwnedSessionPostFreezeOutcomeV1.UnexpectedImportException], observed);
+    }
+
+    [Fact]
+    public void PostFreezeObserverIsOptionalAndThrowingObserverCannotChangeControlFlow()
+    {
+        OwnedSessionPostFreezeOutcomeObservationV1.Notify(null, OwnedSessionPostFreezeOutcomeV1.PreparedBodyRejected);
+        OwnedSessionPostFreezeOutcomeObservationV1.Notify(
+            _ => throw new InvalidOperationException("synthetic"), OwnedSessionPostFreezeOutcomeV1.PreparedBodyRejected);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ThrowingPostFreezeObserverPreservesImporterFailureAndCleanup()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture(OwnedFailure.ImportTransportRefused);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with
+            {
+                PostFreezeFailureObserver = _ => throw new ApplicationException("synthetic observer failure"),
+            }, CancellationToken.None));
+
+        Assert.Equal("The completed session could not be imported.", error.Message);
+        Assert.Equal(1, fixture.Client.DisposeCalls);
+        Assert.Equal(1, fixture.Scope.DisposeCalls);
+        Assert.Single(fixture.Transport.Bodies);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_CandidateLostAfterCallbacksFreezeReportsBeforeExistingFailure()
+    {
+        await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
+        using var fixture = new OwnedFixture(OwnedFailure.OneInvocation);
+        var observed = new List<OwnedSessionPostFreezeOutcomeV1>();
+        using var invalidated = new ManualResetEventSlim();
+        fixture.Admission.RegisterInvalidationObserver(_ => invalidated.Set());
+        Action<OwnedSessionExecutionCheckpointV1> checkpoint = value =>
+        {
+            if (value == OwnedSessionExecutionCheckpointV1.CallbacksFrozen)
+            {
+                fixture.Scope.LoseLease();
+                Assert.True(invalidated.Wait(TimeSpan.FromSeconds(1)));
+            }
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new CopilotAnalysisSdkExecutor().ExecuteAsync(
+            fixture.Scope.ChildDirectory,
+            new CopilotAnalysisExecutionSettings("synthetic-model", 60, Provider: null),
+            new CopilotAnalysisToolRequest("unchanged prompt", data),
+            fixture.Context with { ExecutionCheckpointObserver = checkpoint, PostFreezeFailureObserver = observed.Add },
+            CancellationToken.None));
+
+        Assert.Equal([OwnedSessionPostFreezeOutcomeV1.CandidateNotAdmitted], observed);
+        Assert.Empty(fixture.Transport.Bodies);
     }
 
     [Theory]
