@@ -421,7 +421,6 @@ internal static class SkillProjectionSchemaV1
         }
         ValidateGeneratedIdentities(connection, transaction);
         ValidateForeignKeys(connection, transaction);
-        ValidateSdkClaims(connection, transaction);
         ValidateCanonicalRows(connection, transaction);
         ValidateSanitizedSkillValues(connection, transaction);
         ValidateQueueShapes(connection, transaction);
@@ -467,22 +466,6 @@ internal static class SkillProjectionSchemaV1
         {
             throw new InvalidOperationException(
                 "skill_projection_generated_identity_invalid");
-        }
-    }
-
-    private static void ValidateSdkClaims(
-        SqliteConnection connection,
-        SqliteTransaction? transaction)
-    {
-        using var count = connection.CreateCommand();
-        count.Transaction = transaction;
-        count.CommandText = "SELECT COUNT(*) FROM skill_projection_sdk_claims;";
-        if (Convert.ToInt64(
-                count.ExecuteScalar(),
-                System.Globalization.CultureInfo.InvariantCulture) != 0)
-        {
-            throw new InvalidOperationException(
-                "skill_projection_sdk_claim_authority_unpromoted");
         }
     }
 
