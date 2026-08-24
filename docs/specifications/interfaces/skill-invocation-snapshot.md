@@ -1,6 +1,6 @@
 # Skill Invocation Snapshot Interface
 
-Status: **D086 producer decision-closed; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation and release evidence pending**
+Status: **D089 live-proof authority aligned; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation complete; platform/live evidence refresh, final validation, and review pending**
 
 This specification is the detailed authority for Issues #119, #157, and #158.
 It defines the frozen Session-ingest v1 correction, the exact Skill-only v2
@@ -8,7 +8,8 @@ transport and runtime-capability boundary, the `skill_invocation_snapshot:1`
 component, historical content reads, and explicit bounded current-file reads.
 
 D083 resolves the eight wire/store/read choices. D086 supersedes only its
-Group 5 producer/topology clauses and the affected raw-analysis no-Skill rule.
+Group 5 producer/topology clauses and the affected raw-analysis no-Skill rule;
+D089 further supersedes only its current-release live-proof scope.
 No product contract is left for an implementation to infer. Canonical promotion does not itself
 prove the prerequisite implementations, platform walkers, signed-in live
 runtime, focused/full validation, or independent review required below.
@@ -733,7 +734,13 @@ resume, attach to, or read history from foreign sessions; in particular,
 `ResumeSessionAsync` is configuration-mutating and cannot certify ownership or
 the resumed runtime identity.
 
-Versioned T0b precedes r0002 and all producer startup code. On one same signed-
+Current r0002 deterministically admits exactly `1.0.65` and `1.0.75`, both at
+protocol `3`. For this release, versioned T0b and the final signed-in Windows
+live gate use the exact bundled `1.0.75`, protocol `3`. Deterministic compatibility
+and admission coverage for `1.0.65` is not the mandatory live lane. Every
+runtime identity observation remains exact and fail closed.
+
+Versioned T0b precedes r0002 and all producer startup/implementation code. On one same signed-
 in bundled client it proves exact Version/ProtocolVersion status, matching
 SessionStart version, pre-creation callback registration on both sessions,
 prompt-free probe inventory, execution `DisabledSkills`, retained-root-only
@@ -743,12 +750,10 @@ through the SDK commands API, invokes it with
 `executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-producing result,
 sends that exact returned prompt with `AgentMode.Autopilot`, and observes an
 exact matching typed retained `SkillInvoked` followed by an exact typed task-
-complete event. The candidate tuples are CLI
-`1.0.65` and `1.0.75`, SDK/package `1.0.4/1.0.4.0`, protocol `3`, adapter
+complete event. The mandatory live tuple is CLI `1.0.75`, SDK/package
+`1.0.4/1.0.4.0`, protocol `3`, adapter
 `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
-`github-copilot-sdk.skill-invoked.normalize.v2`; r0002 admits only complete
-exact tuples T0b actually certifies. Failure leaves r0001 unchanged and stops
-r0002, startup implementation, integration, and release. r0001 is historical
+`github-copilot-sdk.skill-invoked.normalize.v2`. Failure stops release. r0001 is historical
 authority, never a fallback.
 
 ### D087 current content authority
@@ -1063,7 +1068,8 @@ data. Protocol 3 is an admission-only runtime fact: it is not added to the
 normalized wire, receipt, snapshot, database, backup, response, log, or metric;
 `adapter_version` already binds SDK 1.0.4.
 
-The inspected baseline's current application-co-located debug executable at
+Historical D083 evidence (superseded for the current release gate by D089):
+the inspected baseline's application-co-located debug executable at
 `src/CopilotAgentObservability.LocalMonitor/bin/Debug/net10.0/runtimes/win-x64/native/copilot.exe`
 is 128,372,512 bytes, hashes as
 `c1d86ddd95da68c826455f8239580166f7bf598502f83684b936403b510cd2b6`, and
@@ -1076,7 +1082,8 @@ admitted** by r0001. It authorizes no producer, handoff, writer, new v2 write,
 replay label, or `source_application_version`; it is not authority to suppress
 stored metadata/historical content. On a valid configured/certified root
 surface it yields only the exact current-file discovery-unavailable result
-above, not route absence. Release activation requires a fresh application bundle
+above, not route absence. The following D083 activation requirement is
+historical and superseded for the current release gate: it requires a fresh application bundle
 that contains the exact package-selected 1.0.65 executable, forbids external
 or updating substitution, and whose same-client live status proves exact
 Version `1.0.65` and ProtocolVersion 3 before discovery or forwarding.
@@ -3040,12 +3047,13 @@ mutation. Until that separate promotion, no such exception exists.
    Linux gates may release independently; unsupported targets prove route
    absence while historical routes remain byte-identical.
 10. Versioned T0b and final live gates: the same bundled, signed-in client must
-    prove each exact r0002 tuple it admits (`1.0.65` and `1.0.75`, protocol 3),
+    prove the exact bundled `1.0.75`, protocol `3` mandatory live tuple,
     matching SessionStart identity, prompt-free inventory probe, distinct
     DisabledSkills-frozen execution Session, retained-root-only inventory and
     invocation, exact completion, owned-session post-completion import, and one
-    discovery without retaining raw user data/path evidence. An unproved tuple
-    is not admitted; no global or externally selected CLI is used.
+    discovery without retaining raw user data/path evidence. This live gate does
+    not replace deterministic `1.0.65` compatibility/admission coverage; no
+    global or externally selected CLI is used.
 11. Update and review the derived public workflow only with the implemented
     flags; run Markdown/link checks plus an exact stale search proving no #158
    workflow still names an obsolete dotted discovery configuration-key alias,

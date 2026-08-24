@@ -4088,3 +4088,23 @@ canceling. A real invalidation that occurs after normal drain has begun upgrades
 that published generation to canceling while both paths await the same
 exactly-once cleanup and disposal task. All other D086 and D087 authority
 remains unchanged.
+
+## D089: Current release requires one exact signed-in Windows live tuple
+
+Status: Accepted (2026-08-25)
+
+D089 narrowly supersedes only the D083 and D086 clauses that require signed-in
+`1.0.65` or live proof of every tuple admitted by current r0002. The immutable
+r0002 authority remains revision 2 with exactly `1.0.65` and `1.0.75`, both at
+protocol `3`; D087's two entries and D088's shutdown contract remain unchanged.
+
+For this release, mandatory T0b and final signed-in Windows live proof use
+exactly the application-bundled `1.0.75` client and protocol `3`. The
+deterministic compatibility and admission coverage for `1.0.65` remains
+required but is not the mandatory live lane. This does not relax identity:
+status, SessionStart, capability, request, registry, and evidence checks remain
+exact and fail closed. Historical D083 `1.0.65` material remains preserved as
+decision history and does not define the current release gate.
+
+D089 changes only the mandatory live tuple; it does not relax the pre-r0002 and
+pre-producer sequencing established by D086.

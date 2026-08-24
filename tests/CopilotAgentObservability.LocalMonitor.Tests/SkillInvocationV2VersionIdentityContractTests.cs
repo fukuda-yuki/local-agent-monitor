@@ -48,6 +48,58 @@ internal static class SkillInvocationNormalizedJsonTestWriter
 public sealed class SkillInvocationV2VersionIdentityContractTests
 {
     [Fact]
+    public void D089CurrentAuthority_SeparatesR0002AdmissionFromTheMandatoryLiveTuple()
+    {
+        var requirements = File.ReadAllText(RepositoryPath("docs", "requirements.md"));
+        var specification = File.ReadAllText(RepositoryPath("docs", "spec.md"));
+        var snapshotInterface = File.ReadAllText(RepositoryPath(
+            "docs", "specifications", "interfaces", "skill-invocation-snapshot.md"));
+        var decisions = File.ReadAllText(RepositoryPath("docs", "decisions.md"));
+        var task = File.ReadAllText(RepositoryPath("docs", "task.md"));
+
+        var requirementsSummary = Section(requirements, "- Skill invocation snapshot foundation", "- Codex App discovery");
+        var requirementsD089 = Section(requirements, "### D089", "## 4. 非目的");
+        Assert.Contains("exact bundled `1.0.75` / protocol `3` T0b must precede r0002 and all producer startup/implementation code", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("r0002 deterministically admits exactly `1.0.65` and `1.0.75`", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("implementation is complete", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.DoesNotContain("implementation/platform/live/full-validation/review/release evidenceは未完了", requirementsSummary, StringComparison.Ordinal);
+        Assert.Contains("mandatory T0b and final signed-in Windows live tuple is exactly bundled `1.0.75` / protocol `3`", NormalizeWhitespace(requirementsD089), StringComparison.Ordinal);
+        Assert.Contains("D089", specification, StringComparison.Ordinal);
+        Assert.Contains("mandatory live lane is exactly bundled `1.0.75`, protocol `3`", NormalizeWhitespace(specification), StringComparison.Ordinal);
+
+        var specCurrent = Section(specification, "D086 supersedes only D083", "The exact checked-in byte authorities");
+        Assert.Contains("T0b precedes r0002 and all producer startup/implementation code", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        var specCrossReference = Section(specification, "The independent `skill_projection:1` component", "The SDK transport and retained raw snapshot");
+        Assert.Contains("T0b-certified exact bundled `1.0.75` / protocol `3`", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
+        Assert.Contains("#158 atomic writer/importer implementation is complete", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
+        Assert.DoesNotContain("must still implement", specCrossReference, StringComparison.Ordinal);
+
+        var currentProducer = Section(snapshotInterface, "### D086 current producer contract", "### D087 current content authority");
+        Assert.Contains("Versioned T0b precedes r0002 and all producer startup/implementation code", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        var finalGates = Section(snapshotInterface, "## Required TDD slices and release gates", "## What is decided versus what still requires evidence");
+        Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.DoesNotContain("prove each exact r0002 tuple", finalGates, StringComparison.Ordinal);
+        Assert.DoesNotContain("An unproved tuple is not admitted", finalGates, StringComparison.Ordinal);
+
+        var d089 = Section(decisions, "## D089:", null);
+        var normalizedD089 = NormalizeWhitespace(d089);
+        Assert.Contains("Status: Accepted (2026-08-25)", normalizedD089, StringComparison.Ordinal);
+        Assert.Contains("deterministic compatibility and admission coverage for `1.0.65`", normalizedD089, StringComparison.Ordinal);
+        Assert.Contains("not the mandatory live lane", normalizedD089, StringComparison.Ordinal);
+        Assert.Contains("exact and fail closed", normalizedD089, StringComparison.Ordinal);
+        Assert.Contains("does not relax the pre-r0002 and pre-producer sequencing", normalizedD089, StringComparison.Ordinal);
+
+        var legacyActivation = Section(snapshotInterface, "Historical D083 evidence", "## Group 6");
+        Assert.Contains("Historical D083 evidence", NormalizeWhitespace(legacyActivation), StringComparison.Ordinal);
+        Assert.Contains("superseded for the current release gate", NormalizeWhitespace(legacyActivation), StringComparison.Ordinal);
+
+        var taskStatus = Section(task, "| Skill invocation snapshot (Issues #119/#157/#158)", "| Versioned pricing registry");
+        Assert.Contains("implementation complete", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("platform-live evidence refresh and final validation-review pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void D087CanonicalSources_KeepCurrentR0002DistinctFromHistoricalR0001()
     {
         var requirements = File.ReadAllText(RepositoryPath("docs", "requirements.md"));
@@ -258,4 +310,18 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         }
         throw new DirectoryNotFoundException("Repository root was not found.");
     }
+
+    private static string Section(string source, string startMarker, string? endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Missing section marker: {startMarker}");
+        if (endMarker is null)
+            return source[start..];
+        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.True(end > start, $"Missing section marker after {startMarker}: {endMarker}");
+        return source[start..end];
+    }
+
+    private static string NormalizeWhitespace(string source) =>
+        string.Join(' ', source.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 }
