@@ -140,21 +140,22 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     {
         var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
         using var document = JsonDocument.Parse(json);
-        Assert.Equal(8, document.RootElement.EnumerateObject().Count());
-        Assert.Equal("issue-158-windows-blocker.v4", document.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal(9, document.RootElement.EnumerateObject().Count());
+        Assert.Equal("issue-158-windows-blocker.v5", document.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
         Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("poison_reason").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("post_freeze_failure").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("post_success_failure").GetString());
+        Assert.Equal("none", document.RootElement.GetProperty("execution_evidence_failure").GetString());
     }
 
     [Fact]
     public void PostSuccessWireMapsEveryClosedStage()
     {
         Assert.Equal(
-            ["none", "execution_evidence", "committed_identity_sequence", "metadata_request", "historical_request", "current_file_request", "route_matrix", "metadata_document", "historical_document", "current_file_document", "persistence_counts", "aggregate_counts", "observed_result", "shutdown_drain", "result_serialization", "result_write", "unexpected"],
+            ["none", "publication_barrier", "execution_evidence", "committed_identity_sequence", "metadata_request", "historical_request", "current_file_request", "route_matrix", "metadata_document", "historical_document", "current_file_document", "persistence_counts", "aggregate_counts", "observed_result", "shutdown_drain", "result_serialization", "result_write", "unexpected"],
             Enum.GetValues<Issue158PostSuccessFailureV1>().Select(value => Issue158WindowsBlocker.PostSuccessWire(value)));
     }
 
@@ -208,6 +209,138 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
                 () => throw new InvalidOperationException("request preparation")),
             () => throw new InvalidOperationException("shutdown"), () => true, capture));
         Assert.Equal(Issue158PostSuccessFailureV1.CurrentFileRequest, capture.Value);
+    }
+
+    [Fact]
+    public async Task PublicationBarrierCompletesOnlyAfterPublishedAndThenEvidenceIsVisible()
+    {
+        var state = new Issue158PublicationEvidenceState(new object());
+        var capture = new Issue158PostSuccessFailureCapture();
+        var currentGeneration = false;
+        var wait = state.WaitAndCertifyAsync(capture, CancellationToken.None);
+        state.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidateReady);
+        Assert.False(wait.IsCompleted);
+        Assert.False(currentGeneration);
+        Assert.Equal(OwnedSessionExecutionCheckpointV1.CandidateReady, state.LastCheckpoint);
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.None, state.EvidenceFailure);
+        var expected = ValidEvidence();
+        state.ObserveEvidence(expected);
+        currentGeneration = true;
+        state.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidatePublished);
+        Assert.Equal(expected, await wait);
+        Assert.Equal(OwnedSessionExecutionCheckpointV1.CandidatePublished, state.LastCheckpoint);
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.None, state.EvidenceFailure);
+        Assert.True(currentGeneration);
+        state.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidatePublished);
+    }
+
+    [Fact]
+    public async Task PublicationBarrierFailureCapturesItsClosedStage()
+    {
+        var state = new Issue158PublicationEvidenceState(new object());
+        var capture = new Issue158PostSuccessFailureCapture();
+        state.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidateReady);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            state.WaitAndCertifyAsync(capture, new CancellationToken(true)));
+        Assert.Equal(Issue158PostSuccessFailureV1.PublicationBarrier, capture.Value);
+        using var blocker = JsonDocument.Parse(Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+            state.LastCheckpoint, null, null, null, capture.Value, state.EvidenceFailure));
+        Assert.Equal("candidate_ready", blocker.RootElement.GetProperty("last_checkpoint").GetString());
+    }
+
+    [Fact]
+    public async Task PublishedStateClassifiesMissingAndMultipleObserversThroughRealContinuation()
+    {
+        var missing = new Issue158PublicationEvidenceState(new object());
+        var missingCapture = new Issue158PostSuccessFailureCapture();
+        missing.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidatePublished);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => missing.WaitAndCertifyAsync(missingCapture, new CancellationToken(true)));
+        Assert.Equal(Issue158PostSuccessFailureV1.ExecutionEvidence, missingCapture.Value);
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ObserverMissing, missing.EvidenceFailure);
+
+        var multiple = new Issue158PublicationEvidenceState(new object());
+        multiple.ObserveEvidence(ValidEvidence());
+        multiple.ObserveEvidence(ValidEvidence());
+        multiple.ObserveCheckpoint(OwnedSessionExecutionCheckpointV1.CandidatePublished);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            multiple.WaitAndCertifyAsync(new Issue158PostSuccessFailureCapture(), CancellationToken.None));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ObserverMultiple, multiple.EvidenceFailure);
+    }
+
+    [Fact]
+    public void EvidenceClassifierUsesSemanticInventoriesAndClosedPrecedence()
+    {
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ObserverMissing, Issue158ExecutionEvidenceClassifier.Classify([]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ObserverMultiple,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence(), ValidEvidence() with { ProtocolVersion = 4 }]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.None,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { ProbeInventoryCount = 2, ExecutionInventoryCount = 2 }]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.None,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { ProbeInventoryCount = 2, ExecutionInventoryCount = 1 }]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ProtocolVersion,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { ProbeInventoryCount = 0, ProtocolVersion = 4 }]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { ProbeInventoryCount = 2, ExecutionInventoryCount = 3 }]));
+        Assert.Equal(Issue158ExecutionEvidenceFailureV1.SourceApplicationVersion,
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { SourceApplicationVersion = "bad", ProtocolVersion = 4 }]));
+    }
+
+    [Fact]
+    public void EvidenceFailureWireMapsEveryClosedValue()
+    {
+        Assert.Equal(
+            ["none", "observer_missing", "observer_multiple", "source_application_version", "protocol_version", "client_start_count", "status_observation_count", "probe_session_count", "execution_session_count", "retained_root_count", "retained_skill_count", "probe_inventory_count", "execution_inventory_count", "prepared_invocation_count", "same_client", "exact_tool_union", "retained_only_inventory", "probe_native_reproof", "execution_native_reproof", "callback_native_reproof"],
+            Enum.GetValues<Issue158ExecutionEvidenceFailureV1>().Select(value => Issue158WindowsBlocker.ExecutionEvidenceWire(value)));
+    }
+
+    [Fact]
+    public void EvidenceClassifierNamesEveryScalarAndBooleanMismatch()
+    {
+        var valid = ValidEvidence();
+        (OwnedSessionExecutionEvidenceV1 Value, Issue158ExecutionEvidenceFailureV1 Failure)[] cases =
+        [
+            (valid with { SourceApplicationVersion = "bad" }, Issue158ExecutionEvidenceFailureV1.SourceApplicationVersion),
+            (valid with { ProtocolVersion = 4 }, Issue158ExecutionEvidenceFailureV1.ProtocolVersion),
+            (valid with { ClientStartCount = 0 }, Issue158ExecutionEvidenceFailureV1.ClientStartCount),
+            (valid with { StatusObservationCount = 0 }, Issue158ExecutionEvidenceFailureV1.StatusObservationCount),
+            (valid with { ProbeSessionCount = 0 }, Issue158ExecutionEvidenceFailureV1.ProbeSessionCount),
+            (valid with { ExecutionSessionCount = 0 }, Issue158ExecutionEvidenceFailureV1.ExecutionSessionCount),
+            (valid with { RetainedRootCount = 0 }, Issue158ExecutionEvidenceFailureV1.RetainedRootCount),
+            (valid with { RetainedSkillCount = 0 }, Issue158ExecutionEvidenceFailureV1.RetainedSkillCount),
+            (valid with { ProbeInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount),
+            (valid with { ExecutionInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount),
+            (valid with { PreparedInvocationCount = 1 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount),
+            (valid with { SameClient = false }, Issue158ExecutionEvidenceFailureV1.SameClient),
+            (valid with { ExactToolUnion = false }, Issue158ExecutionEvidenceFailureV1.ExactToolUnion),
+            (valid with { RetainedOnlyInventory = false }, Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory),
+            (valid with { ProbeNativeReproof = false }, Issue158ExecutionEvidenceFailureV1.ProbeNativeReproof),
+            (valid with { ExecutionNativeReproof = false }, Issue158ExecutionEvidenceFailureV1.ExecutionNativeReproof),
+            (valid with { CallbackNativeReproof = false }, Issue158ExecutionEvidenceFailureV1.CallbackNativeReproof),
+        ];
+        foreach (var item in cases)
+            Assert.Equal(item.Failure, Issue158ExecutionEvidenceClassifier.Classify([item.Value]));
+    }
+
+    [Fact]
+    public void BlockerAcceptsOnlyClosedEvidenceDetailCrossPairAndPublicationCheckpoints()
+    {
+        foreach (var checkpoint in new[] { OwnedSessionExecutionCheckpointV1.CandidateReady, OwnedSessionExecutionCheckpointV1.CandidatePublished })
+            Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded", checkpoint, null, null, null,
+                Issue158PostSuccessFailureV1.PublicationBarrier);
+        foreach (var detail in Enum.GetValues<Issue158ExecutionEvidenceFailureV1>().Skip(1))
+        {
+            using var document = JsonDocument.Parse(Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+                OwnedSessionExecutionCheckpointV1.CandidatePublished, null, null, null,
+                Issue158PostSuccessFailureV1.ExecutionEvidence, detail));
+            Assert.Equal(Issue158WindowsBlocker.ExecutionEvidenceWire(detail),
+                document.RootElement.GetProperty("execution_evidence_failure").GetString());
+        }
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+            OwnedSessionExecutionCheckpointV1.CandidateReady, null, null, null, Issue158PostSuccessFailureV1.ExecutionEvidence,
+            Issue158ExecutionEvidenceFailureV1.ObserverMissing));
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+            OwnedSessionExecutionCheckpointV1.CandidatePublished, null, null, null, Issue158PostSuccessFailureV1.PublicationBarrier,
+            Issue158ExecutionEvidenceFailureV1.ObserverMissing));
     }
 
     [Fact]
@@ -426,6 +559,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     public void ResultSerializationIsStrictAndSanitized()
     {
         var json = Issue158WindowsResult.Serialize(ValidObservedResult());
+        Assert.Equal("{\"schema_version\":\"issue-158-live-validation.v1\",\"candidate_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lane\":\"windows_owned_session\",\"outcome\":\"passed\",\"source_application_version\":\"1.0.75\",\"protocol_version\":3,\"counts\":{\"retained_roots\":1,\"retained_skills\":1,\"probe_sessions\":1,\"execution_sessions\":1,\"user_invoked\":1,\"agent_invoked\":1,\"task_complete\":1,\"v2_imported\":2,\"v1_imported\":2,\"snapshot_rows\":2},\"checks\":{\"operator_gate\":true,\"cli_override_absent\":true,\"retained_only_inventory\":true,\"exact_tool_union\":true,\"native_reproof\":true,\"current_generation\":true,\"metadata_route\":true,\"historical_route\":true,\"current_file_route\":true,\"shutdown_drain\":true,\"cleanup_complete\":true},\"exit_code\":0}", json);
         using var document = JsonDocument.Parse(json);
         Assert.Equal(9, document.RootElement.EnumerateObject().Count());
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
@@ -806,12 +940,11 @@ internal static class Issue158WindowsOwnedSessionLane
                 [new MonitorTraceContribution(traceId, "synthetic", null, null, null, null, null, 0, 0, 0, null, null, null)]),
             timeProvider.GetUtcNow());
         var identities = new List<SkillInvocationV2CommittedIdentityV1>();
-        var evidence = new List<OwnedSessionExecutionEvidenceV1>();
-        OwnedSessionExecutionCheckpointV1? lastCheckpoint = null;
+        var identityLock = new object();
+        var publicationState = new Issue158PublicationEvidenceState(identityLock);
         OwnedSessionDiagnosticEventV1? driverPhase = null;
         OwnedSessionDiagnosticEventV1? poisonReason = null;
         OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null;
-        var identityLock = new object();
         var options = new MonitorOptions(databasePath, "http://127.0.0.1:0", false,
             MonitorOptions.DefaultMaxRequestBodyBytes, SkillDiscoveryDirectories: [skillRoot]);
         var app = MonitorHost.Build(options, new MonitorHostTestOptions
@@ -825,8 +958,8 @@ internal static class Issue158WindowsOwnedSessionLane
             },
             OwnedSessionExecutionDriver = new ExactSkillCommandExecutionDriverV1(SyntheticSkillName),
             SkillInvocationV2CommittedObserver = identity => { lock (identityLock) identities.Add(identity); },
-            OwnedSessionExecutionEvidenceObserver = item => { lock (identityLock) evidence.Add(item); },
-            OwnedSessionExecutionCheckpointObserver = checkpoint => { lock (identityLock) lastCheckpoint = checkpoint; },
+            OwnedSessionExecutionEvidenceObserver = publicationState.ObserveEvidence,
+            OwnedSessionExecutionCheckpointObserver = publicationState.ObserveCheckpoint,
             OwnedSessionPostFreezeFailureObserver = outcome =>
                 Issue158PostFreezeFailureCapture.Capture(identityLock, ref postFreezeFailure, outcome),
             OwnedSessionDiagnosticObserver = diagnostic =>
@@ -844,6 +977,7 @@ internal static class Issue158WindowsOwnedSessionLane
         Issue158WindowsObservedResult? observed = null;
         var shutdownComplete = false;
         var analysisSucceeded = false;
+        var analysisPersistedSucceeded = false;
         var postSuccess = new Issue158PostSuccessFailureCapture();
         try
         {
@@ -877,7 +1011,7 @@ internal static class Issue158WindowsOwnedSessionLane
                 OwnedSessionDiagnosticEventV1? phaseSnapshot;
                 OwnedSessionDiagnosticEventV1? reasonSnapshot;
                 OwnedSessionPostFreezeOutcomeV1? postFreezeSnapshot;
-                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
+                lock (identityLock) { snapshot = publicationState.LastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
                 await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot, postFreezeSnapshot);
                 throw;
             }
@@ -887,20 +1021,15 @@ internal static class Issue158WindowsOwnedSessionLane
                 OwnedSessionDiagnosticEventV1? phaseSnapshot;
                 OwnedSessionDiagnosticEventV1? reasonSnapshot;
                 OwnedSessionPostFreezeOutcomeV1? postFreezeSnapshot;
-                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
+                lock (identityLock) { snapshot = publicationState.LastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; postFreezeSnapshot = postFreezeFailure; }
                 await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot, postFreezeSnapshot);
                 throw new InvalidOperationException("analysis_terminal");
             }
+            analysisPersistedSucceeded = true;
+            OwnedSessionExecutionEvidenceV1 certified;
+            using (var publicationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                certified = await publicationState.WaitAndCertifyAsync(postSuccess, publicationTimeout.Token);
             analysisSucceeded = true;
-
-            var certified = Stage(Issue158PostSuccessFailureV1.ExecutionEvidence, () =>
-            {
-                OwnedSessionExecutionEvidenceV1[] executionEvidence;
-                lock (identityLock) executionEvidence = [.. evidence];
-                if (executionEvidence.Length != 1 || !Issue158WindowsResult.IsCertified(executionEvidence[0]))
-                    throw new InvalidOperationException("execution_evidence");
-                return executionEvidence[0];
-            });
 
             var committed = Stage(Issue158PostSuccessFailureV1.CommittedIdentitySequence, () =>
             {
@@ -972,12 +1101,14 @@ internal static class Issue158WindowsOwnedSessionLane
         }
         catch
         {
-            if (analysisSucceeded)
+            if (analysisPersistedSucceeded)
             {
                 if (postSuccess.Value == Issue158PostSuccessFailureV1.None)
                     postSuccess.Capture(Issue158PostSuccessFailureV1.Unexpected);
-                await Issue158WindowsBlocker.WriteAsync(gate, "succeeded", OwnedSessionExecutionCheckpointV1.CandidatePublished,
-                    null, null, null, postSuccess.Value);
+                OwnedSessionExecutionCheckpointV1? snapshot;
+                snapshot = publicationState.LastCheckpoint;
+                await Issue158WindowsBlocker.WriteAsync(gate, "succeeded", snapshot,
+                    null, null, null, postSuccess.Value, publicationState.EvidenceFailure);
             }
             throw;
         }
@@ -1014,6 +1145,7 @@ internal static class Issue158PostFreezeFailureCapture
 internal enum Issue158PostSuccessFailureV1
 {
     None,
+    PublicationBarrier,
     ExecutionEvidence,
     CommittedIdentitySequence,
     MetadataRequest,
@@ -1030,6 +1162,83 @@ internal enum Issue158PostSuccessFailureV1
     ResultSerialization,
     ResultWrite,
     Unexpected,
+}
+
+internal enum Issue158ExecutionEvidenceFailureV1
+{
+    None, ObserverMissing, ObserverMultiple, SourceApplicationVersion, ProtocolVersion, ClientStartCount,
+    StatusObservationCount, ProbeSessionCount, ExecutionSessionCount, RetainedRootCount, RetainedSkillCount,
+    ProbeInventoryCount, ExecutionInventoryCount, PreparedInvocationCount, SameClient, ExactToolUnion,
+    RetainedOnlyInventory, ProbeNativeReproof, ExecutionNativeReproof, CallbackNativeReproof,
+}
+
+internal sealed class Issue158PublicationEvidenceState
+{
+    private readonly object sync;
+    private readonly TaskCompletionSource<bool> source = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly List<OwnedSessionExecutionEvidenceV1> evidence = [];
+    private OwnedSessionExecutionCheckpointV1? lastCheckpoint;
+    private Issue158ExecutionEvidenceFailureV1 evidenceFailure;
+
+    internal Issue158PublicationEvidenceState(object sync) => this.sync = sync;
+    internal OwnedSessionExecutionCheckpointV1? LastCheckpoint { get { lock (sync) return lastCheckpoint; } }
+    internal Issue158ExecutionEvidenceFailureV1 EvidenceFailure { get { lock (sync) return evidenceFailure; } }
+
+    internal void ObserveEvidence(OwnedSessionExecutionEvidenceV1 item) { lock (sync) evidence.Add(item); }
+    internal void Observe(OwnedSessionExecutionCheckpointV1 checkpoint)
+    {
+        lock (sync) lastCheckpoint = checkpoint;
+        if (checkpoint == OwnedSessionExecutionCheckpointV1.CandidatePublished) source.TrySetResult(true);
+    }
+
+    internal void ObserveCheckpoint(OwnedSessionExecutionCheckpointV1 checkpoint) => Observe(checkpoint);
+
+    internal async Task<OwnedSessionExecutionEvidenceV1> WaitAndCertifyAsync(
+        Issue158PostSuccessFailureCapture capture, CancellationToken cancellationToken)
+    {
+        await Issue158PostSuccessExecution.RunStageAsync(Issue158PostSuccessFailureV1.PublicationBarrier, capture,
+            async () => { await source.Task.WaitAsync(cancellationToken); return true; });
+        return await Issue158PostSuccessExecution.RunStageAsync(Issue158PostSuccessFailureV1.ExecutionEvidence, capture, () =>
+        {
+            OwnedSessionExecutionEvidenceV1[] snapshot;
+            lock (sync)
+            {
+                snapshot = [.. evidence];
+                evidenceFailure = Issue158ExecutionEvidenceClassifier.Classify(snapshot);
+            }
+            if (evidenceFailure != Issue158ExecutionEvidenceFailureV1.None)
+                throw new InvalidOperationException("execution_evidence");
+            return Task.FromResult(snapshot[0]);
+        });
+    }
+}
+
+internal static class Issue158ExecutionEvidenceClassifier
+{
+    internal static Issue158ExecutionEvidenceFailureV1 Classify(IReadOnlyList<OwnedSessionExecutionEvidenceV1> values)
+    {
+        if (values.Count == 0) return Issue158ExecutionEvidenceFailureV1.ObserverMissing;
+        if (values.Count != 1) return Issue158ExecutionEvidenceFailureV1.ObserverMultiple;
+        var value = values[0];
+        if (value.SourceApplicationVersion != "1.0.75") return Issue158ExecutionEvidenceFailureV1.SourceApplicationVersion;
+        if (value.ProtocolVersion != 3) return Issue158ExecutionEvidenceFailureV1.ProtocolVersion;
+        if (value.ClientStartCount != 1) return Issue158ExecutionEvidenceFailureV1.ClientStartCount;
+        if (value.StatusObservationCount != 1) return Issue158ExecutionEvidenceFailureV1.StatusObservationCount;
+        if (value.ProbeSessionCount != 1) return Issue158ExecutionEvidenceFailureV1.ProbeSessionCount;
+        if (value.ExecutionSessionCount != 1) return Issue158ExecutionEvidenceFailureV1.ExecutionSessionCount;
+        if (value.RetainedRootCount != 1) return Issue158ExecutionEvidenceFailureV1.RetainedRootCount;
+        if (value.RetainedSkillCount != 1) return Issue158ExecutionEvidenceFailureV1.RetainedSkillCount;
+        if (value.ProbeInventoryCount < value.RetainedSkillCount) return Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount;
+        if (value.ExecutionInventoryCount < value.RetainedSkillCount || value.ExecutionInventoryCount > value.ProbeInventoryCount) return Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount;
+        if (value.PreparedInvocationCount != 2) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount;
+        if (!value.SameClient) return Issue158ExecutionEvidenceFailureV1.SameClient;
+        if (!value.ExactToolUnion) return Issue158ExecutionEvidenceFailureV1.ExactToolUnion;
+        if (!value.RetainedOnlyInventory) return Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory;
+        if (!value.ProbeNativeReproof) return Issue158ExecutionEvidenceFailureV1.ProbeNativeReproof;
+        if (!value.ExecutionNativeReproof) return Issue158ExecutionEvidenceFailureV1.ExecutionNativeReproof;
+        if (!value.CallbackNativeReproof) return Issue158ExecutionEvidenceFailureV1.CallbackNativeReproof;
+        return Issue158ExecutionEvidenceFailureV1.None;
+    }
 }
 
 internal sealed class Issue158PostSuccessFailureCapture
@@ -1162,22 +1371,30 @@ internal static class Issue158WindowsBlocker
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
         OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
         OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null,
-        Issue158PostSuccessFailureV1? postSuccessFailure = null)
+        Issue158PostSuccessFailureV1? postSuccessFailure = null,
+        Issue158ExecutionEvidenceFailureV1? executionEvidenceFailure = null)
     {
         if (candidateSha.Length != 40 || candidateSha.Any(static value => !char.IsAsciiHexDigitLower(value))
             || terminalStatus is not ("failed" or "canceled" or "timed_out" or "succeeded"))
             throw new InvalidOperationException("blocker");
         var postSuccess = PostSuccessWire(postSuccessFailure);
+        var evidenceFailure = ExecutionEvidenceWire(executionEvidenceFailure);
         if (terminalStatus == "succeeded")
         {
-            if (postSuccess == "none" || checkpoint != OwnedSessionExecutionCheckpointV1.CandidatePublished
+            var checkpointValid = postSuccessFailure == Issue158PostSuccessFailureV1.PublicationBarrier
+                ? checkpoint is OwnedSessionExecutionCheckpointV1.CandidateReady or OwnedSessionExecutionCheckpointV1.CandidatePublished
+                : checkpoint == OwnedSessionExecutionCheckpointV1.CandidatePublished;
+            if (postSuccess == "none" || !checkpointValid
                 || phase is not null || reason is not null || postFreezeFailure is not null)
                 throw new InvalidOperationException("blocker");
         }
         else if (postSuccess != "none") throw new InvalidOperationException("blocker");
+        if ((terminalStatus == "succeeded" && postSuccessFailure == Issue158PostSuccessFailureV1.ExecutionEvidence)
+            != (executionEvidenceFailure is not null and not Issue158ExecutionEvidenceFailureV1.None))
+            throw new InvalidOperationException("blocker");
         return JsonSerializer.Serialize(new
         {
-            schema_version = "issue-158-windows-blocker.v4",
+            schema_version = "issue-158-windows-blocker.v5",
             candidate_sha = candidateSha,
             terminal_status = terminalStatus,
             last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
@@ -1185,6 +1402,7 @@ internal static class Issue158WindowsBlocker
             poison_reason = PoisonWire(reason),
             post_freeze_failure = PostFreezeWire(postFreezeFailure),
             post_success_failure = postSuccess,
+            execution_evidence_failure = evidenceFailure,
         });
     }
 
@@ -1224,6 +1442,7 @@ internal static class Issue158WindowsBlocker
     internal static string PostSuccessWire(Issue158PostSuccessFailureV1? stage) => stage switch
     {
         null or Issue158PostSuccessFailureV1.None => "none",
+        Issue158PostSuccessFailureV1.PublicationBarrier => "publication_barrier",
         Issue158PostSuccessFailureV1.ExecutionEvidence => "execution_evidence",
         Issue158PostSuccessFailureV1.CommittedIdentitySequence => "committed_identity_sequence",
         Issue158PostSuccessFailureV1.MetadataRequest => "metadata_request",
@@ -1243,13 +1462,39 @@ internal static class Issue158WindowsBlocker
         _ => throw new InvalidOperationException("post_success"),
     };
 
+    internal static string ExecutionEvidenceWire(Issue158ExecutionEvidenceFailureV1? failure) => failure switch
+    {
+        null or Issue158ExecutionEvidenceFailureV1.None => "none",
+        Issue158ExecutionEvidenceFailureV1.ObserverMissing => "observer_missing",
+        Issue158ExecutionEvidenceFailureV1.ObserverMultiple => "observer_multiple",
+        Issue158ExecutionEvidenceFailureV1.SourceApplicationVersion => "source_application_version",
+        Issue158ExecutionEvidenceFailureV1.ProtocolVersion => "protocol_version",
+        Issue158ExecutionEvidenceFailureV1.ClientStartCount => "client_start_count",
+        Issue158ExecutionEvidenceFailureV1.StatusObservationCount => "status_observation_count",
+        Issue158ExecutionEvidenceFailureV1.ProbeSessionCount => "probe_session_count",
+        Issue158ExecutionEvidenceFailureV1.ExecutionSessionCount => "execution_session_count",
+        Issue158ExecutionEvidenceFailureV1.RetainedRootCount => "retained_root_count",
+        Issue158ExecutionEvidenceFailureV1.RetainedSkillCount => "retained_skill_count",
+        Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount => "probe_inventory_count",
+        Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount => "execution_inventory_count",
+        Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount => "prepared_invocation_count",
+        Issue158ExecutionEvidenceFailureV1.SameClient => "same_client",
+        Issue158ExecutionEvidenceFailureV1.ExactToolUnion => "exact_tool_union",
+        Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory => "retained_only_inventory",
+        Issue158ExecutionEvidenceFailureV1.ProbeNativeReproof => "probe_native_reproof",
+        Issue158ExecutionEvidenceFailureV1.ExecutionNativeReproof => "execution_native_reproof",
+        Issue158ExecutionEvidenceFailureV1.CallbackNativeReproof => "callback_native_reproof",
+        _ => throw new InvalidOperationException("execution_evidence"),
+    };
+
     internal static async Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
         OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
         OwnedSessionPostFreezeOutcomeV1? postFreezeFailure,
-        Issue158PostSuccessFailureV1? postSuccessFailure = null)
+        Issue158PostSuccessFailureV1? postSuccessFailure = null,
+        Issue158ExecutionEvidenceFailureV1? executionEvidenceFailure = null)
     {
         var bytes = new UTF8Encoding(false, true).GetBytes(
-            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason, postFreezeFailure, postSuccessFailure));
+            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason, postFreezeFailure, postSuccessFailure, executionEvidenceFailure));
         if (bytes.Length > 4096) throw new InvalidOperationException("blocker");
         await using var stream = new FileStream(Path.Combine(gate.ResultDirectory, FileName), FileMode.CreateNew,
             FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough);
@@ -1364,11 +1609,7 @@ internal static class Issue158RouteDocuments
 internal static class Issue158WindowsResult
 {
     internal static bool IsCertified(OwnedSessionExecutionEvidenceV1 evidence) =>
-        evidence is { SourceApplicationVersion: "1.0.75", ProtocolVersion: 3,
-            ClientStartCount: 1, StatusObservationCount: 1, ProbeSessionCount: 1, ExecutionSessionCount: 1,
-            RetainedRootCount: 1, RetainedSkillCount: 1, ProbeInventoryCount: 1, ExecutionInventoryCount: 1,
-            PreparedInvocationCount: 2, SameClient: true, ExactToolUnion: true, RetainedOnlyInventory: true,
-            ProbeNativeReproof: true, ExecutionNativeReproof: true, CallbackNativeReproof: true };
+        Issue158ExecutionEvidenceClassifier.Classify([evidence]) == Issue158ExecutionEvidenceFailureV1.None;
 
     internal static string Serialize(Issue158WindowsObservedResult result)
     {
