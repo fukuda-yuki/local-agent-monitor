@@ -5,6 +5,8 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using GitHub.Copilot;
+using System.Text;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -405,6 +407,35 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_CallbackPoisonCancelsExactCapabilityWorkAndPersistsCanceledWithoutAuthorityCancellation()
+    {
+        using var temp = new MonitorTempDirectory();
+        using var outer = new CancellationTokenSource();
+        using var host = new CancellationTokenSource();
+        var scope = new FakeScope("owned-child");
+        var store = new FakeStore(Run());
+        var executor = new CallbackPoisonExecutor();
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var runner = new DotNetCopilotRawAnalysisRunner(
+            store, new RawTelemetryStoreProjectionStore(raw),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build(),
+            new FakeOwner(scope), executor, temp.TimeProvider, host.Token,
+            rootsExecutionContextFactory: opened => CreateRootsContext(opened));
+        await runner.RunAsync(Context(), outer.Token);
+
+        Assert.True(executor.WorkTokenCanBeCanceled);
+        Assert.True(executor.WorkTokenWasCanceled);
+        Assert.True(executor.ObservedOperationCanceledException);
+        Assert.False(outer.IsCancellationRequested);
+        Assert.False(host.IsCancellationRequested);
+        Assert.False(scope.LeaseLostToken.IsCancellationRequested);
+        Assert.Equal(MonitorAnalysisStatus.Canceled, store.FinishedStatus);
+        Assert.Equal(1, executor.Invalidations);
+        Assert.Equal(1, scope.DisposeCount);
+    }
+
+    [Fact]
     public async Task RunAsync_RootsPresentAndRawAnalysisDisabledHasNoSdkOrDirectorySideEffect()
     {
         using var temp = new MonitorTempDirectory();
@@ -539,6 +570,55 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public Task<GitHub.Copilot.CopilotSession> CreateSessionAsync(GitHub.Copilot.SessionConfig config, CancellationToken cancellationToken) => throw new NotSupportedException();
         public void RecordSessionStartCopilotVersion(string? copilotVersion) { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class CallbackPoisonExecutor : ICopilotAnalysisSdkExecutor
+    {
+        public bool WorkTokenCanBeCanceled { get; private set; }
+        public bool WorkTokenWasCanceled { get; private set; }
+        public bool ObservedOperationCanceledException { get; private set; }
+        public int Invalidations { get; private set; }
+
+        public Task<CopilotAnalysisExecutionResult> ExecuteAsync(string childDirectory, CopilotAnalysisExecutionSettings settings,
+            CopilotAnalysisToolRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public async Task<CopilotAnalysisExecutionResult> ExecuteAsync(string childDirectory, CopilotAnalysisExecutionSettings settings,
+            CopilotAnalysisToolRequest request, CopilotAnalysisRootsExecutionContext context, CancellationToken cancellationToken)
+        {
+            var ownership = Assert.IsType<AnalysisSdkScopeOwnership>(context.ScopeOwnership);
+            Assert.True(ownership.TryTransferToExecutor());
+            Assert.True(ownership.TryTransferToCandidate());
+            var candidate = context.Admission.CreateUnpublishedCandidate(
+                new FakeRuntimeClient(), SkillInvocationV2TestIdentity.V1075, context.AnalysisScope, ownership);
+            Assert.True(candidate.TryAcquireOperationCapability(cancellationToken, out var capability));
+            try
+            {
+                var workToken = capability.WorkToken;
+                WorkTokenCanBeCanceled = workToken.CanBeCanceled;
+                var state = new OwnedSessionCallbackStateV1(
+                    new OwnedSessionFrozenSkillInventoryV1(
+                        new Dictionary<string, OwnedSessionFrozenSkillV1>(),
+                        new Dictionary<string, CopilotDiscoveredSkillFactV1>(), []),
+                    new NeverProof(), "1.0.75",
+                    _ => Encoding.UTF8.GetBytes("start"), _ => Encoding.UTF8.GetBytes("invocation"),
+                    _ => Encoding.UTF8.GetBytes("terminal"), workToken,
+                    () => { Invalidations++; context.Admission.InvalidateCandidate(candidate); });
+                var pending = Task.Delay(Timeout.InfiniteTimeSpan, workToken);
+                state.OnEvent(new SessionErrorEvent
+                    { Data = new SessionErrorData { ErrorType = "synthetic", Message = "synthetic" } });
+                WorkTokenWasCanceled = workToken.IsCancellationRequested;
+                try { await pending; }
+                catch (OperationCanceledException) { ObservedOperationCanceledException = true; throw; }
+                throw new InvalidOperationException();
+            }
+            finally { capability.Release(); }
+        }
+
+        private sealed class NeverProof : IOwnedSessionSkillProofProviderV1
+        {
+            public bool TryProve(CopilotDiscoveredSkillFactV1 fact, IReadOnlyList<string> roots,
+                out OwnedSessionSkillProofV1? proof) { proof = null; return false; }
+        }
     }
 
     private sealed class FakeStore : IMonitorAnalysisStore

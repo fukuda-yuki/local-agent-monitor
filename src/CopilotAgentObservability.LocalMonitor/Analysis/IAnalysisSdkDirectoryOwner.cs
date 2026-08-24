@@ -73,7 +73,39 @@ internal sealed record CopilotAnalysisRootsExecutionContext(
     AnalysisSdkScopeOwnership? ScopeOwnership = null,
     IOwnedSessionExecutionDriverV1? ExecutionDriver = null,
     Action<OwnedSessionExecutionEvidenceV1>? ExecutionEvidenceObserver = null,
-    Action<OwnedSessionExecutionCheckpointV1>? ExecutionCheckpointObserver = null);
+    Action<OwnedSessionExecutionCheckpointV1>? ExecutionCheckpointObserver = null,
+    Action<OwnedSessionDiagnosticEventV1>? OwnedSessionDiagnosticObserver = null);
+
+internal enum OwnedSessionDiagnosticEventV1
+{
+    CommandPending,
+    SendPending,
+    WorkTokenPreCanceled,
+    ClosedRelevantEvent,
+    SessionStartContract,
+    SessionBindingContract,
+    InvocationIdentity,
+    InvocationDescription,
+    InvocationContent,
+    InvocationNativeReproof,
+    InvocationPreparation,
+    InvocationBuffer,
+    TerminalContract,
+    SessionError,
+    ModelCallFailure,
+    Abort,
+    CallbackException,
+}
+
+internal static class OwnedSessionDiagnosticObservationV1
+{
+    internal static void Notify(Action<OwnedSessionDiagnosticEventV1>? observer, OwnedSessionDiagnosticEventV1 value)
+    {
+        if (observer is null) return;
+        try { observer(value); }
+        catch { }
+    }
+}
 
 internal enum OwnedSessionExecutionCheckpointV1
 {

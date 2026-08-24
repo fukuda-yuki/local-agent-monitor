@@ -369,7 +369,8 @@ internal static class MonitorHost
                     skillHostShutdownGate!.StoppingToken,
                     ExecutionDriver: testOptions?.OwnedSessionExecutionDriver,
                     ExecutionEvidenceObserver: testOptions?.OwnedSessionExecutionEvidenceObserver,
-                    ExecutionCheckpointObserver: testOptions?.OwnedSessionExecutionCheckpointObserver);
+                    ExecutionCheckpointObserver: testOptions?.OwnedSessionExecutionCheckpointObserver,
+                    OwnedSessionDiagnosticObserver: testOptions?.OwnedSessionDiagnosticObserver);
                 testOptions?.AnalysisRootsExecutionContextObserver?.Invoke(context);
                 return context;
             };
@@ -2629,6 +2630,8 @@ internal sealed class MonitorHostTestOptions
     public Action<OwnedSessionExecutionEvidenceV1>? OwnedSessionExecutionEvidenceObserver { get; init; }
 
     public Action<OwnedSessionExecutionCheckpointV1>? OwnedSessionExecutionCheckpointObserver { get; init; }
+
+    public Action<OwnedSessionDiagnosticEventV1>? OwnedSessionDiagnosticObserver { get; init; }
 
     public Action<CopilotAnalysisRootsExecutionContext>? AnalysisRootsExecutionContextObserver { get; init; }
 

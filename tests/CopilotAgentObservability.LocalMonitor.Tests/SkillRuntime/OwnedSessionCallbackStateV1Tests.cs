@@ -1,11 +1,92 @@
 using System.Text;
 using CopilotAgentObservability.LocalMonitor.SkillRuntime;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 using GitHub.Copilot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
 public sealed class OwnedSessionCallbackStateV1Tests
 {
+    [Fact]
+    public void Callback_FirstReasonIsStableAndThrowingObserverIsInert()
+    {
+        var reasons = new List<OwnedSessionDiagnosticEventV1>();
+        var invalidations = 0;
+        var state = CreateState(onPoison: () => invalidations++, diagnosticObserver: reason =>
+        {
+            reasons.Add(reason);
+            throw new InvalidOperationException("synthetic");
+        });
+
+        state.OnEvent(new SessionErrorEvent { Data = new SessionErrorData { ErrorType = "synthetic", Message = "synthetic" } });
+        state.Poison();
+
+        Assert.Equal([OwnedSessionDiagnosticEventV1.SessionError], reasons);
+        Assert.Equal(1, invalidations);
+        Assert.True(state.IsPoisoned);
+    }
+
+    [Theory]
+    [InlineData("work-token", 2)]
+    [InlineData("closed", 3)]
+    [InlineData("start", 4)]
+    [InlineData("binding", 5)]
+    [InlineData("identity", 6)]
+    [InlineData("description", 7)]
+    [InlineData("content", 8)]
+    [InlineData("reproof", 9)]
+    [InlineData("preparation", 10)]
+    [InlineData("buffer", 11)]
+    [InlineData("terminal", 12)]
+    [InlineData("session-error", 13)]
+    [InlineData("model-failure", 14)]
+    [InlineData("abort", 15)]
+    [InlineData("callback-exception", 16)]
+    public void Callback_EveryPoisonPathReportsItsClosedReasonExactlyOnce(string scenario, int expectedValue)
+    {
+        using var canceled = new CancellationTokenSource();
+        if (scenario == "work-token") canceled.Cancel();
+        var reasons = new List<OwnedSessionDiagnosticEventV1>();
+        var invalidations = 0;
+        var state = CreateState(
+            throwPreparation: scenario == "preparation",
+            proofProvider: scenario == "reproof" ? new FailingProof() : null,
+            workToken: scenario == "work-token" ? canceled.Token : default,
+            onPoison: () => invalidations++,
+            diagnosticObserver: reasons.Add);
+
+        switch (scenario)
+        {
+            case "work-token": state.OnEvent(Start()); break;
+            case "closed":
+                state.OnEvent(Start()); state.OnEvent(Terminal()); Assert.True(state.TryBindCreatedSession("session"));
+                Assert.NotNull(state.TryFreeze()); state.OnEvent(Invoked()); break;
+            case "start": state.OnEvent(new SessionStartEvent { Data = StartData("session", "drift") }); break;
+            case "binding": state.OnEvent(Start()); Assert.False(state.TryBindCreatedSession("other")); break;
+            case "identity":
+                state.OnEvent(Start()); var identity = Invoked(); identity.Data!.Name = "unknown"; state.OnEvent(identity); break;
+            case "description":
+                state.OnEvent(Start()); var description = Invoked(); description.Data!.Description = "drift"; state.OnEvent(description); break;
+            case "content":
+                state.OnEvent(Start()); var content = Invoked(); content.Data!.Content = "drift"; state.OnEvent(content); break;
+            case "reproof": state.OnEvent(Start()); state.OnEvent(Invoked()); break;
+            case "preparation": state.OnEvent(Start()); state.OnEvent(Invoked()); break;
+            case "buffer":
+                state.OnEvent(Start()); for (var index = 0; index <= OwnedSessionPreparedBufferV1.MaxInvocationCount; index++) state.OnEvent(Invoked()); break;
+            case "terminal": state.OnEvent(Terminal()); break;
+            case "session-error": state.OnEvent(new SessionErrorEvent { Data = new SessionErrorData { ErrorType = "synthetic", Message = "synthetic" } }); break;
+            case "model-failure": state.OnEvent(new ModelCallFailureEvent { Data = new ModelCallFailureData { Source = ModelCallFailureSource.TopLevel } }); break;
+            case "abort": state.OnEvent(new AbortEvent { Data = new AbortData { Reason = AbortReason.UserInitiated } }); break;
+            case "callback-exception": state.Poison(); break;
+            default: throw new InvalidOperationException();
+        }
+        state.Poison();
+
+        Assert.Equal([(OwnedSessionDiagnosticEventV1)expectedValue], reasons);
+        Assert.Equal(1, invalidations);
+        Assert.True(state.IsPoisoned);
+    }
+
     [Fact]
     public void Callback_ExactTypedSequence_FreezesPreparedBytesWithoutRetainingEvents()
     {
@@ -213,7 +294,8 @@ public sealed class OwnedSessionCallbackStateV1Tests
         bool throwPreparation = false,
         IOwnedSessionSkillProofProviderV1? proofProvider = null,
         CancellationToken workToken = default,
-        Action? onPoison = null)
+        Action? onPoison = null,
+        Action<OwnedSessionDiagnosticEventV1>? diagnosticObserver = null)
     {
         var retained = new CopilotDiscoveredSkillFactV1("retained", "custom", "C:/retained/SKILL.md",
             null, "description", "hint", true, true);
@@ -224,7 +306,7 @@ public sealed class OwnedSessionCallbackStateV1Tests
         return new(inventory, proofProvider ?? new FixedProof(proof), "1.0.75",
             _ => Encoding.UTF8.GetBytes("start"),
             _ => throwPreparation ? throw new InvalidOperationException("synthetic") : Encoding.UTF8.GetBytes("invocation"),
-            _ => Encoding.UTF8.GetBytes("terminal"), workToken, onPoison);
+            _ => Encoding.UTF8.GetBytes("terminal"), workToken, onPoison, diagnosticObserver);
     }
 
     private static SessionStartEvent Start() => new()
@@ -259,6 +341,12 @@ public sealed class OwnedSessionCallbackStateV1Tests
     {
         public bool TryProve(CopilotDiscoveredSkillFactV1 fact, IReadOnlyList<string> roots,
             out OwnedSessionSkillProofV1? proof) { proof = value; return true; }
+    }
+
+    private sealed class FailingProof : IOwnedSessionSkillProofProviderV1
+    {
+        public bool TryProve(CopilotDiscoveredSkillFactV1 fact, IReadOnlyList<string> roots,
+            out OwnedSessionSkillProofV1? proof) { proof = null; return false; }
     }
 
     private sealed class MutableProof(OwnedSessionSkillProofV1 value) : IOwnedSessionSkillProofProviderV1

@@ -309,7 +309,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
 
         callbackState = new OwnedSessionCallbackStateV1(inventory, proofProvider,
             identity.SourceApplicationVersion, PrepareStart, PrepareInvocation, PrepareTerminal, cancellationToken,
-            () => context.Admission.InvalidateCandidate(candidate));
+            () => context.Admission.InvalidateCandidate(candidate), context.OwnedSessionDiagnosticObserver);
         var config = OwnedSessionSdkPolicyV1.CreateExecutionConfig(
             baseline, roots, inventory.DisabledSkills, sourceEvent =>
             {
@@ -354,7 +354,10 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
             OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified);
             if (!callbackState.TryBindCreatedSession(session.SessionId))
                 throw new InvalidOperationException("The execution session identity is unavailable.");
-            await executionDriver.ExecuteAsync(session, prompt, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
+            var driverSession = context.OwnedSessionDiagnosticObserver is null
+                ? session
+                : new DiagnosticOwnedCopilotSessionV1(session, context.OwnedSessionDiagnosticObserver);
+            await executionDriver.ExecuteAsync(driverSession, prompt, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
                 .ConfigureAwait(false);
             OwnedSessionExecutionCheckpointObservationV1.Notify(context.ExecutionCheckpointObserver, OwnedSessionExecutionCheckpointV1.DriverCompleted);
         }
@@ -398,7 +401,7 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
 
     private static byte[] SerializeEnvelope(CopilotAgentObservability.LocalMonitor.Sessions.SessionIngestEnvelope? envelope) =>
         envelope is null
-            ? throw new InvalidOperationException("The session envelope is invalid.")
+            ? throw new OwnedSessionEnvelopeContractExceptionV1()
             : JsonSerializer.SerializeToUtf8Bytes(envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
     private static SessionConfig CreateSessionConfig(

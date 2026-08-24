@@ -1,5 +1,6 @@
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
+using CopilotAgentObservability.LocalMonitor.Analysis;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
@@ -33,6 +34,26 @@ internal sealed class ExactSkillCommandExecutionDriverV1(string skillName) : IOw
             throw new InvalidOperationException("The retained Skill command could not be invoked.");
         await session.SendAndWaitAsync(invocation.Prompt, timeout, cancellationToken).ConfigureAwait(false);
     }
+}
+
+internal sealed class DiagnosticOwnedCopilotSessionV1(
+    IOwnedCopilotSessionV1 inner,
+    Action<OwnedSessionDiagnosticEventV1> observer) : IOwnedCopilotSessionV1
+{
+    public string SessionId => inner.SessionId;
+    public Task EnsureSkillsLoadedAsync(CancellationToken cancellationToken) => inner.EnsureSkillsLoadedAsync(cancellationToken);
+    public Task<IReadOnlyList<CopilotDiscoveredSkillFactV1>?> ListSkillsAsync(CancellationToken cancellationToken) => inner.ListSkillsAsync(cancellationToken);
+    public Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
+    {
+        OwnedSessionDiagnosticObservationV1.Notify(observer, OwnedSessionDiagnosticEventV1.CommandPending);
+        return inner.InvokeExactSkillCommandAsync(skillName, cancellationToken);
+    }
+    public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        OwnedSessionDiagnosticObservationV1.Notify(observer, OwnedSessionDiagnosticEventV1.SendPending);
+        return inner.SendAndWaitAsync(prompt, timeout, cancellationToken);
+    }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
 internal interface IOwnedSessionExecutionDriverV1

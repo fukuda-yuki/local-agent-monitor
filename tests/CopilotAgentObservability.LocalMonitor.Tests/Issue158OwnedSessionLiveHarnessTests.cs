@@ -81,13 +81,55 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     }
 
     [Fact]
+    public void PoisonWireMapsEveryClosedReason()
+    {
+        Assert.Equal(
+            ["work_token_pre_canceled", "closed_relevant_event", "session_start_contract", "session_binding_contract", "invocation_identity", "invocation_description", "invocation_content", "invocation_native_reproof", "invocation_preparation", "invocation_buffer", "terminal_contract", "session_error", "model_call_failure", "abort", "callback_exception"],
+            Enum.GetValues<OwnedSessionDiagnosticEventV1>().Skip(2).Select(value => Issue158WindowsBlocker.PoisonWire(value)));
+    }
+
+    [Fact]
+    public void PhaseWireMapsBothClosedPhases() => Assert.Equal(
+        ["command_pending", "send_pending"],
+        Enum.GetValues<OwnedSessionDiagnosticEventV1>().Take(2).Select(value => Issue158WindowsBlocker.PhaseWire(value)));
+
+    [Fact]
+    public void BlockerSerializationCarriesEveryClosedReason()
+    {
+        foreach (var reason in Enum.GetValues<OwnedSessionDiagnosticEventV1>().Skip(2))
+        {
+            using var document = JsonDocument.Parse(Issue158WindowsBlocker.Serialize(
+                new string('a', 40), "canceled", null, null, reason));
+            Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
+            Assert.Equal(Issue158WindowsBlocker.PoisonWire(reason), document.RootElement.GetProperty("poison_reason").GetString());
+        }
+    }
+
+    [Fact]
+    public void BlockerSerializationCarriesBothPhasesAndNone()
+    {
+        foreach (var phase in new OwnedSessionDiagnosticEventV1?[]
+            { null, OwnedSessionDiagnosticEventV1.CommandPending, OwnedSessionDiagnosticEventV1.SendPending })
+        {
+            using var document = JsonDocument.Parse(Issue158WindowsBlocker.Serialize(
+                new string('a', 40), "timed_out", OwnedSessionExecutionCheckpointV1.ExecutionInventoryCertified,
+                phase, null));
+            Assert.Equal(Issue158WindowsBlocker.PhaseWire(phase), document.RootElement.GetProperty("driver_phase").GetString());
+            Assert.Equal("none", document.RootElement.GetProperty("poison_reason").GetString());
+        }
+    }
+
+    [Fact]
     public void BlockerDocumentIsStrictAndSanitized()
     {
         var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
         using var document = JsonDocument.Parse(json);
-        Assert.Equal(4, document.RootElement.EnumerateObject().Count());
+        Assert.Equal(6, document.RootElement.EnumerateObject().Count());
+        Assert.Equal("issue-158-windows-blocker.v2", document.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
         Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
+        Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
+        Assert.Equal("none", document.RootElement.GetProperty("poison_reason").GetString());
     }
 
     [Theory]
@@ -583,6 +625,8 @@ internal static class Issue158WindowsOwnedSessionLane
         var identities = new List<SkillInvocationV2CommittedIdentityV1>();
         var evidence = new List<OwnedSessionExecutionEvidenceV1>();
         OwnedSessionExecutionCheckpointV1? lastCheckpoint = null;
+        OwnedSessionDiagnosticEventV1? driverPhase = null;
+        OwnedSessionDiagnosticEventV1? poisonReason = null;
         var identityLock = new object();
         var options = new MonitorOptions(databasePath, "http://127.0.0.1:0", false,
             MonitorOptions.DefaultMaxRequestBodyBytes, SkillDiscoveryDirectories: [skillRoot]);
@@ -599,6 +643,15 @@ internal static class Issue158WindowsOwnedSessionLane
             SkillInvocationV2CommittedObserver = identity => { lock (identityLock) identities.Add(identity); },
             OwnedSessionExecutionEvidenceObserver = item => { lock (identityLock) evidence.Add(item); },
             OwnedSessionExecutionCheckpointObserver = checkpoint => { lock (identityLock) lastCheckpoint = checkpoint; },
+            OwnedSessionDiagnosticObserver = diagnostic =>
+            {
+                lock (identityLock)
+                {
+                    if (diagnostic is OwnedSessionDiagnosticEventV1.CommandPending or OwnedSessionDiagnosticEventV1.SendPending)
+                        driverPhase = diagnostic;
+                    else poisonReason ??= diagnostic;
+                }
+            },
         });
         var analysisStore = app.Services.GetRequiredService<IMonitorAnalysisStore>();
         await app.StartAsync();
@@ -631,15 +684,19 @@ internal static class Issue158WindowsOwnedSessionLane
             {
                 run = analysisStore.GetRun(runId);
                 OwnedSessionExecutionCheckpointV1? snapshot;
-                lock (identityLock) snapshot = lastCheckpoint;
-                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot);
+                OwnedSessionDiagnosticEventV1? phaseSnapshot;
+                OwnedSessionDiagnosticEventV1? reasonSnapshot;
+                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; }
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot);
                 throw;
             }
             if (run?.Status != MonitorAnalysisStatus.Succeeded)
             {
                 OwnedSessionExecutionCheckpointV1? snapshot;
-                lock (identityLock) snapshot = lastCheckpoint;
-                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot);
+                OwnedSessionDiagnosticEventV1? phaseSnapshot;
+                OwnedSessionDiagnosticEventV1? reasonSnapshot;
+                lock (identityLock) { snapshot = lastCheckpoint; phaseSnapshot = driverPhase; reasonSnapshot = poisonReason; }
+                await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot);
                 throw new InvalidOperationException("analysis_terminal");
             }
 
@@ -740,23 +797,59 @@ internal static class Issue158WindowsBlocker
     };
 
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint)
+        => Serialize(candidateSha, terminalStatus, checkpoint, null, null);
+
+    internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
+        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason)
     {
         if (candidateSha.Length != 40 || candidateSha.Any(static value => !char.IsAsciiHexDigitLower(value))
             || terminalStatus is not ("failed" or "canceled" or "timed_out"))
             throw new InvalidOperationException("blocker");
         return JsonSerializer.Serialize(new
         {
-            schema_version = "issue-158-windows-blocker.v1",
+            schema_version = "issue-158-windows-blocker.v2",
             candidate_sha = candidateSha,
             terminal_status = terminalStatus,
             last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
+            driver_phase = PhaseWire(phase),
+            poison_reason = PoisonWire(reason),
         });
     }
 
-    internal static Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint) =>
+    internal static string PhaseWire(OwnedSessionDiagnosticEventV1? phase) => phase switch
+    {
+        null => "none",
+        OwnedSessionDiagnosticEventV1.CommandPending => "command_pending",
+        OwnedSessionDiagnosticEventV1.SendPending => "send_pending",
+        _ => throw new InvalidOperationException("phase"),
+    };
+
+    internal static string PoisonWire(OwnedSessionDiagnosticEventV1? reason) => reason switch
+    {
+        null => "none",
+        OwnedSessionDiagnosticEventV1.WorkTokenPreCanceled => "work_token_pre_canceled",
+        OwnedSessionDiagnosticEventV1.ClosedRelevantEvent => "closed_relevant_event",
+        OwnedSessionDiagnosticEventV1.SessionStartContract => "session_start_contract",
+        OwnedSessionDiagnosticEventV1.SessionBindingContract => "session_binding_contract",
+        OwnedSessionDiagnosticEventV1.InvocationIdentity => "invocation_identity",
+        OwnedSessionDiagnosticEventV1.InvocationDescription => "invocation_description",
+        OwnedSessionDiagnosticEventV1.InvocationContent => "invocation_content",
+        OwnedSessionDiagnosticEventV1.InvocationNativeReproof => "invocation_native_reproof",
+        OwnedSessionDiagnosticEventV1.InvocationPreparation => "invocation_preparation",
+        OwnedSessionDiagnosticEventV1.InvocationBuffer => "invocation_buffer",
+        OwnedSessionDiagnosticEventV1.TerminalContract => "terminal_contract",
+        OwnedSessionDiagnosticEventV1.SessionError => "session_error",
+        OwnedSessionDiagnosticEventV1.ModelCallFailure => "model_call_failure",
+        OwnedSessionDiagnosticEventV1.Abort => "abort",
+        OwnedSessionDiagnosticEventV1.CallbackException => "callback_exception",
+        _ => throw new InvalidOperationException("reason"),
+    };
+
+    internal static Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
+        OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason) =>
         File.WriteAllTextAsync(
             Path.Combine(gate.ResultDirectory, FileName),
-            Serialize(gate.CandidateSha, terminalStatus, checkpoint),
+            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason),
             new UTF8Encoding(false));
 }
 

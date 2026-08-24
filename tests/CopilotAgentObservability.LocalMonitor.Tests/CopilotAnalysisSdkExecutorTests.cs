@@ -157,6 +157,59 @@ public sealed class CopilotAnalysisSdkExecutorTests
     }
 
     [Fact]
+    public async Task DiagnosticSession_ExactDriverObservesCommandThenSend()
+    {
+        var phases = new List<OwnedSessionDiagnosticEventV1>();
+        var session = new CommandSession(new OwnedSkillCommandPromptV1("prepared"));
+        var observed = new DiagnosticOwnedCopilotSessionV1(session, phases.Add);
+
+        await new ExactSkillCommandExecutionDriverV1("retained").ExecuteAsync(
+            observed, "ordinary", TimeSpan.FromSeconds(1), CancellationToken.None);
+
+        Assert.Equal([OwnedSessionDiagnosticEventV1.CommandPending, OwnedSessionDiagnosticEventV1.SendPending], phases);
+    }
+
+    [Fact]
+    public async Task DiagnosticSession_DefaultDriverObservesSendOnly()
+    {
+        var phases = new List<OwnedSessionDiagnosticEventV1>();
+        var session = new CommandSession(null);
+
+        await DefaultOwnedSessionExecutionDriverV1.Instance.ExecuteAsync(
+            new DiagnosticOwnedCopilotSessionV1(session, phases.Add), "ordinary", TimeSpan.FromSeconds(1), CancellationToken.None);
+
+        Assert.Equal([OwnedSessionDiagnosticEventV1.SendPending], phases);
+    }
+
+    [Fact]
+    public async Task DiagnosticSession_ThrowingPhaseObserverCannotChangeDriverBehavior()
+    {
+        var session = new CommandSession(new OwnedSkillCommandPromptV1("prepared"));
+
+        await new ExactSkillCommandExecutionDriverV1("retained").ExecuteAsync(
+            new DiagnosticOwnedCopilotSessionV1(session, _ => throw new InvalidOperationException("observer")),
+            "ordinary", TimeSpan.FromSeconds(1), CancellationToken.None);
+
+        Assert.Equal(1, session.SendCalls);
+        Assert.Equal("prepared", session.Prompt);
+    }
+
+    [Theory]
+    [InlineData(true, false, 1)]
+    [InlineData(false, true, 2)]
+    public async Task DiagnosticSession_FailureLeavesTheLastPendingPhase(bool failCommand, bool failSend, int expectedCount)
+    {
+        var phases = new List<OwnedSessionDiagnosticEventV1>();
+        var session = new CommandSession(new OwnedSkillCommandPromptV1("prepared"), failCommand, failSend);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new ExactSkillCommandExecutionDriverV1("retained").ExecuteAsync(
+            new DiagnosticOwnedCopilotSessionV1(session, phases.Add), "ordinary", TimeSpan.FromSeconds(1), CancellationToken.None));
+
+        Assert.Equal(expectedCount, phases.Count);
+        Assert.Equal(failCommand ? OwnedSessionDiagnosticEventV1.CommandPending : OwnedSessionDiagnosticEventV1.SendPending, phases[^1]);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RootsEnabledUsesInjectedOwnedSessionExecutionDriver()
     {
         await using var data = await CreateToolDataAsync(MonitorAnalysisFocus.Errors);
@@ -820,7 +873,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         }
     }
 
-    private sealed class CommandSession(OwnedSkillCommandPromptV1? commandPrompt) : IOwnedCopilotSessionV1
+    private sealed class CommandSession(OwnedSkillCommandPromptV1? commandPrompt, bool failCommand = false, bool failSend = false) : IOwnedCopilotSessionV1
     {
         public string SessionId => "command-session";
         public string? RequestedSkillName { get; private set; }
@@ -833,6 +886,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         public Task<OwnedSkillCommandPromptV1?> InvokeExactSkillCommandAsync(string skillName, CancellationToken cancellationToken)
         {
             RequestedSkillName = skillName;
+            if (failCommand) throw new InvalidOperationException("command");
             return Task.FromResult(commandPrompt);
         }
         public Task SendAndWaitAsync(string prompt, TimeSpan timeout, CancellationToken cancellationToken)
@@ -840,6 +894,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             SendCalls++;
             Prompt = prompt;
             Timeout = timeout;
+            if (failSend) throw new InvalidOperationException("send");
             return Task.CompletedTask;
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
