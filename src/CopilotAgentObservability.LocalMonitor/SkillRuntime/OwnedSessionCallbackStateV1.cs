@@ -13,7 +13,7 @@ internal sealed class OwnedSessionCallbackStateV1
     private readonly IOwnedSessionSkillProofProviderV1 proofProvider;
     private readonly string sourceVersion;
     private readonly Func<SessionStartEvent, byte[]> prepareStart;
-    private readonly Func<SkillInvokedEvent, byte[]> prepareInvocation;
+    private readonly Func<SkillInvokedEvent, string, byte[]> prepareInvocation;
     private readonly Func<SessionTaskCompleteEvent, byte[]> prepareTerminal;
     private readonly CancellationToken workToken;
     private readonly Action? onPoison;
@@ -29,7 +29,7 @@ internal sealed class OwnedSessionCallbackStateV1
         IOwnedSessionSkillProofProviderV1 proofProvider,
         string sourceVersion,
         Func<SessionStartEvent, byte[]> prepareStart,
-        Func<SkillInvokedEvent, byte[]> prepareInvocation,
+        Func<SkillInvokedEvent, string, byte[]> prepareInvocation,
         Func<SessionTaskCompleteEvent, byte[]> prepareTerminal,
         CancellationToken workToken = default,
         Action? onPoison = null,
@@ -166,20 +166,35 @@ internal sealed class OwnedSessionCallbackStateV1
         }
         if (!string.Equals(invocation.Data.Description, retained.Descriptor.Description, StringComparison.Ordinal))
         { PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationDescription); return; }
-        if (!string.Equals(invocation.Data.Content, retained.Proof.Content, StringComparison.Ordinal))
+        if (!IsWellFormedRequired(invocation.Data.Content))
         { PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationContent); return; }
+        OwnedSessionSkillProofV1? currentProof;
         try
         {
-            if (!proofProvider.TryProve(retained.Descriptor, inventory.RetainedRoots ?? [], out var currentProof)
-                || currentProof != retained.Proof)
+            if (!proofProvider.TryProve(retained.Descriptor, inventory.RetainedRoots ?? [], out currentProof)
+                || currentProof is null || currentProof != retained.Proof)
             { PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationNativeReproof); return; }
         }
         catch { PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationNativeReproof); return; }
         byte[] prepared;
-        try { prepared = prepareInvocation(invocation); }
+        try { prepared = prepareInvocation(invocation, currentProof.Content); }
         catch { PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationPreparation); return; }
         if (!buffer.TryAcceptInvocation(callbackSessionId, prepared))
             PoisonUnderLock(OwnedSessionDiagnosticEventV1.InvocationBuffer);
+    }
+
+    private static bool IsWellFormedRequired(string? value)
+    {
+        if (value is null) return false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (++index >= value.Length || !char.IsLowSurrogate(value[index])) return false;
+            }
+            else if (char.IsLowSurrogate(value[index])) return false;
+        }
+        return true;
     }
 
     private void AcceptTerminal(SessionTaskCompleteEvent completed)

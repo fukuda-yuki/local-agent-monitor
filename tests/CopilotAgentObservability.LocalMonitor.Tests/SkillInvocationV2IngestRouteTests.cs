@@ -500,7 +500,10 @@ public sealed class SkillInvocationV2IngestRouteTests : IAsyncLifetime
         return registration;
     }
 
-    private static byte[] ValidRequestBytes() => Encoding.UTF8.GetBytes(ValidRequest);
+    private static byte[] ValidRequestBytes() => Encoding.UTF8.GetBytes(ValidRequest.Replace(
+        "github-copilot-sdk.skill-invoked.normalize.v1",
+        "github-copilot-sdk.skill-invoked.normalize.v2",
+        StringComparison.Ordinal));
 
     private static HttpRequestMessage BuildPost(
         byte[] body,

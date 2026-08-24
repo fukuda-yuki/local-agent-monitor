@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using GitHub.Copilot;
 using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -304,6 +305,12 @@ public sealed class CopilotAnalysisSdkExecutorTests
         Assert.Equal(refuseTransport ? ["execution.dispose", "v2", "client.dispose", "scope.dispose"] :
             ["execution.dispose", "v2", "v1:session.start", "v1:session.task_complete"], fixture.Order);
         Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
+        if (!refuseTransport)
+        {
+            using var normalized = JsonDocument.Parse(Assert.Single(fixture.Transport.Bodies));
+            Assert.Equal(OwnedFixture.SkillContent,
+                normalized.RootElement.GetProperty("events")[0].GetProperty("payload").GetProperty("content").GetString());
+        }
         if (refuseTransport)
         {
             Assert.Null(result);
@@ -690,7 +697,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Assert.Equal(SkillDiscoveryRootPreflightOutcomeV1.Certified, preflight.Outcome);
             RootGeneration = new SkillDiscoveryRootGenerationV1(preflight, gate);
             Admission = new CopilotRuntimeAdmissionV1(gate);
-            Client = new FakeOwnedClient(failure, SkillPath, SkillContent, Order, control);
+            Client = new FakeOwnedClient(failure, SkillPath, Order, control);
             Queue = new SessionEventQueue();
             Transport = new RecordingTransport(failure == OwnedFailure.ImportTransportRefused, Order, control);
             var bridge = new SkillRuntimeCapabilityBridgeV1(Admission, Transport, () => 0, () => new byte[32]);
@@ -735,7 +742,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
         public ValueTask DisposeAsync() { DisposeCalls++; order.Add("scope.dispose"); leaseLost.Dispose(); return ValueTask.CompletedTask; }
     }
 
-    private sealed class FakeOwnedClient(OwnedFailure failure, string skillPath, string skillContent, List<string> order,
+    private sealed class FakeOwnedClient(OwnedFailure failure, string skillPath, List<string> order,
         OwnedExecutionControl? control) : IOwnedCopilotClientV1, ICopilotSkillRuntimeClient
     {
         public List<SessionConfig> Configs { get; } = [];
@@ -752,7 +759,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             if (Sessions.Count == 1 && failure == OwnedFailure.ExecutionCreate)
                 throw new InvalidOperationException("execution create");
             Configs.Add(config);
-            var session = new FakeOwnedSession($"session-{Sessions.Count}", config, Sessions.Count == 1, failure, skillPath, skillContent, order, control);
+            var session = new FakeOwnedSession($"session-{Sessions.Count}", config, Sessions.Count == 1, failure, skillPath, order, control);
             Sessions.Add(session);
             return Task.FromResult<IOwnedCopilotSessionV1>(session);
         }
@@ -761,7 +768,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
     }
 
     private sealed class FakeOwnedSession(string sessionId, SessionConfig config, bool execution, OwnedFailure failure,
-        string skillPath, string skillContent, List<string> order, OwnedExecutionControl? control) : IOwnedCopilotSessionV1
+        string skillPath, List<string> order, OwnedExecutionControl? control) : IOwnedCopilotSessionV1
     {
         public string SessionId { get; } = sessionId;
         public string? Prompt { get; private set; }
@@ -845,7 +852,7 @@ public sealed class CopilotAnalysisSdkExecutorTests
             Id = Guid.Parse("22222222-2222-4222-8222-222222222222"),
             Timestamp = DateTimeOffset.Parse("2026-01-02T03:04:06Z"),
             Data = new SkillInvokedData { Name = "retained", Source = "custom", Path = skillPath,
-                Content = skillContent, Description = "retained description" }
+                Content = "\n\n", Description = "retained description" }
         };
 
         private static SessionTaskCompleteEvent CreateTerminalEvent(bool success) => new()

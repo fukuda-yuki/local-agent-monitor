@@ -16,7 +16,7 @@ internal static class SkillInvocationV2TestIdentity
 
     internal static CertifiedSkillProducerIdentityV1 Create(string version) => new(
         version, 3, "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
-        "github-copilot-sdk.skill-invoked.normalize.v1", "github-copilot-sdk.skill-invoked.v1",
+        "github-copilot-sdk.skill-invoked.normalize.v2", "github-copilot-sdk.skill-invoked.v1",
         "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", 2);
 }
 
@@ -25,12 +25,20 @@ internal static class SkillInvocationNormalizedJsonTestWriter
     internal const int MaxProducerBodyBytes = SkillInvocationNormalizedJsonV1.MaxProducerBodyBytes;
 
     internal static bool TryWrite(string? nativeSessionId, GitHub.Copilot.SkillInvokedEvent? sourceEvent, out byte[]? body) =>
-        SkillInvocationNormalizedJsonV1.TryWrite(nativeSessionId, sourceEvent,
+        TryWrite(nativeSessionId, sourceEvent, sourceEvent?.Data?.Content, out body);
+
+    internal static bool TryWrite(string? nativeSessionId, GitHub.Copilot.SkillInvokedEvent? sourceEvent,
+        string? certifiedDefinitionContent, out byte[]? body) =>
+        SkillInvocationNormalizedJsonV1.TryWrite(nativeSessionId, sourceEvent, certifiedDefinitionContent,
             new TestCapability(SkillInvocationV2TestIdentity.V1065), out body);
 
     internal static bool TryWriteCancellable(string? nativeSessionId, GitHub.Copilot.SkillInvokedEvent? sourceEvent,
         CancellationToken cancellationToken, out byte[]? body) =>
-        SkillInvocationNormalizedJsonV1.TryWriteCancellable(nativeSessionId, sourceEvent,
+        TryWriteCancellable(nativeSessionId, sourceEvent, sourceEvent?.Data?.Content, cancellationToken, out body);
+
+    internal static bool TryWriteCancellable(string? nativeSessionId, GitHub.Copilot.SkillInvokedEvent? sourceEvent,
+        string? certifiedDefinitionContent, CancellationToken cancellationToken, out byte[]? body) =>
+        SkillInvocationNormalizedJsonV1.TryWriteCancellable(nativeSessionId, sourceEvent, certifiedDefinitionContent,
             new TestCapability(SkillInvocationV2TestIdentity.V1065), cancellationToken, out body);
 
     private sealed record TestCapability(CertifiedSkillProducerIdentityV1 CertifiedIdentity)
@@ -40,13 +48,46 @@ internal static class SkillInvocationNormalizedJsonTestWriter
 public sealed class SkillInvocationV2VersionIdentityContractTests
 {
     [Fact]
+    public void D087CanonicalSources_KeepCurrentR0002DistinctFromHistoricalR0001()
+    {
+        var requirements = File.ReadAllText(RepositoryPath("docs", "requirements.md"));
+        var nonGoals = requirements[
+            requirements.IndexOf("## 4. 非目的", StringComparison.Ordinal)..
+            requirements.IndexOf("## 5. Data Requirements", StringComparison.Ordinal)];
+        var ingestion = File.ReadAllText(RepositoryPath(
+            "docs", "specifications", "layers", "telemetry-ingestion.md"));
+        var snapshotInterface = File.ReadAllText(RepositoryPath(
+            "docs", "specifications", "interfaces", "skill-invocation-snapshot.md"));
+
+        Assert.DoesNotContain("D087", nonGoals, StringComparison.Ordinal);
+        Assert.DoesNotContain("workflow。\n\n- trace", nonGoals, StringComparison.Ordinal);
+        Assert.Contains("github-copilot-sdk.skill-invoked.normalize.v2", ingestion, StringComparison.Ordinal);
+        Assert.Contains("exact source versions 1.0.65", ingestion, StringComparison.Ordinal);
+        Assert.Contains("and 1.0.75", ingestion, StringComparison.Ordinal);
+        Assert.Contains("never falls back to r0001", ingestion, StringComparison.Ordinal);
+        Assert.DoesNotContain("current r0002 value set:\n\n| Property | Exact r0001 rule", ingestion, StringComparison.Ordinal);
+        Assert.Contains("Exact historical-r0001 / current-r0002 rule", snapshotInterface, StringComparison.Ordinal);
+        Assert.Contains("Under historical r0001 and current r0002", snapshotInterface, StringComparison.Ordinal);
+        Assert.Contains("exact callback-time certified native `currentProof.Content`", snapshotInterface, StringComparison.Ordinal);
+        Assert.Contains("Every other payload field comes from typed `SkillInvokedData`", snapshotInterface, StringComparison.Ordinal);
+        Assert.Contains("exact parsed request/facts producer tuple", snapshotInterface, StringComparison.Ordinal);
+        Assert.Contains("current registry (r0002 here)", snapshotInterface, StringComparison.Ordinal);
+        Assert.DoesNotContain("exact r0001 tuple to be accepted", snapshotInterface, StringComparison.Ordinal);
+        Assert.DoesNotContain("r0001 `trace_id` and `span_id` are always literal null", snapshotInterface, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Registry_LoadsCompleteTwoRevisionHistory_AndUsesOnlyR0002AsCurrent()
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
 
         Assert.Equal(2, registry.CurrentRevision);
         Assert.Equal([1, 2], registry.History.Select(item => item.Revision));
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1",
+            Assert.Single(registry.History[0].Entries).Tuple.NormalizationVersion);
         Assert.Equal(["1.0.65", "1.0.75"], registry.CurrentEntries.Select(item => item.Tuple.SourceApplicationVersion));
+        Assert.All(registry.CurrentEntries, entry => Assert.Equal(
+            "github-copilot-sdk.skill-invoked.normalize.v2", entry.Tuple.NormalizationVersion));
     }
 
     [Fact]
@@ -56,7 +97,7 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         var bytes = File.ReadAllBytes(path);
 
         Assert.Equal(771, bytes.Length);
-        Assert.Equal("069f6d78383f6e4114474010f105507b19ed0bb1c50e9899e6d893948f33efd6", Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        Assert.Equal("e3da4e7334f4e1645de315820181d2752f71ddb9aeba4355a659d185165daaf6", Convert.ToHexStringLower(SHA256.HashData(bytes)));
         Assert.Equal((byte)'\n', bytes[^1]);
         Assert.DoesNotContain((byte)'\r', bytes);
     }
@@ -128,7 +169,7 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
     {
         var identity = TestIdentity("1.0.75");
         var capability = new SingleReadCapability(identity);
-        var body = Encoding.UTF8.GetBytes("{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.75\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill\",\"path\":\"p\",\"content\":\"b\"}}]}");
+        var body = Encoding.UTF8.GetBytes("{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.75\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill\",\"path\":\"p\",\"content\":\"b\"}}]}");
 
         var batch = SkillInvocationV2Parser.Parse(body, capability);
         var facts = SkillInvocationV2IngestRequestFactsV1.Derive(batch);
@@ -145,8 +186,8 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
     {
         var capability = new StableCapability(TestIdentity(version));
 
-        Assert.True(SkillInvocationNormalizedJsonV1.TryWrite("native-session", RequiredEvent(), capability, out var ordinary));
-        Assert.True(SkillInvocationNormalizedJsonV1.TryWriteCancellable("native-session", RequiredEvent(), capability, CancellationToken.None, out var cancellable));
+        Assert.True(SkillInvocationNormalizedJsonV1.TryWrite("native-session", RequiredEvent(), "body", capability, out var ordinary));
+        Assert.True(SkillInvocationNormalizedJsonV1.TryWriteCancellable("native-session", RequiredEvent(), "body", capability, CancellationToken.None, out var cancellable));
         Assert.Equal(ordinary, cancellable);
         using var document = JsonDocument.Parse(ordinary!);
         Assert.Equal(version, document.RootElement.GetProperty("source_application_version").GetString());
@@ -164,7 +205,7 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
             var text = Encoding.UTF8.GetString(valid);
             var marker = field == "source_application_version" ? "1.0.75"
                 : field == "adapter_version" ? "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1"
-                : field == "normalization_version" ? "github-copilot-sdk.skill-invoked.normalize.v1"
+                : field == "normalization_version" ? "github-copilot-sdk.skill-invoked.normalize.v2"
                 : field == "payload_schema" ? "github-copilot-sdk.skill-invoked.v1"
                 : "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
             Assert.Throws<JsonException>(() => SkillInvocationV2Parser.Parse(
@@ -206,5 +247,15 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         Data = new SkillInvokedData { Name = "skill", Path = "p", Content = "b" }
     };
 
-    private static byte[] Request1075() => Encoding.UTF8.GetBytes("{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.75\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill\",\"path\":\"p\",\"content\":\"b\"}}]}");
+    private static byte[] Request1075() => Encoding.UTF8.GetBytes("{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.75\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill\",\"path\":\"p\",\"content\":\"b\"}}]}");
+
+    private static string RepositoryPath(params string[] segments)
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "CopilotAgentObservability.slnx")))
+                return Path.Combine([directory.FullName, .. segments]);
+        }
+        throw new DirectoryNotFoundException("Repository root was not found.");
+    }
 }

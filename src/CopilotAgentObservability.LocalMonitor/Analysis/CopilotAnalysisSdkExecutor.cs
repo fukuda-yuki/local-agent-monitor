@@ -291,14 +291,14 @@ internal sealed class CopilotAnalysisSdkExecutor : ICopilotAnalysisSdkExecutor
         OwnedSessionCallbackStateV1? callbackState = null;
         byte[] PrepareStart(SessionStartEvent sourceEvent) => SerializeEnvelope(
             OwnedSessionEnvelopeMapperV1.TryMap(sourceEvent.Data?.SessionId ?? string.Empty, identity, sourceEvent));
-        byte[] PrepareInvocation(SkillInvokedEvent sourceEvent)
+        byte[] PrepareInvocation(SkillInvokedEvent sourceEvent, string certifiedDefinitionContent)
         {
             if (!candidate.TryAcquireOperationCapability(cancellationToken, out var preparation))
                 throw new InvalidOperationException("Invocation preparation is unavailable.");
             try
             {
                 if (!SkillInvocationNormalizedJsonV1.TryWriteCancellable(
-                    nativeSessionId, sourceEvent, preparation, preparation.WorkToken, out var body))
+                    nativeSessionId, sourceEvent, certifiedDefinitionContent, preparation, preparation.WorkToken, out var body))
                     throw new InvalidOperationException("Invocation preparation failed.");
                 return body;
             }

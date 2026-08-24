@@ -61,7 +61,7 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
         Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, result.Outcome);
         Assert.Equal("1.0.75", Scalar(database, "SELECT source_application_version FROM session_events;"));
         Assert.Equal("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", Scalar(database, "SELECT adapter_version FROM session_events;"));
-        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", Scalar(database, "SELECT normalization_version FROM session_events;"));
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v2", Scalar(database, "SELECT normalization_version FROM session_events;"));
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", facts.ProducerTuple.PayloadSchema);
         Assert.Equal("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", Scalar(database, "SELECT schema_fingerprint FROM session_events;"));
     }
@@ -513,8 +513,11 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
             Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(ValidRequest(payload)).Replace("1.0.65", version, StringComparison.Ordinal)),
             new RuntimeCapability(SkillInvocationV2TestIdentity.Create(version))));
 
-    private static byte[] ValidRequest(string payload) => Encoding.UTF8.GetBytes(
-        "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":\"bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb\",\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":\"run-1\",\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":" + payload + "}]}");
+    private static byte[] ValidRequest(string payload)
+    {
+        var request = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":\"bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb\",\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":\"run-1\",\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":" + payload + "}]}";
+        return Encoding.UTF8.GetBytes(request);
+    }
 
     private static void AssertUnavailableWithoutWrites(TestDatabase database, SkillInvocationV2IngestResultV1 result)
     {

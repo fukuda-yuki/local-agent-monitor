@@ -28,12 +28,13 @@ internal static class SkillInvocationNormalizedJsonV1
     public static bool TryWrite(
         string? nativeSessionId,
         SkillInvokedEvent? sourceEvent,
+        string? certifiedDefinitionContent,
         ISkillInvocationV2RuntimeCapability runtimeCapability,
         [NotNullWhen(true)] out byte[]? bodyUtf8)
     {
         ArgumentNullException.ThrowIfNull(runtimeCapability);
         bodyUtf8 = null;
-        if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, out var envelope))
+        if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, certifiedDefinitionContent, out var envelope))
         {
             return false;
         }
@@ -51,13 +52,14 @@ internal static class SkillInvocationNormalizedJsonV1
     public static bool TryWriteCancellable(
         string? nativeSessionId,
         SkillInvokedEvent? sourceEvent,
+        string? certifiedDefinitionContent,
         ISkillInvocationV2RuntimeCapability runtimeCapability,
         CancellationToken cancellationToken,
         [NotNullWhen(true)] out byte[]? bodyUtf8)
     {
         ArgumentNullException.ThrowIfNull(runtimeCapability);
         bodyUtf8 = null;
-        if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, out var envelope))
+        if (!SkillInvocationSdkV1Mapper.TryMap(nativeSessionId, sourceEvent, certifiedDefinitionContent, out var envelope))
         {
             return false;
         }

@@ -68,7 +68,7 @@ public sealed class OwnedSessionCallbackStateV1Tests
             case "description":
                 state.OnEvent(Start()); var description = Invoked(); description.Data!.Description = "drift"; state.OnEvent(description); break;
             case "content":
-                state.OnEvent(Start()); var content = Invoked(); content.Data!.Content = "drift"; state.OnEvent(content); break;
+                state.OnEvent(Start()); var content = Invoked(); content.Data!.Content = null!; state.OnEvent(content); break;
             case "reproof": state.OnEvent(Start()); state.OnEvent(Invoked()); break;
             case "preparation": state.OnEvent(Start()); state.OnEvent(Invoked()); break;
             case "buffer":
@@ -107,6 +107,22 @@ public sealed class OwnedSessionCallbackStateV1Tests
         Assert.Equal("start", Encoding.UTF8.GetString(prepared.StartEnvelopeUtf8.Span));
         Assert.Equal("invocation", Encoding.UTF8.GetString(prepared.Bodies[0].BodyUtf8.Span));
         Assert.Equal("terminal", Encoding.UTF8.GetString(prepared.TerminalEnvelopeUtf8.Span));
+    }
+
+    [Fact]
+    public void Callback_WellFormedAuxiliarySdkContent_DoesNotReplaceNativeDefinitionAuthority()
+    {
+        var state = CreateState(prepareInvocation: (_, certifiedContent) => Encoding.UTF8.GetBytes(certifiedContent));
+        var invoked = Invoked();
+        invoked.Data.Content = "\n\n";
+
+        state.OnEvent(Start());
+        state.OnEvent(invoked);
+        state.OnEvent(Terminal());
+
+        Assert.True(state.TryBindCreatedSession("session"));
+        var prepared = Assert.IsType<OwnedSessionPreparedImportV1>(state.TryFreeze());
+        Assert.Equal("content", Encoding.UTF8.GetString(Assert.Single(prepared.Bodies).BodyUtf8.Span));
     }
 
     [Theory]
@@ -236,14 +252,13 @@ public sealed class OwnedSessionCallbackStateV1Tests
     }
 
     [Fact]
-    public void Callback_InvocationDescriptorContentOrProofDrift_Poisons()
+    public void Callback_InvocationDescriptorOrProofDrift_Poisons()
     {
         foreach (var mutation in new Action<SkillInvokedData>[]
         {
             data => data.Name = "other",
             data => data.Source = "builtin",
             data => data.Path = "C:/other/SKILL.md",
-            data => data.Content = "drift",
             data => data.Description = "drift",
         })
         {
@@ -261,6 +276,24 @@ public sealed class OwnedSessionCallbackStateV1Tests
         proof.Value = proof.Value with { RootRevision = "drift" };
         proofState.OnEvent(Invoked());
         Assert.False(proofState.TryBindCreatedSession("session"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Callback_MissingOrMalformedUpstreamContent_ReportsInvocationContent(bool malformed)
+    {
+        string? content = malformed ? new string((char)0xD800, 1) : null;
+        var reasons = new List<OwnedSessionDiagnosticEventV1>();
+        var state = CreateState(diagnosticObserver: reasons.Add);
+        var invoked = Invoked();
+        invoked.Data.Content = content!;
+
+        state.OnEvent(Start());
+        state.OnEvent(invoked);
+
+        Assert.Equal([OwnedSessionDiagnosticEventV1.InvocationContent], reasons);
+        Assert.False(state.TryBindCreatedSession("session"));
     }
 
     [Theory]
@@ -295,7 +328,8 @@ public sealed class OwnedSessionCallbackStateV1Tests
         IOwnedSessionSkillProofProviderV1? proofProvider = null,
         CancellationToken workToken = default,
         Action? onPoison = null,
-        Action<OwnedSessionDiagnosticEventV1>? diagnosticObserver = null)
+        Action<OwnedSessionDiagnosticEventV1>? diagnosticObserver = null,
+        Func<SkillInvokedEvent, string, byte[]>? prepareInvocation = null)
     {
         var retained = new CopilotDiscoveredSkillFactV1("retained", "custom", "C:/retained/SKILL.md",
             null, "description", "hint", true, true);
@@ -305,7 +339,7 @@ public sealed class OwnedSessionCallbackStateV1Tests
             new Dictionary<string, CopilotDiscoveredSkillFactV1> { ["retained"] = retained }, []);
         return new(inventory, proofProvider ?? new FixedProof(proof), "1.0.75",
             _ => Encoding.UTF8.GetBytes("start"),
-            _ => throwPreparation ? throw new InvalidOperationException("synthetic") : Encoding.UTF8.GetBytes("invocation"),
+            prepareInvocation ?? ((_, _) => throwPreparation ? throw new InvalidOperationException("synthetic") : Encoding.UTF8.GetBytes("invocation")),
             _ => Encoding.UTF8.GetBytes("terminal"), workToken, onPoison, diagnosticObserver);
     }
 

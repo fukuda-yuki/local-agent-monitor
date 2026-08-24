@@ -69,7 +69,7 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
             OccurredAt: new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
             SourceApplicationVersion: "1.0.65",
             AdapterVersion: "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
-            NormalizationVersion: "github-copilot-sdk.skill-invoked.normalize.v1",
+            NormalizationVersion: "github-copilot-sdk.skill-invoked.normalize.v2",
             PayloadSchema: "github-copilot-sdk.skill-invoked.v1",
             SchemaFingerprint: "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c",
             PayloadSha256: payloadSha256,
@@ -151,7 +151,7 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
             OccurredAt: new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
             SourceApplicationVersion: "1.0.65",
             AdapterVersion: "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
-            NormalizationVersion: "github-copilot-sdk.skill-invoked.normalize.v1",
+            NormalizationVersion: "github-copilot-sdk.skill-invoked.normalize.v2",
             PayloadSchema: "github-copilot-sdk.skill-invoked.v1",
             SchemaFingerprint: "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c",
             PayloadSha256: LowercaseSha256(payloadUtf8),
@@ -197,7 +197,7 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
 
         Assert.Equal("1.0.65", tuple.SourceApplicationVersion);
         Assert.Equal("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", tuple.AdapterVersion);
-        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", tuple.NormalizationVersion);
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v2", tuple.NormalizationVersion);
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", tuple.PayloadSchema);
         Assert.Equal("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", tuple.SchemaFingerprint);
     }
@@ -215,12 +215,13 @@ public sealed class SkillInvocationV2IngestRequestFactsV1Tests
     private static byte[] ValidRequest(
         string payload,
         string sourceEventId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") =>
-        Encoding.UTF8.GetBytes(
+        Encoding.UTF8.GetBytes((
             EnvelopePrefix
             + sourceEventId
             + EventSuffix
             + payload
-            + "}]}");
+            + "}]}").Replace("github-copilot-sdk.skill-invoked.normalize.v1",
+                "github-copilot-sdk.skill-invoked.normalize.v2", StringComparison.Ordinal));
 
     private const string EnvelopePrefix = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"";
 

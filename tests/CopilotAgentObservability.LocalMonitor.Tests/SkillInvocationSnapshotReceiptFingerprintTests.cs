@@ -154,6 +154,24 @@ public sealed class SkillInvocationSnapshotReceiptFingerprintTests
     }
 
     [Fact]
+    public void BuildFrame_CurrentR0002Input_PropagatesV2NormalizerIndependentlyFromHistoricalGolden()
+    {
+        var historical = GoldenInput();
+        var current = CurrentR0002Input();
+
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", historical.NormalizationVersion);
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v2", current.NormalizationVersion);
+        Assert.NotEqual(
+            SkillInvocationSnapshotReceiptFingerprint.Compute(historical),
+            SkillInvocationSnapshotReceiptFingerprint.Compute(current));
+        Assert.Equal(
+            "github-copilot-sdk.skill-invoked.normalize.v2",
+            Encoding.UTF8.GetString(ParseFields(
+                SkillInvocationSnapshotReceiptFingerprint.BuildFrame(current))
+                .Single(field => field.FieldId == 14).Payload));
+    }
+
+    [Fact]
     public void InputType_HasNoMemberForAnyServerGeneratedIdentity()
     {
         var forbidden = new[] { "snapshotid", "eventid", "sessionid", "claimid", "contentitemid", "createdat", "writeat" };
@@ -244,6 +262,11 @@ public sealed class SkillInvocationSnapshotReceiptFingerprintTests
         DefinitionPathSha256: new string('4', 64),
         DefinitionPathUtf8Bytes: 12UL,
         ContentDocumentSha256: new string('5', 64));
+
+    private static SkillInvocationSnapshotReceiptFingerprintInput CurrentR0002Input() => GoldenInput() with
+    {
+        NormalizationVersion = "github-copilot-sdk.skill-invoked.normalize.v2",
+    };
 
     private static byte[] ReadGoldenFrame() =>
         Convert.FromHexString(File.ReadAllText(GoldenPath()).Trim());

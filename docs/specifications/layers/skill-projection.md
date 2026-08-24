@@ -73,6 +73,12 @@ registry, not a seed, delta or provisional fallback. Adding the #158 writer
 must use this component and read authority, not a second Skill projection,
 registry authority or reader.
 
+D087 revises the unreleased current r0002 in place. Its exact accepted tuples
+are source versions 1.0.65 and 1.0.75 with the same adapter, payload schema, and
+schema fingerprint above, but normalization version
+`github-copilot-sdk.skill-invoked.normalize.v2`. r0001 remains the immutable
+historical normalizer-v1 artifact and is not a current fallback.
+
 The single read authority merges one current OTel claim and one current SDK
 claim only when the SDK event explicitly carries both producer trace ID and
 producer span ID and those two identifiers exactly equal the OTel claim's trace

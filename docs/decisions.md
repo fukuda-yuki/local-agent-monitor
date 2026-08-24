@@ -3923,7 +3923,7 @@ and proves an exact matching typed retained `SkillInvoked` followed by an exact
 typed task-complete event. T0b is expected to certify exact CLI
 versions `1.0.65` and `1.0.75`, SDK package/assembly `1.0.4/1.0.4.0`, protocol
 `3`, adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
-`github-copilot-sdk.skill-invoked.normalize.v1`; immutable contiguous r0002 may
+`github-copilot-sdk.skill-invoked.normalize.v2`; immutable contiguous r0002 may
 admit only complete exact tuples actually proved. Failure stops r0002, startup
 code, integration, and release. r0001 remains byte-identical historical
 authority and is not an admission fallback.
@@ -4046,3 +4046,26 @@ using caller/selector order, because reversed input permits lock inversion; and
 using an owner ordinal when present with tuple fallback otherwise, because the
 same grants could then participate in different global lock orders and the
 deadlock proof would remain open.
+
+## D087: Current owned producer certifies native Skill definition content
+
+Status: Accepted (2026-08-24)
+
+D087 narrowly supersedes D083 and D086 for the current owned producer's
+`payload.content` authority and r0002 normalization identity. Certified CLI
+versions 1.0.65 and 1.0.75 emit `SkillInvokedData.Content` as an LF-wrapped
+auxiliary-file inventory (two LF bytes for a single-file synthetic Skill), not
+as the native `SKILL.md` definition. The callback therefore requires that SDK
+field to be present and well-formed UTF-16 but never compares, persists, logs,
+returns, or retains it. After identity and description binding, the callback
+freshly re-proves the retained native target, requires exact equality with the
+frozen proof, and writes that callback-time proof's exact `Content` into the
+existing normalized `payload.content`. No heuristic, auxiliary-tree parser,
+fallback, additional field, or later filesystem read is permitted.
+
+The unreleased r0002 remains revision 2 with exactly the 1.0.65 and 1.0.75
+entries, adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, unchanged payload
+schema and fingerprint, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v2`. Historical r0001 remains
+byte-identical normalizer-v1 evidence and is never a current fallback. D083
+and D086 remain authoritative for every contract D087 does not supersede.

@@ -1955,3 +1955,11 @@ Before using `remote-managed-langfuse` or `remote-managed-collector`, define:
 
 This repository documents the warning but does not implement the consent
 workflow.
+
+## D087 SDK auxiliary-content boundary
+
+Current owned invocation callbacks require the upstream SDK Content string and
+validate well-formed UTF-16, but do not retain, persist, log, return, or compare
+that auxiliary inventory. Only callback-time native definition content from an
+exact re-proof may enter normalized `payload.content`. This source split adds no
+field, raw carrier, path enumeration, fallback, or external-session authority.

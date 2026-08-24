@@ -89,7 +89,7 @@ public sealed class SkillInvocationV2ParserTests
     {
         const string reversedPayload = """{"trigger":"context-load","source":"remote","pluginVersion":"1","pluginName":"p","description":"d","allowedTools":[],"content":"body","path":"relative","name":"ordered"}""";
         var eventJson = """{"payload":""" + reversedPayload + """, "span_id":null,"trace_id":null,"source_ephemeral":false,"run_native_id":null,"occurred_at":"2026-08-09T00:00:00.0000000+00:00","type":"skill.invoked","source_parent_event_id":null,"source_event_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}""";
-        var request = Encoding.UTF8.GetBytes("""{"events":[""" + eventJson + """],"schema_fingerprint":"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c","payload_schema":"github-copilot-sdk.skill-invoked.v1","normalization_version":"github-copilot-sdk.skill-invoked.normalize.v1","adapter_version":"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1","source_application_version":"1.0.65","native_session_id":"native-session","source_surface":"copilot-sdk","source_adapter":"copilot-sdk-stream","schema_version":2}""");
+        var request = Encoding.UTF8.GetBytes("""{"events":[""" + eventJson + """],"schema_fingerprint":"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c","payload_schema":"github-copilot-sdk.skill-invoked.v1","normalization_version":"github-copilot-sdk.skill-invoked.normalize.v2","adapter_version":"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1","source_application_version":"1.0.65","native_session_id":"native-session","source_surface":"copilot-sdk","source_adapter":"copilot-sdk-stream","schema_version":2}""");
 
         var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
 
@@ -217,7 +217,7 @@ public sealed class SkillInvocationV2ParserTests
         yield return Case("native session null scalar", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("native-session", "native\\u0000session", StringComparison.Ordinal)));
         yield return Case("wrong source application version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("1.0.65", "1.0.66", StringComparison.Ordinal)));
         yield return Case("wrong adapter version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", "other", StringComparison.Ordinal)));
-        yield return Case("wrong normalization version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.normalize.v1", "other", StringComparison.Ordinal)));
+        yield return Case("wrong normalization version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.normalize.v2", "other", StringComparison.Ordinal)));
         yield return Case("wrong payload schema", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.v1", "other", StringComparison.Ordinal)));
         yield return Case("wrong fingerprint", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", new string('0', 64), StringComparison.Ordinal)));
         yield return Case("events wrong type", Encoding.UTF8.GetBytes(EnvelopeText("{}")));
@@ -305,7 +305,7 @@ public sealed class SkillInvocationV2ParserTests
 
     private static byte[] ValidRequest(byte[] payload)
     {
-        var prefix = Encoding.UTF8.GetBytes(EnvelopePrefix + "[" + EventPrefix);
+        var prefix = Encoding.UTF8.GetBytes(Currentize(EnvelopePrefix) + "[" + EventPrefix);
         var suffix = Encoding.UTF8.GetBytes("]}");
         var request = new byte[prefix.Length + payload.Length + suffix.Length];
         prefix.CopyTo(request, 0);
@@ -316,7 +316,12 @@ public sealed class SkillInvocationV2ParserTests
 
     private static string ValidRequestText(string payload) => EnvelopeText("[" + ValidEventText(payload) + "]");
 
-    private static string EnvelopeText(string eventsJson) => EnvelopePrefix + eventsJson + "}";
+    private static string EnvelopeText(string eventsJson) => Currentize(EnvelopePrefix) + eventsJson + "}";
+
+    private static string Currentize(string value) => value.Replace(
+        "github-copilot-sdk.skill-invoked.normalize.v1",
+        "github-copilot-sdk.skill-invoked.normalize.v2",
+        StringComparison.Ordinal);
 
     private static string ValidEventText(string payload) => EventPrefix + payload + "}";
 

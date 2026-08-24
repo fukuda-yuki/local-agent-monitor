@@ -25,7 +25,7 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var entry = registry.CurrentEntries[0];
         Assert.Equal("1.0.65", entry.Tuple.SourceApplicationVersion);
         Assert.Equal("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", entry.Tuple.AdapterVersion);
-        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", entry.Tuple.NormalizationVersion);
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v2", entry.Tuple.NormalizationVersion);
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", entry.Tuple.PayloadSchema);
         Assert.Equal(SchemaFingerprint, entry.Tuple.SchemaFingerprint);
         Assert.Equal(SkillInvocationV2CompatibilityDisposition.Accepted, entry.Disposition);
@@ -154,7 +154,7 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         Assert.DoesNotContain("SchemaFingerprint", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("1.0.65", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", serialized, StringComparison.Ordinal);
-        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.normalize.v1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.normalize.v2", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("github-copilot-sdk.skill-invoked.v1", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", serialized, StringComparison.Ordinal);

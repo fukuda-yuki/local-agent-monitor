@@ -29,6 +29,11 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
     private const string ValidV1Request =
         "{\"schema_version\":1,\"source_adapter\":\"claude-code-hook\",\"source_surface\":\"claude-code\",\"native_session_id\":\"host-composition-native\",\"source_application_version\":\"fixture-v1\",\"adapter_version\":\"claude-hook-v1\",\"normalization_version\":\"session-normalization-v1\",\"events\":[{\"source_event_id\":\"host-composition-event\",\"type\":\"UserPromptSubmit\",\"occurred_at\":\"2026-08-22T00:00:00Z\",\"payload\":{\"prompt\":\"synthetic\"}}]}";
 
+    private static string CurrentV2Request() => ValidV2Request.Replace(
+        "github-copilot-sdk.skill-invoked.normalize.v1",
+        "github-copilot-sdk.skill-invoked.normalize.v2",
+        StringComparison.Ordinal);
+
     [Fact]
     public async Task RawDefaultHost_AfterStart_PublishesSkillRuntimeBridge()
     {
@@ -129,7 +134,7 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await StartAsync(temp);
-        using var request = JsonPost(V2Path, ValidV2Request);
+        using var request = JsonPost(V2Path, CurrentV2Request());
 
         using var response = await host.Client.SendAsync(request);
 
@@ -162,7 +167,7 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await StartAsync(temp, sanitizedOnly: true);
-        using var request = JsonPost(V2Path, ValidV2Request);
+        using var request = JsonPost(V2Path, CurrentV2Request());
 
         using var response = await host.Client.SendAsync(request);
 
@@ -178,7 +183,7 @@ public sealed class SkillInvocationV2IngestHostCompositionTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await StartAsync(temp);
-        using var request = JsonPost(V2Path, ValidV2Request);
+        using var request = JsonPost(V2Path, CurrentV2Request());
         request.Headers.TryAddWithoutValidation(CapabilityHeaderName, ValidCapabilityToken);
         request.Headers.TryAddWithoutValidation(VersionHeaderName, "2");
 

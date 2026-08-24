@@ -1495,3 +1495,16 @@ User-facing docs を変更した場合:
 - README と user guide のリンク先が存在すること。
 - screenshot path が存在すること。
 - 古い入口表現が直接入口文書に残っていないこと。
+
+## D087 Current owned-producer content authority
+
+For r0002 normalizer `github-copilot-sdk.skill-invoked.normalize.v2`, the
+existing normalized `payload.content` is exact callback-time native
+`currentProof.Content` after equality with the frozen proof. Typed upstream
+`SkillInvokedData.Content` remains required and well-formed UTF-16, but is an
+auxiliary-file inventory and is neither compared with native content nor
+persisted. The callback performs identity and description binding, validates
+that upstream field, freshly re-proves the native target, and prepares the
+complete body from the proof content with no later read or reserialization.
+r0001 remains immutable normalizer-v1 history and no fallback. All public
+shapes, limits, status behavior, receipts, and storage contracts are unchanged.

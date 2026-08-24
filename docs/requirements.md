@@ -257,6 +257,18 @@ Installed pre-v1 compatibility (D039 / D050): raw-default の旧 overview / trac
 - Visual Studio 系 client。
 - GitHub / Notion / issue / PR 等の external outcome linkage。
 
+### D087 Skill definition content authority
+
+The Skill invocation snapshot foundation requires current owned-producer
+`payload.content` to be the native `SKILL.md` content freshly re-proved at
+callback time and exactly equal to the frozen proof. Typed SDK
+`SkillInvokedData.Content` is required well-formed UTF-16 auxiliary inventory;
+it is not compared with the native definition and is never persisted, returned,
+logged, or retained. Current r0002 accepts only exact 1.0.65 and 1.0.75 tuples
+with `github-copilot-sdk.skill-invoked.normalize.v2`; immutable r0001 remains
+normalizer-v1 history and is not a fallback. Wire, schema, receipt, store, and
+current-file shapes remain unchanged.
+
 ## 4. 非目的
 
 本製品では以下を扱わない。

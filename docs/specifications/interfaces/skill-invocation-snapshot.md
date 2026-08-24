@@ -731,10 +731,29 @@ exact matching typed retained `SkillInvoked` followed by an exact typed task-
 complete event. The candidate tuples are CLI
 `1.0.65` and `1.0.75`, SDK/package `1.0.4/1.0.4.0`, protocol `3`, adapter
 `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
-`github-copilot-sdk.skill-invoked.normalize.v1`; r0002 admits only complete
+`github-copilot-sdk.skill-invoked.normalize.v2`; r0002 admits only complete
 exact tuples T0b actually certifies. Failure leaves r0001 unchanged and stops
 r0002, startup implementation, integration, and release. r0001 is historical
 authority, never a fallback.
+
+### D087 current content authority
+
+For the current owned producer, typed SDK `SkillInvokedData.Content` is a
+required, well-formed UTF-16 auxiliary-file inventory, not the Skill definition
+snapshot. Certified 1.0.65 and 1.0.75 exhibit this contract; the single-file
+synthetic case is exactly two LF bytes. Its arbitrary well-formed value is not
+a mismatch and is never persisted, logged, returned, or retained.
+
+After existing session, identity, and description checks, the callback validates
+that required SDK field, freshly re-proves the retained native target, and
+requires exact equality with the frozen proof. Normalizer v2 then writes exact
+callback-time `currentProof.Content` into the existing `payload.content`; all
+other payload fields remain typed SDK event values in their existing order.
+There is no transform heuristic, auxiliary enumeration parser, fallback,
+second field, later read, or reserialization. Missing or malformed upstream
+Content is `InvocationContent`; native proof failure or drift is
+`InvocationNativeReproof`; preparation and buffer failures retain their
+existing closed reasons.
 
 One admitted analysis candidate freezes the certified identity and owns the
 exact client plus retained directory scope while remaining invisible to
@@ -1288,7 +1307,7 @@ schema_fingerprint
 events
 ```
 
-| Property | Exact r0001 rule |
+| Property | Exact historical-r0001 / current-r0002 rule |
 |---|---|
 | `schema_version` | JSON integer `2` |
 | `source_adapter` | string `copilot-sdk-stream` |
@@ -1296,7 +1315,7 @@ events
 | `native_session_id` | exact `CopilotSession.sessionId`; 1..256 Unicode scalars, no U+0000, at most 1,024 strict UTF-8 bytes |
 | `source_application_version` | exact Version from the same-client certified tuple (r0001 historical `1.0.65`; current r0002 exact admitted tuple) |
 | `adapter_version` | string `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` |
-| `normalization_version` | string `github-copilot-sdk.skill-invoked.normalize.v1` |
+| `normalization_version` | r0001 historical string `github-copilot-sdk.skill-invoked.normalize.v1`; current r0002 string `github-copilot-sdk.skill-invoked.normalize.v2` |
 | `payload_schema` | string `github-copilot-sdk.skill-invoked.v1` |
 | `schema_fingerprint` | string `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c` |
 | `events` | array containing exactly one event |
@@ -1323,18 +1342,24 @@ form, and is only source-chain provenance. Local
 `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. `run_native_id` is JSON null when SDK
 `agentId` is absent, otherwise its exact 1..256-scalar, no-U+0000, at-most-1,024
 UTF-8-byte value. `source_ephemeral` is true only for SDK semantic true; absent
-or false upstream maps to JSON false. Under r0001 the required `trace_id` and
-`span_id` properties are both JSON null because SDK 1.0.4 exposes no exact
-correlation source; a nonnull pair requires a later complete normalizer/
-registry revision. No Session/Run/name/path/time inference supplies them.
+or false upstream maps to JSON false. Under historical r0001 and current r0002,
+the required `trace_id` and `span_id` properties are both JSON null because SDK
+1.0.4 exposes no exact correlation source. No Session/Run/name/path/time
+inference supplies them.
 
-`payload` is a newly written object from typed `SkillInvokedData`, not a raw SDK
-serializer buffer. Its producer order is required `name,path,content`, then
-each present optional member in
+For current owned normalizer v2, `payload` is a newly written object whose
+`content` is exact callback-time certified native `currentProof.Content` after
+equality with the frozen proof. Typed upstream `SkillInvokedData.Content` is
+only required, well-formed transient auxiliary inventory and is never persisted
+or transformed. Every other payload field comes from typed `SkillInvokedData`,
+not a raw SDK serializer buffer, preserving producer order
+`name,path,content`, then each present optional member in
 `allowedTools,description,pluginName,pluginVersion,source,trigger` order.
 Absent optionals are omitted; JSON null is never synthesized. Strings and
 allowed-tool order are preserved without trim, case fold, normalization,
-filtering, path rewriting, or replacement repair. There is no `model`. The
+filtering, path rewriting, or replacement repair. Historical r0001 retains its
+frozen normalizer-v1 meaning. There is no transform, fallback, additional
+field, later read, or `model`. The
 receiver accepts any property order but performs one bounded raw
 `Utf8JsonReader` pass with ordinal name sets and exact `JsonReaderOptions`:
 `AllowTrailingCommas=false`, `CommentHandling=JsonCommentHandling.Disallow`, and
@@ -1486,7 +1511,8 @@ become transport 400 after an admitted outer wire. Receipt lookup and its
 complete graph check always precede current-registry loading; consequently an
 identical durable retry remains 204 after registry removal or corruption. Only
 a true receipt miss captures one immutable complete current registry, requires
-the exact r0001 tuple to be accepted, and re-proves that captured object at the
+the exact parsed request/facts producer tuple to be accepted by that captured
+current registry (r0002 here), and re-proves that captured object at the
 transaction fence under the provider generation read lease held through
 commit. One pre-lease recapture is allowed; no second churn or stale commit is.
 There is no previous-registry fallback. `persistence_busy`
@@ -1908,8 +1934,8 @@ containment, normalization, case, or filesystem test. Content allows 0 through
 `allowedTools` 0..64 strings, each 1..128 scalars/512 bytes; `pluginName` and
 `pluginVersion` 0..256 bytes. Source/trigger use the exact closed schema tokens.
 The unpaired-surrogate classifications are receiver/internal-admission defense,
-not evidence expected from the r0001 SDK producer, whose pre-writer scan rejects
-them without a transport attempt.
+not evidence expected from the historical r0001 or current r0002 SDK producer;
+both pre-writer scans reject them without a transport attempt.
 
 Every state persists immutable Event/provenance, timestamps, content item,
 payload digest/length, document digest, state/reason, and snapshot/receipt.
@@ -2021,7 +2047,8 @@ Every metadata property above is always emitted. These are always nonnull:
 `available` persisted row also always emits nonnull `claim_id`, `name`, both
 body/path SHA-256 values, and both body/path byte counts. Its `source`,
 `trigger`, and `run_id` independently preserve the admitted optional value or
-literal null; r0001 `trace_id` and `span_id` are always literal null. Every
+literal null; historical r0001 and current r0002 `trace_id` and `span_id` are
+always literal null. Every
 nonavailable persisted row emits literal null for `claim_id`, `name`, `source`,
 `trigger`, `run_id`, `trace_id`, `span_id`, both body/path digests, and both
 body/path counts. Deriving `expired` or changing `current|stale|invalid` never

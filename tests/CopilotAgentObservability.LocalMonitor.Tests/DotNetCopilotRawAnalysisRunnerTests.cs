@@ -600,7 +600,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
                         new Dictionary<string, OwnedSessionFrozenSkillV1>(),
                         new Dictionary<string, CopilotDiscoveredSkillFactV1>(), []),
                     new NeverProof(), "1.0.75",
-                    _ => Encoding.UTF8.GetBytes("start"), _ => Encoding.UTF8.GetBytes("invocation"),
+                    _ => Encoding.UTF8.GetBytes("start"), (_, _) => Encoding.UTF8.GetBytes("invocation"),
                     _ => Encoding.UTF8.GetBytes("terminal"), workToken,
                     () => { Invalidations++; context.Admission.InvalidateCandidate(candidate); });
                 var pending = Task.Delay(Timeout.InfiniteTimeSpan, workToken);
