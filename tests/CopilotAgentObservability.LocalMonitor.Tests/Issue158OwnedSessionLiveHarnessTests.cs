@@ -140,13 +140,179 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     {
         var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
         using var document = JsonDocument.Parse(json);
-        Assert.Equal(7, document.RootElement.EnumerateObject().Count());
-        Assert.Equal("issue-158-windows-blocker.v3", document.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal(8, document.RootElement.EnumerateObject().Count());
+        Assert.Equal("issue-158-windows-blocker.v4", document.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
         Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("poison_reason").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("post_freeze_failure").GetString());
+        Assert.Equal("none", document.RootElement.GetProperty("post_success_failure").GetString());
+    }
+
+    [Fact]
+    public void PostSuccessWireMapsEveryClosedStage()
+    {
+        Assert.Equal(
+            ["none", "execution_evidence", "committed_identity_sequence", "metadata_request", "historical_request", "current_file_request", "route_matrix", "metadata_document", "historical_document", "current_file_document", "persistence_counts", "aggregate_counts", "observed_result", "shutdown_drain", "result_serialization", "result_write", "unexpected"],
+            Enum.GetValues<Issue158PostSuccessFailureV1>().Select(value => Issue158WindowsBlocker.PostSuccessWire(value)));
+    }
+
+    [Fact]
+    public void PostSuccessCaptureRetainsOnlyFirstValueAcrossConcurrentAndShutdownReports()
+    {
+        var capture = new Issue158PostSuccessFailureCapture();
+        capture.Capture(Issue158PostSuccessFailureV1.MetadataDocument);
+        Parallel.ForEach(Enum.GetValues<Issue158PostSuccessFailureV1>().Skip(1), capture.Capture);
+        capture.Capture(Issue158PostSuccessFailureV1.ShutdownDrain);
+        Assert.Equal(Issue158PostSuccessFailureV1.MetadataDocument, capture.Value);
+    }
+
+    [Fact]
+    public async Task UnguardedPostSuccessFailurePrecedesShutdownFailure()
+    {
+        var capture = new Issue158PostSuccessFailureCapture();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Issue158PostSuccessExecution.RunWithShutdownAsync(
+            () => throw new InvalidOperationException("body"),
+            () => throw new InvalidOperationException("shutdown"), () => true, capture));
+        Assert.Equal(Issue158PostSuccessFailureV1.Unexpected, capture.Value);
+    }
+
+    [Fact]
+    public async Task StagedPostSuccessFailurePrecedesShutdownFailure()
+    {
+        var capture = new Issue158PostSuccessFailureCapture();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Issue158PostSuccessExecution.RunWithShutdownAsync(
+            () => { capture.Capture(Issue158PostSuccessFailureV1.MetadataDocument); throw new InvalidOperationException("body"); },
+            () => throw new InvalidOperationException("shutdown"), () => true, capture));
+        Assert.Equal(Issue158PostSuccessFailureV1.MetadataDocument, capture.Value);
+    }
+
+    [Fact]
+    public async Task ShutdownFailureIsCapturedWhenBodySucceeds()
+    {
+        var capture = new Issue158PostSuccessFailureCapture();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Issue158PostSuccessExecution.RunWithShutdownAsync(
+            () => Task.CompletedTask,
+            () => throw new InvalidOperationException("shutdown"), () => true, capture));
+        Assert.Equal(Issue158PostSuccessFailureV1.ShutdownDrain, capture.Value);
+    }
+
+    [Fact]
+    public async Task CurrentFileRequestPreparationFailurePrecedesShutdownFailure()
+    {
+        var capture = new Issue158PostSuccessFailureCapture();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Issue158PostSuccessExecution.RunWithShutdownAsync(
+            () => Issue158PostSuccessExecution.RunStageAsync(
+                Issue158PostSuccessFailureV1.CurrentFileRequest, capture,
+                () => throw new InvalidOperationException("request preparation")),
+            () => throw new InvalidOperationException("shutdown"), () => true, capture));
+        Assert.Equal(Issue158PostSuccessFailureV1.CurrentFileRequest, capture.Value);
+    }
+
+    [Fact]
+    public void SucceededBlockerRequiresOnePostSuccessStageAndClosedSuccessFields()
+    {
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(
+            new string('a', 40), "succeeded", OwnedSessionExecutionCheckpointV1.CandidatePublished,
+            null, null, null, null));
+        using var document = JsonDocument.Parse(Issue158WindowsBlocker.Serialize(
+            new string('a', 40), "succeeded", OwnedSessionExecutionCheckpointV1.CandidatePublished,
+            null, null, null, Issue158PostSuccessFailureV1.PersistenceCounts));
+        Assert.Equal("persistence_counts", document.RootElement.GetProperty("post_success_failure").GetString());
+    }
+
+    [Fact]
+    public async Task BlockerWriteIsCreateOnce()
+    {
+        using var fixture = new OwnedGateFixture();
+        var gate = fixture.Read();
+        await Issue158WindowsBlocker.WriteAsync(gate, "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted,
+            null, null, null);
+        await Assert.ThrowsAsync<IOException>(() => Issue158WindowsBlocker.WriteAsync(gate, "failed",
+            OwnedSessionExecutionCheckpointV1.DriverCompleted, null, null, null));
+    }
+
+    [Theory]
+    [InlineData("failed", 9)]
+    [InlineData("canceled", 9)]
+    [InlineData("timed_out", 9)]
+    [InlineData("succeeded", 0)]
+    public void BlockerRejectsInvalidTerminalPostSuccessCrossPairs(string status, int stage)
+    {
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(
+            new string('a', 40), status, OwnedSessionExecutionCheckpointV1.CandidatePublished,
+            null, null, null, (Issue158PostSuccessFailureV1)stage));
+    }
+
+    [Fact]
+    public void SucceededBlockerRejectsEveryWrongClosedCrossField()
+    {
+        foreach (var checkpoint in new OwnedSessionExecutionCheckpointV1?[] { null }.Concat(
+            Enum.GetValues<OwnedSessionExecutionCheckpointV1>().Where(value => value != OwnedSessionExecutionCheckpointV1.CandidatePublished).Select(value => (OwnedSessionExecutionCheckpointV1?)value)))
+            Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+                checkpoint, null, null, null, Issue158PostSuccessFailureV1.Unexpected));
+        foreach (var phase in new[] { OwnedSessionDiagnosticEventV1.CommandPending, OwnedSessionDiagnosticEventV1.SendPending })
+            Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+                OwnedSessionExecutionCheckpointV1.CandidatePublished, phase, null, null, Issue158PostSuccessFailureV1.Unexpected));
+        foreach (var reason in Enum.GetValues<OwnedSessionDiagnosticEventV1>().Skip(2))
+            Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+                OwnedSessionExecutionCheckpointV1.CandidatePublished, null, reason, null, Issue158PostSuccessFailureV1.Unexpected));
+        foreach (var postFreeze in Enum.GetValues<OwnedSessionPostFreezeOutcomeV1>().Skip(1))
+            Assert.Throws<InvalidOperationException>(() => Issue158WindowsBlocker.Serialize(new string('a', 40), "succeeded",
+                OwnedSessionExecutionCheckpointV1.CandidatePublished, null, null, postFreeze, Issue158PostSuccessFailureV1.Unexpected));
+    }
+
+    [Fact]
+    public void CurrentPersistenceFactsUseExactClaimsSnapshotsAndLifecycleRows()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"issue158-facts-{Guid.NewGuid():N}.db");
+        var session = Guid.CreateVersion7();
+        try
+        {
+            using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE skill_invocation_snapshots(session_id TEXT,trigger TEXT);
+                    CREATE TABLE skill_projection_sdk_claims(session_id TEXT);
+                    CREATE TABLE session_events(session_id TEXT,type TEXT);
+                    INSERT INTO skill_invocation_snapshots VALUES($session,'user-invoked'),($session,'agent-invoked');
+                    INSERT INTO skill_projection_sdk_claims VALUES($session),($session);
+                    INSERT INTO session_events VALUES($session,'session.start'),($session,'session.task_complete');
+                    """;
+                command.Parameters.AddWithValue("$session", session.ToString("D"));
+                command.ExecuteNonQuery();
+            }
+            var exact = Issue158PersistenceFactReader.Read(path, session);
+            Assert.Equal(new Issue158PersistenceFacts(2, 2, 1, 1, 1, 1), exact);
+            Assert.Equal(2, Issue158PersistenceFactVerifier.Verify(exact));
+            using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DELETE FROM skill_projection_sdk_claims WHERE rowid=(SELECT MAX(rowid) FROM skill_projection_sdk_claims);";
+                command.ExecuteNonQuery();
+            }
+            var mismatched = Issue158PersistenceFactReader.Read(path, session);
+            Assert.Equal(1, mismatched.SdkClaims);
+            Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(mismatched));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void PersistenceReadFailureRemainsDistinctFromAggregateMismatch()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), $"issue158-missing-{Guid.NewGuid():N}.db");
+        Assert.ThrowsAny<Exception>(() => Issue158PersistenceFactReader.Read(missing, Guid.CreateVersion7()));
+        SqliteConnection.ClearAllPools();
+        if (File.Exists(missing)) File.Delete(missing);
     }
 
     [Theory]
@@ -677,8 +843,12 @@ internal static class Issue158WindowsOwnedSessionLane
         await app.StartAsync();
         Issue158WindowsObservedResult? observed = null;
         var shutdownComplete = false;
+        var analysisSucceeded = false;
+        var postSuccess = new Issue158PostSuccessFailureCapture();
         try
         {
+          await Issue158PostSuccessExecution.RunWithShutdownAsync(async () =>
+          {
             var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
             using var client = new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(30) };
             using var request = new HttpRequestMessage(HttpMethod.Post, $"/traces/{traceId}/analysis")
@@ -721,73 +891,114 @@ internal static class Issue158WindowsOwnedSessionLane
                 await Issue158WindowsBlocker.WriteAsync(gate, Issue158WindowsBlocker.TerminalWire(run), snapshot, phaseSnapshot, reasonSnapshot, postFreezeSnapshot);
                 throw new InvalidOperationException("analysis_terminal");
             }
+            analysisSucceeded = true;
 
-            OwnedSessionExecutionEvidenceV1[] executionEvidence;
-            lock (identityLock) executionEvidence = [.. evidence];
-            if (executionEvidence.Length != 1 || !Issue158WindowsResult.IsCertified(executionEvidence[0]))
-                throw new InvalidOperationException("execution_evidence");
-            var certified = executionEvidence[0];
+            var certified = Stage(Issue158PostSuccessFailureV1.ExecutionEvidence, () =>
+            {
+                OwnedSessionExecutionEvidenceV1[] executionEvidence;
+                lock (identityLock) executionEvidence = [.. evidence];
+                if (executionEvidence.Length != 1 || !Issue158WindowsResult.IsCertified(executionEvidence[0]))
+                    throw new InvalidOperationException("execution_evidence");
+                return executionEvidence[0];
+            });
 
-            SkillInvocationV2CommittedIdentityV1[] committed;
-            lock (identityLock) committed = [.. identities];
-            if (committed.Length != 2 || committed.Select(static item => item.SessionId).Distinct().Count() != 1
-                || committed.Select(static item => item.SnapshotId).Distinct().Count() != 2)
-                throw new InvalidOperationException("committed_identity_sequence");
+            var committed = Stage(Issue158PostSuccessFailureV1.CommittedIdentitySequence, () =>
+            {
+                SkillInvocationV2CommittedIdentityV1[] values;
+                lock (identityLock) values = [.. identities];
+                if (values.Length != 2 || values.Select(static item => item.SessionId).Distinct().Count() != 1
+                    || values.Select(static item => item.SnapshotId).Distinct().Count() != 2)
+                    throw new InvalidOperationException("committed_identity_sequence");
+                return values;
+            });
             var identity = committed[0];
             var routeBase = $"/api/local-monitor/v1/sessions/{identity.SessionId:D}/skill-invocations/{identity.SnapshotId:D}";
-            using var metadata = await client.GetAsync(routeBase, timeout.Token);
-            using var historical = await client.GetAsync(routeBase + "/content", timeout.Token);
-            using var currentRequest = new HttpRequestMessage(HttpMethod.Post, routeBase + "/current-file-read")
+            using var metadata = await StageAsync(Issue158PostSuccessFailureV1.MetadataRequest,
+                () => client.GetAsync(routeBase, timeout.Token));
+            using var historical = await StageAsync(Issue158PostSuccessFailureV1.HistoricalRequest,
+                () => client.GetAsync(routeBase + "/content", timeout.Token));
+            using var current = await Issue158PostSuccessExecution.RunStageAsync(
+                Issue158PostSuccessFailureV1.CurrentFileRequest, postSuccess, async () =>
+                {
+                    using var currentRequest = new HttpRequestMessage(HttpMethod.Post, routeBase + "/current-file-read")
+                    {
+                        Content = JsonContent.Create(new { schema_version = "local-skill-current-file-read.request.v1" }),
+                    };
+                    currentRequest.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
+                    return await client.SendAsync(currentRequest, timeout.Token);
+                });
+            Stage(Issue158PostSuccessFailureV1.RouteMatrix, () =>
             {
-                Content = JsonContent.Create(new { schema_version = "local-skill-current-file-read.request.v1" }),
-            };
-            currentRequest.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
-            using var current = await client.SendAsync(currentRequest, timeout.Token);
-            if (!metadata.IsSuccessStatusCode || !historical.IsSuccessStatusCode || !current.IsSuccessStatusCode)
-                throw new InvalidOperationException("route_matrix");
-            await Issue158RouteDocuments.ValidateMetadataAsync(metadata.Content, identity, certified.SourceApplicationVersion, timeout.Token);
-            await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token);
-            await Issue158RouteDocuments.ValidateCurrentAsync(current.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token);
-            while (Count(databasePath, "skill_invocation_snapshots") != 2
-                || Count(databasePath, "monitor_skill_invocations") != 2)
-                await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
-            var snapshotRows = Count(databasePath, "skill_invocation_snapshots");
-            var v1Imported = Count(databasePath, "monitor_skill_invocations");
-            var userInvoked = CountEqual(databasePath, "skill_invocation_snapshots", "trigger", "user-invoked");
-            var agentInvoked = CountEqual(databasePath, "skill_invocation_snapshots", "trigger", "agent-invoked");
-            var taskComplete = CountEqual(databasePath, "session_events", "type", "session.task_complete");
-            if (snapshotRows != 2 || v1Imported != 2 || userInvoked != 1 || agentInvoked != 1 || taskComplete != 1)
-                throw new InvalidOperationException("aggregate_counts");
-            observed = new(gate.CandidateSha, certified, userInvoked, agentInvoked, taskComplete,
-                committed.LongLength, v1Imported, snapshotRows, gate.IsAuthorized, true, true, true, true, true, false);
+                if (!metadata.IsSuccessStatusCode || !historical.IsSuccessStatusCode || !current.IsSuccessStatusCode)
+                    throw new InvalidOperationException("route_matrix");
+                return true;
+            });
+            await StageTaskAsync(Issue158PostSuccessFailureV1.MetadataDocument, async () =>
+            {
+                try { await Issue158RouteDocuments.ValidateMetadataAsync(metadata.Content, identity, certified.SourceApplicationVersion, timeout.Token); }
+                finally { metadata.Dispose(); }
+            });
+            await StageTaskAsync(Issue158PostSuccessFailureV1.HistoricalDocument, async () =>
+            {
+                try { await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token); }
+                finally { historical.Dispose(); }
+            });
+            await StageTaskAsync(Issue158PostSuccessFailureV1.CurrentFileDocument, async () =>
+            {
+                try { await Issue158RouteDocuments.ValidateCurrentAsync(current.Content, identity.SnapshotId, SyntheticSkillDocument, timeout.Token); }
+                finally { current.Dispose(); }
+            });
+            var facts = Stage(Issue158PostSuccessFailureV1.PersistenceCounts,
+                () => Issue158PersistenceFactReader.Read(databasePath, identity.SessionId));
+            var v1Imported = Stage(Issue158PostSuccessFailureV1.AggregateCounts,
+                () => Issue158PersistenceFactVerifier.Verify(facts));
+            observed = Stage(Issue158PostSuccessFailureV1.ObservedResult, () =>
+                new Issue158WindowsObservedResult(gate.CandidateSha, certified, facts.UserInvoked, facts.AgentInvoked,
+                    facts.TaskComplete, committed.LongLength, v1Imported, facts.SnapshotRows,
+                    gate.IsAuthorized, true, true, true, true, true, false));
+          }, async () =>
+          {
+              await app.StopAsync();
+              await app.DisposeAsync();
+              shutdownComplete = true;
+          }, () => analysisSucceeded, postSuccess);
+          observed = Stage(Issue158PostSuccessFailureV1.ObservedResult,
+              () => observed! with { ShutdownDrain = shutdownComplete });
+          var resultPath = Path.Combine(gate.ResultDirectory, gate.ResultFile);
+          var resultText = Stage(Issue158PostSuccessFailureV1.ResultSerialization,
+              () => Issue158WindowsResult.Serialize(observed));
+          await StageTaskAsync(Issue158PostSuccessFailureV1.ResultWrite,
+              () => File.WriteAllTextAsync(resultPath, resultText, new UTF8Encoding(false)));
         }
-        finally
+        catch
         {
-            await app.StopAsync();
-            await app.DisposeAsync();
-            shutdownComplete = true;
+            if (analysisSucceeded)
+            {
+                if (postSuccess.Value == Issue158PostSuccessFailureV1.None)
+                    postSuccess.Capture(Issue158PostSuccessFailureV1.Unexpected);
+                await Issue158WindowsBlocker.WriteAsync(gate, "succeeded", OwnedSessionExecutionCheckpointV1.CandidatePublished,
+                    null, null, null, postSuccess.Value);
+            }
+            throw;
         }
-        observed = observed! with { ShutdownDrain = shutdownComplete };
-        var resultPath = Path.Combine(gate.ResultDirectory, gate.ResultFile);
-        await File.WriteAllTextAsync(resultPath, Issue158WindowsResult.Serialize(observed),
-            new System.Text.UTF8Encoding(false));
-    }
 
-    private static long Count(string databasePath, string table)
-    {
-        using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadOnly);
-        using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {table};";
-        return (long)command.ExecuteScalar()!;
-    }
+        T Stage<T>(Issue158PostSuccessFailureV1 stage, Func<T> action)
+        {
+            try { return action(); }
+            catch { postSuccess.Capture(stage); throw; }
+        }
 
-    private static long CountEqual(string databasePath, string table, string column, string expected)
-    {
-        using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadOnly);
-        using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM {table} WHERE {column}=$expected;";
-        command.Parameters.AddWithValue("$expected", expected);
-        return (long)command.ExecuteScalar()!;
+        async Task<T> StageAsync<T>(Issue158PostSuccessFailureV1 stage, Func<Task<T>> action)
+        {
+            try { return await action(); }
+            catch { postSuccess.Capture(stage); throw; }
+        }
+
+        async Task StageTaskAsync(Issue158PostSuccessFailureV1 stage, Func<Task> action)
+        {
+            try { await action(); }
+            catch { postSuccess.Capture(stage); throw; }
+        }
     }
 }
 
@@ -797,6 +1008,124 @@ internal static class Issue158PostFreezeFailureCapture
         OwnedSessionPostFreezeOutcomeV1 outcome)
     {
         lock (sync) captured ??= outcome;
+    }
+}
+
+internal enum Issue158PostSuccessFailureV1
+{
+    None,
+    ExecutionEvidence,
+    CommittedIdentitySequence,
+    MetadataRequest,
+    HistoricalRequest,
+    CurrentFileRequest,
+    RouteMatrix,
+    MetadataDocument,
+    HistoricalDocument,
+    CurrentFileDocument,
+    PersistenceCounts,
+    AggregateCounts,
+    ObservedResult,
+    ShutdownDrain,
+    ResultSerialization,
+    ResultWrite,
+    Unexpected,
+}
+
+internal sealed class Issue158PostSuccessFailureCapture
+{
+    private readonly object sync = new();
+    private Issue158PostSuccessFailureV1 value;
+
+    internal Issue158PostSuccessFailureV1 Value { get { lock (sync) return value; } }
+
+    internal void Capture(Issue158PostSuccessFailureV1 stage)
+    {
+        if (stage == Issue158PostSuccessFailureV1.None) throw new InvalidOperationException("post_success");
+        lock (sync)
+        {
+            if (value == Issue158PostSuccessFailureV1.None) value = stage;
+        }
+    }
+}
+
+internal static class Issue158PostSuccessExecution
+{
+    internal static async Task<T> RunStageAsync<T>(Issue158PostSuccessFailureV1 stage,
+        Issue158PostSuccessFailureCapture capture, Func<Task<T>> action)
+    {
+        try { return await action(); }
+        catch { capture.Capture(stage); throw; }
+    }
+
+    internal static async Task RunStageAsync(Issue158PostSuccessFailureV1 stage,
+        Issue158PostSuccessFailureCapture capture, Func<Task> action)
+    {
+        try { await action(); }
+        catch { capture.Capture(stage); throw; }
+    }
+
+    internal static async Task RunWithShutdownAsync(Func<Task> body, Func<Task> shutdown, Func<bool> isPostSuccess,
+        Issue158PostSuccessFailureCapture capture)
+    {
+        try
+        {
+            try { await body(); }
+            catch
+            {
+                if (isPostSuccess()) capture.Capture(Issue158PostSuccessFailureV1.Unexpected);
+                throw;
+            }
+        }
+        finally
+        {
+            try { await shutdown(); }
+            catch
+            {
+                if (isPostSuccess()) capture.Capture(Issue158PostSuccessFailureV1.ShutdownDrain);
+                throw;
+            }
+        }
+    }
+}
+
+internal sealed record Issue158PersistenceFacts(
+    long SnapshotRows, long SdkClaims, long SessionStart, long TaskComplete, long UserInvoked, long AgentInvoked);
+
+internal static class Issue158PersistenceFactReader
+{
+    internal static Issue158PersistenceFacts Read(string databasePath, Guid sessionId)
+    {
+        using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadOnly);
+        var session = sessionId.ToString("D");
+        var facts = new Issue158PersistenceFacts(
+            Count(connection, "SELECT COUNT(*) FROM skill_invocation_snapshots WHERE session_id=$session", session),
+            Count(connection, "SELECT COUNT(*) FROM skill_projection_sdk_claims WHERE session_id=$session", session),
+            Count(connection, "SELECT COUNT(*) FROM session_events WHERE session_id=$session AND type='session.start'", session),
+            Count(connection, "SELECT COUNT(*) FROM session_events WHERE session_id=$session AND type='session.task_complete'", session),
+            Count(connection, "SELECT COUNT(*) FROM skill_invocation_snapshots WHERE session_id=$session AND trigger='user-invoked'", session),
+            Count(connection, "SELECT COUNT(*) FROM skill_invocation_snapshots WHERE session_id=$session AND trigger='agent-invoked'", session));
+        return facts;
+    }
+
+    private static long Count(SqliteConnection connection, string sql, string session)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$session", session);
+        return (long)command.ExecuteScalar()!;
+    }
+}
+
+internal static class Issue158PersistenceFactVerifier
+{
+    internal static long Verify(Issue158PersistenceFacts facts)
+    {
+        var v1Imported = checked(facts.SessionStart + facts.TaskComplete);
+        if (facts is not { SnapshotRows: 2, SdkClaims: 2, SessionStart: 1, TaskComplete: 1, UserInvoked: 1, AgentInvoked: 1 }
+            || v1Imported != 2)
+            throw new InvalidOperationException("aggregate_counts");
+        return v1Imported;
     }
 }
 
@@ -828,24 +1157,34 @@ internal static class Issue158WindowsBlocker
     };
 
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint)
-        => Serialize(candidateSha, terminalStatus, checkpoint, null, null, null);
+        => Serialize(candidateSha, terminalStatus, checkpoint, null, null, null, null);
 
     internal static string Serialize(string candidateSha, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
         OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
-        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null)
+        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure = null,
+        Issue158PostSuccessFailureV1? postSuccessFailure = null)
     {
         if (candidateSha.Length != 40 || candidateSha.Any(static value => !char.IsAsciiHexDigitLower(value))
-            || terminalStatus is not ("failed" or "canceled" or "timed_out"))
+            || terminalStatus is not ("failed" or "canceled" or "timed_out" or "succeeded"))
             throw new InvalidOperationException("blocker");
+        var postSuccess = PostSuccessWire(postSuccessFailure);
+        if (terminalStatus == "succeeded")
+        {
+            if (postSuccess == "none" || checkpoint != OwnedSessionExecutionCheckpointV1.CandidatePublished
+                || phase is not null || reason is not null || postFreezeFailure is not null)
+                throw new InvalidOperationException("blocker");
+        }
+        else if (postSuccess != "none") throw new InvalidOperationException("blocker");
         return JsonSerializer.Serialize(new
         {
-            schema_version = "issue-158-windows-blocker.v3",
+            schema_version = "issue-158-windows-blocker.v4",
             candidate_sha = candidateSha,
             terminal_status = terminalStatus,
             last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
             driver_phase = PhaseWire(phase),
             poison_reason = PoisonWire(reason),
             post_freeze_failure = PostFreezeWire(postFreezeFailure),
+            post_success_failure = postSuccess,
         });
     }
 
@@ -882,13 +1221,41 @@ internal static class Issue158WindowsBlocker
         ? "none"
         : OwnedSessionPostFreezeOutcomeObservationV1.Wire(outcome.Value);
 
-    internal static Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
+    internal static string PostSuccessWire(Issue158PostSuccessFailureV1? stage) => stage switch
+    {
+        null or Issue158PostSuccessFailureV1.None => "none",
+        Issue158PostSuccessFailureV1.ExecutionEvidence => "execution_evidence",
+        Issue158PostSuccessFailureV1.CommittedIdentitySequence => "committed_identity_sequence",
+        Issue158PostSuccessFailureV1.MetadataRequest => "metadata_request",
+        Issue158PostSuccessFailureV1.HistoricalRequest => "historical_request",
+        Issue158PostSuccessFailureV1.CurrentFileRequest => "current_file_request",
+        Issue158PostSuccessFailureV1.RouteMatrix => "route_matrix",
+        Issue158PostSuccessFailureV1.MetadataDocument => "metadata_document",
+        Issue158PostSuccessFailureV1.HistoricalDocument => "historical_document",
+        Issue158PostSuccessFailureV1.CurrentFileDocument => "current_file_document",
+        Issue158PostSuccessFailureV1.PersistenceCounts => "persistence_counts",
+        Issue158PostSuccessFailureV1.AggregateCounts => "aggregate_counts",
+        Issue158PostSuccessFailureV1.ObservedResult => "observed_result",
+        Issue158PostSuccessFailureV1.ShutdownDrain => "shutdown_drain",
+        Issue158PostSuccessFailureV1.ResultSerialization => "result_serialization",
+        Issue158PostSuccessFailureV1.ResultWrite => "result_write",
+        Issue158PostSuccessFailureV1.Unexpected => "unexpected",
+        _ => throw new InvalidOperationException("post_success"),
+    };
+
+    internal static async Task WriteAsync(Issue158WindowsLaneGate gate, string terminalStatus, OwnedSessionExecutionCheckpointV1? checkpoint,
         OwnedSessionDiagnosticEventV1? phase, OwnedSessionDiagnosticEventV1? reason,
-        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure) =>
-        File.WriteAllTextAsync(
-            Path.Combine(gate.ResultDirectory, FileName),
-            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason, postFreezeFailure),
-            new UTF8Encoding(false));
+        OwnedSessionPostFreezeOutcomeV1? postFreezeFailure,
+        Issue158PostSuccessFailureV1? postSuccessFailure = null)
+    {
+        var bytes = new UTF8Encoding(false, true).GetBytes(
+            Serialize(gate.CandidateSha, terminalStatus, checkpoint, phase, reason, postFreezeFailure, postSuccessFailure));
+        if (bytes.Length > 4096) throw new InvalidOperationException("blocker");
+        await using var stream = new FileStream(Path.Combine(gate.ResultDirectory, FileName), FileMode.CreateNew,
+            FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(bytes);
+        await stream.FlushAsync();
+    }
 }
 
 internal sealed record Issue158WindowsObservedResult(

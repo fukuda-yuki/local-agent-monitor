@@ -50,17 +50,39 @@ try {
   Remove-Item -LiteralPath $physical -Force
   if(Test-Path -LiteralPath $physical){throw 'cleanup'}
  }
+ function Read-BoundedChildOutput([Diagnostics.Process]$Process){
+  $limit=1048576;$stdoutBuilder=[Text.StringBuilder]::new();$stdoutOverflow=$false;$stderrNonempty=$false
+  $stdoutBuffer=[char[]]::new(8192);$stderrBuffer=[char[]]::new(8192)
+  $stdoutTask=$Process.StandardOutput.ReadAsync($stdoutBuffer,0,$stdoutBuffer.Length)
+  $stderrTask=$Process.StandardError.ReadAsync($stderrBuffer,0,$stderrBuffer.Length)
+  $exitTask=$Process.WaitForExitAsync()
+  while($null-ne$stdoutTask-or$null-ne$stderrTask-or-not$exitTask.IsCompleted){
+   $pending=[Collections.Generic.List[Threading.Tasks.Task]]::new();if($null-ne$stdoutTask){[void]$pending.Add($stdoutTask)};if($null-ne$stderrTask){[void]$pending.Add($stderrTask)};if(-not$exitTask.IsCompleted){[void]$pending.Add($exitTask)}
+   [void][Threading.Tasks.Task]::WhenAny($pending).GetAwaiter().GetResult()
+   if($null-ne$stdoutTask-and$stdoutTask.IsCompleted){$read=$stdoutTask.GetAwaiter().GetResult();if($read-eq0){$stdoutTask=$null}else{$remaining=$limit-$stdoutBuilder.Length;if($remaining-gt0){[void]$stdoutBuilder.Append($stdoutBuffer,0,[Math]::Min($read,$remaining))};if($read-gt$remaining){$stdoutOverflow=$true};$stdoutTask=$Process.StandardOutput.ReadAsync($stdoutBuffer,0,$stdoutBuffer.Length)}}
+   if($null-ne$stderrTask-and$stderrTask.IsCompleted){$read=$stderrTask.GetAwaiter().GetResult();if($read-eq0){$stderrTask=$null}else{$stderrNonempty=$true;$stderrTask=$Process.StandardError.ReadAsync($stderrBuffer,0,$stderrBuffer.Length)}}
+  }
+  [void]$exitTask.GetAwaiter().GetResult()
+  [pscustomobject]@{Stdout=$stdoutBuilder.ToString();StdoutOverflow=$stdoutOverflow;StderrNonempty=$stderrNonempty}
+ }
+ function Stop-OwnedChildProcessBestEffort([Diagnostics.Process]$Process){
+  if(-not$Process.HasExited){$Process.Kill($true)}
+  if(-not$Process.WaitForExit(30000)){throw 'process wait'}
+ }
  function Get-BlockerCode {
   $children=@(Get-ChildItem -LiteralPath $result -Force);if($children.Count-cne2-or@($children|Where-Object{$_.Name-cnotin@($script:Issue158OwnerName,'blocker.json')}).Count-ne0){throw 'blocker'}
   [void](Get-Issue158Owner $result $runId $CandidateSha result (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result))
   $path=Join-Path $result 'blocker.json';$item=Get-Item -LiteralPath $path -Force;if($item.PSIsContainer-or$item.LinkType-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or$item.Length-gt4096-or(Get-Issue158LexicalPath $path)-cne(Get-Issue158PhysicalPath $path)){throw 'blocker'}
   $bytes=[IO.File]::ReadAllBytes($path);[void][Text.UTF8Encoding]::new($false,$true).GetString($bytes);$document=$null
-  try{$document=[Text.Json.JsonDocument]::Parse([ReadOnlyMemory[byte]]::new($bytes));if($document.RootElement.ValueKind-ne[Text.Json.JsonValueKind]::Object){throw 'blocker'};$keys=@('schema_version','candidate_sha','terminal_status','last_checkpoint','driver_phase','poison_reason','post_freeze_failure');$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$value=@{};foreach($property in $document.RootElement.EnumerateObject()){if(-not$seen.Add($property.Name)-or$property.Name-cnotin$keys-or$property.Value.ValueKind-ne[Text.Json.JsonValueKind]::String){throw 'blocker'};$value[$property.Name]=$property.Value.GetString()};if($seen.Count-cne$keys.Count){throw 'blocker'}}finally{if($null-ne$document){$document.Dispose()}}
-  if($value.schema_version-cne'issue-158-windows-blocker.v3'-or$value.candidate_sha-cne$CandidateSha-or$value.terminal_status-cnotin@('failed','canceled','timed_out')){throw 'blocker'}
+  try{$document=[Text.Json.JsonDocument]::Parse([ReadOnlyMemory[byte]]::new($bytes));if($document.RootElement.ValueKind-ne[Text.Json.JsonValueKind]::Object){throw 'blocker'};$keys=@('schema_version','candidate_sha','terminal_status','last_checkpoint','driver_phase','poison_reason','post_freeze_failure','post_success_failure');$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$value=@{};foreach($property in $document.RootElement.EnumerateObject()){if(-not$seen.Add($property.Name)-or$property.Name-cnotin$keys-or$property.Value.ValueKind-ne[Text.Json.JsonValueKind]::String){throw 'blocker'};$value[$property.Name]=$property.Value.GetString()};if($seen.Count-cne$keys.Count){throw 'blocker'}}finally{if($null-ne$document){$document.Dispose()}}
+  if($value.schema_version-cne'issue-158-windows-blocker.v4'-or$value.candidate_sha-cne$CandidateSha-or$value.terminal_status-cnotin@('failed','canceled','timed_out','succeeded')){throw 'blocker'}
   $checkpoints=@('client_started','identity_certified','candidate_created','probe_certified','execution_inventory_certified','driver_completed','callbacks_frozen','import_completed','candidate_ready','candidate_published');if($value.last_checkpoint-cne'none'-and$value.last_checkpoint-cnotin$checkpoints){throw 'blocker'}
   if($value.driver_phase-cnotin@('none','command_pending','send_pending')){throw 'blocker'}
   if($value.poison_reason-cnotin@('none','work_token_pre_canceled','closed_relevant_event','session_start_contract','session_binding_contract','invocation_identity','invocation_description','invocation_content','invocation_native_reproof','invocation_preparation','invocation_buffer','terminal_contract','session_error','model_call_failure','abort','callback_exception')){throw 'blocker'}
   if($value.post_freeze_failure-cnotin@('none','candidate_not_admitted','prepared_body_rejected','candidate_lost_during_first_v2','first_v2_forward_unavailable','candidate_lost_during_later_v2','later_v2_forward_unavailable','start_envelope_rejected','terminal_envelope_rejected','start_validation_rejected','start_queue_refused','start_commit_busy','start_commit_failed','start_commit_timeout','start_commit_canceled','terminal_validation_rejected','terminal_queue_refused','terminal_commit_busy','terminal_commit_failed','terminal_commit_timeout','terminal_commit_canceled','unexpected_import_exception')){throw 'blocker'}
+  $postSuccess=@('none','execution_evidence','committed_identity_sequence','metadata_request','historical_request','current_file_request','route_matrix','metadata_document','historical_document','current_file_document','persistence_counts','aggregate_counts','observed_result','shutdown_drain','result_serialization','result_write','unexpected');if($value.post_success_failure-cnotin$postSuccess){throw 'blocker'}
+  if($value.terminal_status-ceq'succeeded'){if($value.post_success_failure-ceq'none'-or$value.last_checkpoint-cne'candidate_published'-or$value.driver_phase-cne'none'-or$value.poison_reason-cne'none'-or$value.post_freeze_failure-cne'none'){throw 'blocker'};return 'succeeded_post_success_'+$value.post_success_failure}
+  if($value.post_success_failure-cne'none'){throw 'blocker'}
   $code=if($value.last_checkpoint-ceq'none'){$value.terminal_status+'_before_checkpoint'}else{$value.terminal_status+'_after_'+$value.last_checkpoint}
   if($value.driver_phase-cne'none'){$code+='_at_'+$value.driver_phase};if($value.poison_reason-cne'none'){$code+='_due_'+$value.poison_reason};if($value.post_freeze_failure-cne'none'){$code+='_post_freeze_'+$value.post_freeze_failure};return $code
  }
@@ -85,28 +107,43 @@ try {
  $psi.Environment['CAO_ISSUE158_RESULT_FILE']=$resultFile
  $psi.Environment['CAO_ISSUE158_RUNTIME_MARKER']=$runtimeMarker
  [void]$psi.Environment.Remove('COPILOT_CLI_PATH')
- $process=[Diagnostics.Process]::Start($psi);$stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd();$process.WaitForExit()
- $blockedCode='internal';if($process.ExitCode-ne0){try{$blockedCode=Get-BlockerCode}catch{};throw 'test_process'}
- if($stderr.Length-ne0-or$stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
+ $process=$null;$processCleanupAuthorized=$true;$childExitCode=$null
+ $process=[Diagnostics.Process]::Start($psi);$processCleanupAuthorized=$false;$blockedCode='wrapper_test_output';$childOutput=Read-BoundedChildOutput $process
+ if($process-is[Diagnostics.Process]){if(-not$process.HasExited){throw 'process exit'};$childExitCode=$process.ExitCode;$process.Dispose();$process=$null;$processCleanupAuthorized=$true}else{$childExitCode=$process.ExitCode;$process=$null;$processCleanupAuthorized=$true}
+ if($childExitCode-ne0){$blockedCode='internal';try{$blockedCode=Get-BlockerCode}catch{try{$children=@(Get-ChildItem -LiteralPath $result -Force);if($children.Count-cne1-or$children[0].Name-cne$script:Issue158OwnerName){throw 'child'};[void](Get-Issue158Owner $result $runId $CandidateSha result (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result));$blockedCode='child_nonzero_unreported'}catch{$blockedCode='internal'}};throw 'test_process'}
+ $blockedCode='wrapper_test_output'
+ if($null-eq$childOutput-or-not($childOutput-is[pscustomobject])-or@($childOutput.PSObject.Properties).Count-cne3-or(@($childOutput.PSObject.Properties.Name)-join',')-cne'Stdout,StdoutOverflow,StderrNonempty'-or$childOutput.Stdout.GetType()-ne[string]-or$childOutput.StdoutOverflow.GetType()-ne[bool]-or$childOutput.StderrNonempty.GetType()-ne[bool]){throw 'test_output'}
+ if($childOutput.StderrNonempty-or$childOutput.StdoutOverflow-or$childOutput.Stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$childOutput.Stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
+ $blockedCode='wrapper_runtime_cleanup'
  Remove-Owned $runtime runtime
+ $blockedCode='wrapper_scan'
  $scanOutput=& (Join-Path $PSScriptRoot 'scan-leaks.ps1') -CandidateSha $CandidateSha -RuntimeDirectory $runtime -ResultDirectory $result -ResultFileName $resultFile -Lane windows_owned_session -ExpectedCleanupComplete:$false 2>$null
  if($LASTEXITCODE-ne0-or($scanOutput-join'')-cne'scan_result=PASSED'){throw 'scan'}
- $preparedBytes=[IO.File]::ReadAllBytes((Join-Path $result $resultFile))
+ $blockedCode='wrapper_result_validation';$preparedBytes=[IO.File]::ReadAllBytes((Join-Path $result $resultFile))
  $prepared=Get-Issue158ValidatedResult $preparedBytes $CandidateSha windows_owned_session $runtimeMarker $false
  $retained=$prepared.Json
- Remove-Owned $result result $true
+ $blockedCode='wrapper_result_cleanup';Remove-Owned $result result $true
  if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){throw 'cleanup'}
  $retained.checks.cleanup_complete=$true
  $finalText=$retained|ConvertTo-Json -Compress -Depth 8
  $finalBytes=[Text.UTF8Encoding]::new($false).GetBytes($finalText)
- [void](Get-Issue158ValidatedResult $finalBytes $CandidateSha windows_owned_session $runtimeMarker $true)
- Restore-IdentityEnvironment
+ $blockedCode='wrapper_final_validation';[void](Get-Issue158ValidatedResult $finalBytes $CandidateSha windows_owned_session $runtimeMarker $true)
+ $blockedCode='wrapper_identity_restore';Restore-IdentityEnvironment
  Write-Output $finalText
  exit 0
 } catch {
  $cleanupComplete=$true
+ $processFenceComplete=$true
+ $processCleanupSafe=if($null-ne(Get-Variable processCleanupAuthorized -ErrorAction SilentlyContinue)){$processCleanupAuthorized}else{$true}
+ if($null-ne(Get-Variable process -ErrorAction SilentlyContinue)-and$null-ne$process){
+  if(-not$processCleanupSafe){try{Stop-OwnedChildProcessBestEffort $process}catch{$processFenceComplete=$false}}
+  try{$process.Dispose();$process=$null}catch{$processFenceComplete=$false}
+ }
+ if(-not$processFenceComplete-or-not$processCleanupSafe){$cleanupComplete=$false}
+ if($processFenceComplete-and$processCleanupSafe){
  try{if($null-ne(Get-Variable runtimeCreated -ErrorAction SilentlyContinue)-and$runtimeCreated-and(Test-Path -LiteralPath $runtime)){if($runtimeOwned){Remove-Owned $runtime runtime}else{Remove-Partial $runtime runtime}}}catch{$cleanupComplete=$false}
- try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{$cleanupComplete=$false}
+  try{if($null-ne(Get-Variable resultCreated -ErrorAction SilentlyContinue)-and$resultCreated-and(Test-Path -LiteralPath $result)){if($resultOwned){Remove-Owned $result result (-not(Test-Path -LiteralPath $runtime))}else{Remove-Partial $result result}}}catch{$cleanupComplete=$false}
+ }
  try{if($null-ne(Get-Command Restore-IdentityEnvironment -ErrorAction SilentlyContinue)){Restore-IdentityEnvironment}}catch{$cleanupComplete=$false}
  if(($null-ne(Get-Variable runtime -ErrorAction SilentlyContinue)-and(Test-Path -LiteralPath $runtime))-or($null-ne(Get-Variable result -ErrorAction SilentlyContinue)-and(Test-Path -LiteralPath $result))){$cleanupComplete=$false}
  $code=if($cleanupComplete-and$null-ne(Get-Variable blockedCode -ErrorAction SilentlyContinue)){$blockedCode}else{'internal'};Write-Output "windows_result=BLOCKED check=$code"
