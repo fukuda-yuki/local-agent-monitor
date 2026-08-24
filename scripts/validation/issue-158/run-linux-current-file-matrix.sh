@@ -11,6 +11,7 @@ owner=''
 expected_owner=''
 owned=0
 captured=''
+test_failure_code=''
 
 capture() {
   captured="$("$@" 2>/dev/null)" || return 1
@@ -102,9 +103,49 @@ validate_sdk() {
 
 preflight_tools() {
   local tool
-  for tool in git realpath cat find basename rm mkdir stat base64 timeout grep findmnt; do
+  for tool in git realpath cat find basename rm mkdir stat base64 timeout findmnt; do
     command -v "${tool}" >/dev/null 2>&1 || return 1
   done
+}
+
+read_test_failure() {
+  local result="$1" size content stage
+  test_failure_code=''
+  if [[ ! -e "${result}" && ! -L "${result}" ]]; then return 2; fi
+  [[ -f "${result}" && ! -L "${result}" ]] || return 1
+  capture realpath -e -- "${result}" || return 1
+  [[ "${captured}" == "${result}" ]] || return 1
+  capture stat -c %h -- "${result}" || return 1
+  [[ "${captured}" == 1 ]] || return 1
+  capture stat -c %s -- "${result}" || return 1
+  is_decimal "${captured}" || return 1
+  size="${captured}"
+  [[ "${size}" -gt 0 && "${size}" -le 128 ]] || return 2
+  capture cat -- "${result}" || return 1
+  content="${captured}"
+  [[ "${size}" -eq "${#content}" ]] || return 2
+  case "${content}" in issue158_linux_test_failure_v1=*) stage="${content#issue158_linux_test_failure_v1=}" ;; *) return 2 ;; esac
+  case "${stage}" in
+    work_setup|native_preflight|native_matrix|route_setup|route_seed|host_start|metadata_route|historical_route|current_file_route|shutdown_drain|result_serialization|result_write)
+      test_failure_code="test_${stage}"; return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+handle_test_failure() {
+  local test_exit="$1" result="$2" failure_read
+  if read_test_failure "${result}"; then
+    blocked "${test_failure_code}"
+    return 1
+  else
+    failure_read=$?
+  fi
+  [[ "${failure_read}" -eq 1 ]] && return 1
+  case "${test_exit}" in
+    124) blocked test_timeout; return 1 ;;
+    137) blocked test_killed; return 1 ;;
+    *) blocked test; return 1 ;;
+  esac
 }
 
 run_main() {
@@ -148,12 +189,17 @@ run_main() {
   result="${top}/prepared.json"
   export CAO_ISSUE158_LINUX_AUTHORIZED='issue-158-linux-ext4-current-file-v1' CAO_ISSUE158_CANDIDATE_SHA="${candidate}" CAO_ISSUE158_RUN_ID="${run_id}" CAO_ISSUE158_LINUX_REPOSITORY="${checkout}" CAO_ISSUE158_LINUX_WORK_ROOT="${work}" CAO_ISSUE158_LINUX_RESULT_FILE="${result}"
   test_output="${top}/test-output.txt"
-  timeout --signal=TERM --kill-after=30s 10m "${dotnet_binary}" test "${checkout}/tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" --filter 'Issue158Lane=LinuxExt4CurrentFile' --logger 'console;verbosity=minimal' >"${test_output}" 2>&1 || blocked test
+  set +e
+  timeout --signal=TERM --kill-after=30s 10m "${dotnet_binary}" test "${checkout}/tests/CopilotAgentObservability.LocalMonitor.Tests/CopilotAgentObservability.LocalMonitor.Tests.csproj" --filter 'Issue158Lane=LinuxExt4CurrentFile' --logger 'console;verbosity=minimal' >"${test_output}" 2>&1
+  test_exit=$?
+  set -e
   capture stat -c %s -- "${test_output}" || blocked test
   is_decimal "${captured}" || blocked test
   [[ "${captured}" -le 1048576 ]] || blocked test
-  grep -Eq 'Passed|合格' "${test_output}" 2>/dev/null || blocked test
   rm -- "${test_output}" 2>/dev/null || blocked cleanup
+  if [[ "${test_exit}" -ne 0 ]]; then
+    handle_test_failure "${test_exit}" "${result}" || exit 1
+  fi
   [[ -f "${result}" && ! -L "${result}" ]] || blocked result
   capture stat -c %s -- "${result}" || blocked result
   is_decimal "${captured}" || blocked result

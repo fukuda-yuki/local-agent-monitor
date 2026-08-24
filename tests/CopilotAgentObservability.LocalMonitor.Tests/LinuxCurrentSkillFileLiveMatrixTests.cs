@@ -95,6 +95,74 @@ public sealed class LinuxCurrentSkillFileLiveMatrixTests
         Assert.False(Issue158LinuxGate.HasExactOwner(canonical, 2, "0123456789abcdef0123456789abcdef", candidate));
     }
 
+    [Fact]
+    public void FailureDiagnosticWritesEveryClosedStageAsExactAsciiCreateNew()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"issue158-linux-failure-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            foreach (var stage in Issue158LinuxLane.FailureStages)
+            {
+                var path = Path.Combine(directory, stage);
+                Assert.True(Issue158LinuxLane.TryWriteFailureDiagnostic(path, stage));
+                Assert.Equal(Encoding.ASCII.GetBytes($"issue158_linux_test_failure_v1={stage}"), File.ReadAllBytes(path));
+            }
+
+            var existing = Path.Combine(directory, "existing");
+            File.WriteAllText(existing, "original", Encoding.ASCII);
+            Assert.False(Issue158LinuxLane.TryWriteFailureDiagnostic(existing, "native_preflight"));
+            Assert.Equal("original", File.ReadAllText(existing, Encoding.ASCII));
+            Assert.False(Issue158LinuxLane.TryWriteFailureDiagnostic(Path.Combine(directory, "unknown"), "unknown"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FailureStageTrackerPreservesRouteFailureAcrossShutdown()
+    {
+        var routeFailure = new Issue158LinuxLane.FailureStageTracker("route_setup");
+        routeFailure.Set("current_file_route");
+        routeFailure.Freeze();
+        routeFailure.Set("shutdown_drain");
+        Assert.Equal("current_file_route", routeFailure.Current);
+
+        var shutdownFailure = new Issue158LinuxLane.FailureStageTracker("host_start");
+        shutdownFailure.Set("shutdown_drain");
+        Assert.Equal("shutdown_drain", shutdownFailure.Current);
+    }
+
+    [Fact]
+    public async Task RouteFailureDiagnosticExistsBeforeShutdownCompletes()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"issue158-linux-route-failure-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var result = Path.Combine(directory, "prepared.json");
+            var gate = new Issue158LinuxGate(true, new string('a', 40), directory, result);
+            var stage = new Issue158LinuxLane.FailureStageTracker("metadata_route");
+            var shutdownEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseShutdown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var operation = Issue158LinuxLane.RunRouteBodyWithShutdownAsync<bool>(gate, stage,
+                () => Task.FromException<bool>(new InvalidOperationException("synthetic")),
+                async () => { shutdownEntered.SetResult(); await releaseShutdown.Task; });
+
+            await shutdownEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(operation.IsCompleted);
+            Assert.Equal(Encoding.ASCII.GetBytes("issue158_linux_test_failure_v1=metadata_route"), File.ReadAllBytes(result));
+            releaseShutdown.SetResult();
+            await Assert.ThrowsAsync<InvalidOperationException>(() => operation);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -213,6 +281,20 @@ internal sealed record Issue158LinuxGate(bool IsAuthorized, string CandidateSha,
 
 internal static class Issue158LinuxLane
 {
+    internal static readonly string[] FailureStages =
+    [
+        "work_setup", "native_preflight", "native_matrix", "route_setup", "route_seed", "host_start",
+        "metadata_route", "historical_route", "current_file_route", "shutdown_drain", "result_serialization", "result_write"
+    ];
+
+    internal sealed class FailureStageTracker(string initial)
+    {
+        private bool frozen;
+        internal string Current { get; private set; } = initial;
+        internal void Set(string value) { if (!frozen) Current = value; }
+        internal void Freeze() => frozen = true;
+    }
+
     internal static Task RunAsync() => RunAfterGateAsync(Issue158LinuxGate.ReadProcess, ExecuteAsync);
 
     internal static Task RunAfterGateAsync(Func<Issue158LinuxGate> readGate, Func<Issue158LinuxGate, Task> factory)
@@ -224,18 +306,82 @@ internal static class Issue158LinuxLane
 
     private static async Task ExecuteAsync(Issue158LinuxGate gate)
     {
+        var stage = new FailureStageTracker("work_setup");
+        try
+        {
+            await ExecuteCoreAsync(gate, stage);
+        }
+        catch
+        {
+            _ = TryWriteFailureDiagnostic(gate.ResultFile, stage.Current);
+            throw;
+        }
+    }
+
+    internal static bool TryWriteFailureDiagnostic(string path, string stage)
+    {
+        if (!FailureStages.Contains(stage, StringComparer.Ordinal)) return false;
+        try
+        {
+            var bytes = Encoding.ASCII.GetBytes($"issue158_linux_test_failure_v1={stage}");
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static async Task<T> RunRouteBodyWithShutdownAsync<T>(Issue158LinuxGate gate,
+        FailureStageTracker stage, Func<Task<T>> routeBody, Func<Task> shutdown)
+    {
+        Exception? routeFailure = null;
+        try
+        {
+            return await routeBody();
+        }
+        catch (Exception exception)
+        {
+            routeFailure = exception;
+            stage.Freeze();
+            _ = TryWriteFailureDiagnostic(gate.ResultFile, stage.Current);
+            throw;
+        }
+        finally
+        {
+            if (routeFailure is null)
+            {
+                stage.Set("shutdown_drain");
+                await shutdown();
+            }
+            else
+            {
+                try { await shutdown(); }
+                catch { }
+            }
+        }
+    }
+
+    private static async Task ExecuteCoreAsync(Issue158LinuxGate gate, FailureStageTracker stage)
+    {
         const string body = "---\nname: issue158-linux\ndescription: synthetic\n---\nsynthetic body\n";
+        stage.Set("work_setup");
         var root = Path.Combine(gate.WorkRoot, "skills");
         var skill = Path.Combine(root, "issue158-linux");
         Directory.CreateDirectory(skill);
         var file = Path.Combine(skill, "SKILL.md");
         await File.WriteAllTextAsync(file, body, new UTF8Encoding(false));
+        stage.Set("native_preflight");
         using var preflight = SkillDiscoveryRootPreflightV1.Run([], [root]);
         if (preflight.Outcome != SkillDiscoveryRootPreflightOutcomeV1.Certified || preflight.RetainedRoots.Count != 1)
             throw new InvalidOperationException("native_preflight");
         var target = new CurrentSkillReadTargetV1(preflight.RetainedRoots[0], ["issue158-linux", "SKILL.md"], "synthetic-revision");
         var reader = new LinuxCurrentSkillFileReaderV1();
         var cases = 0;
+        stage.Set("native_matrix");
         if (reader.Read(target, CancellationToken.None).Outcome != CurrentSkillNativeOutcomeV1.Success) throw new InvalidOperationException("native_matrix"); cases++;
         File.Delete(file); if (reader.Read(target, CancellationToken.None).Outcome != CurrentSkillNativeOutcomeV1.Missing) throw new InvalidOperationException("native_matrix"); cases++;
         await File.WriteAllBytesAsync(file, [0xff, 0xfe]); if (reader.Read(target, CancellationToken.None).Outcome != CurrentSkillNativeOutcomeV1.Binary) throw new InvalidOperationException("native_matrix"); cases++;
@@ -245,15 +391,19 @@ internal static class Issue158LinuxLane
         var raced = new LinuxCurrentSkillFileReaderV1(hooks: new CurrentSkillFileReaderHooksV1 { AfterFinalMetadataCaptured = _ => File.AppendAllText(file, "x") });
         if (raced.Read(target, CancellationToken.None).Outcome != CurrentSkillNativeOutcomeV1.Raced) throw new InvalidOperationException("native_matrix"); cases++;
         await File.WriteAllTextAsync(file, body, new UTF8Encoding(false));
-        var routes = await ExerciseRoutesAsync(gate, root, file, body);
+        var routes = await ExerciseRoutesAsync(gate, root, file, body, stage);
+        stage.Set("result_serialization");
         var result = new Issue158LinuxObservedResult(gate.CandidateSha, 1, 1, cases,
             true, true, true, true, true, true, true, true, true, true, routes.Metadata, routes.Historical, routes.Current, false);
-        await File.WriteAllTextAsync(gate.ResultFile, Issue158LinuxResult.Serialize(result), new UTF8Encoding(false));
+        var serialized = Issue158LinuxResult.Serialize(result);
+        stage.Set("result_write");
+        await File.WriteAllTextAsync(gate.ResultFile, serialized, new UTF8Encoding(false));
     }
 
     private static async Task<(bool Metadata, bool Historical, bool Current)> ExerciseRoutesAsync(
-        Issue158LinuxGate gate, string skillRoot, string definitionPath, string body)
+        Issue158LinuxGate gate, string skillRoot, string definitionPath, string body, FailureStageTracker stage)
     {
+        stage.Set("route_setup");
         var databasePath = Path.Combine(gate.WorkRoot, "monitor.db");
         var time = TimeProvider.System;
         var retention = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, time);
@@ -285,38 +435,43 @@ internal static class Issue158LinuxLane
         var registry = app.Services.GetRequiredService<SkillInvocationV2RegistryProviderV1>();
         var facts = SkillInvocationV2IngestRequestFactsV1.Derive(
             SkillInvocationV2Parser.Parse(request, new LinuxRuntimeCapability()));
+        stage.Set("route_seed");
         var ingest = SkillInvocationV2IngestTransactionV1.Execute(databasePath, facts,
             registry, time, () => true, () => true, CancellationToken.None);
         var identity = ingest.CommittedIdentity ?? throw new InvalidOperationException("route_seed");
         var admission = app.Services.GetRequiredService<CopilotRuntimeAdmissionV1>();
         var client = new LinuxDiscoveryClient(new("issue158-linux", "custom", definitionPath, null, "synthetic", null, true, true));
         _ = admission.PublishReadyTestCandidate(client, SkillInvocationV2TestIdentity.V1075, out _);
+        stage.Set("host_start");
         await app.StartAsync();
-        try
+        return await RunRouteBodyWithShutdownAsync(gate, stage, async () =>
         {
             var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
             using var http = new HttpClient { BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(30) };
             var route = $"/api/local-monitor/v1/sessions/{identity.SessionId:D}/skill-invocations/{identity.SnapshotId:D}";
+            stage.Set("metadata_route");
             using var metadata = await http.GetAsync(route);
+            if (!metadata.IsSuccessStatusCode) throw new InvalidOperationException("route_matrix");
+            await Issue158RouteDocuments.ValidateMetadataAsync(metadata.Content, identity, "1.0.75", CancellationToken.None);
+            stage.Set("historical_route");
             using var historical = await http.GetAsync(route + "/content");
+            if (!historical.IsSuccessStatusCode) throw new InvalidOperationException("route_matrix");
+            await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, body, CancellationToken.None);
+            stage.Set("current_file_route");
             using var currentRequest = new HttpRequestMessage(HttpMethod.Post, route + "/current-file-read")
             {
                 Content = new StringContent("{\"schema_version\":\"local-skill-current-file-read.request.v1\"}", Encoding.UTF8, "application/json")
             };
             currentRequest.Headers.TryAddWithoutValidation("x-monitor-csrf", "local-monitor");
             using var current = await http.SendAsync(currentRequest);
-            if (!metadata.IsSuccessStatusCode || !historical.IsSuccessStatusCode || !current.IsSuccessStatusCode)
-                throw new InvalidOperationException("route_matrix");
-            await Issue158RouteDocuments.ValidateMetadataAsync(metadata.Content, identity, "1.0.75", CancellationToken.None);
-            await Issue158RouteDocuments.ValidateHistoricalAsync(historical.Content, identity.SnapshotId, body, CancellationToken.None);
+            if (!current.IsSuccessStatusCode) throw new InvalidOperationException("route_matrix");
             await Issue158RouteDocuments.ValidateCurrentAsync(current.Content, identity.SnapshotId, body, CancellationToken.None);
             return (true, true, true);
-        }
-        finally
+        }, async () =>
         {
             await app.StopAsync();
             await app.DisposeAsync();
-        }
+        });
     }
 
     private sealed class LinuxRuntimeCapability : ISkillInvocationV2RuntimeCapability
