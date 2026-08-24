@@ -170,20 +170,30 @@ public sealed class SkillInvocationSnapshotContentReaderTests
         await AssertPostGrantFailure(database, write, SkillInvocationSnapshotContentOutcome.Unavailable);
     }
 
-    // These four columns are covered by the retention source receipt, so admission itself rejects
-    // them: the store records a read denial (deletion_failed + read_denied_at) inside the admission
-    // transaction, grants no lease, and the reader reports the item as expired. A second read sees the
-    // recorded denial and stays expired without any further writes.
     [Theory]
     [InlineData("content_kind")]
     [InlineData("content_captured_at")]
     [InlineData("content_expires_at")]
-    [InlineData("retention_owner_token")]
-    public async Task Receipt_covered_source_tamper_is_denied_at_admission_and_expires(string tamper)
+    public async Task Content_metadata_tamper_is_unavailable_before_retention_admission_with_zero_writes(string tamper)
     {
         using var database = new TestDatabase();
         var write = InsertAvailableAndCommit(database, $"native-c9m-{tamper}");
         ApplyTamper(database, write, tamper);
+
+        await AssertZeroWrites(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt,
+            SkillInvocationSnapshotContentOutcome.Unavailable);
+        await AssertZeroWrites(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt,
+            SkillInvocationSnapshotContentOutcome.Unavailable);
+        Assert.Equal(0, database.Count("retention_leases"));
+        AssertNoReadDenial(database, write);
+    }
+
+    [Fact]
+    public async Task Retention_owner_token_tamper_is_denied_at_admission_and_expires()
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, "native-c9m-retention-owner-token");
+        ApplyTamper(database, write, "retention_owner_token");
 
         var first = await ReadAt(database, write, DefaultValidationAt);
         Assert.Equal(SkillInvocationSnapshotContentOutcome.Expired, first.Outcome);
@@ -418,6 +428,19 @@ public sealed class SkillInvocationSnapshotContentReaderTests
         Assert.True(reader.GetBoolean(1));
         Assert.Equal("retention_ownership_mismatch", reader.GetString(2));
         Assert.Equal(2, reader.GetInt64(3));
+    }
+
+    private static void AssertNoReadDenial(TestDatabase database, SessionSkillInvocationWrite write)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT read_denied_at,error_code FROM retention_items WHERE source_item_id=$event;";
+        command.Parameters.AddWithValue("$event", write.EventId.ToString("D"));
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.True(reader.IsDBNull(0));
+        Assert.True(reader.IsDBNull(1));
     }
 
     private static void ApplyTamper(TestDatabase database, SessionSkillInvocationWrite write, string tamper)
