@@ -13,10 +13,11 @@ internal static class LinuxNativeFileApisV1
     internal const int AtEmptyPath = 0x1000;
 
     internal const ulong ResolveNoXdev = 0x01;
-    internal const ulong ResolveNoSymlinks = 0x02;
-    internal const ulong ResolveNoMagiclinks = 0x04;
+    internal const ulong ResolveNoMagiclinks = 0x02;
+    internal const ulong ResolveNoSymlinks = 0x04;
     internal const ulong ResolveBeneath = 0x08;
-    internal const ulong ResolveAll = ResolveNoXdev | ResolveNoSymlinks | ResolveNoMagiclinks | ResolveBeneath;
+    internal const ulong ResolveAnchor = ResolveNoXdev | ResolveNoMagiclinks | ResolveNoSymlinks;
+    internal const ulong ResolveAll = ResolveAnchor | ResolveBeneath;
 
     internal const ulong ORdOnly = 0;
     internal const ulong ODirectory = 0x10000;
@@ -127,8 +128,10 @@ internal static class LinuxNativeFileApisV1
     }
 
     // glibc's syscall() wrapper converts a negative raw return into -1 + errno.
+    internal delegate long OpenAt2Invoker(long number, int dirfd, IntPtr pathname, IntPtr how, nuint size);
+
     [DllImport("libc", SetLastError = true)]
-    internal static extern long syscall(long number, int dirfd, IntPtr pathname, nuint usize, IntPtr how);
+    private static extern long syscall(long number, int dirfd, IntPtr pathname, IntPtr how, nuint size);
 
     [DllImport("libc", SetLastError = true)]
     internal static extern int statx(int dirfd, byte[] pathname, int flags, uint mask, out Statx statxBuffer);
@@ -141,10 +144,23 @@ internal static class LinuxNativeFileApisV1
 
     // Shared openat2 marshaling for the opener and the reader. glibc's syscall() wrapper sets
     // errno on a -1 return; the returned fd (when nonnegative) is wrapped owning and cloexec.
-    internal static SafeFileHandle? OpenAt2(int parentFd, string path, ulong flags, out int errno)
+    internal static SafeFileHandle? OpenAt2(int parentFd, string path, ulong flags, ulong resolve, out int errno) =>
+        OpenAt2(parentFd, path, flags, resolve, syscall, out errno);
+
+    internal static SafeFileHandle? OpenAt2(int parentFd, string path, ulong flags, out int errno) =>
+        OpenAt2(parentFd, path, flags, ResolveAll, syscall, out errno);
+
+    internal static SafeFileHandle? OpenAt2(
+        int parentFd,
+        string path,
+        ulong flags,
+        ulong resolve,
+        OpenAt2Invoker invoke,
+        out int errno)
     {
         errno = 0;
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(invoke);
 
         byte[] pathBytes;
         try
@@ -172,13 +188,13 @@ internal static class LinuxNativeFileApisV1
             {
                 Flags = flags | OCloexec,
                 Mode = 0,
-                Resolve = ResolveAll
+                Resolve = resolve
             };
 
             howBuffer = Marshal.AllocHGlobal((int)OpenHowSize);
             Marshal.StructureToPtr(how, howBuffer, fDeleteOld: false);
 
-            var fd = syscall(SysOpenat2, parentFd, pathBuffer, OpenHowSize, howBuffer);
+            var fd = invoke(SysOpenat2, parentFd, pathBuffer, howBuffer, OpenHowSize);
             if (fd < 0)
             {
                 errno = Marshal.GetLastPInvokeError();

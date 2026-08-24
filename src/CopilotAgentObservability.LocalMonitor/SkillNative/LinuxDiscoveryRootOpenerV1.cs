@@ -38,6 +38,7 @@ internal sealed class LinuxDiscoveryRootOpenerV1 : IDiscoveryRootOpenerV1
                 LinuxNativeFileApisV1.AtFdcwd,
                 "/",
                 LinuxNativeFileApisV1.ORdOnly | LinuxNativeFileApisV1.ODirectory,
+                LinuxNativeFileApisV1.ResolveAnchor,
                 out var anchorErrno);
 
             if (anchor is null)
@@ -59,6 +60,7 @@ internal sealed class LinuxDiscoveryRootOpenerV1 : IDiscoveryRootOpenerV1
                     parent.DangerousGetHandle().ToInt32(),
                     segment,
                     LinuxNativeFileApisV1.ORdOnly | LinuxNativeFileApisV1.ODirectory,
+                    LinuxNativeFileApisV1.ResolveAll,
                     out var errno);
 
                 if (child is null)
