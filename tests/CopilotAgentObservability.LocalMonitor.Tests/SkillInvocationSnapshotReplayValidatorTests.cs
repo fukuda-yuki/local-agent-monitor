@@ -3,9 +3,11 @@ using System.Security.Cryptography;
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -94,6 +96,17 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
     {
         using var database = new TestDatabase();
         var write = NewWrite(nativeSessionId: $"native-r4-{state}", state: state, reason: reason);
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var request = RequestFor(database, write);
+
+        AssertBothArmsOutcome(database, request, SkillInvocationSnapshotReplayOutcome.EqualReplay);
+    }
+
+    [Fact]
+    public void Fault_snapshot_preserves_and_validates_the_event_outer_run_for_equal_replay()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-fault-outer-run", runNativeId: "outer-run", state: "missing", reason: "body_missing");
         Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
         var request = RequestFor(database, write);
 
@@ -216,6 +229,47 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
         AssertBothArmsOutcome(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
     }
 
+    [Theory]
+    [InlineData("readable", "EqualReplay", 1)]
+    [InlineData("nonreadable", "Unavailable", 0)]
+    [InlineData("deleted", "EqualReplay", 0)]
+    public void Equal_replay_materializes_content_json_only_after_retention_authorization(
+        string lifecycle, string expectedName, int expectedContentReads)
+    {
+        var expected = Enum.Parse<SkillInvocationSnapshotReplayOutcome>(expectedName);
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-raw-read-order-{lifecycle}");
+        var request = RequestFor(database, write);
+        if (lifecycle == "nonreadable")
+            DriveIntoExpiredPendingDeletionWithReadDenied(database, write, DefaultWriteAt.AddDays(200));
+        else if (lifecycle == "deleted")
+            DeleteContentAndInsertTombstone(database, write, DefaultWriteAt.AddDays(200));
+
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var contentReads = 0;
+        strdelegate_authorizer authorizer = (_, action, table, column, _, _) =>
+        {
+            if (action == raw.SQLITE_READ
+                && string.Equals(table, "session_event_content", StringComparison.Ordinal)
+                && string.Equals(column, "content_json", StringComparison.Ordinal))
+                contentReads++;
+            return raw.SQLITE_OK;
+        };
+        Assert.Equal(raw.SQLITE_OK, raw.sqlite3_set_authorizer(connection.Handle, authorizer, null));
+        try
+        {
+            Assert.Equal(expected, SkillInvocationSnapshotReplayValidator.ValidateInTransaction(
+                connection, transaction, request, new FixedTimeProvider(DefaultValidationAt)));
+        }
+        finally
+        {
+            raw.sqlite3_set_authorizer(connection.Handle, (strdelegate_authorizer?)null, null);
+            transaction.Rollback();
+        }
+        Assert.Equal(expectedContentReads, contentReads);
+    }
+
     // R8
     [Fact]
     public void Binding_kind_changed_to_trace_context_is_unavailable()
@@ -228,6 +282,15 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
             ("$native", write.NativeSessionId));
 
         AssertBothArmsOutcome(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
     }
 
     [Fact]
@@ -256,6 +319,145 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
             ("$value", FormatTimestamp(write.WriteAt.AddSeconds(1))), ("$claim", write.ClaimId!.Value.ToString("D")));
 
         AssertBothArmsOutcome(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("snapshot")]
+    [InlineData("receipt")]
+    [InlineData("retention")]
+    public void Write_timestamp_contradiction_precedes_different_fingerprint(string owner)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-write-time-{owner}");
+        var request = RequestFor(database, write) with { RequestFingerprintSha256 = new string('f', 64) };
+        if (owner != "retention")
+            DropTrigger(database, owner == "snapshot"
+                ? "skill_invocation_snapshot_rows_update_rejected"
+                : "skill_invocation_snapshot_receipts_update_rejected");
+        var sql = owner switch
+        {
+            "snapshot" => "UPDATE skill_invocation_snapshots SET created_at=$value WHERE snapshot_id=$snapshot;",
+            "receipt" => "UPDATE skill_invocation_snapshot_receipts SET created_at=$value WHERE snapshot_id=$snapshot;",
+            _ => "UPDATE retention_items SET captured_at=$value WHERE item_id=(SELECT content_item_id FROM skill_invocation_snapshots WHERE snapshot_id=$snapshot);",
+        };
+        Execute(database, sql,
+            ("$value", FormatTimestamp(write.WriteAt.AddSeconds(1))), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, request));
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("session_created")]
+    [InlineData("session_updated")]
+    [InlineData("event_trace")]
+    [InlineData("content_kind")]
+    [InlineData("content_captured")]
+    [InlineData("content_expires")]
+    public void Surviving_graph_metadata_contradiction_precedes_equal_and_different_replay_and_invalidates_backup(string mutation)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-graph-metadata-{mutation}");
+        var request = RequestFor(database, write);
+        if (mutation.StartsWith("event_", StringComparison.Ordinal))
+            DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
+        var sql = mutation switch
+        {
+            "session_created" => "UPDATE sessions SET created_at=$late WHERE session_id=$session;",
+            "session_updated" => "UPDATE sessions SET updated_at=$early WHERE session_id=$session;",
+            "event_trace" => "UPDATE session_events SET trace_id=$trace WHERE event_id=$event;",
+            "content_kind" => "UPDATE session_event_content SET content_kind='text/plain' WHERE event_id=$event;",
+            "content_captured" => "UPDATE session_event_content SET captured_at=$late WHERE event_id=$event;",
+            _ => "UPDATE session_event_content SET expires_at=$late WHERE event_id=$event;",
+        };
+        Execute(database, sql,
+            ("$late", FormatTimestamp(write.WriteAt.AddDays(2))),
+            ("$early", FormatTimestamp(write.WriteAt.AddDays(-2))),
+            ("$trace", new string('d', 32)), ("$span", new string('e', 16)),
+            ("$session", write.NewSessionId.ToString("D")), ("$event", write.EventId.ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        Assert.Equal(SkillInvocationSnapshotMetadataOutcome.Unavailable,
+            SkillInvocationSnapshotMetadataReader.ReadOwnedTransaction(
+                database.Path, write.NewSessionId, write.SnapshotId, new FixedTimeProvider(DefaultValidationAt)).Outcome);
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Event_and_snapshot_optional_run_mismatch_precedes_equal_and_different_replay(bool eventHasRun)
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite($"native-run-link-{eventHasRun}", runNativeId: eventHasRun ? null : "native-run");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var request = RequestFor(database, write);
+        DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
+        ExecuteWithForeignKeysOff(database, "UPDATE session_events SET run_id=$run WHERE event_id=$event;",
+            ("$run", eventHasRun ? Guid.CreateVersion7().ToString("D") : null), ("$event", write.EventId.ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
+    }
+
+    [Theory]
+    [InlineData("wrong_surface", false)]
+    [InlineData("null_native", false)]
+    [InlineData("changed_native", false)]
+    [InlineData("duplicate_natural", false)]
+    [InlineData("wrong_surface", true)]
+    [InlineData("null_native", true)]
+    [InlineData("changed_native", true)]
+    [InlineData("duplicate_natural", true)]
+    public void Event_outer_run_natural_identity_contradiction_is_unavailable_and_backup_invalid(string mutation, bool fault)
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite($"native-run-natural-{mutation}-{fault}", runNativeId: "outer-run",
+            state: fault ? "missing" : "available", reason: fault ? "body_missing" : "none");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var request = RequestFor(database, write);
+        var sql = mutation switch
+        {
+            "wrong_surface" => "UPDATE session_runs SET source_surface='copilot-cli' WHERE run_id=$run;",
+            "null_native" => "UPDATE session_runs SET native_run_id=NULL WHERE run_id=$run;",
+            "changed_native" => "UPDATE session_runs SET native_run_id='changed-run' WHERE run_id=$run;",
+            _ => "INSERT INTO session_runs(run_id,session_id,source_surface,native_run_id,status) SELECT $other,session_id,source_surface,native_run_id,'unknown' FROM session_runs WHERE run_id=$run;",
+        };
+        Execute(database, sql, ("$run", write.NewRunId.ToString("D")), ("$other", Guid.CreateVersion7().ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        Assert.Equal(SkillInvocationSnapshotMetadataOutcome.Unavailable,
+            SkillInvocationSnapshotMetadataReader.ReadOwnedTransaction(
+                database.Path, write.NewSessionId, write.SnapshotId, new FixedTimeProvider(DefaultValidationAt)).Outcome);
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
     }
 
     [Fact]
@@ -284,6 +486,94 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
         AssertBothArmsOutcome(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
     }
 
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("schema_fingerprint")]
+    public void Event_producer_identity_contradiction_refuses_equal_replay_without_writes(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-event-identity-{column}");
+        var request = RequestFor(database, write);
+        DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE session_events SET {column}=$value WHERE event_id=$event;",
+            ("$value", value),
+            ("$event", write.EventId.ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("payload_schema")]
+    [InlineData("schema_fingerprint")]
+    public void Claim_producer_identity_contradiction_refuses_equal_replay_without_writes(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-claim-identity-{column}");
+        var request = RequestFor(database, write);
+        DropTrigger(database, "skill_projection_sdk_claims_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE skill_projection_sdk_claims SET {column}=$value WHERE claim_id=$claim;",
+            ("$value", value),
+            ("$claim", write.ClaimId!.Value.ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        var different = request with { RequestFingerprintSha256 = Flip(request.RequestFingerprintSha256) };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, different));
+        AssertZeroWritesOwned(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, different, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("schema_fingerprint")]
+    public void Snapshot_producer_identity_contradiction_refuses_equal_replay_without_writes(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-snapshot-identity-{column}");
+        var request = RequestFor(database, write);
+        DropTrigger(database, "skill_invocation_snapshot_rows_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE skill_invocation_snapshots SET {column}=$value WHERE snapshot_id=$snapshot;",
+            ("$value", value), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    public void Backup_validation_rejects_each_claim_producer_identity_contradiction(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-backup-claim-{column}");
+        DropTrigger(database, "skill_projection_sdk_claims_update_rejected");
+        Execute(database, $"UPDATE skill_projection_sdk_claims SET {column}='contradiction' WHERE claim_id=$claim;",
+            ("$claim", write.ClaimId!.Value.ToString("D")));
+
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
+    }
+
     // R9
     [Fact]
     public void Zero_writes_on_equal_replay_for_owned_and_in_transaction_arms()
@@ -305,6 +595,68 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
 
         AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.DifferentFingerprint);
         AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.DifferentFingerprint);
+    }
+
+    [Fact]
+    public void Corrupt_stored_fingerprint_is_unavailable_for_original_and_mutated_requests_without_writes()
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, "native-corrupt-receipt-fingerprint");
+        var original = RequestFor(database, write);
+        var mutatedFingerprint = new string('f', 64);
+        DropTrigger(database, "skill_invocation_snapshot_receipts_update_rejected");
+        Execute(database,
+            "UPDATE skill_invocation_snapshot_receipts SET request_fingerprint_sha256=$value WHERE snapshot_id=$snapshot;",
+            ("$value", mutatedFingerprint), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, original));
+        AssertZeroWritesOwned(database, original, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, original, SkillInvocationSnapshotReplayOutcome.Unavailable);
+
+        var mutated = original with { RequestFingerprintSha256 = mutatedFingerprint };
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, mutated));
+        AssertZeroWritesOwned(database, mutated, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, mutated, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("source_adapter")]
+    [InlineData("source_event_id")]
+    public void Linked_receipt_natural_key_drift_is_unavailable_not_missing_without_writes(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-receipt-key-drift-{column}");
+        var request = RequestFor(database, write);
+        DropTrigger(database, "skill_invocation_snapshot_receipts_update_rejected");
+        var value = column == "source_event_id" ? Guid.NewGuid().ToString("D") : "contradictory-adapter";
+        Execute(database,
+            $"PRAGMA ignore_check_constraints=ON; UPDATE skill_invocation_snapshot_receipts SET {column}=$value WHERE snapshot_id=$snapshot;",
+            ("$value", value), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Unavailable,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path, request));
+        AssertZeroWritesOwned(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+        AssertZeroWritesInTransaction(database, request, SkillInvocationSnapshotReplayOutcome.Unavailable);
+    }
+
+    [Theory]
+    [InlineData("request_fingerprint_sha256")]
+    [InlineData("source_event_id")]
+    public void Backup_validation_rejects_receipt_semantic_contradiction(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-backup-receipt-{column}");
+        DropTrigger(database, "skill_invocation_snapshot_receipts_update_rejected");
+        var value = column == "request_fingerprint_sha256" ? new string('f', 64) : Guid.NewGuid().ToString("D");
+        Execute(database, $"UPDATE skill_invocation_snapshot_receipts SET {column}=$value WHERE snapshot_id=$snapshot;",
+            ("$value", value), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        using var connection = database.Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.False(SkillInvocationSnapshotBackupValidation.IsValid(connection, transaction));
+        transaction.Rollback();
     }
 
     [Fact]
@@ -574,6 +926,20 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
         command.ExecuteNonQuery();
     }
 
+    private static void ExecuteWithForeignKeysOff(
+        TestDatabase database, string sql, params (string Name, object? Value)[] parameters)
+    {
+        using var connection = database.Open();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=OFF;";
+            pragma.ExecuteNonQuery();
+        }
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, sql, parameters);
+        transaction.Commit();
+    }
+
     private static SessionSkillInvocationWrite InsertAvailableAndCommit(TestDatabase database, string nativeSessionId)
     {
         var write = NewWrite(nativeSessionId);
@@ -584,6 +950,7 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
     private static SessionSkillInvocationWrite NewWrite(
         string nativeSessionId,
         string? sourceEventId = null,
+        string? runNativeId = null,
         string state = "available",
         string reason = "none",
         DateTimeOffset? writeAt = null)
@@ -597,7 +964,7 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
             SourceEventId: sourceEventId ?? Guid.NewGuid().ToString("D"),
             SourceParentEventId: null,
             NativeSessionId: nativeSessionId,
-            RunNativeId: null,
+            RunNativeId: runNativeId,
             SourceEphemeral: false,
             OccurredAt: writeAtValue,
             SourceApplicationVersion: "1.0.65",

@@ -649,9 +649,16 @@ path digest byte `44` repeated 32 and length 12, and content-document digest
 byte `55` repeated 32. It decodes to exactly 726 bytes and the request
 fingerprint fixed in the artifact table.
 
-On a receipt hit, recompute the 29-field fingerprint from the request. A
-different fingerprint returns exact `409 idempotency_conflict`, zero writes.
-An identical fingerprint never enters either zero-create arm. It opens one
+On a direct receipt hit, first bind its snapshot back to the exact Event and
+prove the complete surviving non-raw graph: selected native/outer-Run links,
+Session write-time envelope, Event/snapshot/claim identity and classification
+nullability, receipt source key, content metadata, Retention ownership/lifecycle,
+tombstone structure, write-time equalities, claim equality/absence, and
+the 29-field fingerprint recomputed from persisted graph facts. Contradiction
+is exact sanitized `503 local_monitor_ui_unavailable`, zero writes, with no
+clock sample or raw-content read. Only after that proof may a different caller
+fingerprint return exact `409 idempotency_conflict`, zero writes. An identical
+fingerprint never enters either zero-create arm. It opens one
 validation-only `BEGIN IMMEDIATE` through the Retention-owned public replay
 validator, rechecks the exact receipt/fingerprint, and
 thereby serializes its consistent SQLite snapshot against Retention cleanup
@@ -678,13 +685,21 @@ row-readability, tombstone, reclassification, or graph contradiction is exact
 pre-existing v1/unsupported Event without this receipt is conflict. There is no
 adoption, ID regeneration, compatibility read, or backfill.
 
+If direct receipt lookup misses, replay performs only caller source key ->
+Event -> linked snapshot -> its single receipt recovery to detect receipt-key
+drift. A recovered receipt must pass the same persisted-graph proof. No Event,
+or an Event without a linked snapshot, remains a true miss and preserves the
+established foreign/Event collision path.
+
 The receipt recheck after a true miss has already opened the mutation
 `BEGIN IMMEDIATE` is the same semantic validator with different transaction
 ownership. Before any insert, if that recheck finds a receipt, #158 calls only
 the Retention-owned transaction-aware internal replay arm on the already-held
-connection/transaction. That arm rechecks the exact receipt/fingerprint in that
-snapshot; a different fingerprint returns 409 without sampling a clock, while
-an equal fingerprint samples `validation_at` exactly once and applies the same
+connection/transaction. That arm first proves the same exact persisted non-raw
+graph and receipt fingerprint in that snapshot; corruption returns sanitized
+503 without sampling a clock or reading raw content. Only then does a different
+caller fingerprint return 409 without sampling a clock, while an equal caller
+fingerprint samples `validation_at` exactly once and applies the same
 readable/transitional/deleted/corrupt graph rules above. It opens no connection
 or nested transaction, creates no Retention lease/row, selects no raw on the
 transitional/deleted arms, emits no raw value, and neither commits nor rolls
@@ -1480,13 +1495,14 @@ Run resolution, then Event-conflict detection.
 | 4 | any remaining gate-1 outer/header/provenance fault after the capability-header exception at order 1 | `400 invalid_request` | zero |
 | 5 | payload classification | continue with one classified candidate | deferred |
 | 6 | receipt read is busy | `503 persistence_busy` | zero |
-| 7 | receipt hit, different fingerprint | `409 idempotency_conflict` | zero |
-| 8 | receipt hit, identical fingerprint, validation-only `BEGIN IMMEDIATE` is busy | `503 persistence_busy` | zero |
-| 9 | receipt hit, identical fingerprint, owner-valid nonreadable raw-retained lifecycle or invalid stored graph | `503 local_monitor_ui_unavailable` | zero |
-| 10 | receipt hit, identical fingerprint, validation-only graph valid, rollback complete, and `TrySealReplaySuccess` wins | derived `204`; seal loss is sanitized stage-1 `503` | zero |
+| 7 | located/recovered receipt has any contradictory surviving non-raw graph, including Session envelope, classification/nullability, content metadata, Retention lifecycle/ownership, tombstone structure, source binding, or persisted fingerprint | `503 local_monitor_ui_unavailable` | zero |
+| 8 | canonical persisted graph, different caller fingerprint | `409 idempotency_conflict` | zero |
+| 9 | canonical persisted graph, identical caller fingerprint, validation-only `BEGIN IMMEDIATE` is busy | `503 persistence_busy` | zero |
+| 10 | canonical persisted non-raw graph, identical caller fingerprint, and time-dependent unreadability or raw document grammar/digest/reclassification failure | `503 local_monitor_ui_unavailable` | zero |
+| 10a | canonical persisted graph, identical caller fingerprint, validation-only graph valid, rollback complete, and `TrySealReplaySuccess` wins | derived `204`; seal loss is sanitized stage-1 `503` | zero |
 | 11 | receipt miss; exact current complete registry is unavailable, or the exact tuple is revoked/unaccepted | `503 local_monitor_ui_unavailable` | zero |
 | 12 | mutation `BEGIN IMMEDIATE` or eventual commit is busy | `503 persistence_busy` | rollback |
-| 13 | in-transaction receipt recheck now hits | Retention-owned internal replay arm on the same connection/transaction: different -> order 7; equal transitional/corrupt -> order 9; equal readable/deleted -> enclosing rollback then order 10's replay-success seal; no nested BEGIN; current registry irrelevant | zero/rollback |
+| 13 | in-transaction receipt recheck now locates or bounded-recovers a receipt | Retention-owned internal replay arm on the same connection/transaction: corrupt persisted graph -> order 7; canonical different -> order 8; canonical equal transitional/content-invalid -> order 10; canonical equal readable/deleted -> enclosing rollback then order 10a's replay-success seal; no nested BEGIN; current registry irrelevant | zero/rollback |
 | 14 | still a miss; acquire current-generation read lease and prove captured pointer/revision/tuple; if changed, recapture once; second mismatch or lease/generation failure | continue under held lease, or `503 local_monitor_ui_unavailable` | zero/rollback |
 | 15 | pre-existing `(source_adapter,source_event_id)` Event without receipt, or same first-write source/Event/receipt identity wins a uniqueness race | `409 idempotency_conflict` | rollback |
 | 16 | another storage/graph invariant fails | `503 local_monitor_ui_unavailable` | rollback |
@@ -1770,9 +1786,18 @@ store source key, event/snapshot selection, request fingerprint, and creation
 time only; the v1 DDL has no response status/header/entity columns. Success is
 always freshly derived exact 204.
 
-Receipt lookup is first. A hit never creates Session, Run, Event, lease, claim,
-snapshot, or IDs and never consults current registry before equality. A
-different fingerprint is exact 409/zero writes. An equal fingerprint must
+Direct receipt lookup is first. On a miss, only Event -> linked snapshot ->
+single receipt recovery may detect receipt natural-key drift; an Event without
+a linked snapshot remains a true miss and later preserves the established
+foreign Event conflict. A located or recovered receipt never creates Session,
+Run, Event, lease, claim, snapshot, or IDs and never consults current registry.
+It first proves the complete surviving non-raw graph, including content metadata,
+Retention structural/lifecycle state and tombstones, the Session write-time
+envelope, and classification/nullability invariants, and recomputes the persisted
+29-field fingerprint without a clock sample or raw
+content read; corruption is exact sanitized 503/zero writes. Only a canonical
+graph plus a different caller fingerprint is exact 409/zero writes. A canonical
+equal fingerprint must
 use the separately landed Retention-owned public validation-only transaction
 in Group 4. A receipt that races a preceding miss uses the same validator's
 transaction-aware internal arm on the already-held mutation connection/
@@ -1785,6 +1810,12 @@ bytes never leave the validator. A miss alone enters the mutation
 `BEGIN IMMEDIATE` 0|1|>1 mapping and seven-authority insert described in Group
 4; a racing receipt exits it by enclosing rollback with zero writes. No
 pre-existing Event is adopted.
+
+The admitted r0001/r0002 Event stores trace correlation only and requires its
+`trace_id` null; `session_events` intentionally has no producer-span column.
+The snapshot `trace_id`/`span_id` and an available claim's
+`producer_trace_id`/`producer_span_id` are independently required null and equal,
+while a fault snapshot requires both null and has no claim.
 
 Choice B from Group 4—persist the exact selected native ID—is selected over
 unbounded binding enumeration or another selection table. The binary semantic

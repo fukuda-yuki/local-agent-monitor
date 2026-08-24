@@ -1,3 +1,4 @@
+using System.Globalization;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
@@ -369,8 +370,16 @@ internal sealed class SkillProjectionReadService
         string NormalizationVersion,
         string PayloadSchema,
         string SchemaFingerprint,
+        string PayloadSha256,
+        string SourceEventId,
+        string SourceAdapter,
+        string SourceSurface,
+        string? ProducerTraceId,
+        string? ProducerSpanId,
         string SkillName,
-        string? SkillSource);
+        string? SkillSource,
+        string? InvocationTrigger,
+        string CreatedAtText);
 
     private static SdkClaimRow? ReadSdkClaimRow(
         SqliteConnection connection,
@@ -386,7 +395,8 @@ internal sealed class SkillProjectionReadService
                 """
                 SELECT session_id, event_id, source_application_version, adapter_version,
                        normalization_version, payload_schema, schema_fingerprint,
-                       skill_name, skill_source
+                       payload_sha256,source_event_id,source_adapter,source_surface,
+                       producer_trace_id,producer_span_id,skill_name,skill_source,invocation_trigger,created_at
                 FROM skill_projection_sdk_claims
                 WHERE claim_id = @claimId AND session_id = @sessionId
                 LIMIT 2;
@@ -413,7 +423,15 @@ internal sealed class SkillProjectionReadService
                 reader.GetString(5),
                 reader.GetString(6),
                 reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8));
+                reader.GetString(8),
+                reader.GetString(9),
+                reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetString(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.GetString(16));
 
             // The metadata graph already proved ClaimCount(...) == 1; a second row is a
             // contradiction.
@@ -446,9 +464,19 @@ internal sealed class SkillProjectionReadService
 
         return string.Equals(claim.SourceApplicationVersion, facts.SourceApplicationVersion, StringComparison.Ordinal) &&
             string.Equals(claim.AdapterVersion, facts.AdapterVersion, StringComparison.Ordinal) &&
+            string.Equals(claim.NormalizationVersion, facts.NormalizationVersion, StringComparison.Ordinal) &&
             string.Equals(claim.PayloadSchema, facts.PayloadSchema, StringComparison.Ordinal) &&
+            string.Equals(claim.SchemaFingerprint, facts.SchemaFingerprint, StringComparison.Ordinal) &&
+            string.Equals(claim.PayloadSha256, facts.PayloadSha256, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceEventId, facts.SourceEventId, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceAdapter, facts.SourceAdapter, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceSurface, facts.SourceSurface, StringComparison.Ordinal) &&
+            NullableTextEquals(claim.ProducerTraceId, facts.TraceId) &&
+            NullableTextEquals(claim.ProducerSpanId, facts.SpanId) &&
             string.Equals(claim.SkillName, facts.Name, StringComparison.Ordinal) &&
-            NullableTextEquals(claim.SkillSource, facts.Source);
+            NullableTextEquals(claim.SkillSource, facts.Source) &&
+            NullableTextEquals(claim.InvocationTrigger, facts.Trigger) &&
+            string.Equals(claim.CreatedAtText, facts.CapturedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'+00:00'", CultureInfo.InvariantCulture), StringComparison.Ordinal);
     }
 
     private static bool NullableTextEquals(string? left, string? right) =>

@@ -185,6 +185,30 @@ public sealed class SkillInvocationSnapshotMetadataReaderTests
     }
 
     [Fact]
+    public void Deleted_item_with_surviving_mismatched_content_metadata_is_unavailable()
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, "native-deleted-surviving-content");
+        var at = DefaultValidationAt;
+        using (var connection = database.Open())
+        using (var transaction = connection.BeginTransaction())
+        {
+            Execute(connection, transaction,
+                "UPDATE session_event_content SET content_kind='text/plain' WHERE event_id=$event;",
+                ("$event", write.EventId.ToString("D")));
+            Execute(connection, transaction,
+                "UPDATE retention_items SET state='deleted',read_denied_at=$at,deleted_at=$at,revision=revision+1 WHERE source_item_id=$event;",
+                ("$at", FormatTimestamp(at)), ("$event", write.EventId.ToString("D")));
+            Execute(connection, transaction,
+                "INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) SELECT item_id,$at,$at FROM retention_items WHERE source_item_id=$event;",
+                ("$at", FormatTimestamp(at)), ("$event", write.EventId.ToString("D")));
+            transaction.Commit();
+        }
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, at);
+    }
+
+    [Fact]
     public void Deleted_item_missing_its_tombstone_is_unavailable()
     {
         using var database = new TestDatabase();
@@ -218,6 +242,28 @@ public sealed class SkillInvocationSnapshotMetadataReaderTests
         AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
     }
 
+    [Theory]
+    [InlineData("source_adapter")]
+    [InlineData("source_event_id")]
+    [InlineData("request_fingerprint_sha256")]
+    public void Receipt_identity_or_fingerprint_contradiction_is_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-receipt-{column}");
+        DropTrigger(database, "skill_invocation_snapshot_receipts_update_rejected");
+        var value = column switch
+        {
+            "source_event_id" => Guid.NewGuid().ToString("D"),
+            "request_fingerprint_sha256" => new string('f', 64),
+            _ => "contradictory-adapter",
+        };
+        Execute(database,
+            $"PRAGMA ignore_check_constraints=ON; UPDATE skill_invocation_snapshot_receipts SET {column}=$value WHERE snapshot_id=$snapshot;",
+            ("$value", value), ("$snapshot", write.SnapshotId.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
     [Fact]
     public void Event_content_state_changed_is_unavailable()
     {
@@ -238,6 +284,98 @@ public sealed class SkillInvocationSnapshotMetadataReaderTests
         DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
         Execute(database, "UPDATE session_events SET type='skill.something_else' WHERE event_id=$event;",
             ("$event", write.EventId.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("schema_fingerprint")]
+    public void Event_producer_identity_contradiction_is_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-event-identity-{column}");
+        DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE session_events SET {column}=$value WHERE event_id=$event;",
+            ("$value", value),
+            ("$event", write.EventId.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("payload_schema")]
+    [InlineData("schema_fingerprint")]
+    public void Claim_producer_identity_contradiction_is_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-claim-identity-{column}");
+        DropTrigger(database, "skill_projection_sdk_claims_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE skill_projection_sdk_claims SET {column}=$value WHERE claim_id=$claim;",
+            ("$value", value),
+            ("$claim", write.ClaimId!.Value.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
+    [Theory]
+    [InlineData("created_at")]
+    [InlineData("invocation_trigger")]
+    [InlineData("payload_sha256")]
+    public void Claim_remaining_immutable_field_contradiction_is_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-claim-complete-{column}");
+        DropTrigger(database, "skill_projection_sdk_claims_update_rejected");
+        var value = column switch
+        {
+            "created_at" => FormatTimestamp(write.WriteAt.AddSeconds(1)),
+            "payload_sha256" => new string('f', 64),
+            _ => "contradictory-trigger",
+        };
+        Execute(database, $"UPDATE skill_projection_sdk_claims SET {column}=$value WHERE claim_id=$claim;",
+            ("$value", value), ("$claim", write.ClaimId!.Value.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Event_and_snapshot_optional_run_mismatch_is_unavailable(bool eventHasRun)
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite($"native-run-link-{eventHasRun}", runNativeId: eventHasRun ? null : "native-run");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        DropTrigger(database, "skill_invocation_snapshot_session_event_update_rejected");
+        ExecuteWithForeignKeysOff(database,
+            "UPDATE session_events SET run_id=$run WHERE event_id=$event;",
+            ("$run", eventHasRun ? Guid.CreateVersion7().ToString("D") : null),
+            ("$event", write.EventId.ToString("D")));
+
+        AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
+    }
+
+    [Theory]
+    [InlineData("source_application_version")]
+    [InlineData("adapter_version")]
+    [InlineData("normalization_version")]
+    [InlineData("schema_fingerprint")]
+    public void Snapshot_producer_identity_contradiction_is_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = InsertAvailableAndCommit(database, $"native-snapshot-identity-{column}");
+        DropTrigger(database, "skill_invocation_snapshot_rows_update_rejected");
+        var value = column == "schema_fingerprint" ? new string('f', 64) : "contradiction";
+        Execute(database, $"UPDATE skill_invocation_snapshots SET {column}=$value WHERE snapshot_id=$snapshot;",
+            ("$value", value), ("$snapshot", write.SnapshotId.ToString("D")));
 
         AssertUnavailableBothArms(database, write.NewSessionId, write.SnapshotId, DefaultValidationAt);
     }

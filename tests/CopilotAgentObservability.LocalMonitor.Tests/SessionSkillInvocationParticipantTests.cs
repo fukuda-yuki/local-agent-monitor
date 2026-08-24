@@ -225,6 +225,9 @@ public sealed class SessionSkillInvocationParticipantTests
         Assert.Equal(1, baseline["session_events"]);
 
         var write = NewWrite(nativeSessionId: "native-p9", sourceEventId: conflictingSourceEventId);
+        Assert.Equal(SkillInvocationSnapshotReceiptProbeOutcome.Missing,
+            SkillInvocationSnapshotReplayValidator.ProbeReceipt(database.Path,
+                new SkillInvocationSnapshotReplayRequest(write.SourceAdapter, write.SourceEventId, new string('a', 64))));
         var outcome = RollBack(database, write);
 
         Assert.Equal(SessionSkillInvocationWriteOutcome.EventConflict, outcome);

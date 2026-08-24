@@ -32,7 +32,10 @@ internal static class SkillInvocationSnapshotBackupValidation
                    OR e.adapter_version IS NOT s.adapter_version
                    OR e.normalization_version IS NOT s.normalization_version
                    OR e.schema_fingerprint IS NOT s.schema_fingerprint
-                   OR (s.run_id IS NOT NULL AND e.run_id IS NOT s.run_id));
+                   OR e.trace_id IS NOT NULL
+                   OR s.trace_id IS NOT NULL OR s.span_id IS NOT NULL
+                   OR (s.state='available' AND e.run_id IS NOT s.run_id)
+                   OR (s.state<>'available' AND s.run_id IS NOT NULL));
             """),
         ("receipt_cardinality", """
             SELECT EXISTS(
@@ -73,7 +76,29 @@ internal static class SkillInvocationSnapshotBackupValidation
                 SELECT 1 FROM skill_invocation_snapshots s
                 WHERE s.run_id IS NOT NULL
                   AND (SELECT COUNT(*) FROM session_runs r
-                       WHERE r.session_id=s.session_id AND r.run_id=s.run_id)<>1);
+                       WHERE r.session_id=s.session_id AND r.run_id=s.run_id)<>1)
+                OR EXISTS(
+                SELECT 1 FROM session_events e
+                JOIN skill_invocation_snapshots s ON s.session_id=e.session_id AND s.event_id=e.event_id
+                WHERE e.run_id IS NOT NULL
+                  AND (NOT EXISTS(SELECT 1 FROM session_runs r
+                                  WHERE r.session_id=e.session_id AND r.run_id=e.run_id
+                                    AND r.source_surface='copilot-sdk' AND r.native_run_id IS NOT NULL)
+                       OR (SELECT COUNT(*) FROM session_runs selected
+                           JOIN session_runs candidate
+                             ON candidate.session_id=selected.session_id
+                            AND candidate.source_surface='copilot-sdk'
+                            AND candidate.native_run_id=selected.native_run_id
+                           WHERE selected.session_id=e.session_id AND selected.run_id=e.run_id)<>1));
+            """),
+        ("fault_claim_absence", """
+            SELECT EXISTS(
+                SELECT 1 FROM skill_invocation_snapshots s
+                JOIN session_events e ON e.session_id=s.session_id AND e.event_id=s.event_id
+                WHERE s.claim_id IS NULL AND EXISTS(
+                    SELECT 1 FROM skill_projection_sdk_claims c
+                    WHERE (c.session_id=s.session_id AND c.event_id=s.event_id)
+                       OR (c.source_adapter=e.source_adapter AND c.source_event_id=e.source_event_id)));
             """),
         ("claim_equality", """
             SELECT EXISTS(
@@ -88,9 +113,15 @@ internal static class SkillInvocationSnapshotBackupValidation
                       AND c.skill_name IS s.name
                       AND c.skill_source IS s.source
                       AND c.invocation_trigger IS s.trigger
+                      AND c.source_application_version=s.source_application_version
+                      AND c.adapter_version=s.adapter_version
+                      AND c.normalization_version=s.normalization_version
                       AND c.payload_schema=s.payload_schema
                       AND c.schema_fingerprint=s.schema_fingerprint
-                      AND c.payload_sha256=s.payload_sha256));
+                      AND c.payload_sha256=s.payload_sha256
+                      AND c.source_event_id=(SELECT e.source_event_id FROM session_events e WHERE e.session_id=s.session_id AND e.event_id=s.event_id)
+                      AND c.source_adapter='copilot-sdk-stream' AND c.source_surface='copilot-sdk'
+                      AND c.producer_trace_id IS s.trace_id AND c.producer_span_id IS s.span_id));
             """),
         ("write_at_equalities", """
             SELECT EXISTS(
@@ -100,6 +131,18 @@ internal static class SkillInvocationSnapshotBackupValidation
                 SELECT 1 FROM skill_invocation_snapshot_receipts r
                 JOIN skill_invocation_snapshots s ON s.snapshot_id=r.snapshot_id
                 WHERE r.created_at<>s.captured_at);
+            """),
+        ("classification_fields", """
+            SELECT EXISTS(
+                SELECT 1 FROM skill_invocation_snapshots s
+                WHERE (s.state='available' AND (
+                           s.claim_id IS NULL OR s.name IS NULL OR s.body_sha256 IS NULL OR s.body_utf8_bytes IS NULL
+                           OR s.definition_path_sha256 IS NULL OR s.definition_path_utf8_bytes IS NULL))
+                   OR (s.state<>'available' AND (
+                           s.claim_id IS NOT NULL OR s.name IS NOT NULL OR s.source IS NOT NULL OR s.trigger IS NOT NULL
+                           OR s.run_id IS NOT NULL OR s.trace_id IS NOT NULL OR s.span_id IS NOT NULL
+                           OR s.body_sha256 IS NOT NULL OR s.body_utf8_bytes IS NOT NULL
+                           OR s.definition_path_sha256 IS NOT NULL OR s.definition_path_utf8_bytes IS NOT NULL)));
             """),
         // Exactly two graphs are legal: the raw row present under a non-deleted item with no
         // tombstone, or the raw row absent under an exactly deleted item with its tombstone.
@@ -123,8 +166,9 @@ internal static class SkillInvocationSnapshotBackupValidation
         ("session_time_envelope", """
             SELECT EXISTS(
                 SELECT 1 FROM skill_invocation_snapshots s
-                JOIN sessions x ON x.session_id=s.session_id
-                WHERE NOT (x.created_at<=s.captured_at AND s.captured_at<=x.updated_at));
+                LEFT JOIN sessions x ON x.session_id=s.session_id
+                WHERE x.session_id IS NULL
+                   OR NOT (x.created_at<=s.captured_at AND s.captured_at<=x.updated_at));
             """),
     ];
 
@@ -142,6 +186,8 @@ internal static class SkillInvocationSnapshotBackupValidation
         try
         {
             SkillInvocationSnapshotSchemaV1Validator.Validate(connection, transaction);
+            if (!SkillInvocationSnapshotReplayValidator.PersistedReceiptsMatchGraph(connection, transaction))
+                Reject("receipt_fingerprint");
             foreach (var (name, sql) in Violations)
             {
                 if (Probe(connection, transaction, sql))

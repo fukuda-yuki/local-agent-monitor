@@ -180,6 +180,94 @@ public sealed class SkillCurrentAuthorizationTests
         Assert.Equal(0, authority.LeaseAttemptCount);
     }
 
+    [Theory]
+    [InlineData("created_at")]
+    [InlineData("invocation_trigger")]
+    [InlineData("payload_sha256")]
+    [InlineData("source_event_id")]
+    [InlineData("source_adapter")]
+    [InlineData("source_surface")]
+    [InlineData("producer_trace_id")]
+    [InlineData("producer_span_id")]
+    public void Any_remaining_claim_identity_drift_returns_unavailable(string column)
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite($"native-claim-drift-{column}");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        using (var connection = database.Open())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "DROP TRIGGER skill_projection_sdk_claims_update_rejected;";
+            command.ExecuteNonQuery();
+            var value = column switch
+            {
+                "created_at" => "2026-01-01T00:00:01.0000000+00:00",
+                "payload_sha256" => new string('f', 64),
+                "source_event_id" => Guid.NewGuid().ToString("D"),
+                "producer_trace_id" => new string('d', 32),
+                "producer_span_id" => new string('e', 16),
+                _ => "contradiction",
+            };
+            command.CommandText = $"UPDATE skill_projection_sdk_claims SET {column}=$value WHERE claim_id=$claim;";
+            command.Parameters.AddWithValue("$value", value);
+            command.Parameters.AddWithValue("$claim", write.ClaimId!.Value.ToString("D"));
+            command.ExecuteNonQuery();
+        }
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+        var service = new SkillProjectionReadService(database.Path, authority);
+
+        var result = service.TryAcquireCurrentSdkClaimAuthorization(write.NewSessionId, write.SnapshotId, Time());
+
+        Assert.Equal(SkillRegistryCurrentAuthorizationOutcome.Unavailable, result.Outcome);
+        Assert.Null(result.Authorization);
+        Assert.Equal(0, authority.LeaseAttemptCount);
+    }
+
+    [Theory]
+    [InlineData("missing_native_binding")]
+    [InlineData("wrong_native_binding")]
+    [InlineData("receipt_time")]
+    [InlineData("snapshot_time")]
+    [InlineData("retention_time")]
+    [InlineData("event_trace")]
+    [InlineData("fault_nonnull_source")]
+    public void Any_nonraw_authorization_graph_drift_returns_unavailable(string mutation)
+    {
+        using var database = new TestDatabase();
+        var fault = mutation == "fault_nonnull_source";
+        var write = NewWrite($"native-graph-drift-{mutation}", state: fault ? "missing" : "available",
+            reason: fault ? "body_missing" : "none");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        using (var connection = database.Open())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = mutation switch
+            {
+                "missing_native_binding" => "DELETE FROM session_native_ids WHERE native_session_id=$native;",
+                "wrong_native_binding" => "UPDATE session_native_ids SET binding_kind='trace_context' WHERE native_session_id=$native;",
+                "receipt_time" => "DROP TRIGGER skill_invocation_snapshot_receipts_update_rejected; UPDATE skill_invocation_snapshot_receipts SET created_at=$changed WHERE snapshot_id=$snapshot;",
+                "snapshot_time" => "DROP TRIGGER skill_invocation_snapshot_rows_update_rejected; UPDATE skill_invocation_snapshots SET created_at=$changed WHERE snapshot_id=$snapshot;",
+                "retention_time" => "UPDATE retention_items SET captured_at=$changed WHERE item_id=(SELECT content_item_id FROM skill_invocation_snapshots WHERE snapshot_id=$snapshot);",
+                "event_trace" => "DROP TRIGGER skill_invocation_snapshot_session_event_update_rejected; UPDATE session_events SET trace_id=$trace WHERE event_id=$event;",
+                _ => "PRAGMA ignore_check_constraints=ON; DROP TRIGGER skill_invocation_snapshot_rows_update_rejected; UPDATE skill_invocation_snapshots SET source='contradiction' WHERE snapshot_id=$snapshot;",
+            };
+            command.Parameters.AddWithValue("$native", write.NativeSessionId);
+            command.Parameters.AddWithValue("$snapshot", write.SnapshotId.ToString("D"));
+            command.Parameters.AddWithValue("$event", write.EventId.ToString("D"));
+            command.Parameters.AddWithValue("$changed", "2026-01-01T00:00:01.0000000+00:00");
+            command.Parameters.AddWithValue("$trace", new string('d', 32));
+            command.ExecuteNonQuery();
+        }
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+        var service = new SkillProjectionReadService(database.Path, authority);
+
+        var result = service.TryAcquireCurrentSdkClaimAuthorization(write.NewSessionId, write.SnapshotId, Time());
+
+        Assert.Equal(SkillRegistryCurrentAuthorizationOutcome.Unavailable, result.Outcome);
+        Assert.Null(result.Authorization);
+        Assert.Equal(0, authority.LeaseAttemptCount);
+    }
+
     [Fact]
     public void AcquiredAuthorization_HoldsGenerationLeaseUntilDisposed()
     {
