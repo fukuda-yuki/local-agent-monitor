@@ -6,6 +6,67 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 public sealed class CopilotRuntimeCandidateLifecycleV1Tests
 {
     [Fact]
+    public async Task CandidateCreation_CapturesLeaseTokenOnceBeforeExposure()
+    {
+        var order = new List<string>();
+        var scope = new CountingScope(order, canceled: false);
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, scope);
+
+        Assert.Equal(1, scope.LeaseTokenReads);
+        Assert.True(candidate.TryMarkReady());
+        Assert.True(await admission.PublishCandidateAsync(candidate));
+    }
+
+    [Fact]
+    public async Task PreCanceledLeaseDuringCreation_NeverPublishesAndCleansOnce()
+    {
+        var order = new List<string>();
+        var scope = new CountingScope(order, canceled: true);
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, scope);
+        await candidate.CleanupTask;
+
+        Assert.Equal(1, scope.LeaseTokenReads);
+        Assert.True(candidate.IsInvalid);
+        Assert.False(candidate.TryMarkReady());
+        Assert.False(await admission.PublishCandidateAsync(candidate));
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        Assert.Equal(["client", "scope"], order);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ShutdownOrLeaseLossAfterRegistrationBeforeExposure_NeverPublishesOrDeadlocks(
+        bool loseLease)
+    {
+        var order = new List<string>();
+        var gate = new SkillHostShutdownGateV1();
+        var scope = new OrderedScope(order, "scope");
+        var admission = new CopilotRuntimeAdmissionV1(
+            gate,
+            candidateRegistrationAttachedForTesting: () =>
+            {
+                if (loseLease) scope.LoseLease();
+                else gate.TryStartNormalShutdown();
+            });
+
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, scope);
+        await candidate.CleanupTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(candidate.IsInvalid);
+        Assert.False(candidate.TryMarkReady());
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        Assert.Equal(["client", "scope"], order);
+    }
+
+    [Fact]
     public async Task Candidate_IsInvisibleUntilExactObjectPublication_ThenReplacementCleansClientBeforeScope()
     {
         var order = new List<string>();
@@ -106,9 +167,9 @@ public sealed class CopilotRuntimeCandidateLifecycleV1Tests
         held.Release();
 
         Assert.True(await publishing);
-        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
         await candidate.CleanupTask;
-        Assert.Equal(["candidate-client", "candidate-scope", "current-client", "current-scope"], order);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        Assert.Equal(["current-client", "current-scope", "candidate-client", "candidate-scope"], order);
     }
 
     [Fact]
@@ -249,6 +310,71 @@ public sealed class CopilotRuntimeCandidateLifecycleV1Tests
     }
 
     [Fact]
+    public async Task ShutdownObservedAfterReadyToReservedTransition_RefusesAndCleansOnce()
+    {
+        var gate = new SkillHostShutdownGateV1();
+        var admission = new CopilotRuntimeAdmissionV1(gate, () => gate.TryStartNormalShutdown());
+        var invalidations = 0;
+        admission.RegisterInvalidationObserver(_ => invalidations++);
+        var candidate = CreateReadyCandidate(admission, []);
+
+        var reservation = await admission.TryReservePublicationAsync(candidate);
+
+        Assert.Null(reservation);
+        Assert.True(candidate.IsInvalid);
+        Assert.Equal(1, invalidations);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AuthorityCancellationObservedAfterReservedTransition_RefusesBeforeCallbackCanAcquireAdmissionLock(
+        bool loseLease)
+    {
+        using var callerCancellation = new CancellationTokenSource();
+        OrderedScope? scope = null;
+        Thread? cancellationThread = null;
+        Exception? cancellationException = null;
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1(), () =>
+        {
+            cancellationThread = new Thread(() =>
+            {
+                try
+                {
+                    if (loseLease) scope!.LoseLease();
+                    else callerCancellation.Cancel();
+                }
+                catch (Exception exception) { cancellationException = exception; }
+            });
+            cancellationThread.IsBackground = true;
+            cancellationThread.Start();
+            var authorityToken = loseLease ? scope!.LeaseLostToken : callerCancellation.Token;
+            Assert.True(authorityToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+        });
+        var order = new List<string>();
+        scope = new OrderedScope(order, "scope");
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, scope);
+        Assert.True(candidate.TryMarkReady());
+
+        CopilotRuntimeAdmissionV1.PublicationReservation? reservation;
+        var cancellationJoined = false;
+        try { reservation = await admission.TryReservePublicationAsync(candidate, callerCancellation.Token); }
+        finally
+        {
+            cancellationJoined = cancellationThread?.Join(TimeSpan.FromSeconds(5)) ?? true;
+        }
+
+        Assert.True(cancellationJoined);
+        Assert.Null(cancellationException);
+        Assert.Null(reservation);
+        Assert.True(candidate.IsInvalid);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        Assert.Equal(["client", "scope"], order);
+    }
+
+    [Fact]
     public async Task InvalidationAfterPublication_RemovesAndCleansExactCandidate()
     {
         var order = new List<string>();
@@ -262,6 +388,147 @@ public sealed class CopilotRuntimeCandidateLifecycleV1Tests
         await candidate.CleanupTask;
 
         Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        Assert.Equal(["client", "scope"], order);
+    }
+
+    [Fact]
+    public async Task ReservedCandidate_RemainsInvisibleAndRejectsCapabilities()
+    {
+        var order = new List<string>();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope(order, "scope"));
+        Assert.True(candidate.TryMarkReady());
+
+        await using (var reservation = await admission.TryReservePublicationAsync(candidate))
+        {
+            Assert.NotNull(reservation);
+            Assert.False(candidate.TryAcquireOperationCapability(CancellationToken.None, out _));
+            Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+        }
+
+        Assert.True(candidate.IsInvalid);
+        Assert.Equal(["client", "scope"], order);
+    }
+
+    [Fact]
+    public async Task Invalidation_IsImmediateWithoutReservation_AndDeferredWithReservation()
+    {
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var immediate = admission.CreateUnpublishedCandidate(new OrderedClient([], "immediate-client"),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope([], "immediate-scope"));
+        admission.InvalidateCandidate(immediate);
+        Assert.True(immediate.IsInvalid);
+
+        var reserved = admission.CreateUnpublishedCandidate(new OrderedClient([], "reserved-client"),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope([], "reserved-scope"));
+        Assert.True(reserved.TryMarkReady());
+        await using (var reservation = await admission.TryReservePublicationAsync(reserved))
+        {
+            Assert.NotNull(reservation);
+            admission.InvalidateCandidate(reserved);
+            Assert.False(reserved.IsInvalid);
+            await reservation!.CommitAsync();
+            Assert.Same(reserved, AssertCurrent(admission));
+        }
+
+        await reserved.CleanupTask;
+        Assert.True(reserved.IsInvalid);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+    }
+
+    [Fact]
+    public async Task ConcurrentCommits_PublishReservedCandidateOnce()
+    {
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var prior = admission.PublishReadyTestCandidate(new OrderedClient([], "prior"), out _);
+        Assert.True(prior.TryAcquireOperationCapability(CancellationToken.None, out var held));
+        var candidate = CreateReadyCandidate(admission, []);
+        var reservation = Assert.IsType<CopilotRuntimeAdmissionV1.PublicationReservation>(
+            await admission.TryReservePublicationAsync(candidate));
+
+        var first = reservation.CommitAsync();
+        Assert.True(SpinWait.SpinUntil(() => ReferenceEquals(candidate,
+            admission.TryGetCurrentAdmittedGeneration(out var current) ? current : null), TimeSpan.FromSeconds(5)));
+        var second = reservation.CommitAsync();
+        Assert.False(first.IsCompleted);
+        Assert.False(second.IsCompleted);
+        held!.Release();
+        await Task.WhenAll(first, second);
+        await reservation.DisposeAsync();
+
+        Assert.Same(candidate, AssertCurrent(admission));
+        Assert.False(candidate.IsInvalid);
+    }
+
+    [Fact]
+    public async Task CommitWinningDisposeRace_PublishesOnce()
+    {
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var prior = admission.PublishReadyTestCandidate(new OrderedClient([], "prior"), out _);
+        Assert.True(prior.TryAcquireOperationCapability(CancellationToken.None, out var held));
+        var candidate = CreateReadyCandidate(admission, []);
+        var reservation = Assert.IsType<CopilotRuntimeAdmissionV1.PublicationReservation>(
+            await admission.TryReservePublicationAsync(candidate));
+
+        var commit = reservation.CommitAsync();
+        Assert.True(SpinWait.SpinUntil(() => ReferenceEquals(candidate,
+            admission.TryGetCurrentAdmittedGeneration(out var current) ? current : null), TimeSpan.FromSeconds(5)));
+        var dispose = reservation.DisposeAsync().AsTask();
+        Assert.False(commit.IsCompleted);
+        Assert.False(dispose.IsCompleted);
+        held!.Release();
+        await Task.WhenAll(commit, dispose);
+
+        Assert.Same(candidate, AssertCurrent(admission));
+        Assert.False(candidate.IsInvalid);
+    }
+
+    [Fact]
+    public async Task DisposeWinningCommitRace_AbortsOnce()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var candidate = admission.CreateUnpublishedCandidate(new BlockingClient([], release.Task),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope([], "scope"));
+        Assert.True(candidate.TryMarkReady());
+        var reservation = Assert.IsType<CopilotRuntimeAdmissionV1.PublicationReservation>(
+            await admission.TryReservePublicationAsync(candidate));
+
+        var dispose = reservation.DisposeAsync().AsTask();
+        await Task.Yield();
+        var commit = reservation.CommitAsync();
+        Assert.False(dispose.IsCompleted);
+        Assert.False(commit.IsCompleted);
+        release.SetResult();
+        await Task.WhenAll(dispose, commit);
+
+        Assert.True(candidate.IsInvalid);
+        Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
+    }
+
+    [Fact]
+    public async Task ConcurrentDisposals_AbortAndReleasePublicationGateOnce()
+    {
+        var order = new List<string>();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var candidate = admission.CreateUnpublishedCandidate(new BlockingClient(order, release.Task),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope(order, "scope"));
+        Assert.True(candidate.TryMarkReady());
+        var reservation = Assert.IsType<CopilotRuntimeAdmissionV1.PublicationReservation>(
+            await admission.TryReservePublicationAsync(candidate));
+
+        var first = reservation.DisposeAsync().AsTask();
+        await Task.Yield();
+        var second = reservation.DisposeAsync().AsTask();
+        Assert.False(first.IsCompleted);
+        Assert.False(second.IsCompleted);
+        release.SetResult();
+        await Task.WhenAll(first, second);
+        var next = CreateReadyCandidate(admission, []);
+
+        Assert.True(await admission.PublishCandidateAsync(next));
         Assert.Equal(["client", "scope"], order);
     }
 
@@ -304,6 +571,16 @@ public sealed class CopilotRuntimeCandidateLifecycleV1Tests
         return current;
     }
 
+    private static CopilotRuntimeGenerationV1 CreateReadyCandidate(
+        CopilotRuntimeAdmissionV1 admission,
+        List<string> order)
+    {
+        var candidate = admission.CreateUnpublishedCandidate(new OrderedClient(order, "client"),
+            SkillInvocationV2TestIdentity.V1065, new OrderedScope(order, "scope"));
+        Assert.True(candidate.TryMarkReady());
+        return candidate;
+    }
+
     private sealed class OrderedClient(List<string> order, string marker) : ICopilotSkillRuntimeClient
     {
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -332,5 +609,24 @@ public sealed class CopilotRuntimeCandidateLifecycleV1Tests
         public bool IsLeaseLost => lost.IsCancellationRequested;
         public void LoseLease() => lost.Cancel();
         public ValueTask DisposeAsync() { order.Add(marker); lost.Dispose(); return ValueTask.CompletedTask; }
+    }
+
+    private sealed class CountingScope : IAnalysisSdkDirectoryScope
+    {
+        private readonly List<string> order;
+        private readonly CancellationTokenSource lost;
+
+        internal CountingScope(List<string> order, bool canceled)
+        {
+            this.order = order;
+            lost = new CancellationTokenSource();
+            if (canceled) lost.Cancel();
+        }
+
+        internal int LeaseTokenReads { get; private set; }
+        public string ChildDirectory => "synthetic";
+        public CancellationToken LeaseLostToken { get { LeaseTokenReads++; return lost.Token; } }
+        public bool IsLeaseLost => lost.IsCancellationRequested;
+        public ValueTask DisposeAsync() { order.Add("scope"); lost.Dispose(); return ValueTask.CompletedTask; }
     }
 }

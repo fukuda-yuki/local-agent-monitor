@@ -1,4 +1,5 @@
 using System.Reflection;
+using CopilotAgentObservability.LocalMonitor.Tests;
 using CopilotAgentObservability.LocalMonitor.Tests.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.SkillRuntime;
@@ -49,9 +50,81 @@ public sealed class CopilotRuntimeGenerationV1Tests
         Assert.Equal(0, generation.OutstandingCapabilityCount);
     }
 
+    [Fact]
+    public async Task CleanupStartup_ReturnsTaskWithoutWaitingForActiveInvalidationCallback()
+    {
+        using var lease = new CancellationTokenSource();
+        using var callbackEntered = new ManualResetEventSlim();
+        using var allowCallback = new ManualResetEventSlim();
+        using var cleanupCallReturned = new ManualResetEventSlim();
+        var client = new FakeSkillRuntimeClient();
+        var scope = new CountingAsyncDisposable();
+        var generation = new CopilotRuntimeGenerationV1(
+            client,
+            new SkillHostShutdownGateV1(),
+            SkillInvocationV2TestIdentity.V1065,
+            scope,
+            lease.Token);
+        var callbackCalls = 0;
+        generation.AttachInvalidationRegistration(lease.Token.Register(() =>
+        {
+            Interlocked.Increment(ref callbackCalls);
+            callbackEntered.Set();
+            allowCallback.Wait();
+        }));
+        Task? cleanup = null;
+        var cancelThread = new Thread(lease.Cancel) { IsBackground = true };
+        var cleanupThread = new Thread(() =>
+        {
+            cleanup = generation.InvalidateAndCleanupAsync();
+            cleanupCallReturned.Set();
+        }) { IsBackground = true };
+        var callbackWasEntered = false;
+        var cleanupReturnedWhileCallbackBlocked = false;
+        var cancelJoined = false;
+        var cleanupJoined = false;
+
+        try
+        {
+            cancelThread.Start();
+            callbackWasEntered = callbackEntered.Wait(TimeSpan.FromSeconds(5));
+            if (callbackWasEntered)
+            {
+                cleanupThread.Start();
+                cleanupReturnedWhileCallbackBlocked = cleanupCallReturned.Wait(TimeSpan.FromSeconds(5));
+            }
+        }
+        finally
+        {
+            allowCallback.Set();
+            cancelJoined = cancelThread.Join(TimeSpan.FromSeconds(5));
+            cleanupJoined = !cleanupThread.IsAlive || cleanupThread.Join(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.True(callbackWasEntered);
+        Assert.True(cleanupReturnedWhileCallbackBlocked);
+        Assert.True(cancelJoined);
+        Assert.True(cleanupJoined);
+        await Assert.IsType<Task>(cleanup);
+        Assert.Equal(1, callbackCalls);
+        Assert.Equal(1, client.DisposeCalls);
+        Assert.Equal(1, scope.DisposeCalls);
+    }
+
     private static CopilotRuntimeGenerationV1 NewPublishedGeneration() =>
         new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1())
             .PublishReadyTestCandidate(new FakeSkillRuntimeClient(), out _);
+
+    private sealed class CountingAsyncDisposable : IAsyncDisposable
+    {
+        public int DisposeCalls { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            return ValueTask.CompletedTask;
+        }
+    }
 }
 
 public sealed class CopilotRuntimeAdmissionV1Tests
@@ -91,7 +164,8 @@ public sealed class CopilotRuntimeAdmissionV1Tests
         capability!.Release();
         await close;
 
-        Assert.True(generation.IsInvalid);
+        Assert.False(generation.IsInvalid);
+        Assert.False(capability.WorkToken.IsCancellationRequested);
         Assert.Equal(1, client.DisposeCalls);
         Assert.False(admission.TryGetCurrentAdmittedGeneration(out _));
     }

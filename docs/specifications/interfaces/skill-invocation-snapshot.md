@@ -818,14 +818,31 @@ capability exactly once, fails the analysis, destroys the failed candidate, and
 keeps the prior current generation. There is no durable queue or importer
 receipt, startup recovery, or automatic retry.
 
-After complete import and SDK session disposal, the exact candidate atomically
-becomes current; publication order defines the latest successful generation.
+After complete import and SDK session disposal, while the analysis run is still
+nonterminal, publication reserves the exact ready, capability-free, unpublished
+candidate behind the publication fence. Refusal, shutdown, invalidation, or
+lease loss before that reservation prevents durable analysis success. Reservation
+acceptance linearizes at the final direct authority-state check under runtime
+admission synchronization after `Ready -> Reserved`; that check reads the
+candidate lease-loss token and caller-cancellation token directly rather than
+depending on cancellation-callback completion. Cancellation observed only
+after that check is post-reservation invalidation and waits behind the fence. A winning
+reservation is held through durable run completion, the non-refusable atomic
+current-pointer swap, execution-evidence observation, and the
+`CandidatePublished` checkpoint; shutdown, lease loss, and invalidation wait for
+that sequence before removing the published generation. If durable completion
+fails, reservation abort invalidates and drains only the candidate. Publication
+order defines the latest successful generation.
 Zero invocations write no snapshot, receipt, or Session events, while a
 successful roots-configured analysis may publish a current-file generation.
 Roots with no published generation retain the existing exact `503
 skill_current_file_discovery_unavailable` result after earlier gates. Replacement, failure,
-refusal, lease loss, and shutdown reject new capabilities, cancel unsealed work,
-drain capabilities, dispose client, then dispose retained scope, exactly once.
+refusal, lease loss, and explicit invalidation reject new capabilities, cancel
+unsealed work, drain capabilities, dispose client, then dispose retained scope,
+exactly once. Under D088, normal shutdown instead closes all admission,
+non-cancelingly drains the published current generation, invalidates unpublished
+candidates, and permits a later real invalidation to upgrade that shared
+exactly-once drain to canceling.
 
 ### D083 r0001 historical producer contract (superseded by D086)
 

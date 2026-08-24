@@ -21,11 +21,86 @@ internal sealed class CopilotRuntimeAdmissionV1
     private Task? shutdownDrain;
     private bool shutdownClosed;
     private readonly HashSet<CopilotRuntimeGenerationV1> unpublishedCandidates = [];
+    private CopilotRuntimeGenerationV1? reservedCandidate;
+    private readonly Action? publicationReservedForTesting;
+    private readonly Action? candidateRegistrationAttachedForTesting;
 
-    internal CopilotRuntimeAdmissionV1(SkillHostShutdownGateV1 shutdownGate)
+    internal sealed class PublicationReservation : IAsyncDisposable
+    {
+        private readonly CopilotRuntimeAdmissionV1 owner;
+        private readonly SemaphoreSlim lifecycleGate = new(1, 1);
+        private readonly CancellationTokenRegistration cancellationRegistration;
+        private ReservationState state;
+        private int publicationGateReleased;
+
+        internal PublicationReservation(
+            CopilotRuntimeAdmissionV1 owner,
+            CopilotRuntimeGenerationV1 candidate,
+            CancellationTokenRegistration cancellationRegistration)
+        {
+            this.owner = owner;
+            Candidate = candidate;
+            this.cancellationRegistration = cancellationRegistration;
+        }
+
+        internal CopilotRuntimeGenerationV1 Candidate { get; }
+
+        internal async Task CommitAsync()
+        {
+            await lifecycleGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (state != ReservationState.Active) return;
+                CopilotRuntimeGenerationV1? replaced;
+                lock (owner.sync)
+                {
+                    Candidate.CommitReservedPublication();
+                    owner.unpublishedCandidates.Remove(Candidate);
+                    replaced = owner.currentGeneration;
+                    owner.currentGeneration = Candidate;
+                    state = ReservationState.Committed;
+                }
+                if (replaced is not null && !ReferenceEquals(replaced, Candidate))
+                {
+                    if (replaced.Invalidate()) owner.NotifyInvalidationObservers(replaced);
+                    await replaced.InvalidateAndCleanupAsync().ConfigureAwait(false);
+                }
+            }
+            finally { lifecycleGate.Release(); }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await lifecycleGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (state == ReservationState.Disposed) return;
+                if (state == ReservationState.Active)
+                    await owner.DiscardCandidateWithoutGateAsync(Candidate).ConfigureAwait(false);
+                state = ReservationState.Disposed;
+                cancellationRegistration.Dispose();
+                lock (owner.sync)
+                {
+                    if (ReferenceEquals(owner.reservedCandidate, Candidate)) owner.reservedCandidate = null;
+                }
+                if (Interlocked.Exchange(ref publicationGateReleased, 1) == 0)
+                    owner.publicationGate.Release();
+            }
+            finally { lifecycleGate.Release(); }
+        }
+
+        private enum ReservationState { Active, Committed, Disposed }
+    }
+
+    internal CopilotRuntimeAdmissionV1(
+        SkillHostShutdownGateV1 shutdownGate,
+        Action? publicationReservedForTesting = null,
+        Action? candidateRegistrationAttachedForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
         this.shutdownGate = shutdownGate;
+        this.publicationReservedForTesting = publicationReservedForTesting;
+        this.candidateRegistrationAttachedForTesting = candidateRegistrationAttachedForTesting;
     }
 
     public bool IsShutdownClosed
@@ -55,110 +130,129 @@ internal sealed class CopilotRuntimeAdmissionV1
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(analysisScope);
-        var candidate = new CopilotRuntimeGenerationV1(client, shutdownGate, certifiedIdentity, analysisScopeOwner ?? analysisScope);
+        var leaseLostToken = analysisScope.LeaseLostToken;
+        var candidate = new CopilotRuntimeGenerationV1(
+            client, shutdownGate, certifiedIdentity, analysisScopeOwner ?? analysisScope, leaseLostToken);
+        candidate.AttachInvalidationRegistration(
+            leaseLostToken.Register(() => InvalidateCandidate(candidate)));
+        candidateRegistrationAttachedForTesting?.Invoke();
         lock (sync)
         {
-            if (shutdownClosed || shutdownGate.IsNormalShutdownStarted)
+            if (shutdownClosed || shutdownGate.IsNormalShutdownStarted
+                || leaseLostToken.IsCancellationRequested || candidate.IsInvalid)
             {
                 _ = candidate.InvalidateAndCleanupAsync();
                 return candidate;
             }
             unpublishedCandidates.Add(candidate);
         }
-
-        _ = ObserveLeaseLossAsync(candidate, analysisScope.LeaseLostToken);
         return candidate;
     }
 
     public async Task<bool> PublishCandidateAsync(CopilotRuntimeGenerationV1 candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
+        await using var reservation = await TryReservePublicationAsync(candidate, CancellationToken.None).ConfigureAwait(false);
+        if (reservation is null) return false;
+        await reservation.CommitAsync().ConfigureAwait(false);
+        return true;
+    }
+
+    internal async Task<PublicationReservation?> TryReservePublicationAsync(
+        CopilotRuntimeGenerationV1 candidate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        var cancellationRegistration = cancellationToken.Register(() => InvalidateCandidate(candidate));
         await publicationGate.WaitAsync().ConfigureAwait(false);
+        var duplicate = false;
+        var reserved = false;
         try
         {
-            CopilotRuntimeGenerationV1? replaced;
-            var duplicate = false;
-            var claimed = false;
             lock (sync)
             {
                 duplicate = ReferenceEquals(currentGeneration, candidate);
-                claimed = !shutdownClosed && !shutdownGate.IsNormalShutdownStarted
-                    && !duplicate && unpublishedCandidates.Contains(candidate) && candidate.TryPublish();
-                replaced = currentGeneration;
-                if (claimed)
+                if (!shutdownClosed && !shutdownGate.IsNormalShutdownStarted
+                    && !duplicate && unpublishedCandidates.Contains(candidate)
+                    && candidate.TryReservePublication())
                 {
-                    unpublishedCandidates.Remove(candidate);
-                    currentGeneration = candidate;
+                    publicationReservedForTesting?.Invoke();
+                    if (!shutdownClosed && !shutdownGate.IsNormalShutdownStarted
+                        && !candidate.IsInvalid && !candidate.IsLeaseLossRequested
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                        reserved = true;
+                        reservedCandidate = candidate;
+                        return new PublicationReservation(this, candidate, cancellationRegistration);
+                    }
                 }
             }
-
-            if (!claimed)
-            {
-                if (duplicate) return false;
-                await DiscardCandidateAsync(candidate).ConfigureAwait(false);
-                return false;
-            }
-
-            if (replaced is not null)
-            {
-                replaced.Invalidate();
-                NotifyInvalidationObservers(replaced);
-                await replaced.InvalidateAndCleanupAsync().ConfigureAwait(false);
-            }
-            return true;
+            if (!duplicate) await DiscardCandidateWithoutGateAsync(candidate).ConfigureAwait(false);
+            cancellationRegistration.Dispose();
+        }
+        catch
+        {
+            cancellationRegistration.Dispose();
+            throw;
         }
         finally
         {
-            publicationGate.Release();
+            if (!reserved) publicationGate.Release();
         }
+        return null;
+    }
+
+    private async Task DiscardCandidateWithoutGateAsync(CopilotRuntimeGenerationV1 candidate)
+    {
+        lock (sync) unpublishedCandidates.Remove(candidate);
+        if (candidate.Invalidate()) NotifyInvalidationObservers(candidate);
+        await candidate.InvalidateAndCleanupAsync().ConfigureAwait(false);
     }
 
     public async Task<bool> DiscardCandidateAsync(CopilotRuntimeGenerationV1 candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
-        lock (sync)
+        await publicationGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            unpublishedCandidates.Remove(candidate);
-            if (ReferenceEquals(currentGeneration, candidate))
-            {
-                currentGeneration = null;
-            }
+            await RemoveInvalidateAndCleanupAsync(candidate).ConfigureAwait(false);
+            return true;
         }
-        candidate.Invalidate();
-        NotifyInvalidationObservers(candidate);
-        await candidate.InvalidateAndCleanupAsync().ConfigureAwait(false);
-        return true;
+        finally { publicationGate.Release(); }
     }
 
     internal void InvalidateCandidate(CopilotRuntimeGenerationV1 candidate)
     {
+        ArgumentNullException.ThrowIfNull(candidate);
         lock (sync)
         {
-            unpublishedCandidates.Remove(candidate);
-            if (ReferenceEquals(currentGeneration, candidate))
+            if (ReferenceEquals(reservedCandidate, candidate))
             {
-                currentGeneration = null;
+                _ = InvalidateCandidateSerializedAsync(candidate);
+                return;
             }
+            unpublishedCandidates.Remove(candidate);
+            if (ReferenceEquals(currentGeneration, candidate)) currentGeneration = null;
         }
-        candidate.Invalidate();
-        NotifyInvalidationObservers(candidate);
+        if (candidate.Invalidate()) NotifyInvalidationObservers(candidate);
         _ = candidate.InvalidateAndCleanupAsync();
     }
 
-    private async Task ObserveLeaseLossAsync(CopilotRuntimeGenerationV1 candidate, CancellationToken leaseLostToken)
+    private async Task InvalidateCandidateSerializedAsync(CopilotRuntimeGenerationV1 candidate)
     {
-        try { await Task.Delay(Timeout.InfiniteTimeSpan, leaseLostToken).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (leaseLostToken.IsCancellationRequested) { }
+        await publicationGate.WaitAsync().ConfigureAwait(false);
+        try { await RemoveInvalidateAndCleanupAsync(candidate).ConfigureAwait(false); }
+        finally { publicationGate.Release(); }
+    }
+
+    private async Task RemoveInvalidateAndCleanupAsync(CopilotRuntimeGenerationV1 candidate)
+    {
         lock (sync)
         {
             unpublishedCandidates.Remove(candidate);
-            if (ReferenceEquals(currentGeneration, candidate))
-            {
-                currentGeneration = null;
-            }
+            if (ReferenceEquals(currentGeneration, candidate)) currentGeneration = null;
         }
-        candidate.Invalidate();
-        NotifyInvalidationObservers(candidate);
+        if (candidate.Invalidate()) NotifyInvalidationObservers(candidate);
         await candidate.InvalidateAndCleanupAsync().ConfigureAwait(false);
     }
 
@@ -217,29 +311,32 @@ internal sealed class CopilotRuntimeAdmissionV1
 
     public async Task CloseForShutdownAndDrainAsync(CancellationToken cancellationToken)
     {
+        lock (sync) shutdownClosed = true;
+        await publicationGate.WaitAsync().ConfigureAwait(false);
         Task drain;
-        lock (sync)
+        try
         {
-            shutdownClosed = true;
-            if (shutdownDrain is null)
+            lock (sync)
             {
-                var candidates = unpublishedCandidates.ToList();
-                unpublishedCandidates.Clear();
-                if (currentGeneration is not null && !candidates.Contains(currentGeneration))
-                    candidates.Insert(0, currentGeneration);
-                currentGeneration = null;
-                foreach (var candidate in candidates)
+                if (shutdownDrain is null)
                 {
-                    candidate.Invalidate();
-                    NotifyInvalidationObservers(candidate);
+                    var current = currentGeneration;
+                    var candidates = unpublishedCandidates.Where(candidate => !ReferenceEquals(candidate, current)).ToList();
+                    unpublishedCandidates.Clear();
+                    currentGeneration = null;
+                    foreach (var candidate in candidates)
+                    {
+                        if (candidate.Invalidate()) NotifyInvalidationObservers(candidate);
+                    }
+                    var currentDrain = current?.CloseForShutdownAndCleanupAsync() ?? Task.CompletedTask;
+                    var candidateDrain = Task.WhenAll(candidates.Select(candidate => candidate.InvalidateAndCleanupAsync()));
+                    shutdownDrain = Task.WhenAll(currentDrain, candidateDrain);
                 }
-                var candidateDrain = Task.WhenAll(candidates.Select(candidate => candidate.InvalidateAndCleanupAsync()));
-                shutdownDrain = candidateDrain;
+
+                drain = shutdownDrain;
             }
-
-            drain = shutdownDrain;
         }
-
+        finally { publicationGate.Release(); }
         await drain.ConfigureAwait(false);
     }
 

@@ -270,7 +270,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_PublicationRefusalAfterDurableCompletion_DoesNotRewriteRunAsFailed()
+    public async Task RunAsync_PublicationRefusalBeforeDurableCompletion_FinishesFailed()
     {
         using var temp = new MonitorTempDirectory();
         var scope = new FakeScope("owned-child");
@@ -293,15 +293,15 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
 
         await runner.RunAsync(Context(), CancellationToken.None);
 
-        Assert.Equal(1, store.CompleteCount);
-        Assert.Null(store.FinishedStatus);
+        Assert.Equal(0, store.CompleteCount);
+        Assert.Equal(MonitorAnalysisStatus.Failed, store.FinishedStatus);
         Assert.Equal(1, scope.DisposeCount);
         Assert.Empty(observations);
         Assert.Empty(checkpoints);
     }
 
     [Fact]
-    public async Task RunAsync_PublicationThrowDoesNotEmitPublishedCheckpoint()
+    public async Task RunAsync_PublicationRefusalDoesNotEmitPublishedCheckpoint()
     {
         using var temp = new MonitorTempDirectory();
         var scope = new FakeScope("owned-child") { DisposeException = new InvalidOperationException("synthetic") };
@@ -324,7 +324,8 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         await runner.RunAsync(Context(), CancellationToken.None);
 
         Assert.Empty(checkpoints);
-        Assert.Null(store.FinishedStatus);
+        Assert.Equal(0, store.CompleteCount);
+        Assert.Equal(MonitorAnalysisStatus.Failed, store.FinishedStatus);
         Assert.Equal(1, scope.DisposeCount);
     }
 
@@ -366,6 +367,182 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         Assert.Same(candidate, current);
         Assert.Equal(1, store.CompleteCount);
         Assert.Null(store.FinishedStatus);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_DurableCompletionFailureAfterReservation_AbortsCandidateAndKeepsCurrent(
+        bool instructionDiagnosis)
+    {
+        var focus = instructionDiagnosis ? MonitorAnalysisFocus.InstructionDiagnosis : MonitorAnalysisFocus.Errors;
+        using var temp = new MonitorTempDirectory();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var prior = admission.PublishReadyTestCandidate(new FakeRuntimeClient(), out _);
+        var scope = new FakeScope("owned-child");
+        var ownership = new AnalysisSdkScopeOwnership(scope);
+        Assert.True(ownership.TryTransferToExecutor());
+        Assert.True(ownership.TryTransferToCandidate());
+        var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, scope, ownership);
+        Assert.True(candidate.TryMarkReady());
+        var observations = new List<OwnedSessionExecutionEvidenceV1>();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        var store = new FakeStore(Run(Focus: focus)) { CompleteException = new InvalidOperationException("complete") };
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build(),
+            new FakeOwner(scope), new FakeExecutor { Result = new("done", candidate, Evidence()) }, temp.TimeProvider,
+            skillRuntimeAdmission: admission,
+            rootsExecutionContextFactory: opened => CreateRootsContext(opened) with
+            {
+                Admission = admission,
+                ScopeOwnership = ownership,
+                ExecutionEvidenceObserver = observations.Add,
+                ExecutionCheckpointObserver = checkpoints.Add,
+            });
+        var context = Context() with { Focus = focus };
+
+        await runner.RunAsync(context, CancellationToken.None);
+
+        Assert.Equal(1, store.CompleteCount);
+        Assert.Equal(MonitorAnalysisStatus.Failed, store.FinishedStatus);
+        Assert.Same(prior, Assert.IsType<CopilotRuntimeGenerationV1>(
+            admission.TryGetCurrentAdmittedGeneration(out var current) ? current : null));
+        Assert.True(candidate.IsInvalid);
+        Assert.Equal(1, scope.DisposeCount);
+        Assert.Empty(observations);
+        Assert.Empty(checkpoints);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_AuthorityCancellationAfterReservedTransition_PreventsDurableCompletion(
+        bool loseLease)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var callerCancellation = new CancellationTokenSource();
+        FakeScope? scope = null;
+        Thread? cancellationThread = null;
+        Exception? cancellationException = null;
+        var reservationTransitions = 0;
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1(), () =>
+        {
+            if (Interlocked.Increment(ref reservationTransitions) == 1) return;
+            cancellationThread = new Thread(() =>
+            {
+                try
+                {
+                    if (loseLease) scope!.LoseLease();
+                    else callerCancellation.Cancel();
+                }
+                catch (Exception exception) { cancellationException = exception; }
+            });
+            cancellationThread.IsBackground = true;
+            cancellationThread.Start();
+            var authorityToken = loseLease ? scope!.LeaseLostToken : callerCancellation.Token;
+            Assert.True(authorityToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+        });
+        var prior = admission.PublishReadyTestCandidate(new FakeRuntimeClient(), out _);
+        scope = new FakeScope("owned-child");
+        var ownership = new AnalysisSdkScopeOwnership(scope);
+        Assert.True(ownership.TryTransferToExecutor());
+        Assert.True(ownership.TryTransferToCandidate());
+        var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, scope, ownership);
+        Assert.True(candidate.TryMarkReady());
+        var observations = new List<OwnedSessionExecutionEvidenceV1>();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        var store = new FakeStore(Run());
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build(),
+            new FakeOwner(scope), new FakeExecutor { Result = new("done", candidate, Evidence()) }, temp.TimeProvider,
+            skillRuntimeAdmission: admission,
+            rootsExecutionContextFactory: opened => CreateRootsContext(opened) with
+            {
+                Admission = admission,
+                ScopeOwnership = ownership,
+                ExecutionEvidenceObserver = observations.Add,
+                ExecutionCheckpointObserver = checkpoints.Add,
+            });
+
+        var cancellationJoined = false;
+        try { await runner.RunAsync(Context(), callerCancellation.Token); }
+        finally
+        {
+            cancellationJoined = cancellationThread?.Join(TimeSpan.FromSeconds(5)) ?? true;
+        }
+
+        Assert.True(cancellationJoined);
+        Assert.Null(cancellationException);
+        Assert.Equal(0, store.CompleteCount);
+        Assert.NotEqual(MonitorAnalysisStatus.Succeeded, store.FinishedStatus);
+        Assert.Same(prior, Assert.IsType<CopilotRuntimeGenerationV1>(
+            admission.TryGetCurrentAdmittedGeneration(out var current) ? current : null));
+        Assert.True(candidate.IsInvalid);
+        Assert.Equal(1, scope.DisposeCount);
+        Assert.Empty(observations);
+        Assert.Empty(checkpoints);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_QueuedReadyCandidateCancellation_PreventsDurableCompletion(bool loseLease)
+    {
+        using var temp = new MonitorTempDirectory();
+        using var callerCancellation = new CancellationTokenSource();
+        var admission = new CopilotRuntimeAdmissionV1(new SkillHostShutdownGateV1());
+        var prior = admission.PublishReadyTestCandidate(new FakeRuntimeClient(), out _);
+        var blockerScope = new FakeScope("blocker");
+        var blocker = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, blockerScope);
+        Assert.True(blocker.TryMarkReady());
+        await using var blockerReservation = Assert.IsType<CopilotRuntimeAdmissionV1.PublicationReservation>(
+            await admission.TryReservePublicationAsync(blocker));
+        var scope = new FakeScope("owned-child");
+        var ownership = new AnalysisSdkScopeOwnership(scope);
+        Assert.True(ownership.TryTransferToExecutor());
+        Assert.True(ownership.TryTransferToCandidate());
+        var candidate = admission.CreateUnpublishedCandidate(new FakeRuntimeClient(),
+            SkillInvocationV2TestIdentity.V1065, scope, ownership);
+        Assert.True(candidate.TryMarkReady());
+        var observations = new List<OwnedSessionExecutionEvidenceV1>();
+        var checkpoints = new List<OwnedSessionExecutionCheckpointV1>();
+        var store = new FakeStore(Run());
+        var executor = new FakeExecutor { Result = new("done", candidate, Evidence()) };
+        var raw = temp.CreateRawStore();
+        raw.CreateSchema();
+        var runner = new DotNetCopilotRawAnalysisRunner(store, new RawTelemetryStoreProjectionStore(raw),
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["CopilotAnalysis:BaseDirectory"] = "configured-parent" }).Build(),
+            new FakeOwner(scope), executor, temp.TimeProvider, skillRuntimeAdmission: admission,
+            rootsExecutionContextFactory: opened => CreateRootsContext(opened) with
+            {
+                Admission = admission,
+                ScopeOwnership = ownership,
+                ExecutionEvidenceObserver = observations.Add,
+                ExecutionCheckpointObserver = checkpoints.Add,
+            });
+
+        var running = runner.RunAsync(Context(), callerCancellation.Token);
+        await executor.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (loseLease) scope.LoseLease();
+        else callerCancellation.Cancel();
+        await blockerReservation.DisposeAsync();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, store.CompleteCount);
+        Assert.NotEqual(MonitorAnalysisStatus.Succeeded, store.FinishedStatus);
+        Assert.Same(prior, Assert.IsType<CopilotRuntimeGenerationV1>(
+            admission.TryGetCurrentAdmittedGeneration(out var current) ? current : null));
+        Assert.True(candidate.IsInvalid);
+        Assert.Equal(1, scope.DisposeCount);
+        Assert.Empty(observations);
+        Assert.Empty(checkpoints);
     }
 
     [Fact]
@@ -631,6 +808,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public MonitorAnalysisStatus? FinishedStatus { get; private set; }
         public int MarkRunningCount { get; private set; }
         public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Exception? CompleteException { get; init; }
         public void CreateSchema() { }
         public MonitorAnalysisStartResult StartRun(string traceId, long? rawRecordId, string? spanId, MonitorAnalysisFocus focus, DateTimeOffset requestedAt) => throw new NotSupportedException();
         public MonitorAnalysisRun? GetRun(long runId) => Run;
@@ -638,8 +816,8 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public ValueTask<RetentionReadResult<AnalysisRunRawSnapshot>> ReadRawSnapshotAsync(long runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public void MarkRunning(long runId, DateTimeOffset startedAt) { MarkRunningCount++; }
         public RetentionRevisionFence AppendEvent(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string eventType, string message, DateTimeOffset occurredAt) => null!;
-        public RetentionRevisionFence CompleteRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, DateTimeOffset completedAt) { CompleteCount++; return null!; }
-        public RetentionRevisionFence CompleteInstructionDiagnosisRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, InstructionFindingHandoffV1 handoff, DateTimeOffset completedAt) { CompleteCount++; CompletedHandoff = handoff; return null!; }
+        public RetentionRevisionFence CompleteRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, DateTimeOffset completedAt) { CompleteCount++; if (CompleteException is not null) throw CompleteException; return null!; }
+        public RetentionRevisionFence CompleteInstructionDiagnosisRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, string resultMarkdown, InstructionFindingHandoffV1 handoff, DateTimeOffset completedAt) { CompleteCount++; if (CompleteException is not null) throw CompleteException; CompletedHandoff = handoff; return null!; }
         public RetentionRevisionFence? FinishRun(long runId, MonitorAnalysisOperationToken operationToken, RetentionRevisionFence? expectedFence, MonitorAnalysisStatus status, string? message, DateTimeOffset completedAt) { FinishedStatus = status; FinishedMessage = message; Finished.TrySetResult(); return null; }
         public MonitorAnalysisSafeSummary GenerateRepositorySafeSummary(long runId, DateTimeOffset generatedAt) => throw new NotSupportedException();
     }

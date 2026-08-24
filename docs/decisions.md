@@ -4069,3 +4069,22 @@ schema and fingerprint, and normalizer
 `github-copilot-sdk.skill-invoked.normalize.v2`. Historical r0001 remains
 byte-identical normalizer-v1 evidence and is never a current fallback. D083
 and D086 remain authoritative for every contract D087 does not supersede.
+
+## D088: Normal shutdown drains the published runtime generation without invalidation
+
+Status: Accepted (2026-08-25)
+
+D088 narrowly supersedes only D086's runtime-generation shutdown clause. Normal
+shutdown atomically closes the shared, runtime, and root admission authorities.
+Capabilities already admitted by the published current generation continue to
+their ordinary terminal completion or abort; shutdown alone neither invalidates
+that generation nor cancels those capabilities, and waits for their release
+before disposing the client and then the retained analysis scope. Unpublished
+candidates are invalidated, their unsealed work is canceled, and they are
+drained and disposed.
+
+Replacement, failure, refusal, lease loss, and explicit invalidation remain
+canceling. A real invalidation that occurs after normal drain has begun upgrades
+that published generation to canceling while both paths await the same
+exactly-once cleanup and disposal task. All other D086 and D087 authority
+remains unchanged.

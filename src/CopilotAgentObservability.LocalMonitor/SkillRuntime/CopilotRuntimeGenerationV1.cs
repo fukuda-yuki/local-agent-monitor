@@ -101,13 +101,14 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
     }
 }
 
-internal enum CopilotRuntimeCandidatePhaseV1 { Raw, Ready, Published, Invalid }
+internal enum CopilotRuntimeCandidatePhaseV1 { Raw, Ready, Reserved, Published, Invalid }
 
 internal sealed class CopilotRuntimeGenerationV1
 {
     public const int AdmittedProtocolVersion = 3;
 
     private readonly SkillHostShutdownGateV1 shutdownGate;
+    private readonly CancellationToken leaseLostToken;
     private readonly object sync = new();
     private readonly Dictionary<Guid, CopilotRuntimeOperationCapabilityV1> outstandingCapabilities = [];
     private readonly TaskCompletionSource drained =
@@ -118,12 +119,15 @@ internal sealed class CopilotRuntimeGenerationV1
     private readonly IAsyncDisposable analysisScope;
     private Task? cleanupTask;
     private readonly TaskCompletionSource cleanupCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private CancellationTokenRegistration invalidationRegistration;
+    private bool invalidationRegistrationAttached;
 
     internal CopilotRuntimeGenerationV1(
         ICopilotSkillRuntimeClient client,
         SkillHostShutdownGateV1 shutdownGate,
         CertifiedSkillProducerIdentityV1 certifiedIdentity,
-        IAsyncDisposable analysisScope)
+        IAsyncDisposable analysisScope,
+        CancellationToken leaseLostToken)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
         this.shutdownGate = shutdownGate;
@@ -131,6 +135,7 @@ internal sealed class CopilotRuntimeGenerationV1
         CertifiedIdentity = certifiedIdentity ?? throw new ArgumentNullException(nameof(certifiedIdentity));
         Identity = Guid.NewGuid();
         this.analysisScope = analysisScope ?? throw new ArgumentNullException(nameof(analysisScope));
+        this.leaseLostToken = leaseLostToken;
         phase = CopilotRuntimeCandidatePhaseV1.Raw;
     }
 
@@ -140,7 +145,37 @@ internal sealed class CopilotRuntimeGenerationV1
     {
         Invalidate();
         CloseAdmissionForDrain();
-        lock (sync) return cleanupTask ??= CleanupCoreAsync();
+        return EnsureCleanupStarted();
+    }
+
+    internal Task CloseForShutdownAndCleanupAsync()
+    {
+        CloseAdmissionForDrain();
+        return EnsureCleanupStarted();
+    }
+
+    private Task EnsureCleanupStarted()
+    {
+        TaskCompletionSource? completion = null;
+        Task task;
+        lock (sync)
+        {
+            if (cleanupTask is not null) return cleanupTask;
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            task = cleanupTask = completion.Task;
+        }
+        _ = CompleteCleanupAsync(completion);
+        return task;
+    }
+
+    private async Task CompleteCleanupAsync(TaskCompletionSource completion)
+    {
+        try
+        {
+            await CleanupCoreAsync().ConfigureAwait(false);
+            completion.TrySetResult();
+        }
+        catch (Exception exception) { completion.TrySetException(exception); }
     }
 
     private async Task CleanupCoreAsync()
@@ -150,6 +185,17 @@ internal sealed class CopilotRuntimeGenerationV1
             await WaitForDrainAsync(CancellationToken.None).ConfigureAwait(false);
             try { await Client.DisposeAsync().ConfigureAwait(false); } catch { }
             try { await analysisScope.DisposeAsync().ConfigureAwait(false); } catch { }
+            CancellationTokenRegistration registration = default;
+            var disposeRegistration = false;
+            lock (sync)
+            {
+                if (invalidationRegistrationAttached)
+                {
+                    registration = invalidationRegistration;
+                    disposeRegistration = true;
+                }
+            }
+            if (disposeRegistration) await registration.DisposeAsync().ConfigureAwait(false);
         }
         finally { cleanupCompleted.TrySetResult(); }
     }
@@ -209,7 +255,7 @@ internal sealed class CopilotRuntimeGenerationV1
         {
             capability = null;
             if (shutdownGate.IsNormalShutdownStarted || invalid || admissionClosed
-                || phase == CopilotRuntimeCandidatePhaseV1.Ready)
+                || phase is CopilotRuntimeCandidatePhaseV1.Ready or CopilotRuntimeCandidatePhaseV1.Reserved)
             {
                 return false;
             }
@@ -251,14 +297,14 @@ internal sealed class CopilotRuntimeGenerationV1
         }
     }
 
-    internal void Invalidate()
+    internal bool Invalidate()
     {
         CopilotRuntimeOperationCapabilityV1[] unsealed;
         lock (sync)
         {
             if (invalid)
             {
-                return;
+                return false;
             }
 
             invalid = true;
@@ -271,6 +317,7 @@ internal sealed class CopilotRuntimeGenerationV1
         {
             capability.CancelWork();
         }
+        return true;
     }
 
     internal void CloseAdmissionForDrain()
@@ -285,6 +332,8 @@ internal sealed class CopilotRuntimeGenerationV1
         }
     }
 
+    internal bool IsLeaseLossRequested => leaseLostToken.IsCancellationRequested;
+
     internal bool TryMarkReady()
     {
         lock (sync)
@@ -295,14 +344,40 @@ internal sealed class CopilotRuntimeGenerationV1
         }
     }
 
-    internal bool TryPublish()
+    internal void CommitReservedPublication()
+    {
+        lock (sync)
+        {
+            phase = CopilotRuntimeCandidatePhaseV1.Published;
+        }
+    }
+
+    internal bool TryReservePublication()
     {
         lock (sync)
         {
             if (invalid || phase != CopilotRuntimeCandidatePhaseV1.Ready || outstandingCapabilities.Count != 0) return false;
-            phase = CopilotRuntimeCandidatePhaseV1.Published;
+            phase = CopilotRuntimeCandidatePhaseV1.Reserved;
             return true;
         }
+    }
+
+    internal void AttachInvalidationRegistration(CancellationTokenRegistration registration)
+    {
+        var disposeRegistration = false;
+        lock (sync)
+        {
+            if (cleanupTask is not null)
+            {
+                disposeRegistration = true;
+            }
+            else
+            {
+                invalidationRegistration = registration;
+                invalidationRegistrationAttached = true;
+            }
+        }
+        if (disposeRegistration) registration.Dispose();
     }
 
     internal Task WaitForDrainAsync(CancellationToken cancellationToken) =>

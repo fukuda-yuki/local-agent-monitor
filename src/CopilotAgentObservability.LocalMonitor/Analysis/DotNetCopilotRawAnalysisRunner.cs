@@ -190,10 +190,20 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
             var completedExecution = executionResult ?? throw new InvalidOperationException("SDK analysis produced no result.");
             var candidate = completedExecution.UnpublishedCandidate;
+            CopilotRuntimeAdmissionV1.PublicationReservation? publicationReservation = null;
+            var reservationAcquisitionReturned = false;
             try
             {
                 if (candidate is not null && (skillRuntimeAdmission is null || scope.IsLeaseLost))
                     throw new AnalysisOwnershipException();
+                if (candidate is not null)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    publicationReservation = await skillRuntimeAdmission!.TryReservePublicationAsync(candidate, cancellationToken).ConfigureAwait(false);
+                    reservationAcquisitionReturned = true;
+                    if (publicationReservation is null) throw new AnalysisOwnershipException();
+                }
+                await using var reservation = publicationReservation;
                 var completedAt = timeProvider.GetUtcNow();
                 fence = instructionFindingHandoff is null
                     ? analysisStore.CompleteRun(context.RunId, operationToken, fence, completedExecution.ResultMarkdown, completedAt)
@@ -201,19 +211,18 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 durablyCompleted = true;
                 if (candidate is not null)
                 {
-                    var published = await skillRuntimeAdmission!.PublishCandidateAsync(candidate).ConfigureAwait(false);
-                    if (published && completedExecution.ExecutionEvidence is not null && executionEvidenceObserver is not null)
+                    await reservation!.CommitAsync().ConfigureAwait(false);
+                    if (completedExecution.ExecutionEvidence is not null && executionEvidenceObserver is not null)
                     {
                         try { executionEvidenceObserver(completedExecution.ExecutionEvidence); }
                         catch { }
                     }
-                    if (published)
-                        OwnedSessionExecutionCheckpointObservationV1.Notify(executionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidatePublished);
+                    OwnedSessionExecutionCheckpointObservationV1.Notify(executionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidatePublished);
                 }
             }
             catch
             {
-                if (candidate is not null && skillRuntimeAdmission is not null)
+                if (candidate is not null && skillRuntimeAdmission is not null && !reservationAcquisitionReturned)
                     await skillRuntimeAdmission.DiscardCandidateAsync(candidate).ConfigureAwait(false);
                 throw;
             }
