@@ -68,9 +68,31 @@ public sealed class LinuxCurrentSkillFileLiveMatrixTests
         var root = FindRepositoryRoot();
         var script = File.ReadAllText(Path.Combine(root, "scripts", "validation", "issue-158", "run-linux-current-file-matrix.ps1"));
         Assert.Contains("$psi.ArgumentList.Add($argument)", script, StringComparison.Ordinal);
-        Assert.Contains("@('--distribution','Ubuntu','--exec','bash',$helper,$CandidateSha,$source,$runId,$marker)", script, StringComparison.Ordinal);
+        Assert.Contains("@('--distribution','Ubuntu','--exec','timeout','--signal=TERM','--kill-after=30s','12m','bash',$helper,$CandidateSha,$source,$runId,$marker,$linuxSdkRoot)", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("--foreground", script, StringComparison.Ordinal);
         Assert.DoesNotContain("bash -c", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Invoke-Expression", script, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("/mnt/c", true)]
+    [InlineData("/mnt/d/checkout", true)]
+    [InlineData("/mnt/z/work", true)]
+    [InlineData("/mnt/C/work", false)]
+    [InlineData("/mnt/cc/work", false)]
+    [InlineData("/tmp/mnt/d/work", false)]
+    public void WindowsMountGateRejectsEveryLowercaseDriveRoot(string path, bool expected) =>
+        Assert.Equal(expected, Issue158LinuxGate.IsWindowsMount(path));
+
+    [Fact]
+    public void OwnerAuthorityRequiresExactCanonicalBytesAndSingleLink()
+    {
+        var candidate = new string('a', 40);
+        var canonical = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"issue-158-linux-owner.v1\",\"run_id\":\"0123456789abcdef0123456789abcdef\",\"candidate_sha\":\"{candidate}\"}}");
+        Assert.True(Issue158LinuxGate.HasExactOwner(canonical, 1, "0123456789abcdef0123456789abcdef", candidate));
+        Assert.False(Issue158LinuxGate.HasExactOwner([.. canonical, (byte)'\n'], 1, "0123456789abcdef0123456789abcdef", candidate));
+        Assert.False(Issue158LinuxGate.HasExactOwner([.. canonical, 0], 1, "0123456789abcdef0123456789abcdef", candidate));
+        Assert.False(Issue158LinuxGate.HasExactOwner(canonical, 2, "0123456789abcdef0123456789abcdef", candidate));
     }
 
     private static string FindRepositoryRoot()
@@ -122,7 +144,7 @@ internal sealed record Issue158LinuxGate(bool IsAuthorized, string CandidateSha,
                 || !string.Equals(repo, Path.Combine(top, "checkout"), StringComparison.Ordinal)
                 || !string.Equals(resultFile, Path.Combine(top, "prepared.json"), StringComparison.Ordinal)
                 || !VerifyOwner(top, runId, candidate)
-                || IsMntC(repo) || IsMntC(work) || !string.Equals(Run("git", ["-C", repo, "rev-parse", "HEAD"]), candidate, StringComparison.Ordinal)
+                || IsWindowsMount(repo) || IsWindowsMount(work) || !string.Equals(Run("git", ["-C", repo, "rev-parse", "HEAD"]), candidate, StringComparison.Ordinal)
                 || RunExit("git", ["-C", repo, "symbolic-ref", "-q", "HEAD"]) == 0
                 || Run("git", ["-C", repo, "status", "--porcelain=v1", "--untracked-files=normal"]).Length != 0
                 || !string.Equals(Run("findmnt", ["-T", repo, "-n", "-o", "FSTYPE"]), "ext4", StringComparison.Ordinal)
@@ -137,12 +159,15 @@ internal sealed record Issue158LinuxGate(bool IsAuthorized, string CandidateSha,
         var path = Path.Combine(top, ".cao-issue-158-linux-owner.json");
         var info = new FileInfo(path);
         if (!info.Exists || info.LinkTarget is not null || (info.Attributes & FileAttributes.ReparsePoint) != 0) return false;
-        using var document = JsonDocument.Parse(File.ReadAllBytes(path));
-        var root = document.RootElement;
-        return root.ValueKind == JsonValueKind.Object && root.EnumerateObject().Count() == 3
-            && root.GetProperty("schema_version").GetString() == "issue-158-linux-owner.v1"
-            && root.GetProperty("run_id").GetString() == runId
-            && root.GetProperty("candidate_sha").GetString() == candidate;
+        var links = Run("stat", ["-c", "%h", "--", path]);
+        return links == "1" && HasExactOwner(File.ReadAllBytes(path), 1, runId, candidate);
+    }
+
+    internal static bool HasExactOwner(ReadOnlySpan<byte> actual, int linkCount, string runId, string candidate)
+    {
+        if (linkCount != 1) return false;
+        var expected = Encoding.UTF8.GetBytes($"{{\"schema_version\":\"issue-158-linux-owner.v1\",\"run_id\":\"{runId}\",\"candidate_sha\":\"{candidate}\"}}");
+        return actual.SequenceEqual(expected);
     }
 
     private static string ResolveNoAlias(string path)
@@ -162,7 +187,8 @@ internal sealed record Issue158LinuxGate(bool IsAuthorized, string CandidateSha,
         return Path.TrimEndingDirectorySeparator(current);
     }
 
-    private static bool IsMntC(string path) => path.Equals("/mnt/c", StringComparison.Ordinal) || path.StartsWith("/mnt/c/", StringComparison.Ordinal);
+    internal static bool IsWindowsMount(string path) => path.Length >= 6 && path.StartsWith("/mnt/", StringComparison.Ordinal)
+        && path[5] is >= 'a' and <= 'z' && (path.Length == 6 || path[6] == '/');
 
     private static string Run(string file, IReadOnlyList<string> arguments)
     {
