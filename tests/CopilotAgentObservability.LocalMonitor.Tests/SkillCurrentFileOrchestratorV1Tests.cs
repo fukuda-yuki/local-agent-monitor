@@ -391,12 +391,14 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         };
         Assert.Equal(expected, (result.Disposition, result.StatusCode));
         Assert.Equal(1, fixture.AuthorizationGate.IssuedLeaseCount);
-        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
-        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
+        Assert.Equal(0, fixture.AuthorizationGate.ReleasedLeaseCount);
         Assert.Equal(1, fixture.Grant.DisposeCalls);
         Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
-        result.ReleaseRuntimeCapability?.Invoke();
+        result.ResponseCapabilities?.Dispose();
+        result.ResponseCapabilities?.Dispose();
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
+        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
     }
 
     // The registry generation the acceptance was taken from can be superseded while the request is
@@ -443,12 +445,10 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         Assert.Equal(1, leasesHeldAtTerminal);
         Assert.False(publicationCompletedWhileHeld);
 
-        // The release has already happened by the time ExecuteAsync returned, so the publication is
-        // free to finish immediately; the bound only keeps a regression that never releases from
-        // hanging the suite instead of failing it.
+        Assert.False(publication!.IsCompleted);
+        result.ResponseCapabilities!.Dispose();
         await publication!.WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal(0, provider.OutstandingLeaseCount);
-        result.ReleaseRuntimeCapability?.Invoke();
     }
 
     // Retention loss becomes authoritative only where a store-backed terminal operation proves it,
@@ -642,11 +642,14 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
     {
         Assert.Equal(1, fixture.Grant.DisposeCalls);
         Assert.Equal(1, fixture.AuthorizationGate.IssuedLeaseCount);
-        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
+        Assert.Equal(0, fixture.AuthorizationGate.ReleasedLeaseCount);
         Assert.Equal(0, fixture.RootGeneration.OutstandingLeaseCount);
         Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
-        result.ReleaseRuntimeCapability!();
+        result.ResponseCapabilities!.Dispose();
+        result.ResponseCapabilities.Dispose();
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
+        Assert.Equal(1, fixture.AuthorizationGate.MaximumReleaseCallsOnOneLease);
     }
 
     [Fact]
@@ -667,9 +670,26 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
             var result = await fixture.ExecuteAsync();
 
             Assert.Equal(1, fixture.Generation.OutstandingCapabilityCount);
-            result.ReleaseRuntimeCapability?.Invoke();
+            Assert.Equal(0, fixture.AuthorizationGate.ReleasedLeaseCount);
+            result.ResponseCapabilities?.Dispose();
             Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+            Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
         }
+    }
+
+    [Fact]
+    public async Task ResponseCapabilities_DisposesRuntimeBeforeCurrentAuthorization()
+    {
+        using var fixture = new Fixture(handleSource);
+        var runtimeCapabilitiesAtAuthorizationRelease = -1;
+        fixture.AuthorizationGate.OnLeaseRelease = () =>
+            runtimeCapabilitiesAtAuthorizationRelease = fixture.Generation.OutstandingCapabilityCount;
+
+        var result = await fixture.ExecuteAsync();
+
+        result.ResponseCapabilities!.Dispose();
+
+        Assert.Equal(0, runtimeCapabilitiesAtAuthorizationRelease);
     }
 
     [Fact]
@@ -685,6 +705,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.ExecuteAsync());
 
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
     }
 
     [Fact]
@@ -696,6 +717,7 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.ExecuteAsync());
 
         Assert.Equal(0, fixture.Generation.OutstandingCapabilityCount);
+        Assert.Equal(1, fixture.AuthorizationGate.ReleasedLeaseCount);
     }
 
     private static string? ErrorToken(SkillCurrentFileResultV1 result)
@@ -944,6 +966,8 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
         // acquired authorization carries, never re-decides currentness.
         internal Func<ISkillRegistryGenerationLease>? LeaseFactory { get; set; }
 
+        internal Action? OnLeaseRelease { get; set; }
+
         internal int IssuedLeaseCount => issued.Count;
 
         internal int ReleasedLeaseCount => issued.Count(lease => lease.ReleaseCalls > 0);
@@ -969,19 +993,22 @@ public sealed class SkillCurrentFileOrchestratorV1Tests : IDisposable
 
         private ISkillRegistryGenerationLease AcquireLease()
         {
-            var lease = new CountingGenerationLease(LeaseFactory?.Invoke());
+            var lease = new CountingGenerationLease(LeaseFactory?.Invoke(), OnLeaseRelease);
             issued.Add(lease);
             return lease;
         }
     }
 
-    private sealed class CountingGenerationLease(ISkillRegistryGenerationLease? inner) : ISkillRegistryGenerationLease
+    private sealed class CountingGenerationLease(
+        ISkillRegistryGenerationLease? inner,
+        Action? onRelease = null) : ISkillRegistryGenerationLease
     {
         internal int ReleaseCalls { get; private set; }
 
         public void Dispose()
         {
             ReleaseCalls++;
+            onRelease?.Invoke();
             inner?.Dispose();
         }
     }

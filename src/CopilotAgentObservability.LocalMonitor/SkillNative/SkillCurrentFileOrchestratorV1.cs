@@ -19,13 +19,36 @@ internal sealed record SkillCurrentFileResultV1(
     SkillCurrentFileDispositionV1 Disposition,
     int StatusCode,
     byte[] BodyUtf8,
-    Action? ReleaseRuntimeCapability = null)
+    SkillCurrentFileResponseCapabilitiesV1? ResponseCapabilities = null)
 {
     internal static SkillCurrentFileResultV1 Abort() =>
         new(SkillCurrentFileDispositionV1.AbortWithoutResponse, 0, []);
 
     internal static SkillCurrentFileResultV1 Respond(int statusCode, byte[] bodyUtf8) =>
         new(SkillCurrentFileDispositionV1.Respond, statusCode, bodyUtf8);
+}
+
+internal sealed class SkillCurrentFileResponseCapabilitiesV1(
+    SkillProjectionCurrentSdkClaimAuthorization authorization) : IDisposable
+{
+    private CopilotRuntimeOperationCapabilityV1? runtimeCapability;
+    private int disposed;
+
+    internal void AttachRuntimeCapability(CopilotRuntimeOperationCapabilityV1 capability)
+    {
+        runtimeCapability = capability;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        {
+            return;
+        }
+
+        runtimeCapability?.Release();
+        authorization.Dispose();
+    }
 }
 
 // The Retention operation grant seen by the orchestrator. It is the exact subset of the
@@ -154,34 +177,45 @@ internal sealed class SkillCurrentFileOrchestratorV1(
             return PreRuntimeSafe(grant, 503, LocalMonitorUnavailableToken, callerToken);
         }
 
-        using var authorization = authorizationResult.Authorization;
-
-        var acquisition = runtimeAdmission.AcquireCurrentFileCapability(callerToken, out var capability);
-        if (acquisition == CopilotRuntimeAcquisitionDispositionV1.NormalShutdownClosed)
-        {
-            // Shutdown closure is not the discovery-unavailable error: it performs the Retention
-            // cleanup and aborts with no response whatever that cleanup returns.
-            grant.TryCompleteWithoutRaw();
-            return SkillCurrentFileResultV1.Abort();
-        }
-
-        if (acquisition != CopilotRuntimeAcquisitionDispositionV1.Acquired || capability is null)
-        {
-            return PreRuntimeSafe(grant, 503, DiscoveryUnavailableToken, callerToken);
-        }
-
+        var responseCapabilities = new SkillCurrentFileResponseCapabilitiesV1(authorizationResult.Authorization);
+        var ownershipTransferred = false;
         try
         {
+            var acquisition = runtimeAdmission.AcquireCurrentFileCapability(callerToken, out var capability);
+            if (acquisition == CopilotRuntimeAcquisitionDispositionV1.NormalShutdownClosed)
+            {
+                // Shutdown closure is not the discovery-unavailable error: it performs the Retention
+                // cleanup and aborts with no response whatever that cleanup returns.
+                grant.TryCompleteWithoutRaw();
+                var shutdownResult = SkillCurrentFileResultV1.Abort() with
+                {
+                    ResponseCapabilities = responseCapabilities
+                };
+                ownershipTransferred = true;
+                return shutdownResult;
+            }
+
+            if (acquisition != CopilotRuntimeAcquisitionDispositionV1.Acquired || capability is null)
+            {
+                var preRuntimeResult = PreRuntimeSafe(grant, 503, DiscoveryUnavailableToken, callerToken);
+                preRuntimeResult = preRuntimeResult with { ResponseCapabilities = responseCapabilities };
+                ownershipTransferred = true;
+                return preRuntimeResult;
+            }
+
+            responseCapabilities.AttachRuntimeCapability(capability);
             var result = await ExecuteWithRuntimeCapabilityAsync(
-                grant, authorization, capability, rootLease, callerToken).ConfigureAwait(false);
-            return result with { ReleaseRuntimeCapability = capability.Release };
+                grant, authorizationResult.Authorization, capability, rootLease, callerToken).ConfigureAwait(false);
+            result = result with { ResponseCapabilities = responseCapabilities };
+            ownershipTransferred = true;
+            return result;
         }
-        catch
+        finally
         {
-            // The capability transfers to the route only with a returned result, so every
-            // non-returning path must release it before unwinding.
-            capability.Release();
-            throw;
+            if (!ownershipTransferred)
+            {
+                responseCapabilities.Dispose();
+            }
         }
     }
 

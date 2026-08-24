@@ -41,6 +41,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
     private CopilotRuntimeGenerationV1 generation = null!;
     private StubNativeReader nativeReader = null!;
     private StubGrant grant = null!;
+    private StubLease authorizationLease = null!;
     private HttpContext? currentContext;
 
     internal SkillHistoricalContentRouteResultV1 HistoricalResult { get; set; } =
@@ -67,10 +68,11 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         generation = runtimeAdmission.PublishReadyTestCandidate(new StubRuntimeClient(), out _);
         nativeReader = new StubNativeReader();
         grant = new StubGrant();
+        authorizationLease = new StubLease();
 
         var orchestrator = new SkillCurrentFileOrchestratorV1(
             new StubHistoricalGate(grant),
-            new StubAuthorizationGate(),
+            new StubAuthorizationGate(authorizationLease),
             runtimeAdmission,
             new StubDiscoveryGateway(),
             nativeReader);
@@ -432,12 +434,14 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         await writeGate.WriteStarted.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(1, generation.OutstandingCapabilityCount);
+        Assert.Equal(0, authorizationLease.DisposeCalls);
 
         writeGate.AllowWrite();
         using var response = await responseTask;
         await response.Content.ReadAsByteArrayAsync();
 
         Assert.Equal(0, generation.OutstandingCapabilityCount);
+        Assert.Equal(1, authorizationLease.DisposeCalls);
     }
 
     [Fact]
@@ -450,6 +454,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.Equal(0, generation.OutstandingCapabilityCount);
+        Assert.Equal(1, authorizationLease.DisposeCalls);
     }
 
     [Fact]
@@ -460,6 +465,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => PostCurrentFileAsync(ValidRequest));
 
         Assert.Equal(0, generation.OutstandingCapabilityCount);
+        Assert.Equal(1, authorizationLease.DisposeCalls);
     }
 
     [Fact]
@@ -472,6 +478,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         Assert.True(SpinWait.SpinUntil(
             () => generation.OutstandingCapabilityCount == 0,
             TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, authorizationLease.DisposeCalls);
     }
 
     [Fact]
@@ -486,6 +493,7 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         Assert.True(SpinWait.SpinUntil(
             () => generation.OutstandingCapabilityCount == 0,
             TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, authorizationLease.DisposeCalls);
     }
 
     // The orchestrator's no-response abort has to survive the route: a Retention loss proved at the
@@ -613,17 +621,20 @@ public sealed class SkillInvocationSnapshotRoutesTests : IAsyncLifetime
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class StubAuthorizationGate : ISkillCurrentAuthorizationGateV1
+    private sealed class StubAuthorizationGate(StubLease lease) : ISkillCurrentAuthorizationGateV1
     {
         public SkillProjectionCurrentSdkClaimAuthorizationResult TryAcquire(Guid sessionId, Guid snapshotId) =>
             SkillProjectionCurrentSdkClaimAuthorizationResult.ForAcquired(
-                new SkillProjectionCurrentSdkClaimAuthorization("review", "custom", new StubLease()));
+                new SkillProjectionCurrentSdkClaimAuthorization("review", "custom", lease));
     }
 
     private sealed class StubLease : ISkillRegistryGenerationLease
     {
+        internal int DisposeCalls { get; private set; }
+
         public void Dispose()
         {
+            DisposeCalls++;
         }
     }
 

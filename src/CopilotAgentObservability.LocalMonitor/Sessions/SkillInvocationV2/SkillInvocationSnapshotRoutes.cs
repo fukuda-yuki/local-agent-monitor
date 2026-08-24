@@ -226,9 +226,7 @@ internal static class SkillInvocationSnapshotRoutes
             }
             finally
             {
-                // The runtime capability outlives the orchestrator because the specification holds
-                // it through response completion, so the shutdown drain cannot dispose the client mid-write.
-                result.ReleaseRuntimeCapability?.Invoke();
+                result.ResponseCapabilities?.Dispose();
             }
         }
     }
