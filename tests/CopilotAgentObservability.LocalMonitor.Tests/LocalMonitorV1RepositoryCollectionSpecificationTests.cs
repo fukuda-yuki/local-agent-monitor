@@ -26,6 +26,12 @@ public sealed class LocalMonitorV1RepositoryCollectionSpecificationTests
         Assert.Contains("local-monitor-repository-cursor\\0v1\\0", specification, StringComparison.Ordinal);
         Assert.Contains("exactly 101 bytes", specification, StringComparison.Ordinal);
         Assert.Contains("exactly 135 ASCII characters", specification, StringComparison.Ordinal);
+        Assert.Contains("exactly 8,388,608 UTF-8 entity bytes", specification, StringComparison.Ordinal);
+        Assert.Contains("8,388,608 bytes is accepted", specification, StringComparison.Ordinal);
+        Assert.Contains("8,388,609 bytes", specification, StringComparison.Ordinal);
+        Assert.Contains("fully buffers and measures the complete entity", specification, StringComparison.Ordinal);
+        Assert.Contains("before publishing status, headers, or body bytes", specification, StringComparison.Ordinal);
+        Assert.Contains("publishes no partial success body", specification, StringComparison.Ordinal);
         Assert.Equal("https://json-schema.org/draft/2020-12/schema", schema.RootElement.GetProperty("$schema").GetString());
         Assert.False(schema.RootElement.GetProperty("additionalProperties").GetBoolean());
         AssertSchemaObject(schema.RootElement, "schema_version", "workspace_revision", "repositories",

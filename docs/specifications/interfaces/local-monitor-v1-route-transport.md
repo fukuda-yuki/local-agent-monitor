@@ -438,7 +438,7 @@ trailing whitespace, or newline. Errors and status are closed to:
 | Cross-site/origin rejection | `403 {"error":"csrf_rejected"}` |
 | Invalid query grammar or non-cursor value | `400 {"error":"invalid_request"}` |
 | Malformed, noncanonical, tampered, restarted, or filter-mismatched cursor | `400 {"error":"invalid_cursor"}` |
-| Success entity cannot fit the accepted bound | `409 {"error":"workspace_too_large"}` |
+| Complete success entity exceeds the exact 8,388,608 UTF-8 entity-byte ceiling owned by the Repository success contract | `409 {"error":"workspace_too_large"}` |
 | SQLite remains busy after the accepted bounded policy | `503 {"error":"persistence_busy"}` |
 | Raw-default composition unavailable | `503 {"error":"local_monitor_ui_unavailable"}` |
 | Method other than GET/HEAD | `405 {"error":"method_not_allowed"}` |

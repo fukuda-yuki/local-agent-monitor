@@ -39,6 +39,13 @@ unassigned_active_session_count, archived_repository_count, next_cursor
   independently of the current page.
 - `next_cursor` is null unless a `limit+1` lookahead row exists. A non-null
   value is the 135-character cursor below for the last emitted card.
+- The complete Repository success response ceiling is exactly 8,388,608 UTF-8 entity bytes.
+  A complete entity of exactly 8,388,608 bytes is accepted;
+  8,388,609 bytes is the first rejected size. #134 fully buffers and measures the complete entity
+  before publishing status, headers, or body bytes. If the
+  complete entity exceeds the ceiling, the server returns the Repository GET
+  transport contract's exact `409 {"error":"workspace_too_large"}` and
+  publishes no partial success body.
 
 The exact empty response bytes are:
 
