@@ -88,12 +88,18 @@ public sealed class LocalRepositoryRuntimeBackupTests
                     // skill_invocation_snapshot is parented to Session 14 exactly, so a downgraded
                     // Session 13 archive that kept it would be incompatible rather than legacy.
                     removeArchive.CommandText =
-                        "DELETE FROM schema_version WHERE component IN ('local_archive','skill_invocation_snapshot');"
+                        "DELETE FROM schema_version WHERE component IN ('local_archive','skill_invocation_snapshot','local_workspace_projection');"
                         + "DROP TABLE local_archive_events; DROP TABLE local_archive_current;"
                         + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
                         + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
                         + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
-                        + "DROP TABLE IF EXISTS skill_invocation_snapshots;";
+                        + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_sources;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_models;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_activity;"
+                        + "DROP TABLE IF EXISTS local_workspace_token_observations;"
+                        + "DROP TABLE IF EXISTS local_workspace_projection_state;"
+                        + "DROP TABLE IF EXISTS local_workspace_sessions;";
                     removeArchive.ExecuteNonQuery();
                 }
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
@@ -102,7 +108,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
             {
                 ComponentVersions = new SortedDictionary<string, int>(
                     manifest.ComponentVersions
-                        .Where(static item => item.Key is not ("local_archive" or "skill_invocation_snapshot"))
+                        .Where(static item => item.Key is not ("local_archive" or "skill_invocation_snapshot" or "local_workspace_projection"))
                         .ToDictionary(static item => item.Key, static item => item.Value),
                     StringComparer.Ordinal)
                 { ["session"] = 13 },
@@ -112,7 +118,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
                             "local_archive_current"
                             or "local_archive_events"
                             or "skill_invocation_snapshots"
-                            or "skill_invocation_snapshot_receipts"))
+                            or "skill_invocation_snapshot_receipts") && !item.Key.StartsWith("local_workspace_", StringComparison.Ordinal))
                         .ToDictionary(static item => item.Key, static item => item.Value),
                     StringComparer.Ordinal),
             });

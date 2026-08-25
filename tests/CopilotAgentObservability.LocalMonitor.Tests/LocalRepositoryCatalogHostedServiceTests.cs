@@ -221,12 +221,12 @@ public sealed class LocalRepositoryCatalogHostedServiceTests
         var targetExistenceAuthority = Assert.Single(rawDefault.Services.GetServices<ILocalRepositoryTargetExistenceAuthority>());
         Assert.Same(SqliteLocalRepositoryTargetExistenceAuthority.Instance, targetExistenceAuthority);
         Assert.Same(targetExistenceAuthority, rawDefault.Services.GetRequiredService<ILocalRepositoryTargetExistenceAuthority>());
-        Assert.Empty(rawDefault.Services.GetServices<ILocalRepositorySessionSnapshotContributor>());
+        Assert.IsType<LocalWorkspaceSessionSnapshotContributor>(Assert.Single(rawDefault.Services.GetServices<ILocalRepositorySessionSnapshotContributor>()));
         var archiveStore = Assert.Single(rawDefault.Services.GetServices<SqliteLocalArchiveStore>());
         var archiveContributor = Assert.Single(rawDefault.Services.GetServices<ILocalArchiveFactSnapshotContributor>());
         Assert.Same(SqliteLocalArchiveFactSnapshotContributor.Instance, archiveContributor);
         Assert.Same(archiveStore, rawDefault.Services.GetRequiredService<SqliteLocalArchiveStore>());
-        Assert.Throws<InvalidOperationException>(() =>
+        Assert.IsType<SqliteLocalRepositoryScopeSnapshotService>(
             rawDefault.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>());
         Assert.Empty(sanitizedOnly.Services.GetServices<IHostedService>()
             .OfType<LocalRepositoryCatalogHostedService>());

@@ -507,6 +507,8 @@ internal static class MonitorHost
             builder.Services.AddSingleton(localRepositoryApplication);
             builder.Services.AddSingleton<ILocalRepositoryTargetExistenceAuthority>(repositoryExistenceAuthority);
             builder.Services.AddSingleton(localArchiveStore);
+            builder.Services.AddSingleton<ILocalRepositorySessionSnapshotContributor>(
+                new LocalWorkspaceSessionSnapshotContributor(options.DatabasePath, timeProvider));
             builder.Services.AddSingleton<ILocalArchiveFactSnapshotContributor>(SqliteLocalArchiveFactSnapshotContributor.Instance);
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
                 new SqliteLocalRepositoryScopeSnapshotService(

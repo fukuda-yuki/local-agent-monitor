@@ -2971,11 +2971,17 @@ public sealed class RuntimeBackupRestoreTests
                 // downgraded archive that kept it would be incompatible rather than legacy.
                 Execute(
                     connection,
-                    "DELETE FROM schema_version WHERE component='skill_invocation_snapshot';"
+                    "DELETE FROM schema_version WHERE component IN ('skill_invocation_snapshot','local_workspace_projection');"
                     + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
                     + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
                     + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
-                    + "DROP TABLE IF EXISTS skill_invocation_snapshots;");
+                    + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_sources;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_models;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_activity;"
+                    + "DROP TABLE IF EXISTS local_workspace_token_observations;"
+                    + "DROP TABLE IF EXISTS local_workspace_projection_state;"
+                    + "DROP TABLE IF EXISTS local_workspace_sessions;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
                 Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
             }
@@ -2987,7 +2993,7 @@ public sealed class RuntimeBackupRestoreTests
                     "local_archive_current"
                     or "local_archive_events"
                     or "skill_invocation_snapshots"
-                    or "skill_invocation_snapshot_receipts")))
+                    or "skill_invocation_snapshot_receipts") && !table.StartsWith("local_workspace_", StringComparison.Ordinal)))
                     rowCounts[table] = Scalar<long>(connection, $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";");
             }
             database = File.ReadAllBytes(mutatedPath);
@@ -3002,6 +3008,7 @@ public sealed class RuntimeBackupRestoreTests
             componentVersions["session"] = 13;
             componentVersions.Remove("local_archive");
             componentVersions.Remove("skill_invocation_snapshot");
+            componentVersions.Remove("local_workspace_projection");
             var databaseHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
             manifest = RuntimeBackupJson.WriteManifest(parsed with
             {
