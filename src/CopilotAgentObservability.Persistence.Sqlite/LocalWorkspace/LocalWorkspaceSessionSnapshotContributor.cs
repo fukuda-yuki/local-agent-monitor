@@ -5,38 +5,12 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositorySessionSnapshotContributor
 {
     private const int MaximumSessions = 10_000;
-    private readonly string? databasePath;
-    private readonly TimeProvider timeProvider;
-
-    internal LocalWorkspaceSessionSnapshotContributor(string? databasePath = null, TimeProvider? timeProvider = null)
-    {
-        this.databasePath = databasePath is null ? null : Path.GetFullPath(databasePath);
-        this.timeProvider = timeProvider ?? TimeProvider.System;
-    }
-
     public ValueTask<LocalRepositorySessionContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        RefreshBeforeRead();
         return transaction.ReadAsync(ReadRowsAsync, cancellationToken);
-    }
-
-    private void RefreshBeforeRead()
-    {
-        if (databasePath is null) return;
-        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Pooling = false,
-        }.ToString());
-        connection.Open();
-        using var transaction = connection.BeginTransaction(deferred: false);
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
-        transaction.Commit();
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
@@ -76,6 +50,11 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.Activity[reader.GetString(1)] = new(reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt64(3));
         }
+        var skillAggregates = SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, byId.Keys.ToArray());
+        foreach (var row in rows)
+            row.Activity["skill"] = skillAggregates.TryGetValue(row.SessionId, out var aggregate)
+                ? new("recorded", aggregate.InvocationCount)
+                : new("not_observed", null);
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
@@ -119,9 +98,30 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         while (await reader.ReadAsync(token).ConfigureAwait(false)) if (rows.TryGetValue(reader.GetString(0), out var row)) add(row, reader.GetString(1));
     }
 
-    private sealed class MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string timingState, string? startedAt, string? endedAt, long? duration, string notes, string revision)
+    private sealed class MutableRow
     {
-        internal string SessionId { get; } = sessionId;
+        private readonly long sortGroup;
+        private readonly long sortEpoch;
+        private readonly string labelState;
+        private readonly string? label;
+        private readonly string status;
+        private readonly string completeness;
+        private readonly string timingState;
+        private readonly string? startedAt;
+        private readonly string? endedAt;
+        private readonly long? duration;
+        private readonly string notes;
+        private readonly string revision;
+
+        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string timingState, string? startedAt, string? endedAt, long? duration, string notes, string revision)
+        {
+            SessionId = sessionId; this.sortGroup = sortGroup; this.sortEpoch = sortEpoch;
+            this.labelState = labelState; this.label = label; this.status = status; this.completeness = completeness;
+            this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt;
+            this.duration = duration; this.notes = notes; this.revision = revision;
+        }
+
+        internal string SessionId { get; }
         internal List<string> Sources { get; } = [];
         internal List<string> Models { get; } = [];
         internal Dictionary<string, LocalWorkspaceFact<long>> Activity { get; } = new(StringComparer.Ordinal);
@@ -130,7 +130,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         {
             LocalWorkspaceFact<long> A(string kind) => Activity.TryGetValue(kind, out var fact) ? fact : new("not_observed", null);
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
-            return new(sessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
+            return new(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
                 Array.AsReadOnly(Sources.ToArray()), Array.AsReadOnly(Models.ToArray()), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
                 timingState, startedAt, endedAt, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), revision);
         }

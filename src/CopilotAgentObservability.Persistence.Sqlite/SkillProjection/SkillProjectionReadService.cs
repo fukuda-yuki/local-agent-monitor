@@ -515,6 +515,44 @@ internal sealed class SkillProjectionReadService
             : new(null, "certification_pending");
     }
 
+    internal static IReadOnlyDictionary<string, SkillProjectionSessionInvocationAggregate> ReadSessionInvocationAggregates(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        if (sessionIds.Count == 0) return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
+            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        }
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT invocation.session_id,COUNT(*)
+            FROM skill_projection_invocations invocation
+            JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
+            JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
+            JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id
+              AND revision.current_revision=generation.compatibility_revision
+              AND revision.current_effective_state='resolved'
+              AND revision.current_exact_version=invocation.source_application_version
+            WHERE invocation.source_arm='otel_trace_span' AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input WHERE input.generation_id=generation.generation_id AND input.input_evidence_kind='deleted_before_digest_v10')
+            GROUP BY invocation.session_id ORDER BY invocation.session_id COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        using var reader = command.ExecuteReader();
+        var result = new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        while (reader.Read()) result.Add(reader.GetString(0), new(reader.GetInt32(1), "current"));
+        return result;
+    }
+
     private IReadOnlyList<(string TraceId, string SpanId)> ListCurrentOtelPairs(
         string sessionId)
     {

@@ -613,6 +613,11 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }
 
         ReduceSessionOutcomeAndCompleteness(connection, transaction, batch.Detail.Session.SessionId);
+        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+            connection,
+            transaction,
+            [Id(batch.Detail.Session.SessionId)],
+            timeProvider.GetUtcNow());
 
         transaction.Commit();
     }

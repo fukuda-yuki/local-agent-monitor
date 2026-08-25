@@ -55,12 +55,12 @@ public sealed class SqliteRuntimeBackupService
     [
         "monitor",
         "session",
-        "local_workspace_projection",
         "local_repository_catalog",
         "local_archive",
         "retention",
         "skill_projection",
         "skill_invocation_snapshot",
+        "local_workspace_projection",
         "doctor",
         "alert_engine",
         "alert_lifecycle",

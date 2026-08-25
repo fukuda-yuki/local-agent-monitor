@@ -3,20 +3,40 @@ namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 internal sealed class SessionEventContentRetentionAdapter : IRetentionDeletionAdapter
 {
     private readonly RetentionCatalogStore catalog;
+    private readonly TimeProvider timeProvider;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant participant;
 
-    internal SessionEventContentRetentionAdapter(RetentionCatalogStore catalog) =>
+    internal SessionEventContentRetentionAdapter(
+        RetentionCatalogStore catalog,
+        TimeProvider? timeProvider = null,
+        ILocalWorkspaceProjectionTransactionParticipant? participant = null)
+    {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.participant = participant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+    }
 
     public RetentionStoreKind StoreKind => RetentionStoreKind.SessionEventContent;
 
     public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) =>
         catalog.ExecuteSqliteDeletionAsync(context, (connection, transaction, grant) =>
         {
+            string? sessionId;
+            using (var owner = connection.CreateCommand())
+            {
+                owner.Transaction = transaction;
+                owner.CommandText = "SELECT session_id FROM session_events WHERE event_id=$event_id;";
+                owner.Parameters.AddWithValue("$event_id", grant.OwnershipKey.SourceItemId);
+                sessionId = owner.ExecuteScalar() as string;
+            }
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = "DELETE FROM session_event_content WHERE event_id=$event_id AND retention_owner_token=$retention_owner_token;";
             command.Parameters.AddWithValue("$event_id", grant.OwnershipKey.SourceItemId);
             grant.BindSourceToken(command);
-            return ValueTask.FromResult(command.ExecuteNonQuery() == 1 ? 1 : -1);
+            var deleted = command.ExecuteNonQuery() == 1;
+            if (deleted && sessionId is not null)
+                participant.RefreshSessions(connection, transaction, [sessionId], timeProvider.GetUtcNow());
+            return ValueTask.FromResult(deleted ? 1 : -1);
         });
 }

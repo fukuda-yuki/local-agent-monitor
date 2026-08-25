@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
@@ -7,89 +9,108 @@ internal static class LocalWorkspaceProjectionStore
 {
     internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
     {
-        var timestamp = now.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-        Execute(connection, transaction, "DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_sessions;");
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = """
-                INSERT INTO local_workspace_sessions(
-                    session_id,sort_group,sort_epoch_ms,label_state,label_text,label_search_text,
-                    label_source_identity,label_expires_at,status,completeness,timing_state,started_at,
-                    ended_at,duration_ms,capture_notes,revision_seed)
-                SELECT s.session_id,
-                       CASE WHEN s.started_at IS NULL THEN 2 WHEN s.ended_at IS NULL THEN 0 ELSE 1 END,
-                       MAX(0,CAST((julianday(COALESCE(s.started_at,s.last_seen_at)) - 2440587.5) * 86400000 AS INTEGER)),
-                       CASE WHEN label.text IS NOT NULL THEN 'recorded'
-                            WHEN s.raw_retention_state='expired_pending_deletion' THEN 'expired'
-                            WHEN s.raw_retention_state='not_captured' THEN 'not_captured'
-                            ELSE 'not_observed' END,
-                       label.text,
-                       CASE WHEN label.text IS NULL THEN NULL ELSE lower(label.text) END,
-                       label.event_id,
-                       label.expires_at,
-                       s.status,s.completeness,
-                       CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN 'recorded'
-                            WHEN s.started_at IS NULL AND s.ended_at IS NULL THEN 'not_observed' ELSE 'inconsistent' END,
-                       s.started_at,s.ended_at,
-                       CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at)
-                            THEN CAST((julianday(s.ended_at)-julianday(s.started_at))*86400000 AS INTEGER) END,
-                       CASE WHEN s.raw_retention_state='expired_pending_deletion' THEN 'raw_content_expired'
-                            WHEN s.raw_retention_state='not_captured' THEN 'raw_content_not_captured' ELSE '' END,
-                       s.status || '|' || s.completeness || '|' || COALESCE(s.started_at,'') || '|' || COALESCE(s.ended_at,'') || '|' || s.last_seen_at || '|' || COALESCE(label.event_id,'') || '|' || COALESCE(label.expires_at,'')
-                FROM sessions s
-                LEFT JOIN (
-                    SELECT event_id,session_id,expires_at,text FROM (
-                        SELECT e.event_id,e.session_id,c.expires_at,
-                               substr(trim(replace(replace(COALESCE(json_extract(c.content_json,'$.instruction'),json_extract(c.content_json,'$.prompt'),json_extract(c.content_json,'$.message')),'\r',' '),'\n',' ')),1,160) AS text,
-                               row_number() OVER(PARTITION BY e.session_id ORDER BY e.occurred_at,e.event_id) AS ordinal
-                        FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
-                        WHERE c.expires_at>$now AND json_valid(c.content_json)
-                    ) WHERE ordinal=1 AND text<>''
-                ) label ON label.session_id=s.session_id;
-                """;
-            command.Parameters.AddWithValue("$now", timestamp);
-            command.ExecuteNonQuery();
-        }
-        var skillCount = TableExists(connection, transaction, "skill_projection_invocations")
-            ? "(SELECT COUNT(*) FROM skill_projection_invocations i WHERE i.session_id=s.session_id)"
-            : "0";
-        Execute(connection, transaction, $$"""
-            INSERT INTO local_workspace_session_sources SELECT session_id,source FROM (
-              SELECT session_id,source_surface AS source FROM session_native_ids WHERE source_surface IS NOT NULL
-              UNION SELECT session_id,source_surface FROM session_runs WHERE source_surface IS NOT NULL
-              UNION SELECT session_id,source_surface FROM session_events WHERE source_surface IS NOT NULL) ORDER BY session_id,source;
-            INSERT INTO local_workspace_session_models SELECT DISTINCT session_id,model FROM session_runs WHERE model IS NOT NULL AND trim(model)<>'' ORDER BY session_id,model;
-            INSERT INTO local_workspace_session_activity
-              SELECT s.session_id,k.kind,'recorded',CASE k.kind
-                WHEN 'skill' THEN {{skillCount}}
-                WHEN 'tool' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=s.session_id AND lower(e.type) LIKE '%tool%')
-                WHEN 'subagent' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=s.session_id AND lower(e.type) LIKE '%subagent%')
-                WHEN 'error' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=s.session_id AND (e.status='failed' OR e.terminal_outcome='failed'))
-                ELSE (SELECT COUNT(*) FROM session_events e WHERE e.session_id=s.session_id AND lower(e.type) LIKE '%retry%') END
-              FROM sessions s CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k;
+        var ids = ReadSessionIds(connection, transaction);
+        RefreshSessions(connection, transaction, ids, now);
+        Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
+    }
+
+    internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
+    {
+        if (sessionIds.Count == 0) return;
+        var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
+        ExecuteWithIds(connection, transaction, """
+            DELETE FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_session_activity WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_sessions WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_sessions(session_id,sort_group,sort_epoch_ms,label_state,label_text,label_search_text,label_source_identity,label_expires_at,status,completeness,timing_state,started_at,ended_at,duration_ms,capture_notes,revision_seed)
+            SELECT s.session_id,CASE WHEN s.started_at IS NULL THEN 2 WHEN s.ended_at IS NULL THEN 0 ELSE 1 END,
+                   MAX(0,CAST((julianday(COALESCE(s.started_at,s.last_seen_at))-2440587.5)*86400000 AS INTEGER)),
+                   CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'expired' WHEN 'not_captured' THEN 'not_captured' ELSE 'not_observed' END,
+                   NULL,NULL,NULL,NULL,s.status,s.completeness,
+                   CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN 'recorded' WHEN s.started_at IS NULL AND s.ended_at IS NULL THEN 'not_observed' ELSE 'inconsistent' END,
+                   s.started_at,s.ended_at,CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN MAX(0,CAST((julianday(s.ended_at)-julianday(s.started_at))*86400000 AS INTEGER)) END,
+                   CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'raw_content_expired' WHEN 'not_captured' THEN 'raw_content_not_captured' ELSE '' END,
+                   s.status||'|'||s.completeness||'|'||COALESCE(s.started_at,'')||'|'||COALESCE(s.ended_at,'')||'|'||s.last_seen_at
+            FROM sessions s WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_session_sources
+              WITH values_by_session AS (
+                SELECT session_id,source_surface source FROM session_native_ids WHERE source_surface IS NOT NULL AND trim(source_surface)<>''
+                UNION SELECT session_id,source_surface FROM session_runs WHERE source_surface IS NOT NULL AND trim(source_surface)<>''
+                UNION SELECT session_id,source_surface FROM session_events WHERE source_surface IS NOT NULL AND trim(source_surface)<>''),
+              ranked AS (SELECT session_id,source,row_number() OVER(PARTITION BY session_id ORDER BY source COLLATE BINARY) ordinal FROM values_by_session)
+              SELECT session_id,source FROM ranked WHERE ordinal<=5 AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_session_models
+              WITH distinct_models AS (SELECT DISTINCT session_id,model FROM session_runs WHERE model IS NOT NULL AND trim(model)<>''),
+              ranked AS (SELECT session_id,model,row_number() OVER(PARTITION BY session_id ORDER BY model COLLATE BINARY) ordinal FROM distinct_models)
+              SELECT session_id,model FROM ranked WHERE ordinal<=16 AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_session_activity SELECT s.session_id,k.kind,'not_observed',NULL FROM sessions s
+              CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k
+              WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
-              SELECT session_id,run_id,'session_run',0,run_id,input_tokens,output_tokens,total_tokens,NULL,NULL,NULL FROM session_runs;
-            INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at)
-              VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),CURRENT_TIMESTAMP)
-              ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;
-            """);
+              SELECT session_id,run_id,'session_run',0,run_id,input_tokens,output_tokens,total_tokens,NULL,NULL,NULL FROM session_runs
+              WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            """, idsJson);
+        if (TableExists(connection, transaction, "monitor_spans"))
+            ExecuteWithIds(connection, transaction, """
+                INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
+                SELECT e.session_id,e.run_id,'llm_span',1,CAST(ms.raw_record_id AS TEXT)||':'||CAST(ms.span_ordinal AS TEXT),ms.input_tokens,ms.output_tokens,ms.total_tokens,ms.reasoning_tokens,ms.cache_read_tokens,ms.cache_creation_tokens
+                FROM session_events e JOIN monitor_spans ms ON e.source_adapter='otel-exact' COLLATE BINARY AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY AND e.trace_id=ms.trace_id COLLATE BINARY
+                WHERE e.run_id IS NOT NULL AND ms.category='llm_call' AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
+        ApplyLabels(connection, transaction, sessionIds, now);
+        using var state = connection.CreateCommand(); state.Transaction = transaction;
+        state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
+        state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
     }
 
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
+    private static void ApplyLabels(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
     {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT e.session_id,e.event_id,c.expires_at,c.content_json FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id WHERE e.type='user_prompt' COLLATE BINARY AND e.content_state='available' AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY e.session_id COLLATE BINARY,e.occurred_at COLLATE BINARY,e.event_id COLLATE BINARY;";
+        command.Parameters.AddWithValue("$ids", JsonSerializer.Serialize(sessionIds));
+        using var reader = command.ExecuteReader(); var selected = new Dictionary<string, Label>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var sessionId = reader.GetString(0);
+            if (selected.ContainsKey(sessionId) || !TryCanonicalFuture(reader.GetString(2), now) || !TryReadInstruction(reader.GetString(3), out var text)) continue;
+            selected.Add(sessionId, new(reader.GetString(1), reader.GetString(2), text, Search(text)));
+        }
+        reader.Close();
+        foreach (var pair in selected)
+        {
+            using var update = connection.CreateCommand(); update.Transaction = transaction;
+            update.CommandText = "UPDATE local_workspace_sessions SET label_state='recorded',label_text=$text,label_search_text=$search,label_source_identity=$event,label_expires_at=$expires,revision_seed=revision_seed||'|'||$event||'|'||$expires WHERE session_id=$session;";
+            update.Parameters.AddWithValue("$text", pair.Value.Text); update.Parameters.AddWithValue("$search", pair.Value.Search); update.Parameters.AddWithValue("$event", pair.Value.EventId); update.Parameters.AddWithValue("$expires", pair.Value.ExpiresAt); update.Parameters.AddWithValue("$session", pair.Key); update.ExecuteNonQuery();
+        }
     }
 
-    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name)
+    private static bool TryReadInstruction(string json, out string text)
     {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
-        command.Parameters.AddWithValue("$name", name);
-        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        text = string.Empty;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("message", out var value) || value.ValueKind != JsonValueKind.String) return false;
+            var builder = new StringBuilder(); var previousSpace = false;
+            foreach (var rune in value.GetString()!.EnumerateRunes())
+            {
+                if (rune.Value is '\r' or '\n' or 0x0085 or 0x2028 or 0x2029 || Rune.IsWhiteSpace(rune)) { if (builder.Length != 0 && !previousSpace) builder.Append(' '); previousSpace = true; continue; }
+                builder.Append(rune); previousSpace = false;
+            }
+            var normalized = builder.ToString().Trim(); if (normalized.Length == 0) return false;
+            text = string.Concat(normalized.EnumerateRunes().Take(160).Select(static rune => rune.ToString())); return true;
+        }
+        catch (JsonException) { return false; }
     }
+
+    private static string Search(string value) => value.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+    private static bool TryCanonicalFuture(string value, DateTimeOffset now) => DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) && parsed.Offset == TimeSpan.Zero && parsed > now;
+    private static string Canonical(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+    private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }
+    private static void ExecuteWithIds(SqliteConnection connection, SqliteTransaction transaction, string sql, string ids) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); command.ExecuteNonQuery(); }
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.ExecuteNonQuery(); }
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", name); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0; }
+    private sealed record Label(string EventId, string ExpiresAt, string Text, string Search);
 }
