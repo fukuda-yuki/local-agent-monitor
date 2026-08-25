@@ -20,7 +20,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         new("table", "local_workspace_sessions", "local_workspace_sessions", """
             CREATE TABLE local_workspace_sessions (
                 session_id TEXT PRIMARY KEY,
-                sort_group INTEGER NOT NULL CHECK(sort_group BETWEEN 0 AND 2),
+                sort_group INTEGER NOT NULL CHECK(sort_group IN (0,1)),
                 sort_epoch_ms INTEGER NOT NULL CHECK(sort_epoch_ms >= 0),
                 label_state TEXT NOT NULL,
                 label_text TEXT NULL,
@@ -34,17 +34,19 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 timing_state TEXT NOT NULL,
                 started_at TEXT NULL,
                 ended_at TEXT NULL,
+                last_seen_at TEXT NOT NULL,
                 duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms >= 0),
                 capture_notes TEXT NOT NULL,
                 revision_seed TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
-                CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_search_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_search_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL))
+                CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_search_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_search_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL)),
+                CHECK((started_at IS NULL AND sort_group=1 AND sort_epoch_ms=0) OR (started_at IS NOT NULL AND sort_group=0))
             );
             """),
         new("table", "local_workspace_session_sources", "local_workspace_session_sources", """
             CREATE TABLE local_workspace_session_sources (
                 session_id TEXT NOT NULL,
-                source TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code')),
                 PRIMARY KEY(session_id,source),
                 FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE
             );

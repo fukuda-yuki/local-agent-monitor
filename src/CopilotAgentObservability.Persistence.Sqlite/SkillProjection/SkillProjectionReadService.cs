@@ -518,7 +518,8 @@ internal sealed class SkillProjectionReadService
     internal static IReadOnlyDictionary<string, SkillProjectionSessionInvocationAggregate> ReadSessionInvocationAggregates(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds)
+        IReadOnlyCollection<string> sessionIds,
+        Action<string>? commandObserver = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -528,6 +529,7 @@ internal sealed class SkillProjectionReadService
         {
             exists.Transaction = transaction;
             exists.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
+            commandObserver?.Invoke("skills");
             if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
                 return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
         }
@@ -547,6 +549,7 @@ internal sealed class SkillProjectionReadService
             GROUP BY invocation.session_id ORDER BY invocation.session_id COLLATE BINARY;
             """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        commandObserver?.Invoke("skill-aggregates");
         using var reader = command.ExecuteReader();
         var result = new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
         while (reader.Read()) result.Add(reader.GetString(0), new(reader.GetInt32(1), "current"));

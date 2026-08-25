@@ -23,13 +23,13 @@ internal static class LocalWorkspaceProjectionStore
             DELETE FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_sessions WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-            INSERT INTO local_workspace_sessions(session_id,sort_group,sort_epoch_ms,label_state,label_text,label_search_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,duration_ms,capture_notes,revision_seed)
-            SELECT s.session_id,CASE WHEN s.started_at IS NULL THEN 2 WHEN s.ended_at IS NULL THEN 0 ELSE 1 END,
-                   MAX(0,CAST((julianday(COALESCE(s.started_at,s.last_seen_at))-2440587.5)*86400000 AS INTEGER)),
+            INSERT INTO local_workspace_sessions(session_id,sort_group,sort_epoch_ms,label_state,label_text,label_search_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,last_seen_at,duration_ms,capture_notes,revision_seed)
+            SELECT s.session_id,CASE WHEN s.started_at IS NULL THEN 1 ELSE 0 END,
+                   CASE WHEN s.started_at IS NULL THEN 0 ELSE MAX(0,CAST((julianday(s.started_at)-2440587.5)*86400000 AS INTEGER)) END,
                    CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'expired' WHEN 'not_captured' THEN 'not_captured' ELSE 'not_observed' END,
                    NULL,NULL,NULL,NULL,s.status,s.completeness,'not_observed','not_observed',
                    CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN 'recorded' WHEN s.started_at IS NULL AND s.ended_at IS NULL THEN 'not_observed' ELSE 'inconsistent' END,
-                   s.started_at,s.ended_at,CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN MAX(0,CAST((julianday(s.ended_at)-julianday(s.started_at))*86400000 AS INTEGER)) END,
+                   s.started_at,s.ended_at,s.last_seen_at,CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN MAX(0,CAST((julianday(s.ended_at)-julianday(s.started_at))*86400000 AS INTEGER)) END,
                    CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'raw_content_expired' WHEN 'not_captured' THEN 'raw_content_not_captured' ELSE '' END,
                    s.status||'|'||s.completeness||'|'||COALESCE(s.started_at,'')||'|'||COALESCE(s.ended_at,'')||'|'||s.last_seen_at
             FROM sessions s WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));

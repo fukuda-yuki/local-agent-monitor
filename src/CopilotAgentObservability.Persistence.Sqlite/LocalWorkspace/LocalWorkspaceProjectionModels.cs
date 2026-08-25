@@ -39,6 +39,7 @@ internal sealed record LocalWorkspaceProjectionRow(
     string TimingState,
     string? StartedAt,
     string? EndedAt,
+    string LastSeenAt,
     long? DurationMilliseconds,
     IReadOnlyList<string> CaptureNotes,
     string RevisionSeed) : ILocalRepositorySessionSnapshotRow;

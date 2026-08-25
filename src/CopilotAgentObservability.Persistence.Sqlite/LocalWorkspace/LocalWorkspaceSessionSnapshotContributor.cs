@@ -41,7 +41,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                        CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
                        CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,duration_ms,capture_notes,revision_seed
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
@@ -57,23 +57,24 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                     reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6),
                     reader.GetString(7), reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
-                    reader.IsDBNull(12) ? null : reader.GetInt64(12), reader.GetString(13), reader.GetString(14)));
+                    reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetInt64(13), reader.GetString(14), reader.GetString(15)));
             }
         }
         var byId = rows.ToDictionary(row => row.SessionId, StringComparer.Ordinal);
-        await ReadPairs(connection, transaction, "sources", "SELECT session_id,source FROM local_workspace_session_sources ORDER BY session_id,source;", byId, static (row, value) => row.Sources.Add(value), statementObserver, cancellationToken);
-        await ReadPairs(connection, transaction, "models", "SELECT session_id,model FROM local_workspace_session_models ORDER BY session_id,model;", byId, static (row, value) => row.Models.Add(value), statementObserver, cancellationToken);
+        var ids = System.Text.Json.JsonSerializer.Serialize(byId.Keys.Order(StringComparer.Ordinal));
+        await ReadPairs(connection, transaction, "sources", "SELECT session_id,source FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,source;", ids, byId, static (row, value) => row.Sources.Add(value), statementObserver, cancellationToken);
+        await ReadPairs(connection, transaction, "models", "SELECT session_id,model FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,model;", ids, byId, static (row, value) => row.Models.Add(value), statementObserver, cancellationToken);
         using (var command = connection.CreateCommand())
         {
             statementObserver?.Invoke("activity");
             command.Transaction = transaction;
-            command.CommandText = "SELECT session_id,kind,state,count FROM local_workspace_session_activity ORDER BY session_id,kind;";
+            command.CommandText = "SELECT session_id,kind,state,count FROM local_workspace_session_activity WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,kind;";
+            command.Parameters.AddWithValue("$ids", ids);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.Activity[reader.GetString(1)] = new(reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt64(3));
         }
-        statementObserver?.Invoke("skills");
-        var skillAggregates = SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, byId.Keys.ToArray());
+        var skillAggregates = SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, byId.Keys.ToArray(), statementObserver);
         foreach (var row in rows)
             row.Activity["skill"] = skillAggregates.TryGetValue(row.SessionId, out var aggregate)
                 ? new("recorded", aggregate.InvocationCount)
@@ -85,11 +86,12 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             command.CommandText = """
                 WITH ranked AS (
                   SELECT *,row_number() OVER(PARTITION BY session_id,execution_id ORDER BY authority_rank,authority,source_identity) ordinal
-                  FROM local_workspace_token_observations), selected AS (SELECT * FROM ranked WHERE ordinal=1)
+                  FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))), selected AS (SELECT * FROM ranked WHERE ordinal=1)
                 SELECT session_id,COUNT(*),SUM(input_tokens IS NOT NULL),SUM(input_tokens),SUM(output_tokens),SUM(total_tokens),SUM(reasoning_tokens),SUM(cache_read_tokens),SUM(cache_creation_tokens),
                        MIN(authority),MAX(authority),SUM(CASE WHEN input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_read_tokens>input_tokens THEN 1 ELSE 0 END)
                 FROM selected GROUP BY session_id ORDER BY session_id;
                 """;
+            command.Parameters.AddWithValue("$ids", ids);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.TokenAggregate = ReadTokens(reader);
@@ -115,10 +117,10 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
-    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token)
+    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, string ids, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token)
     {
         statementObserver?.Invoke(name);
-        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql;
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids);
         using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
         while (await reader.ReadAsync(token).ConfigureAwait(false)) if (rows.TryGetValue(reader.GetString(0), out var row)) add(row, reader.GetString(1));
     }
@@ -136,15 +138,16 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         private readonly string timingState;
         private readonly string? startedAt;
         private readonly string? endedAt;
+        private readonly string lastSeenAt;
         private readonly long? duration;
         private readonly string notes;
         private readonly string revision;
 
-        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string sourceState, string modelState, string timingState, string? startedAt, string? endedAt, long? duration, string notes, string revision)
+        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string sourceState, string modelState, string timingState, string? startedAt, string? endedAt, string lastSeenAt, long? duration, string notes, string revision)
         {
             SessionId = sessionId; this.sortGroup = sortGroup; this.sortEpoch = sortEpoch;
             this.labelState = labelState; this.label = label; this.status = status; this.completeness = completeness; this.sourceState = sourceState; this.modelState = modelState;
-            this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt;
+            this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt; this.lastSeenAt = lastSeenAt;
             this.duration = duration; this.notes = notes; this.revision = revision;
         }
 
@@ -159,7 +162,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
             return new(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
                 new(sourceState, Array.AsReadOnly(Sources.ToArray())), new(modelState, Array.AsReadOnly(Models.ToArray())), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
-                timingState, startedAt, endedAt, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), revision);
+                timingState, startedAt, endedAt, lastSeenAt, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), revision);
         }
     }
 }

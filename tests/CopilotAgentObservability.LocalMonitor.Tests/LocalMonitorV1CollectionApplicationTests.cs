@@ -16,6 +16,28 @@ public sealed class LocalMonitorV1CollectionApplicationTests
         Assert.True(LocalMonitorV1RepositoryRequestParser.TryParse("", out var request));
         Assert.Equal("active_only", request!.ArchiveScope);
         Assert.Equal(50, request.Limit);
+        foreach (var query in new[] { "?%6cimit=1", "?limit=%31", "?limit=+1", "?limit=1;archive_scope=active_only", "?LIMIT=1", "?limit=%", "?archive_scope=ACTIVE_ONLY" })
+            Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse(query, out _));
+    }
+
+    [Fact]
+    public void FullPrecisionStartedAtDateWindowIsInclusiveExclusiveForActiveAndCompleted()
+    {
+        var from = "2026-01-01T00:00:00.0000001+00:00"; var to = "2026-01-01T00:00:00.0000003+00:00";
+        var sessions = new[] { Session(1, startedAt:"2026-01-01T00:00:00.0000000+00:00"), Session(2, startedAt:from), Session(3, status:"completed", startedAt:"2026-01-01T00:00:00.0000002+00:00"), Session(4, status:"completed", startedAt:to) };
+        var request = Parse($"{{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":\"{from}\",\"to\":\"{to}\",\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":null}}");
+        using var json = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(new(new(LocalRepositoryScopeKind.All,null),[],sessions),request,new byte[32]));
+        Assert.Equal([sessions[1].SessionId,sessions[2].SessionId], json.RootElement.GetProperty("items").EnumerateArray().Select(x=>x.GetProperty("session_id").GetString()!).Order().ToArray());
+    }
+
+    [Fact]
+    public void ValidAndInvalidTimesCrossCursorWithoutDropsOrDuplicates()
+    {
+        var sessions = new[] { Session(1,status:"active",startedAt:"2026-01-02T00:00:00.0000000+00:00"), Session(2,status:"completed",startedAt:"2026-01-01T00:00:00.0000000+00:00"), Session(3,status:"active",startedAt:null), Session(4,status:"completed",startedAt:null) };
+        var request=Parse("{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":2}"); var key=new byte[32];
+        using var first=JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(new(new(LocalRepositoryScopeKind.All,null),[],sessions),request,key)); var cursor=first.RootElement.GetProperty("next_cursor").GetString();
+        using var second=JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(new(new(LocalRepositoryScopeKind.All,null),[],sessions),request with { Cursor=cursor },key));
+        var ids=first.RootElement.GetProperty("items").EnumerateArray().Concat(second.RootElement.GetProperty("items").EnumerateArray()).Select(x=>x.GetProperty("session_id").GetString()).ToArray(); Assert.Equal(4,ids.Distinct().Count());
     }
 
     [Fact]
@@ -66,6 +88,19 @@ public sealed class LocalMonitorV1CollectionApplicationTests
         Assert.DoesNotContain("first instruction", json, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("copilot-sdk")]
+    [InlineData("copilot-cli")]
+    [InlineData("vscode")]
+    [InlineData("hook-unknown")]
+    [InlineData("claude-code")]
+    public void EveryClosedSourceTokenFiltersAnActualProjection(string source)
+    {
+        var request=Parse("{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[\""+source+"\"],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":null}");
+        using var json=JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(new(new(LocalRepositoryScopeKind.All,null),[],[Session(1,source:source),Session(2,source:"copilot-sdk"==source?"vscode":"copilot-sdk")]),request,new byte[32]));
+        Assert.Single(json.RootElement.GetProperty("items").EnumerateArray());
+    }
+
     [Fact]
     public void RepositoryCollectionSortsCountsPaginatesAndRevisesFromOneSnapshot()
     {
@@ -76,6 +111,7 @@ public sealed class LocalMonitorV1CollectionApplicationTests
 
         using var first=JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeRepositories(snapshot,request!));
         var root=first.RootElement; Assert.Equal(firstId,root.GetProperty("repositories")[0].GetProperty("repository_id").GetString());
+        Assert.Equal("2026-01-01T00:00:01.0000000+00:00",root.GetProperty("repositories")[0].GetProperty("last_observed_at").GetString());
         Assert.Equal(2,root.GetProperty("all_session_count").GetInt32()); Assert.Equal(1,root.GetProperty("unassigned_active_session_count").GetInt32()); Assert.Equal(1,root.GetProperty("archived_repository_count").GetInt32());
         var revision=root.GetProperty("workspace_revision").GetString(); Assert.Equal(firstId,root.GetProperty("next_cursor").GetString());
         Assert.True(LocalMonitorV1RepositoryRequestParser.TryParse($"?archive_scope=include_archived&after={firstId}&limit=1",out var continuation));
@@ -85,13 +121,13 @@ public sealed class LocalMonitorV1CollectionApplicationTests
         using var changed=JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeRepositories(snapshot with { Repositories=[repositories[0],repositories[1] with { Revision=3 }] },request!)); Assert.NotEqual(revision,changed.RootElement.GetProperty("workspace_revision").GetString());
     }
 
-    private static LocalRepositoryScopeSessionSnapshot Session(int index, string? repositoryId = null, bool archived = false, string source = "copilot-sdk", string model = "m", string label = "label", long skillCount = 0)
+    private static LocalRepositoryScopeSessionSnapshot Session(int index, string? repositoryId = null, bool archived = false, string source = "copilot-sdk", string model = "m", string label = "label", long skillCount = 0, string status = "active", string? startedAt = "2026-01-01T00:00:00.0000000+00:00")
     {
         var id = $"018f0000-0000-7000-8000-{index:x12}";
         var fact = new LocalWorkspaceFact<long>("recorded", 0);
-        var projection = new LocalWorkspaceProjectionRow(id, 0, 10_000-index, "recorded", label, "active", "rich", new("recorded", [source]), new("recorded", [model]), new(new("recorded", skillCount), fact, fact, fact, fact),
+        var projection = new LocalWorkspaceProjectionRow(id, startedAt is null ? 1 : 0, startedAt is null ? 0 : 10_000-index, "recorded", label, status, "rich", new("recorded", [source]), new("recorded", [model]), new(new("recorded", skillCount), fact, fact, fact, fact),
             new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null)),
-            "not_observed", null, null, null, [], $"seed-{index}");
+            "not_observed", startedAt, null, "2026-01-01T00:00:01.0000000+00:00", null, [], $"seed-{index}");
         return new(id, projection, 0, repositoryId is null ? LocalRepositoryScopeAssignmentState.Unassigned : LocalRepositoryScopeAssignmentState.Assigned,
             repositoryId is null ? LocalRepositoryScopeAssignmentAuthority.None : LocalRepositoryScopeAssignmentAuthority.Automatic, repositoryId, [], true, repositoryId is null, repositoryId is not null,
             archived ? LocalArchiveState.Archived : LocalArchiveState.Active, archived ? 1 : 0, !archived, archived ? "session_archived" : null);

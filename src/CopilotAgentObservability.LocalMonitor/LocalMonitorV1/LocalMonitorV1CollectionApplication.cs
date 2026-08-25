@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
-using Microsoft.AspNetCore.WebUtilities;
 
 namespace CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 
@@ -14,18 +13,28 @@ internal static class LocalMonitorV1RepositoryRequestParser
     internal static bool TryParse(string queryString, out LocalMonitorV1RepositoryRequest? request)
     {
         request = null;
-        var values = QueryHelpers.ParseQuery(queryString);
-        if (values.Keys.Any(key => key is not ("archive_scope" or "after" or "limit"))
-            || values.Any(item => item.Value.Count != 1 || item.Value[0]!.Length == 0)) return false;
-        var archiveScope = values.TryGetValue("archive_scope", out var archive) ? archive[0] : "active_only";
-        var after = values.TryGetValue("after", out var cursor) ? cursor[0] : null;
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var raw = queryString.StartsWith("?", StringComparison.Ordinal) ? queryString[1..] : queryString;
+        if (raw.Length != 0)
+        {
+            foreach (var part in raw.Split('&', StringSplitOptions.None))
+            {
+                var separator = part.IndexOf('=');
+                if (separator <= 0 || separator == part.Length - 1 || part.IndexOf('=', separator + 1) >= 0) return false;
+                var name = part[..separator]; var value = part[(separator + 1)..];
+                if (name is not ("archive_scope" or "after" or "limit") || !values.TryAdd(name, value)
+                    || name.IndexOfAny(['%', '+', ';']) >= 0 || value.IndexOfAny(['%', '+', ';']) >= 0) return false;
+            }
+        }
+        var archiveScope = values.TryGetValue("archive_scope", out var archive) ? archive : "active_only";
+        var after = values.TryGetValue("after", out var cursor) ? cursor : null;
         var limit = 50;
         if (archiveScope is not ("active_only" or "include_archived")
             || after is not null && !LocalMonitorV1Identity.TryParseUuidV7(after, out _)
             || values.TryGetValue("limit", out var rawLimit)
-                && (!int.TryParse(rawLimit[0], NumberStyles.None, CultureInfo.InvariantCulture, out limit)
+                && (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit)
                     || limit is < 1 or > 200
-                    || !string.Equals(limit.ToString(CultureInfo.InvariantCulture), rawLimit[0], StringComparison.Ordinal))) return false;
+                    || !string.Equals(limit.ToString(CultureInfo.InvariantCulture), rawLimit, StringComparison.Ordinal))) return false;
         request = new(archiveScope!, after, limit);
         return true;
     }
@@ -92,7 +101,7 @@ internal static class LocalMonitorV1CollectionApplication
                 writer.WriteStartObject(); writer.WriteString("repository_id", repository.RepositoryId); writer.WriteString("display_name", repository.DisplayName);
                 writer.WriteString("archive_state", Name(repository.ArchiveState)); writer.WriteNumber("archive_revision", repository.ArchiveRevision);
                 writer.WriteNumber("active_session_count", assigned.Count(s => s.IsEffectivelyEligible));
-                var last = assigned.Select(s => ((LocalWorkspaceProjectionRow)s.Session).EndedAt ?? ((LocalWorkspaceProjectionRow)s.Session).StartedAt).Where(x => x is not null).Order(StringComparer.Ordinal).LastOrDefault();
+                var last = assigned.Select(s => ((LocalWorkspaceProjectionRow)s.Session).LastSeenAt).Order(StringComparer.Ordinal).LastOrDefault();
                 if (last is null) writer.WriteNull("last_observed_at"); else writer.WriteString("last_observed_at", last);
                 writer.WriteNumber("assignment_conflict_count", repository.AssignmentConflictCount); writer.WriteString("repository_revision", Hash("local-monitor-repository-item\0v1\0", repository, assigned)); writer.WriteEndObject();
             }
@@ -110,8 +119,9 @@ internal static class LocalMonitorV1CollectionApplication
     private static bool Matches(LocalRepositoryScopeSessionSnapshot row, LocalMonitorV1SessionSearchRequest request)
     {
         var p = (LocalWorkspaceProjectionRow)row.Session;
-        return (request.From is null || p.SortGroup == 0 && p.SortEpochMilliseconds >= request.From.Value.ToUnixTimeMilliseconds())
-            && (request.To is null || p.SortGroup == 0 && p.SortEpochMilliseconds < request.To.Value.ToUnixTimeMilliseconds())
+        var startedAt = p.StartedAt is null ? (DateTimeOffset?)null : DateTimeOffset.ParseExact(p.StartedAt, "O", CultureInfo.InvariantCulture, DateTimeStyles.None);
+        return (request.From is null || startedAt is not null && startedAt.Value >= request.From.Value)
+            && (request.To is null || startedAt is not null && startedAt.Value < request.To.Value)
             && (request.Sources.Count == 0 || p.Sources.Values.Any(request.Sources.Contains))
             && (request.Models.Count == 0 || p.Models.Values.Any(request.Models.Contains))
             && (request.Statuses.Count == 0 || request.Statuses.Contains(p.Status))

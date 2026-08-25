@@ -3,6 +3,25 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalWorkspaceProjectionBackfillTests
 {
     [Fact]
+    public void BackfillUsesTwoStartedAtGroupsAndPersistsAllClosedSourceTokens()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','completed','partial',NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00','2026-08-24T00:02:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:02:00.0000000+00:00');
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000002','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:03:00.0000000+00:00','not_captured','2026-08-24T00:03:00.0000000+00:00','2026-08-24T00:03:00.0000000+00:00');
+            INSERT INTO session_runs(run_id,session_id,source_surface,status) VALUES
+              ('0198f5b8-0c01-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk','completed'),
+              ('0198f5b8-0c01-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001','copilot-cli','completed'),
+              ('0198f5b8-0c01-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001','vscode','completed'),
+              ('0198f5b8-0c01-7000-8000-000000000004','0198f5b8-0c00-7000-8000-000000000001','hook-unknown','completed'),
+              ('0198f5b8-0c01-7000-8000-000000000005','0198f5b8-0c00-7000-8000-000000000001','claude-code','completed');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        Assert.Equal(["0:0:2026-08-24T00:02:00.0000000+00:00", "1:1:2026-08-24T00:03:00.0000000+00:00"], LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT sort_group||':'||(sort_epoch_ms=0)||':'||last_seen_at FROM local_workspace_sessions ORDER BY session_id;"));
+        Assert.Equal(["claude-code","copilot-cli","copilot-sdk","hook-unknown","vscode"], LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT source FROM local_workspace_session_sources ORDER BY source;"));
+    }
+
+    [Fact]
     public void ModelOverflowFailsClosedInsteadOfTruncating()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

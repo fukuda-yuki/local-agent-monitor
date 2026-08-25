@@ -118,7 +118,7 @@ public sealed class LocalMonitorV1CollectionRouteTests
     {
         var id="018f0000-0000-7000-8000-000000000001"; var zero=new LocalWorkspaceFact<long>("recorded",0); var missing=new LocalWorkspaceFact<long>("not_observed",null);
         var tokens=new LocalWorkspaceTokenFacts("session_run","inconsistent",1,1,new("recorded",10),new("recorded",2),missing,missing,new("recorded",20),zero,new("inconsistent",null),new("inconsistent",null));
-        var p=new LocalWorkspaceProjectionRow(id,0,1_767_225_601_000,"not_observed",null,"completed","partial",new("recorded",["github-copilot-cli"]),new("not_observed",[]),new(zero,missing,zero,zero,zero),tokens,"recorded","2026-01-01T00:00:00.0000000+00:00","2026-01-01T00:00:01.0000000+00:00",1000,["cache_inconsistent","token_inconsistent"],"seed");
+        var p=new LocalWorkspaceProjectionRow(id,0,1_767_225_601_000,"not_observed",null,"completed","partial",new("recorded",["copilot-cli"]),new("not_observed",[]),new(zero,missing,zero,zero,zero),tokens,"recorded","2026-01-01T00:00:00.0000000+00:00","2026-01-01T00:00:01.0000000+00:00","2026-01-01T00:00:02.0000000+00:00",1000,["cache_inconsistent","token_inconsistent"],"seed");
         return new(id,p,0,LocalRepositoryScopeAssignmentState.Unassigned,LocalRepositoryScopeAssignmentAuthority.None,null,[],true,true,true,LocalArchiveState.Archived,1,false,"session_archived");
     }
 
@@ -126,7 +126,7 @@ public sealed class LocalMonitorV1CollectionRouteTests
     {
         var id="018f0000-0000-7000-8000-000000000002"; var zero=new LocalWorkspaceFact<long>("recorded",0); var missing=new LocalWorkspaceFact<long>("not_observed",null);
         var tokens=new LocalWorkspaceTokenFacts("mixed","recorded",2,2,new("recorded",100),new("recorded",25),new("recorded",125),new("recorded",5),new("recorded",40),new("recorded",10),new("recorded",60),new("recorded",4000));
-        var p=new LocalWorkspaceProjectionRow(id,0,1_767_312_000_000,"recorded","Synthetic session","active","rich",new("recorded",["codex-app","github-copilot-chat"]),new("recorded",["model-a"]),new(new("recorded",1),zero,missing,zero,zero),tokens,"recorded","2026-01-02T00:00:00.0000000+00:00","2026-01-02T00:00:02.0000000+00:00",2000,[],"seed");
+        var p=new LocalWorkspaceProjectionRow(id,0,1_767_312_000_000,"recorded","Synthetic session","active","rich",new("recorded",["copilot-sdk","vscode"]),new("recorded",["model-a"]),new(new("recorded",1),zero,missing,zero,zero),tokens,"recorded","2026-01-02T00:00:00.0000000+00:00","2026-01-02T00:00:02.0000000+00:00","2026-01-02T00:00:03.0000000+00:00",2000,[],"seed");
         return new(id,p,2,LocalRepositoryScopeAssignmentState.Conflict,LocalRepositoryScopeAssignmentAuthority.Automatic,null,["018f0000-0000-7000-8000-000000000101","018f0000-0000-7000-8000-000000000102"],true,true,true,LocalArchiveState.Active,0,true,null);
     }
 
@@ -139,7 +139,7 @@ public sealed class LocalMonitorV1CollectionRouteTests
     private static LocalRepositoryScopeSessionSnapshot LargeSession(int index)
     {
         var id=$"018f0000-0000-7000-8000-{index:x12}"; var missing=new LocalWorkspaceFact<long>("not_observed",null);
-        var projection=new LocalWorkspaceProjectionRow(id,0,index,"recorded",new string('x',200_000),"active","rich",new("not_observed",[]),new("not_observed",[]),new(missing,missing,missing,missing,missing),new("none","not_observed",0,0,missing,missing,missing,missing,missing,missing,missing,missing),"not_observed",null,null,null,[],"seed");
+        var projection=new LocalWorkspaceProjectionRow(id,1,0,"recorded",new string('x',200_000),"active","rich",new("not_observed",[]),new("not_observed",[]),new(missing,missing,missing,missing,missing),new("none","not_observed",0,0,missing,missing,missing,missing,missing,missing,missing,missing),"not_observed",null,null,"2026-01-01T00:00:00.0000000+00:00",null,[],"seed");
         return new(id,projection,0,LocalRepositoryScopeAssignmentState.Unassigned,LocalRepositoryScopeAssignmentAuthority.None,null,[],true,true,true,LocalArchiveState.Active,0,true,null);
     }
 

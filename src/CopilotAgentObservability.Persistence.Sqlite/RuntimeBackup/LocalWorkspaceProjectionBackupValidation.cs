@@ -18,6 +18,10 @@ internal static class LocalWorkspaceProjectionBackupValidation
                   LEFT JOIN sessions s ON s.session_id=p.session_id
                   WHERE s.session_id IS NULL
                      OR length(p.revision_seed)=0
+                     OR p.last_seen_at<>s.last_seen_at COLLATE BINARY
+                     OR p.sort_group<>CASE WHEN s.started_at IS NULL THEN 1 ELSE 0 END
+                     OR s.started_at IS NULL AND p.sort_epoch_ms<>0
+                     OR s.started_at IS NOT NULL AND p.sort_epoch_ms<>MAX(0,CAST((julianday(s.started_at)-2440587.5)*86400000 AS INTEGER))
                      OR (SELECT COUNT(*) FROM local_workspace_session_sources x WHERE x.session_id=p.session_id)>5
                      OR (SELECT COUNT(*) FROM local_workspace_session_models x WHERE x.session_id=p.session_id)>16
                      OR EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id AND x.source NOT IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code'))
