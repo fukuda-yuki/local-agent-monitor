@@ -138,8 +138,13 @@ or live proof of every admitted r0002 tuple. Current r0002 remains exactly
 `1.0.65` and `1.0.75`, protocol `3`; the mandatory live lane is exactly bundled
 `1.0.75`, protocol `3`. Deterministic compatibility and admission coverage for
 `1.0.65` is not the mandatory live lane. Runtime identity remains exact and
-fail closed. T0b precedes r0002 and all producer startup/implementation code;
-D089 does not relax that sequencing. D087 and D088 remain unchanged.
+fail closed. D090 retracts the contradicted claim that current-release T0b
+preceded r0002 and producer implementation. This already-implemented release
+uses the exact post-implementation same-client proof plus deterministic
+r0002/identity/admission coverage; exact-final-candidate platform evidence,
+pinned full validation, and fresh independent review remain release gates.
+Future registry revisions or producer/startup implementations require T0b
+before implementation. D087 and D088 remain unchanged.
 
 The exact checked-in byte authorities and their SHA-256 identities are:
 
@@ -1154,9 +1159,10 @@ unlinked same-Session pair is not added and yields `null` count with
 `certification_pending`. The obsolete pre-release Skill rows are discarded
 without copy, backfill, dual readers or deletion of unrelated
 Session/raw/Retention data. D083 pins the exact wire and complete r0001
-registry. Under D086/D089, T0b-certified exact bundled `1.0.75` / protocol `3`
-preceded the unchanged exact two-entry r0002 and owned-session producer; the
-#158 atomic writer/importer implementation is complete. SDK claim admission
+registry. Under D090, exact bundled `1.0.75` / protocol `3` same-client live
+proof was accepted after the unchanged exact two-entry r0002 and owned-session
+producer; the former opposite chronology is retracted, and the #158 atomic
+writer/importer implementation is complete. SDK claim admission
 still requires exact current-registry identity and capability checks.
 Canonical details are
 [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)

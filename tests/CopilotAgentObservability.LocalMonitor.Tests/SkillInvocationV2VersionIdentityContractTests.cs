@@ -48,7 +48,7 @@ internal static class SkillInvocationNormalizedJsonTestWriter
 public sealed class SkillInvocationV2VersionIdentityContractTests
 {
     [Fact]
-    public void D089CurrentAuthority_SeparatesR0002AdmissionFromTheMandatoryLiveTuple()
+    public void D090CurrentAuthority_CorrectsChronologyWithoutRelaxingIdentityOrFutureGates()
     {
         var requirements = File.ReadAllText(RepositoryPath("docs", "requirements.md"));
         var specification = File.ReadAllText(RepositoryPath("docs", "spec.md"));
@@ -59,7 +59,10 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
 
         var requirementsSummary = Section(requirements, "- Skill invocation snapshot foundation", "- Codex App discovery");
         var requirementsD089 = Section(requirements, "### D089", "## 4. 非目的");
-        Assert.Contains("exact bundled `1.0.75` / protocol `3` T0b must precede r0002 and all producer startup/implementation code", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.False(HasStaleCurrentReleaseChronology(requirementsSummary));
+        Assert.Contains("same-client post-implementation T0b", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("future registry revisionまたはproducer/startup implementationでは実装前T0bをmandatory gate", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate platform/live refresh、full validation、review、releaseは未完了", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.Contains("r0002 deterministically admits exactly `1.0.65` and `1.0.75`", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.Contains("implementation is complete", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.DoesNotContain("implementation/platform/live/full-validation/review/release evidenceは未完了", requirementsSummary, StringComparison.Ordinal);
@@ -68,36 +71,88 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         Assert.Contains("mandatory live lane is exactly bundled `1.0.75`, protocol `3`", NormalizeWhitespace(specification), StringComparison.Ordinal);
 
         var specCurrent = Section(specification, "D086 supersedes only D083", "The exact checked-in byte authorities");
-        Assert.Contains("T0b precedes r0002 and all producer startup/implementation code", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        Assert.False(HasStaleCurrentReleaseChronology(specCurrent));
+        Assert.Contains("retracts the contradicted claim that current-release T0b preceded r0002 and producer implementation", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        Assert.Contains("Future registry revisions or producer/startup implementations require T0b before implementation", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate platform evidence, pinned full validation, and fresh independent review remain release gates", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
         var specCrossReference = Section(specification, "The independent `skill_projection:1` component", "The SDK transport and retained raw snapshot");
-        Assert.Contains("T0b-certified exact bundled `1.0.75` / protocol `3`", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
+        Assert.False(HasStaleCurrentReleaseChronology(specCrossReference));
+        Assert.Contains("exact bundled `1.0.75` / protocol `3` same-client live proof was accepted after the unchanged exact two-entry r0002 and owned-session producer", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
         Assert.Contains("#158 atomic writer/importer implementation is complete", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
         Assert.DoesNotContain("must still implement", specCrossReference, StringComparison.Ordinal);
 
         var currentProducer = Section(snapshotInterface, "### D086 current producer contract", "### D087 current content authority");
-        Assert.Contains("Versioned T0b precedes r0002 and all producer startup/implementation code", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        Assert.False(HasStaleCurrentReleaseChronology(currentProducer));
+        Assert.Contains("versioned T0b preceded r0002 and producer implementation", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        Assert.Contains("Future registry revisions or producer/startup implementations require T0b before implementation", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate platform evidence, pinned full validation, and fresh independent review remain release gates", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
         Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
         var finalGates = Section(snapshotInterface, "## Required TDD slices and release gates", "## What is decided versus what still requires evidence");
+        Assert.False(HasStaleCurrentReleaseChronology(finalGates));
         Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux live evidence remains pending", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.Contains("pinned full validation and review workflow", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
         Assert.DoesNotContain("prove each exact r0002 tuple", finalGates, StringComparison.Ordinal);
         Assert.DoesNotContain("An unproved tuple is not admitted", finalGates, StringComparison.Ordinal);
 
-        var d089 = Section(decisions, "## D089:", null);
+        var d086 = NormalizeWhitespace(Section(decisions, "## D086:", "## D085:"));
+        Assert.False(HasStaleCurrentReleaseChronology(d086));
+        Assert.Contains("As corrected by D090, this current release did not run versioned gate T0b before r0002 or producer startup code", d086, StringComparison.Ordinal);
+        Assert.Contains("future registry revisions and producer/ startup implementations must do so", d086, StringComparison.Ordinal);
+        Assert.Contains("On the same signed-in bundled client T0b must prove exact status Version and integer ProtocolVersion", d086, StringComparison.Ordinal);
+
+        var d089 = Section(decisions, "## D089:", "## D090:");
         var normalizedD089 = NormalizeWhitespace(d089);
         Assert.Contains("Status: Accepted (2026-08-25)", normalizedD089, StringComparison.Ordinal);
         Assert.Contains("deterministic compatibility and admission coverage for `1.0.65`", normalizedD089, StringComparison.Ordinal);
         Assert.Contains("not the mandatory live lane", normalizedD089, StringComparison.Ordinal);
         Assert.Contains("exact and fail closed", normalizedD089, StringComparison.Ordinal);
-        Assert.Contains("does not relax the pre-r0002 and pre-producer sequencing", normalizedD089, StringComparison.Ordinal);
+
+        var d090 = NormalizeWhitespace(Section(decisions, "## D090:", null));
+        Assert.False(HasStaleCurrentReleaseChronology(d090));
+        Assert.Contains("fc5a0e890341093fa42eec9f05f4b95569ea634c", d090, StringComparison.Ordinal);
+        Assert.Contains("007826104af146a0920e62939a47a2aa3503f86a", d090, StringComparison.Ordinal);
+        Assert.Contains("1ddc79142ba6afc93074360a19992d0c1eee0774", d090, StringComparison.Ordinal);
+        Assert.Contains("527c7b5f299296afefe13def783c08be121684b9", d090, StringComparison.Ordinal);
+        Assert.Contains("retracted, not merely left unproven", d090, StringComparison.Ordinal);
+        Assert.Contains("mandatory pre-implementation T0b", d090, StringComparison.Ordinal);
+        Assert.Contains("exact version/protocol/SessionStart", d090, StringComparison.Ordinal);
+        Assert.Contains("no-fallback", d090, StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux live refresh, final validation, independent review, release, merge, and Issue closure remain pending", d090, StringComparison.Ordinal);
 
         var legacyActivation = Section(snapshotInterface, "Historical D083 evidence", "## Group 6");
         Assert.Contains("Historical D083 evidence", NormalizeWhitespace(legacyActivation), StringComparison.Ordinal);
         Assert.Contains("superseded for the current release gate", NormalizeWhitespace(legacyActivation), StringComparison.Ordinal);
 
         var taskStatus = Section(task, "| Skill invocation snapshot (Issues #119/#157/#158)", "| Versioned pricing registry");
+        Assert.False(HasStaleCurrentReleaseChronology(taskStatus));
         Assert.Contains("implementation complete", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
-        Assert.Contains("platform-live evidence refresh and final validation-review pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate platform-live refresh and final validation-review pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux live refresh、pinned full validation、fresh independent review、release evidenceは未完了", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+
+        Assert.All(StaleCurrentReleaseChronologyPhrases, phrase =>
+            Assert.True(HasStaleCurrentReleaseChronology(phrase)));
+        Assert.False(HasStaleCurrentReleaseChronology(
+            "D090 retracts the contradicted claim that current-release T0b preceded r0002 and producer implementation."));
     }
+
+    private static bool HasStaleCurrentReleaseChronology(string section)
+    {
+        var normalized = NormalizeWhitespace(section);
+        return StaleCurrentReleaseChronologyPhrases.Any(phrase =>
+            normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static readonly string[] StaleCurrentReleaseChronologyPhrases =
+    [
+        "T0b must precede r0002",
+        "T0b precedes r0002",
+        "Versioned T0b precedes r0002",
+        "T0b preceded the unchanged exact two-entry r0002",
+        "Before r0002 or producer startup code, versioned gate T0b must prove",
+        "does not relax the pre-r0002 and pre-producer sequencing",
+        "Versioned T0b must first certify one signed-in bundled"
+    ];
 
     [Fact]
     public void D087CanonicalSources_KeepCurrentR0002DistinctFromHistoricalR0001()

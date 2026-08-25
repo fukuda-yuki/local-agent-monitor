@@ -740,8 +740,14 @@ live gate use the exact bundled `1.0.75`, protocol `3`. Deterministic compatibil
 and admission coverage for `1.0.65` is not the mandatory live lane. Every
 runtime identity observation remains exact and fail closed.
 
-Versioned T0b precedes r0002 and all producer startup/implementation code. On one same signed-
-in bundled client it proves exact Version/ProtocolVersion status, matching
+For this already-implemented release, D090 retracts the contradicted claim that
+versioned T0b preceded r0002 and producer implementation. Exact post-
+implementation same-client proof is accepted together with deterministic
+r0002/identity/admission coverage; exact-final-candidate platform evidence,
+pinned full validation, and fresh independent review remain release gates.
+Future registry revisions or producer/startup implementations require T0b
+before implementation. On one same signed-in bundled client T0b proves exact
+Version/ProtocolVersion status, matching
 SessionStart version, pre-creation callback registration on both sessions,
 prompt-free probe inventory, execution `DisabledSkills`, retained-root-only
 execution inventory/invocation, and exact task completion. Deterministic T0b
@@ -3046,14 +3052,18 @@ mutation. Until that separate promotion, no such exception exists.
    disposal/no-retention matrix. Windows and
    Linux gates may release independently; unsupported targets prove route
    absence while historical routes remain byte-identical.
-10. Versioned T0b and final live gates: the same bundled, signed-in client must
+10. Current-release T0b and final live gates: the same bundled, signed-in client must
     prove the exact bundled `1.0.75`, protocol `3` mandatory live tuple,
     matching SessionStart identity, prompt-free inventory probe, distinct
     DisabledSkills-frozen execution Session, retained-root-only inventory and
     invocation, exact completion, owned-session post-completion import, and one
     discovery without retaining raw user data/path evidence. This live gate does
     not replace deterministic `1.0.65` compatibility/admission coverage; no
-    global or externally selected CLI is used.
+    global or externally selected CLI is used. The accepted post-implementation
+    proof resolves the historical sequencing conflict, but production changed
+    afterward, so exact-final-candidate Windows/Linux live evidence remains
+    pending. Future registry revisions or producer/startup implementations must
+    pass T0b before implementation.
 11. Update and review the derived public workflow only with the implemented
     flags; run Markdown/link checks plus an exact stale search proving no #158
    workflow still names an obsolete dotted discovery configuration-key alias,

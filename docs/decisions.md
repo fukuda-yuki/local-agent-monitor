@@ -3910,8 +3910,10 @@ does not prove exclusive ownership or the resumed runtime identity. The sole
 producer is a raw-default Local Monitor raw-analysis session created and
 exclusively owned through completion by one admitted `CopilotClient`.
 
-Before r0002 or producer startup code, versioned gate T0b must prove on that
-same signed-in bundled client: exact status Version and integer
+As corrected by D090, this current release did not run versioned gate T0b
+before r0002 or producer startup code; future registry revisions and producer/
+startup implementations must do so. On the same signed-in bundled client T0b
+must prove exact status Version and integer
 ProtocolVersion, matching `SessionStartData.CopilotVersion`, callback
 registration before both session creations, prompt-free probe inventory,
 execution `DisabledSkills`, retained-root-only execution inventory/invocation,
@@ -4106,5 +4108,37 @@ status, SessionStart, capability, request, registry, and evidence checks remain
 exact and fail closed. Historical D083 `1.0.65` material remains preserved as
 decision history and does not define the current release gate.
 
-D089 changes only the mandatory live tuple; it does not relax the pre-r0002 and
-pre-producer sequencing established by D086.
+D089 changes only the mandatory live tuple. D090 supersedes its sequencing
+statement and the corresponding current-release chronology in D086.
+
+## D090: Correct current-release T0b chronology and acceptance sequencing
+
+Status: Accepted (2026-08-25)
+
+Durable repository history proves that D086/S3 authority was recorded at
+`fc5a0e890341093fa42eec9f05f4b95569ea634c`, r0002 and the producer were
+implemented in its direct child `007826104af146a0920e62939a47a2aa3503f86a`,
+and the importer followed at `1ddc79142ba6afc93074360a19992d0c1eee0774`.
+Accepted signed-in live proof arrived only later, at
+`527c7b5f299296afefe13def783c08be121684b9` on 2026-08-25. The D086/D089 claim
+that current-release T0b preceded r0002 and producer implementation is therefore
+retracted, not merely left unproven.
+
+For this already-implemented current release, acceptance uses exact post-
+implementation bundled `1.0.75` / protocol `3` same-client live proof together
+with deterministic r0002/identity/admission coverage, candidate-bound platform
+evidence, pinned full validation, and fresh independent review. The earlier
+accepted proof resolves the historical sequencing conflict. Production changed
+after that proof, however, so an exact-final-candidate Windows/Linux live refresh,
+final validation, independent review, release, merge, and Issue closure remain
+pending and must not be inferred from the historical anchor.
+
+Every future registry revision or producer/startup implementation retains a
+mandatory pre-implementation T0b. D090 changes chronology and acceptance
+sequencing only. It does not relax exact version/protocol/SessionStart,
+capability, registry, retained-root-only owned-session topology, external
+CLI/VS Code session prohibition, no-fallback, no-compatibility-range, wire,
+schema, HTTP, CLI, storage, D087 content-authority, or D088 shutdown behavior.
+D090 takes precedence over only the conflicting chronology and current-release
+acceptance-sequencing clauses in D083, D086, and D089; all other clauses remain
+authoritative.
