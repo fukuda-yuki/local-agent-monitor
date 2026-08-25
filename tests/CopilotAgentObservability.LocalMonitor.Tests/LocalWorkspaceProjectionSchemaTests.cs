@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalWorkspaceProjectionSchemaTests
 {
     [Fact]
-    public void EnsureCreatesExactVersionAndSixOwnedTables()
+    public void EnsureCreatesExactVersionAndOwnedTables()
     {
         using var connection = OpenSessionDatabase();
         using var transaction = connection.BeginTransaction();
@@ -17,7 +17,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
             ["local_workspace_projection:1"],
             Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(
-            ["local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_token_observations"],
+            ["local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
             Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'local_workspace_%' ORDER BY name;"));
     }
 

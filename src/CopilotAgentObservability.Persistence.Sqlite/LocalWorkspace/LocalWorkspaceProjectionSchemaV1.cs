@@ -12,7 +12,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
     [
         "local_workspace_sessions", "local_workspace_session_sources",
         "local_workspace_session_models", "local_workspace_session_activity",
-        "local_workspace_token_observations", "local_workspace_projection_state",
+        "local_workspace_token_observations", "local_workspace_span_facts", "local_workspace_projection_state",
     ];
 
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
@@ -92,6 +92,15 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 projector_key TEXT PRIMARY KEY CHECK(projector_key='local-workspace-projection-v1'),
                 session_frontier TEXT NULL,
                 refreshed_at TEXT NOT NULL
+            );
+            """),
+        new("table", "local_workspace_span_facts", "local_workspace_span_facts", """
+            CREATE TABLE local_workspace_span_facts (
+                raw_record_id INTEGER NOT NULL,
+                span_ordinal INTEGER NOT NULL,
+                retry_count INTEGER NULL CHECK(retry_count IS NULL OR retry_count >= 0),
+                producer_total_tokens INTEGER NULL CHECK(producer_total_tokens IS NULL OR producer_total_tokens >= 0),
+                PRIMARY KEY(raw_record_id,span_ordinal)
             );
             """),
     ];

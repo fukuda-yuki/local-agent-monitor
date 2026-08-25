@@ -27,5 +27,5 @@ internal sealed record MonitorSpanProjection(
     double? DurationMs,
     string? StartTime,
     string? EndTime,
-    int? RetryCount = null,
-    int? ProducerTotalTokens = null);
+    [property: System.Text.Json.Serialization.JsonIgnore] int? RetryCount = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] int? ProducerTotalTokens = null);

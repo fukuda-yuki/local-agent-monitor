@@ -732,7 +732,7 @@ internal sealed partial class RawTelemetryStore
                     operation, category, tool_name, tool_type, mcp_tool_name,
                     mcp_server_hash, agent_name, request_model, response_model,
                     input_tokens, output_tokens, total_tokens, reasoning_tokens,
-                    cache_read_tokens, cache_creation_tokens, retry_count, producer_total_tokens, status, error_type,
+                    cache_read_tokens, cache_creation_tokens, status, error_type,
                     finish_reasons, conversation_id, duration_ms, start_time, end_time,
                     projected_at
                 ) VALUES (
@@ -740,7 +740,7 @@ internal sealed partial class RawTelemetryStore
                     $operation, $category, $tool_name, $tool_type, $mcp_tool_name,
                     $mcp_server_hash, $agent_name, $request_model, $response_model,
                     $input_tokens, $output_tokens, $total_tokens, $reasoning_tokens,
-                    $cache_read_tokens, $cache_creation_tokens, $retry_count, $producer_total_tokens, $status, $error_type,
+                    $cache_read_tokens, $cache_creation_tokens, $status, $error_type,
                     $finish_reasons, $conversation_id, $duration_ms, $start_time, $end_time,
                     $projected_at
                 );
@@ -765,8 +765,6 @@ internal sealed partial class RawTelemetryStore
             AddParameter(insert, "$reasoning_tokens", span.ReasoningTokens);
             AddParameter(insert, "$cache_read_tokens", span.CacheReadTokens);
             AddParameter(insert, "$cache_creation_tokens", span.CacheCreationTokens);
-            AddParameter(insert, "$retry_count", span.RetryCount);
-            AddParameter(insert, "$producer_total_tokens", span.ProducerTotalTokens);
             AddParameter(insert, "$status", span.Status);
             AddParameter(insert, "$error_type", span.ErrorType);
             AddParameter(insert, "$finish_reasons", span.FinishReasons);
@@ -776,6 +774,17 @@ internal sealed partial class RawTelemetryStore
             AddParameter(insert, "$end_time", span.EndTime);
             AddParameter(insert, "$projected_at", projectedAtText);
             insert.ExecuteNonQuery();
+            using var collectionInstalled = connection.CreateCommand();
+            collectionInstalled.Transaction = transaction;
+            collectionInstalled.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts');";
+            if (Convert.ToInt64(collectionInstalled.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            {
+                using var collectionFact = connection.CreateCommand();
+                collectionFact.Transaction = transaction;
+                collectionFact.CommandText = "INSERT OR REPLACE INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens) VALUES($raw,$ordinal,$retry,$total);";
+                AddParameter(collectionFact, "$raw", rawRecordId); AddParameter(collectionFact, "$ordinal", span.SpanOrdinal); AddParameter(collectionFact, "$retry", span.RetryCount); AddParameter(collectionFact, "$total", span.ProducerTotalTokens);
+                collectionFact.ExecuteNonQuery();
+            }
         }
 
         // Update rollup columns on monitor_traces for each affected trace_id.

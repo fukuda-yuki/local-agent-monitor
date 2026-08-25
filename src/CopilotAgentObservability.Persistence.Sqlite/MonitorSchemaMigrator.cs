@@ -143,8 +143,6 @@ internal static class MonitorSchemaMigrator
         AddColumnIfMissing(connection, transaction, "monitor_traces", "cache_read_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "cache_creation_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "trace_status", "TEXT NULL");
-        AddColumnIfMissing(connection, transaction, "monitor_spans", "retry_count", "INTEGER NULL CHECK(retry_count IS NULL OR retry_count >= 0)");
-        AddColumnIfMissing(connection, transaction, "monitor_spans", "producer_total_tokens", "INTEGER NULL CHECK(producer_total_tokens IS NULL OR producer_total_tokens >= 0)");
 
         EnsureRawRecordsRetentionOwnerToken(connection, transaction);
         EnsureAnalysisRetentionSchema(connection, transaction);

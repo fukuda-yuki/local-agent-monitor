@@ -18,7 +18,7 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupRestoreTests
 {
     [Fact]
-    public void LocalWorkspaceProjection_AllSixTablesRoundTripThroughProductionRestore()
+    public void LocalWorkspaceProjection_AllOwnedTablesRoundTripThroughProductionRestore()
     {
         using var temp = new RestoreTemp();
         using var fixture = new LocalRepositoryCatalogFixture();
@@ -34,6 +34,7 @@ public sealed class RuntimeBackupRestoreTests
                 run.ExecuteNonQuery();
             }
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+            temp.Execute(connection, "INSERT INTO local_workspace_span_facts VALUES(1,0,0,NULL);");
             using var transaction = connection.BeginTransaction(deferred: true);
             LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction);
         }
@@ -49,14 +50,14 @@ public sealed class RuntimeBackupRestoreTests
         var backup = service.CreateAndPublish(source, bundle);
         Assert.True(backup.Success, backup.ErrorCode);
         using (var connection = temp.Open(source))
-            temp.Execute(connection, "DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_sessions; DELETE FROM local_workspace_projection_state; DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+            temp.Execute(connection, "DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_span_facts; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_sessions; DELETE FROM local_workspace_projection_state; DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
 
         var restored = service.Restore(bundle, source, new RuntimeRestoreOptions());
 
         Assert.True(restored.Success, restored.ErrorCode);
         Assert.Equal(expected, temp.SnapshotOwnedRows(source, "local_workspace_"));
         using var verification = temp.Open(source);
-        Assert.Equal(6, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.Equal(7, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.True(temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM {table};") > 0));
         Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         using var validation = verification.BeginTransaction(deferred: true);
@@ -3025,7 +3026,7 @@ public sealed class RuntimeBackupRestoreTests
                     + "DROP TABLE IF EXISTS local_workspace_session_sources;"
                     + "DROP TABLE IF EXISTS local_workspace_session_models;"
                     + "DROP TABLE IF EXISTS local_workspace_session_activity;"
-                    + "DROP TABLE IF EXISTS local_workspace_token_observations;"
+                    + "DROP TABLE IF EXISTS local_workspace_token_observations;DROP TABLE IF EXISTS local_workspace_span_facts;"
                     + "DROP TABLE IF EXISTS local_workspace_projection_state;"
                     + "DROP TABLE IF EXISTS local_workspace_sessions;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
