@@ -118,13 +118,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             catch(OverflowException){overflow=true;return new("oversized",null);}
         }
         var input=Fact(r=>r.Input); var output=Fact(r=>r.Output); var producerTotal=Fact(r=>r.Total); var reasoning=Fact(r=>r.Reasoning); var cache=Fact(r=>r.CacheRead); var creation=Fact(r=>r.CacheCreation);
-        var producerContradiction = false;
-        if (producerTotal.State=="recorded" && input.State=="recorded" && output.State=="recorded")
-        {
-            try { producerContradiction = producerTotal.Value != checked(input.Value!.Value + output.Value!.Value); }
-            catch (OverflowException) { overflow = true; }
-        }
-        var inconsistent=input.State=="recorded"&&cache.State=="recorded"&&cache.Value>input.Value || producerContradiction;
+        var inconsistent=input.State=="recorded"&&cache.State=="recorded"&&cache.Value>input.Value;
         var componentGap = new[] { input, output, producerTotal, reasoning, cache, creation }.Any(f => f.State == "capture_gap");
         var overall=overflow?"oversized":inconsistent?"inconsistent":available==0?"not_observed":available<total||componentGap?"capture_gap":"recorded";
         LocalWorkspaceFact<long> derived;

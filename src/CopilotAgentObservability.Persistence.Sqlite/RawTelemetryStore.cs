@@ -732,7 +732,7 @@ internal sealed partial class RawTelemetryStore
                     operation, category, tool_name, tool_type, mcp_tool_name,
                     mcp_server_hash, agent_name, request_model, response_model,
                     input_tokens, output_tokens, total_tokens, reasoning_tokens,
-                    cache_read_tokens, cache_creation_tokens, status, error_type,
+                    cache_read_tokens, cache_creation_tokens, retry_count, status, error_type,
                     finish_reasons, conversation_id, duration_ms, start_time, end_time,
                     projected_at
                 ) VALUES (
@@ -740,7 +740,7 @@ internal sealed partial class RawTelemetryStore
                     $operation, $category, $tool_name, $tool_type, $mcp_tool_name,
                     $mcp_server_hash, $agent_name, $request_model, $response_model,
                     $input_tokens, $output_tokens, $total_tokens, $reasoning_tokens,
-                    $cache_read_tokens, $cache_creation_tokens, $status, $error_type,
+                    $cache_read_tokens, $cache_creation_tokens, $retry_count, $status, $error_type,
                     $finish_reasons, $conversation_id, $duration_ms, $start_time, $end_time,
                     $projected_at
                 );
@@ -765,6 +765,7 @@ internal sealed partial class RawTelemetryStore
             AddParameter(insert, "$reasoning_tokens", span.ReasoningTokens);
             AddParameter(insert, "$cache_read_tokens", span.CacheReadTokens);
             AddParameter(insert, "$cache_creation_tokens", span.CacheCreationTokens);
+            AddParameter(insert, "$retry_count", span.RetryCount);
             AddParameter(insert, "$status", span.Status);
             AddParameter(insert, "$error_type", span.ErrorType);
             AddParameter(insert, "$finish_reasons", span.FinishReasons);
@@ -823,6 +824,7 @@ internal sealed partial class RawTelemetryStore
                         ReasoningTokens: null,
                         CacheReadTokens: sr.IsDBNull(13) ? null : sr.GetInt32(13),
                         CacheCreationTokens: sr.IsDBNull(14) ? null : sr.GetInt32(14),
+                        RetryCount: null,
                         Status: sr.IsDBNull(15) ? null : sr.GetString(15),
                         ErrorType: null,
                         FinishReasons: null,

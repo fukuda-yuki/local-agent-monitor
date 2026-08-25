@@ -26,4 +26,5 @@ internal sealed record MonitorSpanProjection(
     string? ConversationId,
     double? DurationMs,
     string? StartTime,
-    string? EndTime);
+    string? EndTime,
+    int? RetryCount = null);

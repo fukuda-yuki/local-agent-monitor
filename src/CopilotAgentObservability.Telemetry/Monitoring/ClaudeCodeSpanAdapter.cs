@@ -55,6 +55,7 @@ internal static class ClaudeCodeSpanAdapter
             ReasoningTokens: null,
             CacheReadTokens: cacheReadTokens,
             CacheCreationTokens: cacheCreationTokens,
+            RetryCount: isLlmRequest ? MonitorSpanProjectionBuilder.ReadRetryCount(span) : null,
             Status: status,
             ErrorType: null,
             FinishReasons: null,

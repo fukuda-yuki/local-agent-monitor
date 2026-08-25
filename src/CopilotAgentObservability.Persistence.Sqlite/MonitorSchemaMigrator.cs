@@ -87,6 +87,7 @@ internal static class MonitorSchemaMigrator
                 repo_snapshot TEXT NULL,
                 cache_read_tokens INTEGER NULL,
                 cache_creation_tokens INTEGER NULL,
+                retry_count INTEGER NULL CHECK(retry_count IS NULL OR retry_count >= 0),
                 trace_status TEXT NULL
             );
             """);
@@ -143,6 +144,7 @@ internal static class MonitorSchemaMigrator
         AddColumnIfMissing(connection, transaction, "monitor_traces", "cache_read_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "cache_creation_tokens", "INTEGER NULL");
         AddColumnIfMissing(connection, transaction, "monitor_traces", "trace_status", "TEXT NULL");
+        AddColumnIfMissing(connection, transaction, "monitor_spans", "retry_count", "INTEGER NULL CHECK(retry_count IS NULL OR retry_count >= 0)");
 
         EnsureRawRecordsRetentionOwnerToken(connection, transaction);
         EnsureAnalysisRetentionSchema(connection, transaction);

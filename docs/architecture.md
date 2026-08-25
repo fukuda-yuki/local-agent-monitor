@@ -217,7 +217,7 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
   accepted Session collection request transport; q/model search values remain
   transient and it has no GET or saved-search fallback. #133 does not yet fix
-    its exact success wire is frozen by #171. Only pure #136 parsers may precede the
+    Its exact success wire is frozen by #171. Only pure #136 parsers may precede the
   canonical #134 Workspace-read response contract; #134 alone maps and
   serializes the endpoint after that gate closes.
   It does not widen `/api/monitor/*`,

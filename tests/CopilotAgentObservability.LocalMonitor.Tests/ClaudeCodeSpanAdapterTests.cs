@@ -119,7 +119,7 @@ public sealed class ClaudeCodeSpanAdapterTests
             "tool_name", "tool_type", "mcp_tool_name", "mcp_server_hash", "agent_name",
             "request_model", "response_model", "input_tokens", "output_tokens", "total_tokens",
             "reasoning_tokens", "cache_read_tokens", "cache_creation_tokens", "status", "error_type",
-            "finish_reasons", "conversation_id", "duration_ms", "start_time", "end_time",
+            "finish_reasons", "conversation_id", "duration_ms", "start_time", "end_time", "retry_count",
         };
         Assert.All(
             canonical.RootElement.EnumerateArray(),
@@ -172,6 +172,7 @@ public sealed class ClaudeCodeSpanAdapterTests
               {"key":"reasoning_tokens","value":{"intValue":"12"}},
               {"key":"ttft_ms","value":{"doubleValue":13.5}},
               {"key":"attempt","value":{"intValue":"2"}},
+              {"key":"gen_ai.request.attempt","value":{"intValue":"2"}},
               {"key":"agent_id","value":{"stringValue":"LEAK_AGENT_ID"}},
               {"key":"parent_agent_id","value":{"stringValue":"LEAK_PARENT_AGENT_ID"}},
               {"key":"response.model_output","value":{"stringValue":"LEAK_MODEL_OUTPUT"}},
@@ -218,6 +219,7 @@ public sealed class ClaudeCodeSpanAdapterTests
         Assert.Equal(4, spans.Count);
         Assert.Equal("chat", spans[0].Operation);
         Assert.Equal("error", spans[0].Category);
+        Assert.Equal(2, spans[0].RetryCount);
         Assert.Null(spans[0].AgentName);
         Assert.Null(spans[0].ResponseModel);
         Assert.Null(spans[0].TotalTokens);

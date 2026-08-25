@@ -130,6 +130,7 @@ internal static class MonitorSpanProjectionBuilder
         var reasoningTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, ReasoningTokenKeys);
         var cacheReadTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, CacheReadTokenKeys);
         var cacheCreationTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, CacheCreationTokenKeys);
+        var retryCount = ReadRetryCount(span);
 
         totalTokens ??= AddTokenCounts(inputTokens, outputTokens);
 
@@ -159,6 +160,7 @@ internal static class MonitorSpanProjectionBuilder
             ReasoningTokens: reasoningTokens,
             CacheReadTokens: cacheReadTokens,
             CacheCreationTokens: cacheCreationTokens,
+            RetryCount: retryCount,
             Status: status,
             ErrorType: errorType,
             FinishReasons: finishReasons,
@@ -166,6 +168,15 @@ internal static class MonitorSpanProjectionBuilder
             DurationMs: ComputeDurationMs(span.StartTimeUnixNano, span.EndTimeUnixNano),
             StartTime: FormatTimestamp(span.StartTimeUnixNano),
             EndTime: FormatTimestamp(span.EndTimeUnixNano));
+    }
+
+    internal static int? ReadRetryCount(OtlpSpanReader.RawSpanInfo span)
+    {
+        int? maximum = null;
+        if (OtlpSpanReader.ReadFirstInt(span.Attributes, ["gen_ai.request.attempt"]) is { } attribute) maximum = attribute;
+        foreach (var item in span.Events.Where(item => item.Name == "gen_ai.request.attempt"))
+            if (OtlpSpanReader.ReadFirstInt(item.Attributes, ["attempt"]) is { } attempt && (maximum is null || attempt > maximum)) maximum = attempt;
+        return maximum is >= 1 ? maximum - 1 : maximum == 0 ? 0 : null;
     }
 
     private static string? ClassifyOperation(OtlpSpanReader.RawSpanInfo span)

@@ -272,7 +272,7 @@ public sealed class MonitorSchemaMigrationFixtureTests
 
         var expectedSpanRows = sentinels.SpanId is null
             ? Array.Empty<string>()
-            : new[] { $"i:{sentinels.SpanRowId}|i:{sentinels.RawRecordId}|s:{sentinels.TraceId}|s:{sentinels.SpanId}|<null>|i:0|{string.Join('|', Enumerable.Repeat("<null>", 22))}|s:2026-07-12T00:00:01.0000000+00:00" };
+            : new[] { $"i:{sentinels.SpanRowId}|i:{sentinels.RawRecordId}|s:{sentinels.TraceId}|s:{sentinels.SpanId}|<null>|i:0|{string.Join('|', Enumerable.Repeat("<null>", 22))}|s:2026-07-12T00:00:01.0000000+00:00|<null>" };
         Assert.Equal(expectedSpanRows, ReadRows(connection, "monitor_spans"));
         Assert.Empty(ReadRows(connection, "source_schema_observations"));
         Assert.Empty(ReadRows(connection, "source_unknown_observations"));
