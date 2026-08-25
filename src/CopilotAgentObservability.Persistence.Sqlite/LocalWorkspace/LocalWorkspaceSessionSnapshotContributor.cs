@@ -6,9 +6,13 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
 {
     private const int MaximumSessions = 10_000;
     private readonly TimeProvider timeProvider;
+    private readonly Action<string>? statementObserver;
 
-    internal LocalWorkspaceSessionSnapshotContributor(TimeProvider? timeProvider = null) =>
+    internal LocalWorkspaceSessionSnapshotContributor(TimeProvider? timeProvider = null, Action<string>? statementObserver = null)
+    {
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.statementObserver = statementObserver;
+    }
 
     public ValueTask<LocalRepositorySessionContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
@@ -17,18 +21,20 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
     {
         var now = timeProvider.GetUtcNow().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         return transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadRowsAsync(connection, sqliteTransaction, now, token), cancellationToken);
+            ReadRowsAsync(connection, sqliteTransaction, now, statementObserver, token), cancellationToken);
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string now,
+        Action<string>? statementObserver,
         CancellationToken cancellationToken)
     {
         var rows = new List<MutableRow>();
         using (var command = connection.CreateCommand())
         {
+            statementObserver?.Invoke("sessions");
             command.Transaction = transaction;
             command.CommandText = """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
@@ -55,16 +61,18 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             }
         }
         var byId = rows.ToDictionary(row => row.SessionId, StringComparer.Ordinal);
-        await ReadPairs(connection, transaction, "SELECT session_id,source FROM local_workspace_session_sources ORDER BY session_id,source;", byId, static (row, value) => row.Sources.Add(value), cancellationToken);
-        await ReadPairs(connection, transaction, "SELECT session_id,model FROM local_workspace_session_models ORDER BY session_id,model;", byId, static (row, value) => row.Models.Add(value), cancellationToken);
+        await ReadPairs(connection, transaction, "sources", "SELECT session_id,source FROM local_workspace_session_sources ORDER BY session_id,source;", byId, static (row, value) => row.Sources.Add(value), statementObserver, cancellationToken);
+        await ReadPairs(connection, transaction, "models", "SELECT session_id,model FROM local_workspace_session_models ORDER BY session_id,model;", byId, static (row, value) => row.Models.Add(value), statementObserver, cancellationToken);
         using (var command = connection.CreateCommand())
         {
+            statementObserver?.Invoke("activity");
             command.Transaction = transaction;
             command.CommandText = "SELECT session_id,kind,state,count FROM local_workspace_session_activity ORDER BY session_id,kind;";
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.Activity[reader.GetString(1)] = new(reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt64(3));
         }
+        statementObserver?.Invoke("skills");
         var skillAggregates = SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, byId.Keys.ToArray());
         foreach (var row in rows)
             row.Activity["skill"] = skillAggregates.TryGetValue(row.SessionId, out var aggregate)
@@ -72,6 +80,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 : new("not_observed", null);
         using (var command = connection.CreateCommand())
         {
+            statementObserver?.Invoke("tokens");
             command.Transaction = transaction;
             command.CommandText = """
                 WITH ranked AS (
@@ -106,8 +115,9 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
-    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string sql, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, CancellationToken token)
+    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token)
     {
+        statementObserver?.Invoke(name);
         using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql;
         using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
         while (await reader.ReadAsync(token).ConfigureAwait(false)) if (rows.TryGetValue(reader.GetString(0), out var row)) add(row, reader.GetString(1));

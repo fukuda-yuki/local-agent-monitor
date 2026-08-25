@@ -10,6 +10,7 @@ using CopilotAgentObservability.LocalMonitor.Events;
 using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.HistoricalImport;
 using CopilotAgentObservability.LocalMonitor.Ingestion;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.LocalMonitor.ProposalApply;
 using CopilotAgentObservability.LocalMonitor.Pricing;
@@ -511,7 +512,8 @@ internal static class MonitorHost
                 new LocalWorkspaceSessionSnapshotContributor(timeProvider));
             builder.Services.AddSingleton<ILocalArchiveFactSnapshotContributor>(SqliteLocalArchiveFactSnapshotContributor.Instance);
             builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
-                new SqliteLocalRepositoryScopeSnapshotService(
+                testOptions?.LocalRepositoryScopeSnapshotService
+                ?? new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
                     services.GetRequiredService<ILocalArchiveFactSnapshotContributor>()));
@@ -717,9 +719,10 @@ internal static class MonitorHost
             var runtimeBackupPath = RuntimeBackupRoutes.IsPath(context.Request.Path);
             var localRepositoryPath = LocalRepositoryRoutes.IsNamespacePath(context.Request.Path);
             var localArchivePath = LocalArchiveRoutes.IsPath(context);
+            var localMonitorV1CollectionPath = LocalMonitorV1CollectionRoutes.IsPath(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath || localArchivePath)
+                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -780,6 +783,10 @@ internal static class MonitorHost
                         StatusCodes.Status400BadRequest,
                         "invalid_host");
                 }
+                else if (localMonitorV1CollectionPath)
+                {
+                    await LocalMonitorV1CollectionRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
                 else
                 {
                     await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
@@ -790,6 +797,7 @@ internal static class MonitorHost
             if (options.SanitizedOnly
                 && (localRepositoryPath
                     || localArchivePath
+                    || localMonitorV1CollectionPath
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
@@ -802,6 +810,7 @@ internal static class MonitorHost
         });
         if (!options.SanitizedOnly)
         {
+            LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(
@@ -2675,6 +2684,10 @@ internal sealed class MonitorHostTestOptions
     public Action<LocalRepositoryCatalogHostedServiceCheckpoint>? LocalRepositoryCatalogHostedServiceCheckpoint { get; init; }
 
     public ILocalRepositoryReconciliationCheckpoint? LocalRepositoryReconciliationCheckpoint { get; init; }
+
+    public ILocalRepositoryScopeSnapshotService? LocalRepositoryScopeSnapshotService { get; init; }
+
+    public LocalMonitorV1CollectionTestOverrides? LocalMonitorV1CollectionOverrides { get; init; }
 
     public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
 

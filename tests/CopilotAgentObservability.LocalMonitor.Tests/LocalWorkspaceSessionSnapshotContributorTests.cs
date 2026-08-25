@@ -32,11 +32,32 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        var result = await new LocalWorkspaceSessionSnapshotContributor().ReadAsync(
+        var statements = new List<string>();
+        var result = await new LocalWorkspaceSessionSnapshotContributor(statementObserver: statements.Add).ReadAsync(
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
+        Assert.Equal(["sessions", "sources", "models", "activity", "skills", "tokens"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
+    }
+
+    [Fact]
+    public void CandidateReadPlanUsesProjectionAndExactLabelJoinIndexesWithoutPerRowSubqueries()
+    {
+        using var connection=LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection,DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using var command=connection.CreateCommand(); command.CommandText="""
+            EXPLAIN QUERY PLAN SELECT p.session_id,c.event_id
+            FROM local_workspace_sessions p
+            LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
+            LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
+            ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
+            """;
+        using var reader=command.ExecuteReader(); var details=new List<string>(); while(reader.Read())details.Add(reader.GetString(3));
+        Assert.Contains(details,detail=>detail.Contains("local_workspace_sessions",StringComparison.Ordinal)&&detail.Contains("INDEX",StringComparison.Ordinal));
+        Assert.Contains(details,detail=>detail.Contains("session_events",StringComparison.Ordinal)&&detail.Contains("INDEX",StringComparison.Ordinal));
+        Assert.Contains(details,detail=>detail.Contains("session_event_content",StringComparison.Ordinal)&&detail.Contains("INDEX",StringComparison.Ordinal));
+        Assert.DoesNotContain(details,detail=>detail.Contains("CORRELATED",StringComparison.Ordinal)||detail.Contains("TEMP B-TREE",StringComparison.Ordinal));
     }
 
     [Theory]

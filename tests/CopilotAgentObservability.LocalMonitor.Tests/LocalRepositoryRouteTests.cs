@@ -23,13 +23,14 @@ public sealed class LocalRepositoryRouteTests
     private const string SessionId = "01900000-0000-7000-8000-0000000000a1";
 
     [Fact]
-    public async Task RawDefault_MapsExactlyFiveMethodTemplatePairs()
+    public async Task RawDefault_MapsExactlySixMethodTemplatePairs()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
 
         Assert.Equal(
             [
+                ("GET", "/api/local-monitor/v1/repositories"),
                 ("POST", "/api/local-monitor/v1/repositories"),
                 ("PATCH", "/api/local-monitor/v1/repositories/{repositoryId}"),
                 ("GET", "/api/local-monitor/v1/repositories/{repositoryId}/locators"),
@@ -90,7 +91,7 @@ public sealed class LocalRepositoryRouteTests
     }
 
     [Theory]
-    [InlineData("/api/local-monitor/v1/repositories", "POST")]
+    [InlineData("/api/local-monitor/v1/repositories", "GET,POST")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001", "PATCH")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001/locators", "GET")]
     [InlineData("/api/local-monitor/v1/session-repository-actions", "POST")]
@@ -105,7 +106,7 @@ public sealed class LocalRepositoryRouteTests
         Assert.Equal(HttpStatusCode.MethodNotAllowed, owned.StatusCode);
         Assert.Equal("{\"error\":\"method_not_allowed\"}", await owned.Content.ReadAsStringAsync());
         Assert.True(owned.Headers.CacheControl?.NoStore);
-        Assert.Equal([allowedMethod], AllowedMethods(owned));
+        Assert.Equal(allowedMethod.Split(','), AllowedMethods(owned));
     }
 
     [Fact]
@@ -124,7 +125,7 @@ public sealed class LocalRepositoryRouteTests
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, postOnly.StatusCode);
         Assert.Empty(await postOnly.Content.ReadAsByteArrayAsync());
-        Assert.Equal(["POST"], AllowedMethods(postOnly));
+        Assert.Equal(["GET", "POST"], AllowedMethods(postOnly));
         Assert.Equal(HttpStatusCode.MethodNotAllowed, getRoute.StatusCode);
         Assert.Empty(await getRoute.Content.ReadAsByteArrayAsync());
         Assert.Equal(["GET"], AllowedMethods(getRoute));
@@ -134,26 +135,18 @@ public sealed class LocalRepositoryRouteTests
     }
 
     [Fact]
-    public async Task FutureCollectionGet_IsSelectedUntouchedAndContributesToAllow()
+    public async Task ActivatedCollectionGet_IsSelectedAndContributesToAllow()
     {
         using var temp = new MonitorTempDirectory();
         var options = QuietHost();
-        options.AdditionalEndpoints = endpoints => endpoints.MapGet(
-            "/api/local-monitor/v1/repositories",
-            async context =>
-            {
-                context.Response.StatusCode = 202;
-                context.Response.ContentType = "application/future+json";
-                await context.Response.WriteAsync("future-owner");
-            });
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: options);
 
         using var get = await host.Client.GetAsync("/api/local-monitor/v1/repositories");
         using var delete = await host.Client.DeleteAsync("/api/local-monitor/v1/repositories");
 
-        Assert.Equal(HttpStatusCode.Accepted, get.StatusCode);
-        Assert.Equal("application/future+json", get.Content.Headers.ContentType?.ToString());
-        Assert.Equal("future-owner", await get.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
+        Assert.Contains("\"schema_version\":\"local-monitor-repositories.response.v1\"", await get.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, delete.StatusCode);
         Assert.Contains("POST", AllowedMethods(delete));
         Assert.Contains("GET", AllowedMethods(delete));
