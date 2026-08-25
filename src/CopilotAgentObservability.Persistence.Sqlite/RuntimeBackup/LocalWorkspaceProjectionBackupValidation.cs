@@ -140,6 +140,17 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 actual.Add((reader.GetInt64(0), reader.GetInt32(1)),
                     (reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetInt64(3)));
         }
+        using (var deleted = connection.CreateCommand())
+        {
+            deleted.Transaction = transaction;
+            deleted.CommandText = """
+                SELECT EXISTS(SELECT 1 FROM local_workspace_span_facts f
+                  JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(f.raw_record_id AS TEXT)
+                  JOIN retention_tombstones t ON t.item_id=i.item_id
+                  WHERE i.state='deleted' AND i.read_denied_at IS NOT NULL AND i.deleted_at=t.deleted_at);
+                """;
+            if (Convert.ToInt64(deleted.ExecuteScalar(), CultureInfo.InvariantCulture) != 0) throw new InvalidOperationException();
+        }
         if (actual.Keys.Any(key => !monitorKeys.Contains(key)))
             throw new InvalidOperationException();
         var availableActual = actual.Where(pair => availableRawIds.Contains(pair.Key.RawId)).ToDictionary();

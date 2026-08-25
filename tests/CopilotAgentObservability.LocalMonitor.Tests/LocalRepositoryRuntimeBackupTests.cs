@@ -669,6 +669,33 @@ public sealed class LocalRepositoryRuntimeBackupTests
     }
 
     [Fact]
+    public async Task DeletedRawTombstoneWithStaleSpanFactIsRejectedAcrossBackupSurfaces()
+    {
+        using var fixture = await CreatePopulatedCatalogAsync();
+        var directory = Path.GetDirectoryName(fixture.DatabasePath)!;
+        var valid = Path.Combine(directory, "deleted-fact-valid.zip");
+        var deleted = Path.Combine(directory, "deleted-fact-canonical.zip");
+        var corrupt = Path.Combine(directory, "deleted-fact-corrupt.zip");
+        var previewTarget = Path.Combine(directory, "deleted-fact-preview.db");
+        var restoreTarget = Path.Combine(directory, "deleted-fact-restore.db");
+        var service = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(service.CreateAndPublish(fixture.DatabasePath, valid).Success);
+        RepublishArchiveDatabase(valid, deleted, fixture.Clock, path => ApplyRestorableRawMutation(path, "RAW3", fixture.Clock));
+        RewriteArchiveDatabase(deleted, corrupt, path => Execute(path, """
+            INSERT INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT CAST(i.source_item_id AS INTEGER),s.span_ordinal,NULL,NULL
+            FROM retention_items i JOIN monitor_spans s ON s.raw_record_id=CAST(i.source_item_id AS INTEGER)
+            WHERE i.store_kind='raw_record' AND i.state='deleted' LIMIT 1;
+            """));
+
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Inspect(corrupt).ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Preview(corrupt, previewTarget).ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Restore(corrupt, restoreTarget, new RuntimeRestoreOptions()).ErrorCode);
+        Assert.False(File.Exists(previewTarget));
+        Assert.False(File.Exists(restoreTarget));
+    }
+
+    [Fact]
     public async Task MonitorStartupRejectsCatalogCorruptionBeforeReturningTheOwnerLease()
     {
         using var fixture = await CreatePopulatedCatalogAsync();
@@ -2258,6 +2285,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         deleted_at='2026-08-01T00:00:00.0000000+00:00'
                     WHERE store_kind='raw_record'
                       AND source_item_id=(SELECT CAST(raw_record_id AS TEXT) FROM session_repository_observations LIMIT 1);
+                    DELETE FROM local_workspace_span_facts
+                    WHERE raw_record_id=(SELECT raw_record_id FROM session_repository_observations LIMIT 1);
                     DELETE FROM raw_records
                     WHERE id=(SELECT raw_record_id FROM session_repository_observations LIMIT 1);
                     """);
