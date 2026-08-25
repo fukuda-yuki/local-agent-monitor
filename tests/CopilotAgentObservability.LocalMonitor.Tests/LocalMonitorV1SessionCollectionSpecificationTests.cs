@@ -84,6 +84,10 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
         var nextCursor = morePage.RootElement.GetProperty("next_cursor").GetString()!;
         var cursorKey = Enumerable.Range(0, 32).Select(index => (byte)index).ToArray();
         var cursorRequest = ParseCursorRequest();
+        Assert.Equal(cursorRequest.EffectiveLimit, morePage.RootElement.GetProperty("items").GetArrayLength());
+        var regenerated = LocalMonitorV1SessionCursorCodec.Encode(cursorKey, cursorRequest, new(
+            LocalMonitorV1SessionSortGroup.ValidTime, 1_767_312_000_000, "018f0000-0000-7000-8000-000000000002"));
+        Assert.Equal(regenerated, nextCursor);
         Assert.Equal(147, nextCursor.Length);
         Assert.True(LocalMonitorV1SessionCursorCodec.TryDecode(nextCursor, cursorKey, cursorRequest, out var cursorPosition));
         Assert.Equal(new LocalMonitorV1SessionCursorPosition(
@@ -116,11 +120,12 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
 
     private static LocalMonitorV1SessionSearchRequest ParseCursorRequest()
     {
-        const string RequestJson = "{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":null}";
+        const string RequestJson = "{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":1}";
         Assert.Equal(
             "Success",
             LocalMonitorV1SessionSearchRequestParser.Parse(Encoding.UTF8.GetBytes(RequestJson), out var request).ToString());
-        return request!;
+        Assert.Equal(1, request!.EffectiveLimit);
+        return request;
     }
 
     private static bool ValidateWithPowerShellJsonSchema(string instancePath, string schemaPath)

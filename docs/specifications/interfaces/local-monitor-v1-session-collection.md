@@ -147,6 +147,8 @@ The three test goldens are normative byte examples and are consumed verbatim by
 - `final-page.json`: final page covering archived and unassigned facts,
   missing versus recorded zero, and token/cache inconsistency;
 - `more-page.json`: non-final page covering assignment conflict and a non-null
-  147-character cursor.
+  147-character cursor. Its fixed semantic request is the canonical all-scope,
+  active-only request with no dynamic filters and explicit `limit=1`; the
+  fixture's second matching candidate is the required `limit+1` lookahead.
 
 They contain synthetic UUIDv7 values and no real user data.
