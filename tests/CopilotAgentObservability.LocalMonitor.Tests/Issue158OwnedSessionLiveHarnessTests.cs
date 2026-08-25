@@ -35,6 +35,28 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         Assert.NotNull(new WindowsOwnedSessionLiveFactAttribute().Skip);
 
     [Fact]
+    public void WindowsOwnedSessionLaneTraitSelectsExactlyTheGatedLiveFact()
+    {
+        var selected = typeof(Issue158OwnedSessionLiveHarnessTests).Assembly.GetTypes()
+            .SelectMany(static type => type.GetMethods(
+                System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Static))
+            .Where(static method => method.CustomAttributes.Any(static attribute =>
+                attribute.AttributeType == typeof(TraitAttribute)
+                && attribute.ConstructorArguments.Count == 2
+                && string.Equals(attribute.ConstructorArguments[0].Value as string, "Issue158Lane", StringComparison.Ordinal)
+                && string.Equals(attribute.ConstructorArguments[1].Value as string, "WindowsOwnedSession", StringComparison.Ordinal)))
+            .ToArray();
+        var method = Assert.Single(selected);
+        Assert.Equal(typeof(Issue158OwnedSessionLiveHarnessTests), method.DeclaringType);
+        Assert.Equal(nameof(WindowsOwnedSession_TraversesTheProductionHost), method.Name);
+        Assert.Contains(method.CustomAttributes, static attribute =>
+            attribute.AttributeType == typeof(WindowsOwnedSessionLiveFactAttribute));
+    }
+
+    [Fact]
     public void SyntheticSkillFixtureCarriesTheProvenInvocationAndTerminalContract()
     {
         Assert.Equal(ExpectedSyntheticSkillName, Issue158WindowsOwnedSessionLane.SyntheticSkillName);
