@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -24,6 +25,10 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
         Assert.Contains("POST /api/local-monitor/v1/sessions", specification, StringComparison.Ordinal);
         Assert.Contains("#133", specification, StringComparison.Ordinal);
         Assert.Contains("#134", specification, StringComparison.Ordinal);
+        Assert.Contains("8,388,608 UTF-8 entity", specification, StringComparison.Ordinal);
+        Assert.Contains("fully buffers and measures the complete entity", specification, StringComparison.Ordinal);
+        Assert.Contains("409 workspace_too_large", specification, StringComparison.Ordinal);
+        Assert.Contains("publishes no partial success body", specification, StringComparison.Ordinal);
         Assert.Equal("https://json-schema.org/draft/2020-12/schema", schema.RootElement.GetProperty("$schema").GetString());
         Assert.False(schema.RootElement.GetProperty("additionalProperties").GetBoolean());
     }
@@ -76,7 +81,15 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
         using var finalPage = JsonDocument.Parse(fixtures.Single(fixture => fixture.Name == "final-page.json").Bytes);
         using var morePage = JsonDocument.Parse(fixtures.Single(fixture => fixture.Name == "more-page.json").Bytes);
         Assert.Equal(JsonValueKind.Null, finalPage.RootElement.GetProperty("next_cursor").ValueKind);
-        Assert.Equal(147, morePage.RootElement.GetProperty("next_cursor").GetString()!.Length);
+        var nextCursor = morePage.RootElement.GetProperty("next_cursor").GetString()!;
+        var cursorKey = Enumerable.Range(0, 32).Select(index => (byte)index).ToArray();
+        var cursorRequest = ParseCursorRequest();
+        Assert.Equal(147, nextCursor.Length);
+        Assert.True(LocalMonitorV1SessionCursorCodec.TryDecode(nextCursor, cursorKey, cursorRequest, out var cursorPosition));
+        Assert.Equal(new LocalMonitorV1SessionCursorPosition(
+            LocalMonitorV1SessionSortGroup.ValidTime,
+            1_767_312_000_000,
+            "018f0000-0000-7000-8000-000000000002"), cursorPosition);
 
         var allItems = finalPage.RootElement.GetProperty("items").EnumerateArray()
             .Concat(morePage.RootElement.GetProperty("items").EnumerateArray()).ToArray();
@@ -100,6 +113,15 @@ public sealed class LocalMonitorV1SessionCollectionSpecificationTests
 
     private static void AssertProperties(JsonElement value, params string[] expected) =>
         Assert.Equal(expected, value.EnumerateObject().Select(property => property.Name));
+
+    private static LocalMonitorV1SessionSearchRequest ParseCursorRequest()
+    {
+        const string RequestJson = "{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":null,\"to\":null,\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":null}";
+        Assert.Equal(
+            "Success",
+            LocalMonitorV1SessionSearchRequestParser.Parse(Encoding.UTF8.GetBytes(RequestJson), out var request).ToString());
+        return request!;
+    }
 
     private static bool ValidateWithPowerShellJsonSchema(string instancePath, string schemaPath)
     {

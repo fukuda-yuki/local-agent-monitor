@@ -593,8 +593,8 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 | Archive | [Local Archive v1](local-archive.md) + #160/D082 | #161 |
 | AI scope/history | #162 | #163/#164 |
 | Compare | #165 | #166 |
-| Workspace read APIs | #133 plus a required later exact response contract | #134 after that contract closes |
-| Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps only after its response gate closes |
+| Workspace read APIs | #133 plus accepted #171 [Session collection success contract](local-monitor-v1-session-collection.md) | #134; mapping may proceed |
+| Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps the accepted success wire |
 | Shell/header/Settings host | this spec | #135/#136 |
 | Missing states | #129 + this spec | #137 |
 | Repository selection | this spec | #167 |

@@ -12,9 +12,10 @@ request transport for Local Monitor v1. It amends the route-facing seams of
 The page hierarchy and presentation remain owned by
 [Local Monitor v1 IA](local-monitor-v1-ia.md). Raw-local posture remains owned
 by [Local Monitor v1 Security](local-monitor-v1-security.md). Workspace semantic
-data requirements and projections remain #133/#134-owned. #133 does not yet
-define the exact public Session-collection success wire; the later canonical
-#134 Workspace-read response contract must close that wire before registration.
+data requirements and projections remain #133/#134-owned. The accepted #171
+success wire in
+[`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md)
+composes with this transport, so #134 mapping may proceed.
 Optional AI storage remains #162/#163/#164-owned. Comparison formulas and
 snapshots remain #165/#166-owned.
 

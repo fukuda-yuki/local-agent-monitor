@@ -38,6 +38,11 @@ schema_version, workspace_revision, items, next_cursor
   exists, it is the section 9 cursor from the route transport contract for the
   last emitted item. Empty and final pages use `null`.
 - Request `limit` is never returned.
+- The complete success response ceiling is exactly 8,388,608 UTF-8 entity
+  bytes. #134 fully buffers and measures the complete entity before publishing
+  status, headers, or body bytes. If it exceeds the ceiling, the server returns
+  the route transport contract's exact `409 workspace_too_large` error and
+  publishes no partial success body.
 
 The exact empty response bytes are:
 
