@@ -56,17 +56,26 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
             "docs", "specifications", "interfaces", "skill-invocation-snapshot.md"));
         var decisions = File.ReadAllText(RepositoryPath("docs", "decisions.md"));
         var task = File.ReadAllText(RepositoryPath("docs", "task.md"));
+        var evidenceReadme = File.ReadAllText(RepositoryPath(
+            "docs", "sprints", "issue-158-skill-invocation-snapshot", "README.md"));
+        var liveEvidence = File.ReadAllText(RepositoryPath(
+            "docs", "sprints", "issue-158-skill-invocation-snapshot", "milestones",
+            "M1-owned-session-producer", "live-validation.md"));
 
         var requirementsSummary = Section(requirements, "- Skill invocation snapshot foundation", "- Codex App discovery");
         var requirementsD089 = Section(requirements, "### D089", "## 4. 非目的");
         Assert.False(HasStaleCurrentReleaseChronology(requirementsSummary));
         Assert.Contains("same-client post-implementation T0b", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.Contains("future registry revisionまたはproducer/startup implementationでは実装前T0bをmandatory gate", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate platform/live refresh、full validation、review、releaseは未完了", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux platform/live refreshは`711b3e16283796d7d8dcebe8733fdb63dbc86df6`でcomplete", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("pinned full validation、fresh independent review、release/merge/closureは未完了", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.DoesNotContain("exact-final-candidate platform/live refresh、full validation、review、releaseは未完了", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.Contains("r0002 deterministically admits exactly `1.0.65` and `1.0.75`", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
-        Assert.Contains("implementation is complete", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
+        Assert.Contains("owned-session importer implementationとexact-final-candidate Windows/Linux platform/live refresh", NormalizeWhitespace(requirementsSummary), StringComparison.Ordinal);
         Assert.DoesNotContain("implementation/platform/live/full-validation/review/release evidenceは未完了", requirementsSummary, StringComparison.Ordinal);
         Assert.Contains("mandatory T0b and final signed-in Windows live tuple is exactly bundled `1.0.75` / protocol `3`", NormalizeWhitespace(requirementsD089), StringComparison.Ordinal);
+        Assert.Contains("owned-session importer implementation and exact-final-candidate Windows/Linux platform/live refresh are complete", NormalizeWhitespace(requirementsD089), StringComparison.Ordinal);
+        Assert.Contains("pinned full validation, fresh independent review, release, merge, and closure remain pending", NormalizeWhitespace(requirementsD089), StringComparison.Ordinal);
         Assert.Contains("D089", specification, StringComparison.Ordinal);
         Assert.Contains("mandatory live lane is exactly bundled `1.0.75`, protocol `3`", NormalizeWhitespace(specification), StringComparison.Ordinal);
 
@@ -74,7 +83,8 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         Assert.False(HasStaleCurrentReleaseChronology(specCurrent));
         Assert.Contains("retracts the contradicted claim that current-release T0b preceded r0002 and producer implementation", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
         Assert.Contains("Future registry revisions or producer/startup implementations require T0b before implementation", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate platform evidence, pinned full validation, and fresh independent review remain release gates", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        Assert.Contains("completed exact-final-candidate platform evidence; pinned full validation and fresh independent review remain release gates", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
+        Assert.DoesNotContain("platform/live evidence refresh, final validation, independent review, and release remain pending", NormalizeWhitespace(specCurrent), StringComparison.Ordinal);
         var specCrossReference = Section(specification, "The independent `skill_projection:1` component", "The SDK transport and retained raw snapshot");
         Assert.False(HasStaleCurrentReleaseChronology(specCrossReference));
         Assert.Contains("exact bundled `1.0.75` / protocol `3` same-client live proof was accepted after the unchanged exact two-entry r0002 and owned-session producer", NormalizeWhitespace(specCrossReference), StringComparison.Ordinal);
@@ -82,18 +92,28 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
         Assert.DoesNotContain("must still implement", specCrossReference, StringComparison.Ordinal);
 
         var currentProducer = Section(snapshotInterface, "### D086 current producer contract", "### D087 current content authority");
+        var interfaceStatus = Section(snapshotInterface, "Status:", "This specification is the detailed authority");
+        Assert.Contains("owned-session importer implementation and exact-final-candidate platform/live evidence complete", NormalizeWhitespace(interfaceStatus), StringComparison.Ordinal);
+        Assert.Contains("pinned full validation and fresh independent review remain release gates", NormalizeWhitespace(interfaceStatus), StringComparison.Ordinal);
+        Assert.DoesNotContain("platform/live evidence refresh, final validation, and review pending", NormalizeWhitespace(interfaceStatus), StringComparison.Ordinal);
         Assert.False(HasStaleCurrentReleaseChronology(currentProducer));
         Assert.Contains("versioned T0b preceded r0002 and producer implementation", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
         Assert.Contains("Future registry revisions or producer/startup implementations require T0b before implementation", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate platform evidence, pinned full validation, and fresh independent review remain release gates", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
+        Assert.Contains("completed exact-final-candidate platform evidence; pinned full validation and fresh independent review remain release gates", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
         Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(currentProducer), StringComparison.Ordinal);
         var finalGates = Section(snapshotInterface, "## Required TDD slices and release gates", "## What is decided versus what still requires evidence");
         Assert.False(HasStaleCurrentReleaseChronology(finalGates));
         Assert.Contains("exact bundled `1.0.75`, protocol `3`", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate Windows/Linux live evidence remains pending", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux live evidence was completed and recorded", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.Contains("Issue #158 M1 live validation", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
+        Assert.DoesNotContain("exact-final-candidate Windows/Linux live evidence remains pending", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
         Assert.Contains("pinned full validation and review workflow", NormalizeWhitespace(finalGates), StringComparison.Ordinal);
         Assert.DoesNotContain("prove each exact r0002 tuple", finalGates, StringComparison.Ordinal);
         Assert.DoesNotContain("An unproved tuple is not admitted", finalGates, StringComparison.Ordinal);
+        var remainingEvidence = Section(snapshotInterface, "## What is decided versus what still requires evidence", null);
+        Assert.DoesNotContain("actual Windows/Linux native walker matrices", remainingEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("signed-in bundled exact-tuple T0b/final live observation", remainingEvidence, StringComparison.Ordinal);
+        Assert.Contains("#119 parser/handoff result; full repository validation; and code review", NormalizeWhitespace(remainingEvidence), StringComparison.Ordinal);
 
         var d086 = NormalizeWhitespace(Section(decisions, "## D086:", "## D085:"));
         Assert.False(HasStaleCurrentReleaseChronology(d086));
@@ -126,9 +146,56 @@ public sealed class SkillInvocationV2VersionIdentityContractTests
 
         var taskStatus = Section(task, "| Skill invocation snapshot (Issues #119/#157/#158)", "| Versioned pricing registry");
         Assert.False(HasStaleCurrentReleaseChronology(taskStatus));
-        Assert.Contains("implementation complete", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate platform-live refresh and final validation-review pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
-        Assert.Contains("exact-final-candidate Windows/Linux live refresh、pinned full validation、fresh independent review、release evidenceは未完了", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("owned-session importer and exact-final-candidate platform-live refresh complete / final validation-review-release pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("exact-final-candidate Windows/Linux live refreshも`711b3e16283796d7d8dcebe8733fdb63dbc86df6`で完了", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.Contains("pinned full validation、fresh independent review、release/merge/closureは未完了", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.DoesNotContain("exact-final-candidate platform-live refresh and final validation-review pending", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+        Assert.DoesNotContain("exact-final-candidate Windows/Linux live refresh、pinned full validation、fresh independent review、release evidenceは未完了", NormalizeWhitespace(taskStatus), StringComparison.Ordinal);
+
+        var normalizedEvidenceReadme = NormalizeWhitespace(evidenceReadme);
+        var normalizedLiveEvidence = NormalizeWhitespace(liveEvidence);
+        const string finalCandidate = "711b3e16283796d7d8dcebe8733fdb63dbc86df6";
+        const string priorCandidate = "527c7b5f299296afefe13def783c08be121684b9";
+        Assert.Contains($"| Windows signed-in owned session | `{finalCandidate}` | 2026-08-25 | `passed` in one authorized attempt |", evidenceReadme, StringComparison.Ordinal);
+        Assert.Contains($"| Linux WSL Ubuntu native ext4 | `{finalCandidate}` | 2026-08-25 | `passed` in one wrapper attempt |", evidenceReadme, StringComparison.Ordinal);
+        Assert.DoesNotContain($"| Windows signed-in owned session | `{priorCandidate}`", evidenceReadme, StringComparison.Ordinal);
+        Assert.DoesNotContain($"| Linux WSL Ubuntu native ext4 | `{priorCandidate}`", evidenceReadme, StringComparison.Ordinal);
+        Assert.Contains($"`{priorCandidate}` is historical and superseded", normalizedEvidenceReadme, StringComparison.Ordinal);
+        Assert.Contains("no cross-candidate inference is used", normalizedEvidenceReadme, StringComparison.Ordinal);
+        Assert.Contains("schema `issue-158-live-validation.v1`, source application `1.0.75`, and protocol `3`", normalizedLiveEvidence, StringComparison.Ordinal);
+        Assert.All(new[]
+        {
+            "| `retained_roots` | 1 |", "| `retained_skills` | 1 |", "| `probe_sessions` | 1 |",
+            "| `execution_sessions` | 1 |", "| `user_invoked` | 1 |", "| `agent_invoked` | 1 |",
+            "| `task_complete` | 1 |", "| `v2_imported` | 2 |", "| `v1_imported` | 2 |",
+            "| `snapshot_rows` | 2 |"
+        }, fact => Assert.Contains(fact, liveEvidence, StringComparison.Ordinal));
+        Assert.All(new[]
+        {
+            "`operator_gate`", "`cli_override_absent`", "`retained_only_inventory`", "`exact_tool_union`",
+            "`native_reproof`", "`current_generation`", "`metadata_route`", "`historical_route`",
+            "`current_file_route`", "`shutdown_drain`", "`cleanup_complete`"
+        }, check => Assert.Contains(check, liveEvidence, StringComparison.Ordinal));
+        Assert.Contains("| `matrix_cases` | 6 |", liveEvidence, StringComparison.Ordinal);
+        Assert.All(new[]
+        {
+            "`detached_clean_candidate`", "`kernel_supported`", "`native_ext4`",
+            "`retained_root_reproof`", "`strict_utf8_read`", "`unsafe_path_rejected`",
+            "`missing_rejected`", "`oversized_rejected`", "`binary_rejected`"
+        }, check => Assert.Contains(check, liveEvidence, StringComparison.Ordinal));
+        Assert.Contains("approximately 34.0 seconds", normalizedLiveEvidence, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("approximately 41.69 seconds", normalizedLiveEvidence, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("SDK `10.0.203`", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains("`installer_roots` and `lane_roots` were `0`", normalizedLiveEvidence, StringComparison.Ordinal);
+        Assert.Contains("| `f7da5ad655cc62f04e22bac671ae6808be5a1780` | `succeeded_post_success_execution_evidence_prepared_invocation_count` |", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains("| `dc155cc87690956bd02b33a981125ceddadeff49` | `succeeded_post_success_execution_evidence_prepared_invocation_excess` |", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains("| `655da557af6615262a50c44cbd5c2f613ea5e25f` | `wrapper_test_output` |", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains("| `967d55f8e4e2ced2dd00b540f14e48825f891e8a` | `wrapper_test_output_pass_summary` |", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains($"run-windows-owned-session.ps1 -CandidateSha {finalCandidate} -OperatorAuthorized", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains($"run-linux-current-file-matrix.ps1 -CandidateSha {finalCandidate} -OperatorAuthorized", liveEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain($"run-windows-owned-session.ps1 -CandidateSha {priorCandidate}", liveEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain($"run-linux-current-file-matrix.ps1 -CandidateSha {priorCandidate}", liveEvidence, StringComparison.Ordinal);
+        Assert.Contains("Pinned full validation, fresh final reviews, merge, release, and Issues #173/#158 closure remained pending", normalizedLiveEvidence, StringComparison.Ordinal);
 
         Assert.All(StaleCurrentReleaseChronologyPhrases, phrase =>
             Assert.True(HasStaleCurrentReleaseChronology(phrase)));

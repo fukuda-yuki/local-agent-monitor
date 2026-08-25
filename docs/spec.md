@@ -130,8 +130,8 @@ invocations alone use v2 callbacks, one-event v1 SessionStart, then one-event
 v1 task-complete. Zero roots leaves the current-file surface absent (`404`);
 roots without a published generation retain exact `503
 skill_current_file_discovery_unavailable` after earlier gates. Implementation
-is complete; platform/live evidence refresh, final validation, independent
-review, and release remain pending.
+and exact-final-candidate platform/live refresh are complete; pinned full
+validation, fresh independent review, and release remain pending.
 
 D089 narrowly supersedes D083/D086 only where they require signed-in `1.0.65`
 or live proof of every admitted r0002 tuple. Current r0002 remains exactly
@@ -141,8 +141,9 @@ or live proof of every admitted r0002 tuple. Current r0002 remains exactly
 fail closed. D090 retracts the contradicted claim that current-release T0b
 preceded r0002 and producer implementation. This already-implemented release
 uses the exact post-implementation same-client proof plus deterministic
-r0002/identity/admission coverage; exact-final-candidate platform evidence,
-pinned full validation, and fresh independent review remain release gates.
+r0002/identity/admission coverage and completed exact-final-candidate platform
+evidence; pinned full validation and fresh independent review remain release
+gates.
 Future registry revisions or producer/startup implementations require T0b
 before implementation. D087 and D088 remain unchanged.
 

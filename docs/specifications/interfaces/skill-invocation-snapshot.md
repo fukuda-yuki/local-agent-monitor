@@ -1,6 +1,6 @@
 # Skill Invocation Snapshot Interface
 
-Status: **D089 live-proof authority aligned; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation complete; platform/live evidence refresh, final validation, and review pending**
+Status: **D089 live-proof authority aligned; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation and exact-final-candidate platform/live evidence complete; pinned full validation and fresh independent review remain release gates**
 
 This specification is the detailed authority for Issues #119, #157, and #158.
 It defines the frozen Session-ingest v1 correction, the exact Skill-only v2
@@ -743,8 +743,9 @@ runtime identity observation remains exact and fail closed.
 For this already-implemented release, D090 retracts the contradicted claim that
 versioned T0b preceded r0002 and producer implementation. Exact post-
 implementation same-client proof is accepted together with deterministic
-r0002/identity/admission coverage; exact-final-candidate platform evidence,
-pinned full validation, and fresh independent review remain release gates.
+r0002/identity/admission coverage and completed exact-final-candidate platform
+evidence; pinned full validation and fresh independent review remain release
+gates.
 Future registry revisions or producer/startup implementations require T0b
 before implementation. On one same signed-in bundled client T0b proves exact
 Version/ProtocolVersion status, matching
@@ -3060,10 +3061,12 @@ mutation. Until that separate promotion, no such exception exists.
     discovery without retaining raw user data/path evidence. This live gate does
     not replace deterministic `1.0.65` compatibility/admission coverage; no
     global or externally selected CLI is used. The accepted post-implementation
-    proof resolves the historical sequencing conflict, but production changed
-    afterward, so exact-final-candidate Windows/Linux live evidence remains
-    pending. Future registry revisions or producer/startup implementations must
-    pass T0b before implementation.
+    proof resolves the historical sequencing conflict. After later production
+    changes, exact-final-candidate Windows/Linux live evidence was completed and
+    recorded at
+    [Issue #158 M1 live validation](../../sprints/issue-158-skill-invocation-snapshot/milestones/M1-owned-session-producer/live-validation.md).
+    Future registry revisions or producer/startup implementations must pass T0b
+    before implementation.
 11. Update and review the derived public workflow only with the implemented
     flags; run Markdown/link checks plus an exact stale search proving no #158
    workflow still names an obsolete dotted discovery configuration-key alias,
@@ -3084,8 +3087,9 @@ does not yet exist: a clean tracked spec commit; the ordered integrated
 #124-owned Session 14 -> #156-owned carrier/composition closure for #161-owned
 direct archive facts -> #161 `local_archive:1` implementation/backup/restore
 evidence; the separate Retention implementation/test result; the nonregistered
-#119 parser/handoff result; actual Windows/Linux native walker matrices; a
-signed-in bundled exact-tuple T0b/final live observation; full repository validation; and code
-review. Those are release gates, not open Product Owner choices. If any gate
+#119 parser/handoff result; full repository validation; and code review. The
+Windows/Linux native platform matrices and signed-in final live observation are
+recorded in the Issue #158 M1 live-validation evidence. The remaining items are
+release gates, not open Product Owner choices. If any gate
 disproves the pinned contract, stop and return for a new versioned decision; do
 not add fallback, compatibility, or backfill.
