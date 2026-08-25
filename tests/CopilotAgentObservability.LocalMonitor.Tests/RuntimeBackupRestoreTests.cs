@@ -603,6 +603,8 @@ public sealed class RuntimeBackupRestoreTests
             transaction.Commit();
         }
         new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+            temp.Execute(database, "CREATE TABLE localXworkspaceYextension(value INTEGER); CREATE INDEX localXworkspaceYextension_index ON localXworkspaceYextension(value);");
         var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
 
         var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Source);
