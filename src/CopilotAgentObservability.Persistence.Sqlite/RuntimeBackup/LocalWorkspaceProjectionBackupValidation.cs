@@ -82,53 +82,58 @@ internal static class LocalWorkspaceProjectionBackupValidation
 
     private static void ValidateSpanFacts(SqliteConnection connection, SqliteTransaction transaction)
     {
-        using (var count = connection.CreateCommand())
+        using (var availability = connection.CreateCommand())
         {
-            count.Transaction = transaction;
-            count.CommandText = "SELECT COUNT(*) FROM local_workspace_span_facts;";
-            if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return;
-        }
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT EXISTS(SELECT 1 FROM local_workspace_span_facts f
-              LEFT JOIN monitor_spans s ON s.raw_record_id=f.raw_record_id AND s.span_ordinal=f.span_ordinal
-              LEFT JOIN raw_records r ON r.id=f.raw_record_id
-              WHERE s.raw_record_id IS NULL OR r.id IS NULL);
-            """;
-        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0) throw new InvalidOperationException();
-        command.CommandText = """
-            SELECT f.raw_record_id,f.span_ordinal,f.retry_count,f.producer_total_tokens,
-                   r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version
-            FROM local_workspace_span_facts f
-            JOIN monitor_spans s ON s.raw_record_id=f.raw_record_id AND s.span_ordinal=f.span_ordinal
-            JOIN raw_records r ON r.id=f.raw_record_id
-            ORDER BY 1,2;
-            """;
-        using var reader = command.ExecuteReader();
-        var projections = new Dictionary<long, IReadOnlyDictionary<int, MonitorSpanProjection>>();
-        while (reader.Read())
-        {
-            if (reader.IsDBNull(4) || reader.IsDBNull(8)) throw new InvalidOperationException();
-            var rawId = reader.GetInt64(0);
-            if (!projections.TryGetValue(rawId, out var spans))
+            availability.Transaction = transaction;
+            availability.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='raw_records') AND EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='monitor_spans');";
+            if (Convert.ToInt64(availability.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
             {
-                if (!DateTimeOffset.TryParseExact(reader.GetString(6), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
-                    throw new InvalidOperationException();
-                var raw = new RawTelemetryRecord(rawId, reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), receivedAt,
-                    reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8), reader.GetInt32(9));
-                spans = MonitorSpanProjectionBuilder.Build(raw).ToDictionary(static span => span.SpanOrdinal);
-                projections.Add(rawId, spans);
+                availability.CommandText = "SELECT COUNT(*) FROM local_workspace_span_facts;";
+                if (Convert.ToInt64(availability.ExecuteScalar(), CultureInfo.InvariantCulture) != 0) throw new InvalidOperationException();
+                return;
             }
-            if (!spans.TryGetValue(reader.GetInt32(1), out var expected)
-                || NullableInt64(reader, 2) != expected.RetryCount
-                || NullableInt64(reader, 3) != expected.ProducerTotalTokens)
-                throw new InvalidOperationException();
         }
-    }
+        var monitorKeys = new HashSet<(long RawId, int Ordinal)>();
+        using (var spans = connection.CreateCommand())
+        {
+            spans.Transaction = transaction;
+            spans.CommandText = "SELECT raw_record_id,span_ordinal FROM monitor_spans ORDER BY raw_record_id,span_ordinal;";
+            using var reader = spans.ExecuteReader();
+            while (reader.Read()) monitorKeys.Add((reader.GetInt64(0), reader.GetInt32(1)));
+        }
 
-    private static long? NullableInt64(SqliteDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
+        var expected = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
+        using (var records = connection.CreateCommand())
+        {
+            records.Transaction = transaction;
+            records.CommandText = "SELECT id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version FROM raw_records ORDER BY id;";
+            using var reader = records.ExecuteReader();
+            while (reader.Read())
+            {
+                var rawId = reader.GetInt64(0);
+                if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
+                    throw new InvalidOperationException();
+                var raw = new RawTelemetryRecord(rawId, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
+                    reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetInt32(6));
+                foreach (var span in MonitorSpanProjectionBuilder.Build(raw))
+                    if (monitorKeys.Contains((rawId, span.SpanOrdinal)))
+                        expected.Add((rawId, span.SpanOrdinal), (span.RetryCount, span.ProducerTotalTokens));
+            }
+        }
+
+        var actual = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
+        using (var facts = connection.CreateCommand())
+        {
+            facts.Transaction = transaction;
+            facts.CommandText = "SELECT raw_record_id,span_ordinal,retry_count,producer_total_tokens FROM local_workspace_span_facts ORDER BY raw_record_id,span_ordinal;";
+            using var reader = facts.ExecuteReader();
+            while (reader.Read())
+                actual.Add((reader.GetInt64(0), reader.GetInt32(1)),
+                    (reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetInt64(3)));
+        }
+        if (expected.Count != actual.Count || expected.Any(pair => !actual.TryGetValue(pair.Key, out var value) || value != pair.Value))
+            throw new InvalidOperationException();
+    }
 
     private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction)
     {

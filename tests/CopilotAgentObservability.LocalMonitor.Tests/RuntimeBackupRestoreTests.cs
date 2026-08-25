@@ -37,7 +37,7 @@ public sealed class RuntimeBackupRestoreTests
         }
         var raw = new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At), null,
-            "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"bbbbbbbbbbbbbbbb\",\"name\":\"synthetic\"}]}]}]}");
+            "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"bbbbbbbbbbbbbbbb\",\"name\":\"synthetic\"},{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"cccccccccccccccc\",\"name\":\"synthetic-child\"}]}]}]}");
         var rawId = fixture.RawStore.Insert(raw);
         fixture.RawStore.ApplyProjection(rawId, raw.Source, raw.ReceivedAt, MonitorProjectionBuilder.Build(raw), raw.ReceivedAt);
         fixture.RawStore.ApplySpanProjection(rawId, MonitorSpanProjectionBuilder.Build(raw), raw.ReceivedAt);
@@ -49,6 +49,8 @@ public sealed class RuntimeBackupRestoreTests
             $"UPDATE local_workspace_span_facts SET retry_count=1 WHERE raw_record_id={rawId};",
             $"UPDATE local_workspace_span_facts SET producer_total_tokens=1 WHERE raw_record_id={rawId};",
             $"DELETE FROM monitor_spans WHERE raw_record_id={rawId};",
+            $"DELETE FROM local_workspace_span_facts WHERE raw_record_id={rawId} AND span_ordinal=0;",
+            $"DELETE FROM local_workspace_span_facts WHERE raw_record_id={rawId};",
         })
         {
             using var connection = temp.Open(source);
@@ -57,6 +59,7 @@ public sealed class RuntimeBackupRestoreTests
             command.Transaction = transaction;
             command.CommandText = mutation;
             command.ExecuteNonQuery();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
             Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
                 LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
             transaction.Rollback();
