@@ -600,6 +600,7 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
             new FakeOwner(scope), executor, temp.TimeProvider, host.Token,
             rootsExecutionContextFactory: opened => CreateRootsContext(opened));
         await runner.RunAsync(Context(), outer.Token);
+        await scope.Disposed.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(executor.WorkTokenCanBeCanceled);
         Assert.True(executor.WorkTokenWasCanceled);
@@ -690,9 +691,10 @@ public sealed class DotNetCopilotRawAnalysisRunnerTests
         public CancellationToken LeaseLostToken => leaseLost.Token;
         public bool IsLeaseLost => leaseLost.IsCancellationRequested;
         public int DisposeCount { get; private set; }
+        public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Exception? DisposeException { get; set; }
         public void LoseLease() => leaseLost.Cancel();
-        public ValueTask DisposeAsync() { DisposeCount++; if (DisposeException is not null) return ValueTask.FromException(DisposeException); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync() { DisposeCount++; Disposed.TrySetResult(); if (DisposeException is not null) return ValueTask.FromException(DisposeException); return ValueTask.CompletedTask; }
     }
 
     private sealed class FakeExecutor : ICopilotAnalysisSdkExecutor
