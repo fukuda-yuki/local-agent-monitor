@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -19,8 +21,8 @@ public sealed class SkillInvocationV2ParserTests
 
         Assert.Same(capability, batch.RuntimeCapability);
         var envelope = Assert.Single(batch.AcceptedEnvelopes);
-        Assert.Equal(SkillInvocationV2PayloadState.Available, envelope.PayloadState);
-        Assert.Equal(SkillInvocationV2PayloadReason.None, envelope.PayloadReason);
+        Assert.Equal(SkillInvocationPayloadState.Available, envelope.PayloadState);
+        Assert.Equal(SkillInvocationPayloadReason.None, envelope.PayloadReason);
         Assert.Equal(119, envelope.RawPayloadEvidence.PayloadByteLength);
         Assert.Equal(ValidPayload, Encoding.UTF8.GetString(envelope.RawPayloadEvidence.PayloadUtf8.Span));
         Assert.Equal("e26ce7c0d8ea9a43478423e5b0a51969de53fc64e2c5e0838136290a3a61c375", Convert.ToHexStringLower(envelope.RawPayloadEvidence.PayloadSha256.Span));
@@ -36,15 +38,62 @@ public sealed class SkillInvocationV2ParserTests
     }
 
     [Fact]
+    public void Parse_CapturesAdmittedOuterIdentityWithNonnullOptionals()
+    {
+        var batch = SkillInvocationV2Parser.Parse(ValidRequest(ValidPayload), new TestRuntimeCapability());
+        var envelope = Assert.Single(batch.AcceptedEnvelopes);
+
+        Assert.Equal("native-session", batch.NativeSessionId);
+        Assert.Equal("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", envelope.Identity.SourceEventId);
+        Assert.Equal("bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb", envelope.Identity.SourceParentEventId);
+        Assert.Equal(new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero), envelope.Identity.OccurredAt);
+        Assert.Equal("run-1", envelope.Identity.RunNativeId);
+        Assert.True(envelope.Identity.SourceEphemeral);
+        Assert.Null(envelope.Identity.TraceId);
+        Assert.Null(envelope.Identity.SpanId);
+    }
+
+    [Fact]
+    public void Parse_CapturesAdmittedOuterIdentityWithAllNullOptionalsAndFalseEphemeral()
+    {
+        var request = Encoding.UTF8.GetBytes(
+            ValidRequestText(ValidPayload)
+                .Replace("\"source_parent_event_id\":\"bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb\"", "\"source_parent_event_id\":null", StringComparison.Ordinal)
+                .Replace("\"run_native_id\":\"run-1\"", "\"run_native_id\":null", StringComparison.Ordinal)
+                .Replace("\"source_ephemeral\":true", "\"source_ephemeral\":false", StringComparison.Ordinal));
+
+        var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
+
+        Assert.Equal("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", envelope.Identity.SourceEventId);
+        Assert.Null(envelope.Identity.SourceParentEventId);
+        Assert.Null(envelope.Identity.RunNativeId);
+        Assert.False(envelope.Identity.SourceEphemeral);
+    }
+
+    [Fact]
+    public void Parse_OccurredAtRoundTripsToTheExactAdmittedInstantToTheTick()
+    {
+        const string occurredAt = "2026-08-09T12:34:56.7654321+00:00";
+        const string format = "yyyy-MM-ddTHH:mm:ss.fffffffzzz";
+        var request = Encoding.UTF8.GetBytes(
+            ValidRequestText(ValidPayload).Replace("2026-08-09T00:00:00.0000000+00:00", occurredAt, StringComparison.Ordinal));
+
+        var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
+
+        Assert.Equal(TimeSpan.Zero, envelope.Identity.OccurredAt.Offset);
+        Assert.Equal(occurredAt, envelope.Identity.OccurredAt.ToString(format, CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
     public void Parse_PropertyOrderIsNonsemanticForEnvelopeEventAndPayload()
     {
         const string reversedPayload = """{"trigger":"context-load","source":"remote","pluginVersion":"1","pluginName":"p","description":"d","allowedTools":[],"content":"body","path":"relative","name":"ordered"}""";
         var eventJson = """{"payload":""" + reversedPayload + """, "span_id":null,"trace_id":null,"source_ephemeral":false,"run_native_id":null,"occurred_at":"2026-08-09T00:00:00.0000000+00:00","type":"skill.invoked","source_parent_event_id":null,"source_event_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}""";
-        var request = Encoding.UTF8.GetBytes("""{"events":[""" + eventJson + """],"schema_fingerprint":"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c","payload_schema":"github-copilot-sdk.skill-invoked.v1","normalization_version":"github-copilot-sdk.skill-invoked.normalize.v1","adapter_version":"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1","source_application_version":"1.0.65","native_session_id":"native-session","source_surface":"copilot-sdk","source_adapter":"copilot-sdk-stream","schema_version":2}""");
+        var request = Encoding.UTF8.GetBytes("""{"events":[""" + eventJson + """],"schema_fingerprint":"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c","payload_schema":"github-copilot-sdk.skill-invoked.v1","normalization_version":"github-copilot-sdk.skill-invoked.normalize.v2","adapter_version":"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1","source_application_version":"1.0.65","native_session_id":"native-session","source_surface":"copilot-sdk","source_adapter":"copilot-sdk-stream","schema_version":2}""");
 
         var envelope = Assert.Single(SkillInvocationV2Parser.Parse(request, new TestRuntimeCapability()).AcceptedEnvelopes);
 
-        Assert.Equal(SkillInvocationV2PayloadState.Available, envelope.PayloadState);
+        Assert.Equal(SkillInvocationPayloadState.Available, envelope.PayloadState);
         Assert.Equal("ordered", envelope.Name);
         Assert.Equal("remote", envelope.Source);
         Assert.Equal("context-load", envelope.Trigger);
@@ -84,7 +133,7 @@ public sealed class SkillInvocationV2ParserTests
         var rejected = ValidRequest(PayloadWithUnknownNestedArrays(61));
 
         var envelope = Assert.Single(SkillInvocationV2Parser.Parse(accepted, new TestRuntimeCapability()).AcceptedEnvelopes);
-        Assert.Equal(SkillInvocationV2PayloadReason.UnknownProperty, envelope.PayloadReason);
+        Assert.Equal(SkillInvocationPayloadReason.UnknownProperty, envelope.PayloadReason);
         Assert.Throws<JsonException>(() => SkillInvocationV2Parser.Parse(rejected, new TestRuntimeCapability()));
     }
 
@@ -98,13 +147,13 @@ public sealed class SkillInvocationV2ParserTests
 
     [Theory]
     [MemberData(nameof(ClassificationCases))]
-    public void Parse_ClassifiesPayloadWithLiteralTotalStateReason(string _, string payload, SkillInvocationV2PayloadState expectedState, SkillInvocationV2PayloadReason expectedReason)
+    public void Parse_ClassifiesPayloadWithLiteralTotalStateReason(string _, string payload, SkillInvocationPayloadState expectedState, SkillInvocationPayloadReason expectedReason)
     {
         var envelope = Assert.Single(SkillInvocationV2Parser.Parse(ValidRequest(payload), new TestRuntimeCapability()).AcceptedEnvelopes);
 
         Assert.Equal(expectedState, envelope.PayloadState);
         Assert.Equal(expectedReason, envelope.PayloadReason);
-        if (expectedState == SkillInvocationV2PayloadState.Available)
+        if (expectedState == SkillInvocationPayloadState.Available)
         {
             Assert.NotNull(envelope.ClaimFacts);
         }
@@ -125,8 +174,8 @@ public sealed class SkillInvocationV2ParserTests
         string _,
         string firstOrder,
         string secondOrder,
-        SkillInvocationV2PayloadState expectedState,
-        SkillInvocationV2PayloadReason expectedReason)
+        SkillInvocationPayloadState expectedState,
+        SkillInvocationPayloadReason expectedReason)
     {
         var first = Assert.Single(SkillInvocationV2Parser.Parse(ValidRequest(firstOrder), new TestRuntimeCapability()).AcceptedEnvelopes);
         var second = Assert.Single(SkillInvocationV2Parser.Parse(ValidRequest(secondOrder), new TestRuntimeCapability()).AcceptedEnvelopes);
@@ -139,7 +188,7 @@ public sealed class SkillInvocationV2ParserTests
 
     [Theory]
     [MemberData(nameof(OptionalBoundsCases))]
-    public void Parse_ValidatesOptionalBoundsAndClosedTokens(string _, string payload, SkillInvocationV2PayloadState expectedState, SkillInvocationV2PayloadReason expectedReason)
+    public void Parse_ValidatesOptionalBoundsAndClosedTokens(string _, string payload, SkillInvocationPayloadState expectedState, SkillInvocationPayloadReason expectedReason)
     {
         var envelope = Assert.Single(SkillInvocationV2Parser.Parse(ValidRequest(payload), new TestRuntimeCapability()).AcceptedEnvelopes);
 
@@ -168,7 +217,7 @@ public sealed class SkillInvocationV2ParserTests
         yield return Case("native session null scalar", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("native-session", "native\\u0000session", StringComparison.Ordinal)));
         yield return Case("wrong source application version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("1.0.65", "1.0.66", StringComparison.Ordinal)));
         yield return Case("wrong adapter version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", "other", StringComparison.Ordinal)));
-        yield return Case("wrong normalization version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.normalize.v1", "other", StringComparison.Ordinal)));
+        yield return Case("wrong normalization version", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.normalize.v2", "other", StringComparison.Ordinal)));
         yield return Case("wrong payload schema", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("github-copilot-sdk.skill-invoked.v1", "other", StringComparison.Ordinal)));
         yield return Case("wrong fingerprint", Encoding.UTF8.GetBytes(ValidRequestText(ValidPayload).Replace("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", new string('0', 64), StringComparison.Ordinal)));
         yield return Case("events wrong type", Encoding.UTF8.GetBytes(EnvelopeText("{}")));
@@ -195,68 +244,68 @@ public sealed class SkillInvocationV2ParserTests
 
     public static IEnumerable<object[]> ClassificationCases()
     {
-        yield return Classification("available none", ValidPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None);
-        yield return Classification("duplicate", """{"name":"a","name":"b","path":"p","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty);
-        yield return Classification("unknown", """{"name":"a","path":"p","content":"b","model":"m"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.UnknownProperty);
-        yield return Classification("invalid type", """{"name":"a","path":"p","content":null}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("name invalid empty", """{"name":"","path":"p","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-        yield return Classification("name invalid control", """{"name":"a\u0001","path":"p","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-        yield return Classification("name invalid noncharacter", """{"name":"a\uFDD0","path":"p","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-        yield return Classification("name invalid Unicode", """{"name":"\uD800","path":"p","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-        yield return Classification("path invalid empty", """{"name":"a","path":"","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid);
-        yield return Classification("path invalid ASCII control", """{"name":"a","path":"p\u007F","content":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid);
-        yield return Classification("name missing", """{"path":"p","content":"b"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing);
-        yield return Classification("body missing", """{"name":"a","path":"p"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyMissing);
-        yield return Classification("definition path missing", """{"name":"a","content":"b"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.DefinitionPathMissing);
-        yield return Classification("body Unicode invalid", """{"name":"a","path":"p","content":"\uD800"}""", SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid);
-        yield return Classification("path Unicode invalid", """{"name":"a","path":"\uD800","content":"b"}""", SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.PathUnicodeInvalid);
-        yield return Classification("body oversized", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"" + new string('b', 1_048_577) + "\"}", SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized);
-        yield return Classification("path oversized", "{\"name\":\"a\",\"path\":\"" + new string('p', 4_097) + "\",\"content\":\"b\"}", SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.PathOversized);
+        yield return Classification("available none", ValidPayload, SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None);
+        yield return Classification("duplicate", """{"name":"a","name":"b","path":"p","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty);
+        yield return Classification("unknown", """{"name":"a","path":"p","content":"b","model":"m"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.UnknownProperty);
+        yield return Classification("invalid type", """{"name":"a","path":"p","content":null}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("name invalid empty", """{"name":"","path":"p","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid);
+        yield return Classification("name invalid control", """{"name":"a\u0001","path":"p","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid);
+        yield return Classification("name invalid noncharacter", """{"name":"a\uFDD0","path":"p","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid);
+        yield return Classification("name invalid Unicode", """{"name":"\uD800","path":"p","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid);
+        yield return Classification("path invalid empty", """{"name":"a","path":"","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.PathInvalid);
+        yield return Classification("path invalid ASCII control", """{"name":"a","path":"p\u007F","content":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.PathInvalid);
+        yield return Classification("name missing", """{"path":"p","content":"b"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing);
+        yield return Classification("body missing", """{"name":"a","path":"p"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyMissing);
+        yield return Classification("definition path missing", """{"name":"a","content":"b"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.DefinitionPathMissing);
+        yield return Classification("body Unicode invalid", """{"name":"a","path":"p","content":"\uD800"}""", SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid);
+        yield return Classification("path Unicode invalid", """{"name":"a","path":"\uD800","content":"b"}""", SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.PathUnicodeInvalid);
+        yield return Classification("body oversized", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"" + new string('b', 1_048_577) + "\"}", SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.BodyOversized);
+        yield return Classification("path oversized", "{\"name\":\"a\",\"path\":\"" + new string('p', 4_097) + "\",\"content\":\"b\"}", SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.PathOversized);
     }
 
     public static IEnumerable<object[]> PrecedenceCases()
     {
-        yield return Precedence("duplicate over unknown", """{"name":"a","name":"b","path":"p","content":"b","model":0}""", """{"model":0,"content":"b","path":"p","name":"a","name":"b"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty);
-        yield return Precedence("unknown over invalid type", """{"name":"a","path":"p","content":null,"model":0}""", """{"model":0,"content":null,"path":"p","name":"a"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.UnknownProperty);
-        yield return Precedence("invalid type over name invalid", """{"name":"","path":"p","content":null}""", """{"content":null,"path":"p","name":""}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Precedence("name invalid over path invalid", """{"name":"","path":"","content":"b"}""", """{"content":"b","path":"","name":""}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid);
-        yield return Precedence("path invalid over body missing", """{"name":"a","path":""}""", """{"path":"","name":"a"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid);
-        yield return Precedence("name missing over body missing", """{"path":"p"}""", """{"path":"p"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing);
-        yield return Precedence("body missing over path missing", """{"name":"a"}""", """{"name":"a"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyMissing);
-        yield return Precedence("path missing over body Unicode", """{"name":"a","content":"\uD800"}""", """{"content":"\uD800","name":"a"}""", SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.DefinitionPathMissing);
-        yield return Precedence("body Unicode over path Unicode", """{"name":"a","path":"\uD800","content":"\uD800"}""", """{"content":"\uD800","path":"\uD800","name":"a"}""", SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid);
-        yield return Precedence("path Unicode over body oversized", "{\"name\":\"a\",\"path\":\"\\uD800\",\"content\":\"" + new string('b', 1_048_577) + "\"}", "{\"content\":\"" + new string('b', 1_048_577) + "\",\"path\":\"\\uD800\",\"name\":\"a\"}", SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.PathUnicodeInvalid);
-        yield return Precedence("body oversized over path oversized", "{\"name\":\"a\",\"path\":\"" + new string('p', 4_097) + "\",\"content\":\"" + new string('b', 1_048_577) + "\"}", "{\"content\":\"" + new string('b', 1_048_577) + "\",\"path\":\"" + new string('p', 4_097) + "\",\"name\":\"a\"}", SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized);
+        yield return Precedence("duplicate over unknown", """{"name":"a","name":"b","path":"p","content":"b","model":0}""", """{"model":0,"content":"b","path":"p","name":"a","name":"b"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty);
+        yield return Precedence("unknown over invalid type", """{"name":"a","path":"p","content":null,"model":0}""", """{"model":0,"content":null,"path":"p","name":"a"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.UnknownProperty);
+        yield return Precedence("invalid type over name invalid", """{"name":"","path":"p","content":null}""", """{"content":null,"path":"p","name":""}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Precedence("name invalid over path invalid", """{"name":"","path":"","content":"b"}""", """{"content":"b","path":"","name":""}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid);
+        yield return Precedence("path invalid over body missing", """{"name":"a","path":""}""", """{"path":"","name":"a"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.PathInvalid);
+        yield return Precedence("name missing over body missing", """{"path":"p"}""", """{"path":"p"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing);
+        yield return Precedence("body missing over path missing", """{"name":"a"}""", """{"name":"a"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyMissing);
+        yield return Precedence("path missing over body Unicode", """{"name":"a","content":"\uD800"}""", """{"content":"\uD800","name":"a"}""", SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.DefinitionPathMissing);
+        yield return Precedence("body Unicode over path Unicode", """{"name":"a","path":"\uD800","content":"\uD800"}""", """{"content":"\uD800","path":"\uD800","name":"a"}""", SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid);
+        yield return Precedence("path Unicode over body oversized", "{\"name\":\"a\",\"path\":\"\\uD800\",\"content\":\"" + new string('b', 1_048_577) + "\"}", "{\"content\":\"" + new string('b', 1_048_577) + "\",\"path\":\"\\uD800\",\"name\":\"a\"}", SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.PathUnicodeInvalid);
+        yield return Precedence("body oversized over path oversized", "{\"name\":\"a\",\"path\":\"" + new string('p', 4_097) + "\",\"content\":\"" + new string('b', 1_048_577) + "\"}", "{\"content\":\"" + new string('b', 1_048_577) + "\",\"path\":\"" + new string('p', 4_097) + "\",\"name\":\"a\"}", SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.BodyOversized);
     }
 
     public static IEnumerable<object[]> OptionalBoundsCases()
     {
         var maximumTools = string.Join(',', Enumerable.Repeat("\"" + new string('t', 128) + "\"", 64));
         var maximumPayload = "{\"name\":\"a\",\"path\":\"p\",\"content\":\"\",\"allowedTools\":[" + maximumTools + "],\"description\":\"" + RepeatAstral(4_096) + "\",\"pluginName\":\"" + RepeatAstral(64) + "\",\"pluginVersion\":\"" + new string('v', 256) + "\",\"source\":\"builtin\",\"trigger\":\"agent-invoked\"}";
-        yield return Classification("all optional maximums accepted", maximumPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None);
-        yield return Classification("allowed tools count", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"allowedTools\":[" + string.Join(',', Enumerable.Repeat("\"t\"", 65)) + "]}", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("allowed tool empty", """{"name":"a","path":"p","content":"b","allowedTools":[""]}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("allowed tool wrong type", """{"name":"a","path":"p","content":"b","allowedTools":[null]}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("allowed tool scalar bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"allowedTools\":[\"" + new string('t', 129) + "\"]}", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("description scalar bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"description\":\"" + new string('d', 4_097) + "\"}", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("plugin name byte bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"pluginName\":\"" + new string('p', 257) + "\"}", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("plugin version byte bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"pluginVersion\":\"" + RepeatAstral(65) + "\"}", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("optional null", """{"name":"a","path":"p","content":"b","description":null}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("source closed", """{"name":"a","path":"p","content":"b","source":"future"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
-        yield return Classification("trigger closed", """{"name":"a","path":"p","content":"b","trigger":"future"}""", SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType);
+        yield return Classification("all optional maximums accepted", maximumPayload, SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None);
+        yield return Classification("allowed tools count", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"allowedTools\":[" + string.Join(',', Enumerable.Repeat("\"t\"", 65)) + "]}", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("allowed tool empty", """{"name":"a","path":"p","content":"b","allowedTools":[""]}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("allowed tool wrong type", """{"name":"a","path":"p","content":"b","allowedTools":[null]}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("allowed tool scalar bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"allowedTools\":[\"" + new string('t', 129) + "\"]}", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("description scalar bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"description\":\"" + new string('d', 4_097) + "\"}", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("plugin name byte bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"pluginName\":\"" + new string('p', 257) + "\"}", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("plugin version byte bound", "{\"name\":\"a\",\"path\":\"p\",\"content\":\"b\",\"pluginVersion\":\"" + RepeatAstral(65) + "\"}", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("optional null", """{"name":"a","path":"p","content":"b","description":null}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("source closed", """{"name":"a","path":"p","content":"b","source":"future"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
+        yield return Classification("trigger closed", """{"name":"a","path":"p","content":"b","trigger":"future"}""", SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType);
     }
 
     private static object[] Case(string name, byte[] request) => [name, request];
 
-    private static object[] Classification(string name, string payload, SkillInvocationV2PayloadState state, SkillInvocationV2PayloadReason reason) => [name, payload, state, reason];
+    private static object[] Classification(string name, string payload, SkillInvocationPayloadState state, SkillInvocationPayloadReason reason) => [name, payload, state, reason];
 
-    private static object[] Precedence(string name, string first, string second, SkillInvocationV2PayloadState state, SkillInvocationV2PayloadReason reason) => [name, first, second, state, reason];
+    private static object[] Precedence(string name, string first, string second, SkillInvocationPayloadState state, SkillInvocationPayloadReason reason) => [name, first, second, state, reason];
 
     private static byte[] ValidRequest(string payload) => Encoding.UTF8.GetBytes(ValidRequestText(payload));
 
     private static byte[] ValidRequest(byte[] payload)
     {
-        var prefix = Encoding.UTF8.GetBytes(EnvelopePrefix + "[" + EventPrefix);
+        var prefix = Encoding.UTF8.GetBytes(Currentize(EnvelopePrefix) + "[" + EventPrefix);
         var suffix = Encoding.UTF8.GetBytes("]}");
         var request = new byte[prefix.Length + payload.Length + suffix.Length];
         prefix.CopyTo(request, 0);
@@ -267,7 +316,12 @@ public sealed class SkillInvocationV2ParserTests
 
     private static string ValidRequestText(string payload) => EnvelopeText("[" + ValidEventText(payload) + "]");
 
-    private static string EnvelopeText(string eventsJson) => EnvelopePrefix + eventsJson + "}";
+    private static string EnvelopeText(string eventsJson) => Currentize(EnvelopePrefix) + eventsJson + "}";
+
+    private static string Currentize(string value) => value.Replace(
+        "github-copilot-sdk.skill-invoked.normalize.v1",
+        "github-copilot-sdk.skill-invoked.normalize.v2",
+        StringComparison.Ordinal);
 
     private static string ValidEventText(string payload) => EventPrefix + payload + "}";
 
@@ -295,5 +349,8 @@ public sealed class SkillInvocationV2ParserTests
         return corrupt;
     }
 
-    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

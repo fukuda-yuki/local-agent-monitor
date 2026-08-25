@@ -73,6 +73,9 @@
     <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0001.json"
           Link="TestData\SkillInvocationV2\compatibility-registry-r0001.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0002.json"
+          Link="TestData\SkillInvocationV2\compatibility-registry-r0002.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -26,6 +26,7 @@ internal sealed class SessionEventWriterWorker : BackgroundService
         await foreach (var request in queue.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
         {
             queue.MarkDequeued();
+            if (!request.TryClaim()) continue;
             try
             {
                 normalizer.NormalizeAndWrite(request.Envelope);

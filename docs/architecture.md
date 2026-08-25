@@ -1118,3 +1118,13 @@ physical cleanup; Session aggregate fields remain a frozen read projection and
 cannot authorize deletion of any other store. Catalog adapters are exact-owner
 components for the five closed store kinds, while safe summaries, projections,
 receipts, and tombstones remain outside the raw deletion registry.
+
+## D087 owned Skill content split
+
+The current owned-session adapter validates typed SDK invocation content only
+as a required well-formed auxiliary inventory. It re-proves the retained native
+Skill under the existing root/lease authority and supplies exact proof content
+explicitly to normalizer v2; the mapper cannot implicitly promote SDK content
+to the persisted definition. Prepared bytes remain the sole post-terminal
+import input, so current-file comparison continues to compare stored native
+definition bytes with a fresh native read.

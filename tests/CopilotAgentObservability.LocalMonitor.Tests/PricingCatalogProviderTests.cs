@@ -519,6 +519,15 @@ public sealed class WindowsFactAttribute : FactAttribute
     }
 }
 
+public sealed class WindowsTheoryAttribute : TheoryAttribute
+{
+    public WindowsTheoryAttribute()
+    {
+        if (!OperatingSystem.IsWindows())
+            Skip = "not_applicable:windows_only_security_contract";
+    }
+}
+
 public sealed class LinuxFactAttribute : FactAttribute
 {
     public LinuxFactAttribute()

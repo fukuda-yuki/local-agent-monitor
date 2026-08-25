@@ -646,9 +646,12 @@ transaction. Ordinary OTel ingestion uses the same transaction-aware generation
 participant. OTel publication rechecks the current compatibility revision,
 resolved state, desired generation, exact frontier, projector version, queue
 lease and Retention operation leases. The independent SDK Session/Event arm is
-not trace-generation-bound. D083 fixes its exact wire and complete r0001
-registry, but admission remains unavailable until #158 implements the atomic
-writer. A raw snapshot cannot resurrect an invalid claim.
+not trace-generation-bound. Immutable r0001 remains the complete historical
+normalizer-v1 registry. Current r0002 admits only exact source versions 1.0.65
+and 1.0.75 with adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v2`. Missing, corrupt, or gapped
+r0002 is unavailable and never falls back to r0001. A raw snapshot cannot
+resurrect an invalid claim.
 
 The old pre-release Skill rows and Skill-only completion marker are discarded;
 they are not copied, backfilled or served through a compatibility reader.
@@ -725,17 +728,17 @@ exactly one `X-CAO-Session-Event-Version` field whose complete ASCII value is
 consumed bridge token below, exactly one accepted JSON `Content-Type`, and one
 strict UTF-8 JSON object followed only by JSON whitespace. Object-property order
 is nonsemantic. The adapter emits, and the parser requires exactly once and
-nonnull, this outer order and r0001 value set:
+nonnull, this outer order and current r0002 value set:
 
-| Property | Exact r0001 rule |
+| Property | Exact current r0002 rule |
 |---|---|
 | `schema_version` | JSON integer `2` |
 | `source_adapter` | `copilot-sdk-stream` |
 | `source_surface` | `copilot-sdk` |
 | `native_session_id` | exact `CopilotSession.sessionId`; 1..256 Unicode scalars, no U+0000, at most 1,024 strict UTF-8 bytes |
-| `source_application_version` | `1.0.65` from the admitted same-client runtime generation |
+| `source_application_version` | exact `1.0.65` or `1.0.75` from the admitted same-client runtime generation |
 | `adapter_version` | `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` |
-| `normalization_version` | `github-copilot-sdk.skill-invoked.normalize.v1` |
+| `normalization_version` | `github-copilot-sdk.skill-invoked.normalize.v2` |
 | `payload_schema` | `github-copilot-sdk.skill-invoked.v1` |
 | `schema_fingerprint` | `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c` |
 | `events` | array containing exactly one Event |
@@ -751,14 +754,19 @@ same form and never supplies local `session_events.parent_event_id`; `type` is
 `agentId` is absent, otherwise it has the same scalar/U+0000/UTF-8 bounds as the
 native Session ID. `source_ephemeral` is true only for SDK semantic true;
 absent or false maps to false. `trace_id` and `span_id` are both required JSON
-null under r0001 because SDK 1.0.4 exposes no exact correlation source; no
+null under current r0002 because SDK 1.0.4 exposes no exact correlation source; no
 Session, Run, name, path, time, or proximity inference may populate them.
 
 `payload` is newly written from typed SDK `SkillInvokedData`, not copied from a
 raw SDK serializer buffer. It has exactly the required properties `name`,
 `path`, and `content`, followed when present by optional `allowedTools`,
 `description`, `pluginName`, `pluginVersion`, `source`, and `trigger`. Absent
-optionals are omitted and JSON null is never synthesized. Strings and allowed-
+optionals are omitted and JSON null is never synthesized. Under D087, typed
+SDK `Content` is required and well-formed but is auxiliary inventory and never
+becomes the persisted definition. Normalizer v2 writes exact callback-time
+native `currentProof.Content` after equality with the frozen proof into
+`payload.content`; every other payload field remains the typed SDK value.
+Strings and allowed-
 tool order are preserved without trimming, case folding, normalization,
 filtering, path rewriting, or replacement repair. There is no `model`; it is an
 unknown payload property and follows the fixed

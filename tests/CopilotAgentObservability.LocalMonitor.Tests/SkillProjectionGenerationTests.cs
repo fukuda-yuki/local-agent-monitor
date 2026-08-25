@@ -1435,7 +1435,7 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
-    public void SdkClaim_RemainsNonCurrentWhilePayloadAuthorityIsUnpromoted()
+    public void ValidSdkClaim_IsSchemaValidButRemainsNonCurrentWithoutRegistryAuthority()
     {
         using var database = new TestDatabase();
         _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
@@ -1490,13 +1490,11 @@ public sealed class SkillProjectionGenerationTests
             command.ExecuteNonQuery();
         }
 
+        using var validation = Open(database.Path);
+        SkillProjectionSchemaV1.Validate(validation, transaction: null);
         Assert.Empty(
             new SkillProjectionReadService(database.Path)
                 .ListCurrentSdkClaims(sessionId));
-        using var validation = Open(database.Path);
-        var error = Assert.Throws<InvalidOperationException>(
-            () => SkillProjectionSchemaV1.Validate(validation, transaction: null));
-        Assert.Equal("skill_projection_sdk_claim_authority_unpromoted", error.Message);
     }
 
     [Fact]
@@ -1528,7 +1526,7 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
-    public void SdkClaimParticipant_RejectsUnpromotedPayloadAuthorityAndRollsBackCaller()
+    public void SdkClaimParticipant_InsertsUnderTheCallerTransactionAndRollsBackWithIt()
     {
         using var database = new TestDatabase();
         _ = RetentionCatalogContext.InitializeNewOwnedDatabase(database.Path);
@@ -1594,12 +1592,12 @@ public sealed class SkillProjectionGenerationTests
             unrelated.CommandText =
                 "INSERT INTO schema_version(component,version) VALUES('collision-proof',1);";
             unrelated.ExecuteNonQuery();
-            var error = Assert.Throws<InvalidOperationException>(
-                () => SkillProjectionSdkClaimParticipant.InsertOrVerify(
+            Assert.Equal(
+                SkillProjectionSdkClaimWriteOutcome.Inserted,
+                SkillProjectionSdkClaimParticipant.InsertOrVerify(
                     connection,
                     transaction,
                     claim));
-            Assert.Equal("skill_projection_sdk_claim_authority_unpromoted", error.Message);
             transaction.Rollback();
         }
         using var verification = Open(database.Path);

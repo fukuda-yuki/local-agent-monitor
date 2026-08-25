@@ -402,18 +402,26 @@ internal static class SessionRoutes
                 await RawContentFailure(context, 404, "session_event_content_not_found");
                 return;
             }
-            var read = await store.ReadContentAsync(sessionGuid, eventGuid, context.RequestAborted);
-            if (read.Disposition == SessionContentReadDisposition.NotFound)
+            // The sole read this route performs. It denies every skill.invoked Event inside the
+            // same transaction as the lease insertion and the content selection, so no v2 payload
+            // can cross this frozen generic authority through a racing type change.
+            var read = await store.ReadGenericRouteContentAsync(sessionGuid, eventGuid, context.RequestAborted);
+            if (read.Disposition == SessionGenericRouteContentDisposition.NotFound)
             {
                 await RawContentFailure(context, 404, "session_event_content_not_found");
                 return;
             }
-            if (read.Disposition == SessionContentReadDisposition.Busy)
+            if (read.Disposition == SessionGenericRouteContentDisposition.Busy)
             {
                 await RawContentFailure(context, 503, "session_store_busy");
                 return;
             }
-            if (read.Disposition == SessionContentReadDisposition.Denied)
+            if (read.Disposition == SessionGenericRouteContentDisposition.Unavailable)
+            {
+                await RawContentFailure(context, 503, "session_store_unavailable");
+                return;
+            }
+            if (read.Disposition == SessionGenericRouteContentDisposition.Denied)
             {
                 context.Response.Headers.CacheControl = "no-store";
                 context.Response.StatusCode = 410;

@@ -99,6 +99,54 @@ documents with fresh semantic serialization; and historical-to-discovery proof
 with native current-file reads. The raw-default-only additive v2 path has no
 payload `model`, no inferred join, and no serializer-default authority.
 
+D086 supersedes only D083's producer topology and affected raw-analysis
+no-Skill rule. External CLI/VS Code sessions remain unavailable and unobserved;
+only the execution Session of a Local Monitor-owned raw-analysis candidate may
+produce callbacks. On one T0b-certified bundled client, a prompt-free inventory
+probe precedes a distinct execution Session whose `DisabledSkills` freezes all
+non-retained names. Explicit `--skill-discovery-directory` roots are the sole
+Skill provenance. The prompt-free probe retains only the existing exact source-
+qualified custom raw-analysis tool entries. With retained roots, the execution
+Session retains those exact custom entries and adds exactly `builtin:skill` and
+`builtin:task_complete`; no wildcard, other built-in, MCP, plugin, ambient
+instruction/config discovery, or Skill `allowed-tools` metadata can widen that
+union. Production sends the ordinary requested prompt with
+`AgentMode.Autopilot`, never forces an arbitrary retained Skill invocation, and
+uses the exact typed task-complete event as its terminal boundary. Deterministic
+T0b alone resolves the exact admitted enabled/user-invocable retained command
+through the SDK commands API, invokes it with
+`executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-producing result,
+and sends that exact returned prompt with `AgentMode.Autopilot` to prove an exact
+matching typed retained `SkillInvoked` followed by exact typed task completion.
+Every retained inventory path requires native retained-root
+opener/lease proof before prompt; each invocation path is re-proved when
+invoked. After exact completion, at most 64 callbacks
+and 8,388,608 aggregate complete UTF-8 body bytes enter the synchronous, non-
+durable owned-session post-completion buffer/import. Successful import and
+Session disposal atomically publish the candidate generation; valid-prefix
+failure keeps the preceding generation. Zero invocations perform no v2 or v1
+writes but may publish a successful roots-configured generation; positive
+invocations alone use v2 callbacks, one-event v1 SessionStart, then one-event
+v1 task-complete. Zero roots leaves the current-file surface absent (`404`);
+roots without a published generation retain exact `503
+skill_current_file_discovery_unavailable` after earlier gates. Implementation
+and exact-final-candidate platform/live refresh are complete; pinned full
+validation, fresh independent review, and release remain pending.
+
+D089 narrowly supersedes D083/D086 only where they require signed-in `1.0.65`
+or live proof of every admitted r0002 tuple. Current r0002 remains exactly
+`1.0.65` and `1.0.75`, protocol `3`; the mandatory live lane is exactly bundled
+`1.0.75`, protocol `3`. Deterministic compatibility and admission coverage for
+`1.0.65` is not the mandatory live lane. Runtime identity remains exact and
+fail closed. D090 retracts the contradicted claim that current-release T0b
+preceded r0002 and producer implementation. This already-implemented release
+uses the exact post-implementation same-client proof plus deterministic
+r0002/identity/admission coverage and completed exact-final-candidate platform
+evidence; pinned full validation and fresh independent review remain release
+gates.
+Future registry revisions or producer/startup implementations require T0b
+before implementation. D087 and D088 remain unchanged.
+
 The exact checked-in byte authorities and their SHA-256 identities are:
 
 - `github-copilot-sdk.skill-invoked.v1.schema.json` = `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c`;
@@ -1112,8 +1160,11 @@ unlinked same-Session pair is not added and yields `null` count with
 `certification_pending`. The obsolete pre-release Skill rows are discarded
 without copy, backfill, dual readers or deletion of unrelated
 Session/raw/Retention data. D083 pins the exact wire and complete r0001
-registry; #158 must still implement its atomic writer before SDK claim
-admission is available.
+registry. Under D090, exact bundled `1.0.75` / protocol `3` same-client live
+proof was accepted after the unchanged exact two-entry r0002 and owned-session
+producer; the former opposite chronology is retracted, and the #158 atomic
+writer/importer implementation is complete. SDK claim admission
+still requires exact current-registry identity and capability checks.
 Canonical details are
 [source compatibility reconciliation](specifications/layers/source-compatibility-reconciliation.md)
 and [Skill projection](specifications/layers/skill-projection.md). Issue #152
@@ -1127,7 +1178,9 @@ Its v2 outer envelope/event inventory and mapping, complete error/status/media/
 `405` bytes, producer schema/fingerprint/registry, equality-receipt and content
 byte domains, multi-fault/nullability/name/path classification,
 success/discovery literals, and historical-to-discovery handle identity proof
-are closed by D083. Consequently the nonregistered #119 parser/handoff is
+are closed by D083; D086 alone replaces the producer topology with the
+same-client inventory-probe/execution-Session and owned-session post-completion
+buffer/import contract. Consequently the nonregistered #119 parser/handoff is
 implementation-ready only after mandatory live-Issue reconciliation/readback;
 #158 production and route registration remain prerequisite-, implementation-,
 and release-gated. Raw-local registration is raw-default only; the complete
@@ -1459,3 +1512,16 @@ User-facing docs を変更した場合:
 - README と user guide のリンク先が存在すること。
 - screenshot path が存在すること。
 - 古い入口表現が直接入口文書に残っていないこと。
+
+## D087 Current owned-producer content authority
+
+For r0002 normalizer `github-copilot-sdk.skill-invoked.normalize.v2`, the
+existing normalized `payload.content` is exact callback-time native
+`currentProof.Content` after equality with the frozen proof. Typed upstream
+`SkillInvokedData.Content` remains required and well-formed UTF-16, but is an
+auxiliary-file inventory and is neither compared with native content nor
+persisted. The callback performs identity and description binding, validates
+that upstream field, freshly re-proves the native target, and prepares the
+complete body from the proof content with no later read or reserialization.
+r0001 remains immutable normalizer-v1 history and no fallback. All public
+shapes, limits, status behavior, receipts, and storage contracts are unchanged.

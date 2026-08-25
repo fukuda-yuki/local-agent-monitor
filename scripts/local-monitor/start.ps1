@@ -6,6 +6,8 @@ param(
     [string] $Mode = 'DotnetRun',
     [switch] $SanitizedOnly,
     [string[]] $PricingRegistryOverride = @(),
+    [string[]] $SkillDiscoveryProjectPath = @(),
+    [string[]] $SkillDiscoveryDirectory = @(),
     [switch] $NoBrowser = $true,
     [switch] $WaitReady = $true,
     [int] $TimeoutSeconds = 30
@@ -15,6 +17,15 @@ param(
 
 if (-not (Test-LocalMonitorPricingRegistryOverrideCount -PricingRegistryOverride $PricingRegistryOverride)) {
     Write-Error 'pricing_registry_override_count_invalid'
+    exit 1
+}
+
+$skillDiscoveryValidationError = Test-LocalMonitorSkillDiscoveryArguments `
+    -SkillDiscoveryProjectPath $SkillDiscoveryProjectPath `
+    -SkillDiscoveryDirectory $SkillDiscoveryDirectory `
+    -SanitizedOnly:$SanitizedOnly.IsPresent
+if ($null -ne $skillDiscoveryValidationError) {
+    Write-Error $skillDiscoveryValidationError
     exit 1
 }
 
@@ -120,6 +131,14 @@ if ($SanitizedOnly) {
 foreach ($override in @($PricingRegistryOverride)) {
     $arguments += '--pricing-registry-override'
     $arguments += $override
+}
+foreach ($projectPath in @($SkillDiscoveryProjectPath)) {
+    $arguments += '--skill-discovery-project-path'
+    $arguments += $projectPath
+}
+foreach ($directory in @($SkillDiscoveryDirectory)) {
+    $arguments += '--skill-discovery-directory'
+    $arguments += $directory
 }
 
 $stdoutPath = Join-Path $script:LogDirectory 'local-monitor.stdout.log'

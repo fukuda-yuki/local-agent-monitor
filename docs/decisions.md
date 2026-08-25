@@ -2937,8 +2937,8 @@ owned by Session Event content. The writer is one atomic seven-authority
 transaction; partial Event, content, Retention, snapshot, claim, receipt or
 invalid-claim state cannot remain.
 
-Startup `SkillDiscovery.ProjectPaths` and
-`SkillDiscovery.SkillDirectories` are the sole discovery-root authority.
+The repeatable startup CLI options `--skill-discovery-project-path` (0..16) and
+`--skill-discovery-directory` (0..32) are the sole discovery-root authority.
 `ServerSkillsApi.DiscoverAsync` receives only those validated roots. Historical
 path/CWD, Repository locator, prompt, workspace label, timestamp and out-of-root
 results never create a root, and the service never opens the historical path
@@ -3894,6 +3894,109 @@ inferred join, second Skill/#154/Retention authority, raw-content logging,
 repository-safe raw carrier, #152 resolution, or claim that any engineering or
 release gate is complete.
 
+## D086: Skill snapshots use only Local Monitor-owned completed analysis sessions
+
+Status: Accepted (2026-08-23)
+
+Issue #158 supersedes only D083 Group 5's producer/topology clauses and the
+raw-analysis rule that disabled every Skill. D083 remains authoritative for the
+wire, parser/handoff, schema, receipt, persistence, classification, raw owner,
+read routes, native current-file proof, Retention, and security contracts.
+
+External GitHub Copilot CLI and VS Code sessions remain unavailable and
+unobserved. The product does not enumerate, resume, attach to, or read history
+from a foreign session. `ResumeSessionAsync` mutates session configuration and
+does not prove exclusive ownership or the resumed runtime identity. The sole
+producer is a raw-default Local Monitor raw-analysis session created and
+exclusively owned through completion by one admitted `CopilotClient`.
+
+As corrected by D090, this current release did not run versioned gate T0b
+before r0002 or producer startup code; future registry revisions and producer/
+startup implementations must do so. On the same signed-in bundled client T0b
+must prove exact status Version and integer
+ProtocolVersion, matching `SessionStartData.CopilotVersion`, callback
+registration before both session creations, prompt-free probe inventory,
+execution `DisabledSkills`, retained-root-only execution inventory/invocation,
+and exact task completion. Deterministic T0b alone resolves the exact admitted
+enabled/user-invocable retained-skill command through the SDK commands API,
+invokes it with `executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-
+producing result, sends that exact returned prompt with `AgentMode.Autopilot`,
+and proves an exact matching typed retained `SkillInvoked` followed by an exact
+typed task-complete event. T0b is expected to certify exact CLI
+versions `1.0.65` and `1.0.75`, SDK package/assembly `1.0.4/1.0.4.0`, protocol
+`3`, adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v2`; immutable contiguous r0002 may
+admit only complete exact tuples actually proved. Failure stops r0002, startup
+code, integration, and release. r0001 remains byte-identical historical
+authority and is not an admission fallback.
+
+An admitted analysis creates one current-file-invisible candidate containing
+the exact client, certified identity, and retained directory scope. With
+explicit `--skill-discovery-directory` roots, it enables Skills, disables
+configuration discovery, skips custom instructions, supplies no plugin or
+instruction directories, and uses only exact retained Skill directories.
+Those roots are the sole allowed Skill provenance. On the same certified client
+it first creates and disposes a prompt-free inventory-probe Session whose
+callback is registered before creation. The probe retains only the existing
+exact source-qualified custom raw-analysis tool entries and does not require
+either admitted built-in. It rejects collisions and missing or
+unverifiable paths, then freezes every non-retained Skill name into
+`SessionConfig.DisabledSkills` for a distinct owned execution Session, also
+with its callback registered before creation. Before any prompt, execution
+inventory must show no enabled non-retained Skill and no inventory drift or
+inability to disable. Before prompt, every retained inventory path is proved
+with the existing native retained-root opener and lease; each later invocation
+path is re-proved when invoked, never trusted from SDK path strings. Only the
+execution Session produces callbacks/import. With retained roots it preserves
+the exact custom entries and adds exactly `builtin:skill` and
+`builtin:task_complete`. Wildcards, every other built-in, MCP tools, plugins,
+ambient instruction/config discovery, and widening by a retained Skill's
+`allowed-tools` metadata remain forbidden. Production sends the ordinary
+requested prompt with `AgentMode.Autopilot`, never forces an arbitrary retained
+Skill invocation, and uses the exact typed task-complete event as terminal.
+With zero roots, analysis runs with Skills disabled, retains no generation, and
+the current-file service/POST remains absent (outer `404`).
+
+The candidate registers its callback before session creation and, under one
+lock, accepts exactly one matching SessionStart, zero through 64 SkillInvoked
+callbacks in assigned ordinal order, then exact same-session task completion.
+Each callback prepares one complete one-event v2 UTF-8 body from the immutable
+candidate identity. The process-memory-only aggregate is capped at 8,388,608
+complete body bytes. Any malformed, out-of-order, mismatched, 65th, oversized,
+post-terminal, cancellation, root, identity, or lease failure poisons it.
+
+Before exact completion there is no HTTP send or persistence. The
+**owned-session post-completion buffer/import** is synchronous and non-durable:
+zero invocations perform no v2 or v1 writes. For one or more invocations, after
+completion it sends prepared v2 bodies sequentially with same-candidate
+capabilities and fresh body-bound tokens, without reserialization or retry;
+then it awaits one-event v1 SessionStart and one-event v1 task-complete writes.
+Any failure stops immediately, releases capabilities exactly once, fails the
+analysis, disposes the failed candidate, preserves only the valid already-
+committed prefix, and leaves the preceding current generation in place. There
+is no durable queue or importer receipt, startup recovery, or automatic retry.
+
+Only after all required imports succeed and the SDK session is disposed may
+the exact candidate publish atomically as current; publication order, not
+analysis start order, defines the latest successful generation. Zero Skill
+invocations write no snapshot, receipt, or Session events, but with configured
+roots a successful completed analysis may still publish its generation for
+current-file discovery. With roots but no published generation, the existing
+current-file route returns exact `503 skill_current_file_discovery_unavailable` after its
+earlier gates. Replacement, failure, refusal, lease loss, and shutdown reject
+new capabilities, cancel unsealed work, drain capabilities, dispose the client,
+then dispose the retained directory scope, exactly once.
+
+D086 adds no option, wire/schema/receipt/storage shape, #154 authority,
+foreign producer, direct writer, fallback, compatibility path, backfill,
+durable importer state, or external CLI/VS Code capture. Implementation,
+platform/live evidence, full validation, independent review, and release remain
+pending.
+
+The current canonical decision order is D079 -> D080 -> D081 -> D082 -> D083
+-> D085 -> D086. D086 is placed adjacent to the D083 text it narrowly
+supersedes; this placement does not reorder D085's Retention lock authority.
+
 ## D085: Exact admitted lease tuple is the Retention publication-lock order
 
 Status: Accepted (2026-08-15)
@@ -3945,3 +4048,97 @@ using caller/selector order, because reversed input permits lock inversion; and
 using an owner ordinal when present with tuple fallback otherwise, because the
 same grants could then participate in different global lock orders and the
 deadlock proof would remain open.
+
+## D087: Current owned producer certifies native Skill definition content
+
+Status: Accepted (2026-08-24)
+
+D087 narrowly supersedes D083 and D086 for the current owned producer's
+`payload.content` authority and r0002 normalization identity. Certified CLI
+versions 1.0.65 and 1.0.75 emit `SkillInvokedData.Content` as an LF-wrapped
+auxiliary-file inventory (two LF bytes for a single-file synthetic Skill), not
+as the native `SKILL.md` definition. The callback therefore requires that SDK
+field to be present and well-formed UTF-16 but never compares, persists, logs,
+returns, or retains it. After identity and description binding, the callback
+freshly re-proves the retained native target, requires exact equality with the
+frozen proof, and writes that callback-time proof's exact `Content` into the
+existing normalized `payload.content`. No heuristic, auxiliary-tree parser,
+fallback, additional field, or later filesystem read is permitted.
+
+The unreleased r0002 remains revision 2 with exactly the 1.0.65 and 1.0.75
+entries, adapter `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, unchanged payload
+schema and fingerprint, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v2`. Historical r0001 remains
+byte-identical normalizer-v1 evidence and is never a current fallback. D083
+and D086 remain authoritative for every contract D087 does not supersede.
+
+## D088: Normal shutdown drains the published runtime generation without invalidation
+
+Status: Accepted (2026-08-25)
+
+D088 narrowly supersedes only D086's runtime-generation shutdown clause. Normal
+shutdown atomically closes the shared, runtime, and root admission authorities.
+Capabilities already admitted by the published current generation continue to
+their ordinary terminal completion or abort; shutdown alone neither invalidates
+that generation nor cancels those capabilities, and waits for their release
+before disposing the client and then the retained analysis scope. Unpublished
+candidates are invalidated, their unsealed work is canceled, and they are
+drained and disposed.
+
+Replacement, failure, refusal, lease loss, and explicit invalidation remain
+canceling. A real invalidation that occurs after normal drain has begun upgrades
+that published generation to canceling while both paths await the same
+exactly-once cleanup and disposal task. All other D086 and D087 authority
+remains unchanged.
+
+## D089: Current release requires one exact signed-in Windows live tuple
+
+Status: Accepted (2026-08-25)
+
+D089 narrowly supersedes only the D083 and D086 clauses that require signed-in
+`1.0.65` or live proof of every tuple admitted by current r0002. The immutable
+r0002 authority remains revision 2 with exactly `1.0.65` and `1.0.75`, both at
+protocol `3`; D087's two entries and D088's shutdown contract remain unchanged.
+
+For this release, mandatory T0b and final signed-in Windows live proof use
+exactly the application-bundled `1.0.75` client and protocol `3`. The
+deterministic compatibility and admission coverage for `1.0.65` remains
+required but is not the mandatory live lane. This does not relax identity:
+status, SessionStart, capability, request, registry, and evidence checks remain
+exact and fail closed. Historical D083 `1.0.65` material remains preserved as
+decision history and does not define the current release gate.
+
+D089 changes only the mandatory live tuple. D090 supersedes its sequencing
+statement and the corresponding current-release chronology in D086.
+
+## D090: Correct current-release T0b chronology and acceptance sequencing
+
+Status: Accepted (2026-08-25)
+
+Durable repository history proves that D086/S3 authority was recorded at
+`fc5a0e890341093fa42eec9f05f4b95569ea634c`, r0002 and the producer were
+implemented in its direct child `007826104af146a0920e62939a47a2aa3503f86a`,
+and the importer followed at `1ddc79142ba6afc93074360a19992d0c1eee0774`.
+Accepted signed-in live proof arrived only later, at
+`527c7b5f299296afefe13def783c08be121684b9` on 2026-08-25. The D086/D089 claim
+that current-release T0b preceded r0002 and producer implementation is therefore
+retracted, not merely left unproven.
+
+For this already-implemented current release, acceptance uses exact post-
+implementation bundled `1.0.75` / protocol `3` same-client live proof together
+with deterministic r0002/identity/admission coverage, candidate-bound platform
+evidence, pinned full validation, and fresh independent review. The earlier
+accepted proof resolves the historical sequencing conflict. Production changed
+after that proof, however, so an exact-final-candidate Windows/Linux live refresh,
+final validation, independent review, release, merge, and Issue closure remain
+pending and must not be inferred from the historical anchor.
+
+Every future registry revision or producer/startup implementation retains a
+mandatory pre-implementation T0b. D090 changes chronology and acceptance
+sequencing only. It does not relax exact version/protocol/SessionStart,
+capability, registry, retained-root-only owned-session topology, external
+CLI/VS Code session prohibition, no-fallback, no-compatibility-range, wire,
+schema, HTTP, CLI, storage, D087 content-authority, or D088 shutdown behavior.
+D090 takes precedence over only the conflicting chronology and current-release
+acceptance-sequencing clauses in D083, D086, and D089; all other clauses remain
+authoritative.

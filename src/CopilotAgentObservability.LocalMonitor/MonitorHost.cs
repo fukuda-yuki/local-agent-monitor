@@ -16,6 +16,9 @@ using CopilotAgentObservability.LocalMonitor.Pricing;
 using CopilotAgentObservability.LocalMonitor.Retention;
 using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.LocalMonitor.SkillNative;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 using CopilotAgentObservability.LocalMonitor.SourceCompatibility;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.Doctor.ClaudeCode;
@@ -34,6 +37,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using GitHub.Copilot;
 
 namespace CopilotAgentObservability.LocalMonitor;
 
@@ -149,6 +153,16 @@ internal static class MonitorHost
             kestrelOptions.Limits.MaxRequestLineSize = 16_384;
         });
 
+        // The Gate 8 root preflight runs before any store is opened so an invalid configuration
+        // aborts startup without leaving a side effect behind. Receiver-only never reaches it:
+        // --sanitized-only composes no discovery surface at all.
+        var skillHostShutdownGate = options.SanitizedOnly ? null : new SkillHostShutdownGateV1();
+        var skillDiscoveryRootGeneration = options.SanitizedOnly
+            ? null
+            : BuildSkillDiscoveryRootGeneration(options, skillHostShutdownGate!);
+        using var skillDiscoveryRootOwnership = new SkillDiscoveryRootOwnershipGuard(skillDiscoveryRootGeneration);
+        testOptions?.SkillDiscoveryRootGenerationObserver?.Invoke(skillDiscoveryRootGeneration);
+
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
         var queue = testOptions?.Queue ?? new IngestionQueue(timeProvider);
         var health = testOptions?.Health ?? new MonitorHealthState();
@@ -213,7 +227,39 @@ internal static class MonitorHost
             skillProjectionStore,
             timeProvider: timeProvider);
         builder.Services.AddSingleton(skillProjectionStore);
-        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath));
+        var skillRegistryAuthority = new SkillInvocationV2RegistryProviderV1();
+        builder.Services.AddSingleton(skillRegistryAuthority);
+
+        // The runtime admission exists on every raw-default host, but no generation is admitted
+        // until the owned producer chain certifies a tuple accepted by the artifact registry. Until then the
+        // current-file route stays registered and forms its fixed discovery-unavailable 503, which
+        // is what Gate 8 requires of an absent or mismatched generation.
+        var skillRuntimeAdmission = options.SanitizedOnly
+            ? null
+            : new CopilotRuntimeAdmissionV1(skillHostShutdownGate!);
+        SkillRuntimeBridgeHolderV1? skillRuntimeBridgeHolder = null;
+        if (skillRuntimeAdmission is not null)
+        {
+            builder.Services.AddSingleton(skillRuntimeAdmission);
+            skillRuntimeBridgeHolder = new SkillRuntimeBridgeHolderV1();
+            builder.Services.AddSingleton(skillRuntimeBridgeHolder);
+            builder.Services.AddHostedService(services => new SkillRuntimeBridgeLifetimeV1(
+                services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>(),
+                skillRuntimeBridgeHolder,
+                skillRuntimeAdmission,
+                services.GetRequiredService<IHostApplicationLifetime>()));
+        }
+        if (skillHostShutdownGate is not null)
+        {
+            var shutdownCoordinator = new SkillHostShutdownCoordinatorV1(
+                skillHostShutdownGate,
+                skillDiscoveryRootGeneration,
+                skillRuntimeAdmission);
+            builder.Services.AddSingleton<SkillHostShutdownCoordinatorV1>(_ => shutdownCoordinator);
+            builder.Services.AddHostedService(services =>
+                services.GetRequiredService<SkillHostShutdownCoordinatorV1>());
+        }
+        builder.Services.AddSingleton(new SkillProjectionReadService(options.DatabasePath, skillRegistryAuthority));
         var summaryService = new MonitorSummaryService(projectionStore);
         builder.Services.AddSingleton(summaryService);
         var overviewService = new MonitorOverviewService(projectionStore, testOptions?.TimeProvider);
@@ -274,15 +320,62 @@ internal static class MonitorHost
         {
             builder.Services.AddHostedService(_ => new SessionEventWriterWorker(sessionEventQueue, sessionEventNormalizer));
         }
+        var rootsExecutionContextFactory = CreateRootsExecutionContextFactory();
+        testOptions?.AnalysisRootsExecutionEnabledObserver?.Invoke(rootsExecutionContextFactory is not null);
         var analysisRunner = testOptions?.AnalysisRunner
             ?? new DotNetCopilotRawAnalysisRunner(
                 analysisStore,
                 projectionStore,
                 builder.Configuration,
                 new AnalysisSdkDirectoryOwner(new RetentionCatalogStore(retentionContext, timeProvider), timeProvider),
-                new CopilotAnalysisSdkExecutor(),
-                timeProvider);
+                testOptions?.AnalysisSdkExecutor ?? new CopilotAnalysisSdkExecutor(),
+                timeProvider,
+                skillHostShutdownGate?.StoppingToken ?? CancellationToken.None,
+                skillRuntimeAdmission,
+                rootsExecutionContextFactory);
         builder.Services.AddSingleton(analysisRunner);
+
+        Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? CreateRootsExecutionContextFactory()
+        {
+            if (options.SanitizedOnly
+                || options.SkillDiscoveryDirectories is not { Count: > 0 }
+                || skillDiscoveryRootGeneration is null
+                || skillRuntimeAdmission is null
+                || skillRuntimeBridgeHolder is null)
+            {
+                return null;
+            }
+
+            var nativeReader = SkillInvocationSnapshotComposition.CreateNativeReader(
+                skillDiscoveryRootGeneration.Platform, timeProvider);
+            if (nativeReader is null) return null;
+
+            return scope =>
+            {
+                var context = new CopilotAnalysisRootsExecutionContext(
+                    scope,
+                    skillDiscoveryRootGeneration,
+                    nativeReader,
+                    skillRuntimeAdmission,
+                    skillRuntimeBridgeHolder.CurrentBridge,
+                    sessionEventQueue,
+                    testOptions?.SessionCommitTimeout ?? DefaultCommitTimeout,
+                    ownedDirectory => OwnedCopilotSdkClientV1.TryCreate(
+                        ownedDirectory,
+                        static clientOptions => new CopilotClient(clientOptions),
+                        static name => Environment.GetEnvironmentVariable(name) is not null,
+                        out var client) ? client : null,
+                    static name => Environment.GetEnvironmentVariable(name) is not null,
+                    skillHostShutdownGate!.StoppingToken,
+                    ExecutionDriver: testOptions?.OwnedSessionExecutionDriver,
+                    ExecutionEvidenceObserver: testOptions?.OwnedSessionExecutionEvidenceObserver,
+                    ExecutionCheckpointObserver: testOptions?.OwnedSessionExecutionCheckpointObserver,
+                    OwnedSessionDiagnosticObserver: testOptions?.OwnedSessionDiagnosticObserver,
+                    PostFreezeFailureObserver: testOptions?.OwnedSessionPostFreezeFailureObserver);
+                testOptions?.AnalysisRootsExecutionContextObserver?.Invoke(context);
+                return context;
+            };
+        }
 
         if (testOptions?.StartProjectionWorker ?? true)
         {
@@ -450,8 +543,13 @@ internal static class MonitorHost
             timeProvider,
             alertEngineStore as ISqliteAlertEngineTransactionParticipantV2);
         builder.Services.AddHostedService(_ => costApplication);
+        testOptions?.AdditionalServices?.Invoke(builder.Services);
 
         var app = builder.Build();
+        if (skillHostShutdownGate is not null)
+        {
+            _ = app.Services.GetRequiredService<SkillHostShutdownCoordinatorV1>();
+        }
         var historicalAnalysisCoordinator = app.Services.GetRequiredService<HistoricalAnalysisCoordinatorV1>();
         _ = app.Services.GetRequiredService<RuntimeBackupMonitorLease>();
         async Task<SourceProjectionState> ProjectTraceAsync(MonitorTraceRow row, CancellationToken cancellationToken)
@@ -736,6 +834,38 @@ internal static class MonitorHost
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
             RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
             SessionRoutes.MapRawContentRoute(app, sessionStore);
+            MapSkillInvocationSnapshotRoutes(
+                app,
+                options,
+                timeProvider,
+                retentionCatalog,
+                app.Services.GetRequiredService<SkillProjectionReadService>(),
+                skillDiscoveryRootGeneration,
+                skillRuntimeAdmission,
+                testOptions);
+            SkillInvocationV2IngestRoute.Map(app, new SkillInvocationV2IngestRouteServicesV1(
+                skillRuntimeBridgeHolder!.TryConsume,
+                (facts, transfer, _) =>
+                {
+                    // Do not pass the work token to Task.Run: an already-cancelled generation would make
+                    // the awaited task throw TaskCanceledException, which the caller-abort filter does not
+                    // match, instead of returning the sanitized unavailable result required after transfer.
+                    return Task.Run(() =>
+                    {
+                        var result = SkillInvocationV2IngestTransactionV1.Execute(
+                            options.DatabasePath,
+                            facts,
+                            skillRegistryAuthority,
+                            timeProvider,
+                            transfer.TrySealReplaySuccess,
+                            transfer.TrySealCommit,
+                            transfer.WorkToken);
+                        SkillInvocationV2CommittedObservationV1.Notify(
+                            result,
+                            testOptions?.SkillInvocationV2CommittedObserver);
+                        return result;
+                    });
+                }));
         }
         AlertLifecycleRoutes.Map(app, alertEngineStore, alertLifecycleStore);
         HistoricalImportRoutes.Map(app, app.Services.GetRequiredService<IHistoricalImportApplication>());
@@ -1714,6 +1844,7 @@ internal static class MonitorHost
         app.MapFallback(WriteUnsupportedEndpointAsync)
             .WithMetadata(LocalRepositoryRoutes.FallbackMarker);
 
+        skillDiscoveryRootOwnership.Transfer();
         return app;
     }
 
@@ -1920,6 +2051,11 @@ internal static class MonitorHost
             error.WriteLine("error: pricing_catalog_unavailable");
             return 1;
         }
+        catch (SkillDiscoveryStartupAbortException exception)
+        {
+            error.WriteLine($"error: {exception.Reason}");
+            return 1;
+        }
         catch (InvalidOperationException exception)
             when (string.Equals(exception.Message, PricingStoreUnavailable, StringComparison.Ordinal))
         {
@@ -1957,6 +2093,83 @@ internal static class MonitorHost
             }
 
             return 0;
+        }
+    }
+
+    private static void MapSkillInvocationSnapshotRoutes(
+        WebApplication app,
+        MonitorOptions options,
+        TimeProvider timeProvider,
+        RetentionCatalogStore retentionCatalog,
+        SkillProjectionReadService skillProjectionReadService,
+        SkillDiscoveryRootGenerationV1? rootGeneration,
+        CopilotRuntimeAdmissionV1? runtimeAdmission,
+        MonitorHostTestOptions? testOptions)
+    {
+        SkillCurrentFileOrchestratorV1? orchestrator = null;
+
+        // The current-file service and POST are composed only when this platform's gate is
+        // certified and at least one root survived the preflight. A zero-root or uncertified host
+        // omits only that surface; the metadata and historical routes stay registered.
+        if (rootGeneration is not null && runtimeAdmission is not null)
+        {
+            var nativeReader = SkillInvocationSnapshotComposition.CreateNativeReader(
+                rootGeneration.Platform, timeProvider);
+
+            if (nativeReader is not null)
+            {
+                orchestrator = new SkillCurrentFileOrchestratorV1(
+                    testOptions?.SkillCurrentFileHistoricalGate
+                        ?? new SkillCurrentFileHistoricalGateV1(options.DatabasePath, retentionCatalog, timeProvider),
+                    testOptions?.SkillCurrentAuthorizationGate
+                        ?? new SkillCurrentAuthorizationGateV1(skillProjectionReadService, timeProvider),
+                    runtimeAdmission,
+                    new SkillDiscoveryGatewayAdapterV1(new CopilotSdkSkillDiscoveryGateway()),
+                    nativeReader);
+            }
+        }
+
+        SkillInvocationSnapshotRoutes.Map(app, new SkillInvocationSnapshotRouteServicesV1(
+            (sessionId, snapshotId, cancellationToken) => SkillInvocationSnapshotComposition.ReadMetadataAsync(
+                options.DatabasePath, skillProjectionReadService, timeProvider, sessionId, snapshotId, cancellationToken),
+            (sessionId, snapshotId, cancellationToken) => SkillInvocationSnapshotComposition.ReadHistoricalContentAsync(
+                options.DatabasePath, retentionCatalog, timeProvider, sessionId, snapshotId, cancellationToken),
+            orchestrator is null ? null : rootGeneration,
+            orchestrator));
+    }
+
+    private static SkillDiscoveryRootGenerationV1? BuildSkillDiscoveryRootGeneration(
+        MonitorOptions options,
+        SkillHostShutdownGateV1 shutdownGate)
+    {
+        var preflight = SkillDiscoveryRootPreflightV1.Run(
+            options.SkillDiscoveryProjectPaths,
+            options.SkillDiscoveryDirectories);
+
+        if (preflight.AbortReason is { } reason)
+        {
+            preflight.Dispose();
+            throw new SkillDiscoveryStartupAbortException(reason);
+        }
+
+        // Zero configured roots is valid and simply omits the current-file service and POST.
+        return preflight.Outcome == SkillDiscoveryRootPreflightOutcomeV1.Certified
+            ? new SkillDiscoveryRootGenerationV1(preflight, shutdownGate)
+            : null;
+    }
+
+    private sealed class SkillDiscoveryRootOwnershipGuard(SkillDiscoveryRootGenerationV1? generation) : IDisposable
+    {
+        private bool ownsGeneration = generation is not null;
+
+        public void Transfer() => ownsGeneration = false;
+
+        public void Dispose()
+        {
+            if (ownsGeneration)
+            {
+                generation!.DrainAndDisposeRootsAsync().GetAwaiter().GetResult();
+            }
         }
     }
 
@@ -2411,6 +2624,22 @@ internal sealed class MonitorHostTestOptions
 
     public IMonitorAnalysisRunner? AnalysisRunner { get; init; }
 
+    public ICopilotAnalysisSdkExecutor? AnalysisSdkExecutor { get; init; }
+
+    public IOwnedSessionExecutionDriverV1? OwnedSessionExecutionDriver { get; init; }
+
+    public Action<OwnedSessionExecutionEvidenceV1>? OwnedSessionExecutionEvidenceObserver { get; init; }
+
+    public Action<OwnedSessionExecutionCheckpointV1>? OwnedSessionExecutionCheckpointObserver { get; init; }
+
+    public Action<OwnedSessionDiagnosticEventV1>? OwnedSessionDiagnosticObserver { get; init; }
+
+    public Action<OwnedSessionPostFreezeOutcomeV1>? OwnedSessionPostFreezeFailureObserver { get; init; }
+
+    public Action<CopilotAnalysisRootsExecutionContext>? AnalysisRootsExecutionContextObserver { get; init; }
+
+    public Action<bool>? AnalysisRootsExecutionEnabledObserver { get; init; }
+
     public bool StartProjectionWorker { get; init; } = true;
 
     public ISessionStore? SessionStore { get; init; }
@@ -2446,6 +2675,16 @@ internal sealed class MonitorHostTestOptions
     public ILocalRepositoryReconciliationCheckpoint? LocalRepositoryReconciliationCheckpoint { get; init; }
 
     public Action<IEndpointRouteBuilder>? AdditionalEndpoints { get; set; }
+
+    public Action<IServiceCollection>? AdditionalServices { get; init; }
+
+    public ISkillCurrentFileHistoricalGateV1? SkillCurrentFileHistoricalGate { get; init; }
+
+    public ISkillCurrentAuthorizationGateV1? SkillCurrentAuthorizationGate { get; init; }
+
+    public Action<SkillDiscoveryRootGenerationV1?>? SkillDiscoveryRootGenerationObserver { get; init; }
+
+    public Action<SkillInvocationV2CommittedIdentityV1>? SkillInvocationV2CommittedObserver { get; init; }
 }
 
 internal sealed record AnalysisStartPayload(

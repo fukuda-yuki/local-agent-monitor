@@ -2,11 +2,40 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SkillInvocationNormalizedJsonV1Tests
 {
+    [Fact]
+    public void TryWrite_UsesExplicitCertifiedDefinitionAndNeverSdkAuxiliaryContent()
+    {
+        var sourceEvent = CompleteEvent();
+        sourceEvent.Data.Content = "\n\n";
+
+        Assert.True(SkillInvocationNormalizedJsonV1.TryWrite(
+            "native-session", sourceEvent, "# synthetic native definition", out var bodyUtf8));
+
+        using var document = JsonDocument.Parse(Assert.IsType<byte[]>(bodyUtf8));
+        var payload = document.RootElement.GetProperty("events")[0].GetProperty("payload");
+        Assert.Equal("# synthetic native definition", payload.GetProperty("content").GetString());
+        Assert.Equal("description", payload.GetProperty("description").GetString());
+        Assert.DoesNotContain("\n\n", Encoding.UTF8.GetString(bodyUtf8), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TryWrite_RejectsMissingOrMalformedCertifiedDefinition(bool malformed)
+    {
+        string? certifiedContent = malformed ? new string((char)0xD800, 1) : null;
+        Assert.False(SkillInvocationNormalizedJsonV1.TryWrite(
+            "native-session", CompleteEvent(), certifiedContent, out var bodyUtf8));
+        Assert.Null(bodyUtf8);
+    }
+
     [Fact]
     public void TryWrite_AllSdkFields_EmitsExactOrderedNormalizedJson()
     {
@@ -16,7 +45,7 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
         Assert.True(written);
         Assert.Equal(
-            "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4\\u002Bcao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"018f0f4e-7b2a-4c11-8a3b-123456789abc\",\"source_parent_event_id\":\"aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa\",\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:30.1234567\\u002B00:00\",\"run_native_id\":\"agent-7\",\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill-name\",\"path\":\"skills/SKILL.md\",\"content\":\"body\",\"allowedTools\":[\"second\",\"first\"],\"description\":\"description\",\"pluginName\":\"plugin-name\",\"pluginVersion\":\"1.2.3\",\"source\":\"plugin\",\"trigger\":\"agent-invoked\"}}]}",
+            "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4\\u002Bcao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"018f0f4e-7b2a-4c11-8a3b-123456789abc\",\"source_parent_event_id\":\"aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa\",\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:30.1234567\\u002B00:00\",\"run_native_id\":\"agent-7\",\"source_ephemeral\":true,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill-name\",\"path\":\"skills/SKILL.md\",\"content\":\"body\",\"allowedTools\":[\"second\",\"first\"],\"description\":\"description\",\"pluginName\":\"plugin-name\",\"pluginVersion\":\"1.2.3\",\"source\":\"plugin\",\"trigger\":\"agent-invoked\"}}]}",
             Encoding.UTF8.GetString(Assert.IsType<byte[]>(bodyUtf8)));
 
         using var document = JsonDocument.Parse(bodyUtf8);
@@ -40,7 +69,7 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
         Assert.True(written);
         Assert.Equal(
-            "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4\\u002Bcao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"018f0f4e-7b2a-4c11-8a3b-123456789abc\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000\\u002B00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill-name\",\"path\":\"skills/SKILL.md\",\"content\":\"body\"}}]}",
+            "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"native-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4\\u002Bcao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"018f0f4e-7b2a-4c11-8a3b-123456789abc\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000\\u002B00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"skill-name\",\"path\":\"skills/SKILL.md\",\"content\":\"body\"}}]}",
             Encoding.UTF8.GetString(Assert.IsType<byte[]>(bodyUtf8)));
     }
 
@@ -139,7 +168,7 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
         var accepted = Assert.Single(batch.AcceptedEnvelopes);
         Assert.Same(capability, batch.RuntimeCapability);
-        Assert.Equal(SkillInvocationV2PayloadState.Available, accepted.PayloadState);
+        Assert.Equal(SkillInvocationPayloadState.Available, accepted.PayloadState);
         Assert.Equal("skill-name", accepted.Name);
         Assert.Equal("skills/SKILL.md", accepted.DefinitionPath!.Text);
         Assert.Equal("body", accepted.Body!.Text);
@@ -223,5 +252,8 @@ public sealed class SkillInvocationNormalizedJsonV1Tests
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class TestRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

@@ -277,6 +277,8 @@ internal sealed class RunningMonitorHost(
 {
     public HttpClient Client { get; } = client;
 
+    public IServiceProvider Services => app.Services;
+
     public void StopApplication() => app.Lifetime.StopApplication();
 
     public IReadOnlyList<string> RoutePatterns =>

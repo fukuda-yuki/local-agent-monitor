@@ -2,6 +2,29 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite.Retention;
 
+internal enum RetentionAdmissionTransactionDecision
+{
+    Commit,
+    Rollback,
+}
+
+// The outcome of the admission decision taken on a caller-owned transaction. Exactly one of Handle
+// and Failure is set; TransactionDecision is meaningful only for a failure, because a prepared
+// handle always leaves the commit to the caller.
+internal sealed record RetentionPreparedAdmission(
+    RetentionCommittedReadHandle? Handle,
+    RetentionReadDisposition? Failure,
+    RetentionAdmissionTransactionDecision TransactionDecision)
+{
+    internal static RetentionPreparedAdmission Prepared(RetentionCommittedReadHandle handle) =>
+        new(handle, null, RetentionAdmissionTransactionDecision.Commit);
+
+    internal static RetentionPreparedAdmission Failed(
+        RetentionReadDisposition failure,
+        RetentionAdmissionTransactionDecision decision) =>
+        new(null, failure, decision);
+}
+
 internal enum RetentionHandlePublicationDisposition
 {
     Published,
@@ -106,7 +129,12 @@ public sealed partial class RetentionCatalogStore
         }
     }
 
-    private RetentionReadAdmissionResult CompleteOrdinaryAdmission(
+    // The whole admission decision, taken on the caller's connection and transaction and never
+    // committing or rolling it back. Group 6's generic Session route needs the lease insertion and
+    // the content selection inside one caller-owned BEGIN IMMEDIATE, so the transaction decision is
+    // returned rather than executed here; CompleteOrdinaryAdmission applies it for every other
+    // caller exactly as before.
+    private RetentionPreparedAdmission PrepareOrdinaryAdmission(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyList<RetentionReadRequest> requests,
@@ -119,15 +147,11 @@ public sealed partial class RetentionCatalogStore
             var request = requests[index];
             var item = FindForUpdate(connection, transaction, request.OwnershipKey);
             if (item is null)
-            {
-                transaction.Commit();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
-            }
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
             if (request.ExpectedRevision is not null && item.Revision != request.ExpectedRevision)
-            {
-                transaction.Commit();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
-            }
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
             items[index] = item;
         }
 
@@ -144,24 +168,22 @@ public sealed partial class RetentionCatalogStore
                         && ClassifyRowReadability(candidate, initialAt) == RetentionRowReadability.ExpiredExpiring))
                         DenyAndQueue(connection, transaction, expired, initialAt);
                 }
-                transaction.Commit();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
             }
 
             var proof = SourceProof(connection, transaction, requests[index].OwnershipKey);
             if (proof == SourceReceiptProof.CatalogBusy)
-            {
-                transaction.Rollback();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.Busy);
-            }
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.Busy, RetentionAdmissionTransactionDecision.Rollback);
             if (proof != SourceReceiptProof.Match)
             {
                 if (proof == SourceReceiptProof.Missing)
                     DenyMissingSource(connection, transaction, item, initialAt);
                 else
                     DenyInvalidSource(connection, transaction, item, initialAt, proof);
-                transaction.Commit();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
             }
         }
 
@@ -173,8 +195,8 @@ public sealed partial class RetentionCatalogStore
         {
             foreach (var item in crossed)
                 DenyAndQueue(connection, transaction, item, finalAt);
-            transaction.Commit();
-            return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
+            return RetentionPreparedAdmission.Failed(
+                RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
         }
 
         DateTimeOffset leaseExpiry;
@@ -184,8 +206,8 @@ public sealed partial class RetentionCatalogStore
         }
         catch (ArgumentOutOfRangeException)
         {
-            transaction.Rollback();
-            return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.SelectorUnavailable);
+            return RetentionPreparedAdmission.Failed(
+                RetentionReadDisposition.SelectorUnavailable, RetentionAdmissionTransactionDecision.Rollback);
         }
 
         var owner = Guid.NewGuid().ToString("N");
@@ -206,18 +228,16 @@ public sealed partial class RetentionCatalogStore
                 finalAt,
                 leaseExpiry);
             if (generation is null)
-            {
-                transaction.Rollback();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.Busy);
-            }
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.Busy, RetentionAdmissionTransactionDecision.Rollback);
             var token = SourceToken(connection, transaction, request.OwnershipKey);
             if (token is null)
             {
                 ReleaseWithinTransaction(connection, transaction, item.ItemId, kind, owner, generation.Value);
                 ReleaseWithinTransaction(connection, transaction, grants);
                 DenyInvalidSource(connection, transaction, item, finalAt, SourceReceiptProof.InvalidIdentity);
-                transaction.Commit();
-                return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.LifecycleDenied);
+                return RetentionPreparedAdmission.Failed(
+                    RetentionReadDisposition.LifecycleDenied, RetentionAdmissionTransactionDecision.Commit);
             }
             grants.Add(new RetentionReadGrant(
                 request.OwnershipKey,
@@ -241,10 +261,28 @@ public sealed partial class RetentionCatalogStore
         }
         catch (Exception)
         {
-            transaction.Rollback();
-            return RetentionReadAdmissionResult.Failed(RetentionReadDisposition.SelectorUnavailable);
+            return RetentionPreparedAdmission.Failed(
+                RetentionReadDisposition.SelectorUnavailable, RetentionAdmissionTransactionDecision.Rollback);
         }
 
+        return RetentionPreparedAdmission.Prepared(handle);
+    }
+
+    private RetentionReadAdmissionResult CompleteOrdinaryAdmission(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<RetentionReadRequest> requests,
+        DateTimeOffset initialAt,
+        CancellationToken cancellationToken)
+    {
+        var prepared = PrepareOrdinaryAdmission(connection, transaction, requests, initialAt, cancellationToken);
+        if (prepared.Handle is null)
+        {
+            ApplyAdmissionTransactionDecision(transaction, prepared.TransactionDecision);
+            return RetentionReadAdmissionResult.Failed(prepared.Failure!.Value);
+        }
+
+        var handle = prepared.Handle;
         try
         {
             transaction.Commit();
@@ -255,6 +293,23 @@ public sealed partial class RetentionCatalogStore
             throw;
         }
 
+        return ActivateAndPublishCommittedHandle(handle, cancellationToken);
+    }
+
+    private static void ApplyAdmissionTransactionDecision(
+        SqliteTransaction transaction,
+        RetentionAdmissionTransactionDecision decision)
+    {
+        if (decision == RetentionAdmissionTransactionDecision.Commit)
+            transaction.Commit();
+        else
+            transaction.Rollback();
+    }
+
+    private RetentionReadAdmissionResult ActivateAndPublishCommittedHandle(
+        RetentionCommittedReadHandle handle,
+        CancellationToken cancellationToken)
+    {
         if (!handle.Activate())
         {
             handle.Lose();

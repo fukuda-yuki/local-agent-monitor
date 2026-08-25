@@ -85,7 +85,15 @@ public sealed class LocalRepositoryRuntimeBackupTests
                 using var connection = OpenWritable(path);
                 using (var removeArchive = connection.CreateCommand())
                 {
-                    removeArchive.CommandText = "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;";
+                    // skill_invocation_snapshot is parented to Session 14 exactly, so a downgraded
+                    // Session 13 archive that kept it would be incompatible rather than legacy.
+                    removeArchive.CommandText =
+                        "DELETE FROM schema_version WHERE component IN ('local_archive','skill_invocation_snapshot');"
+                        + "DROP TABLE local_archive_events; DROP TABLE local_archive_current;"
+                        + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
+                        + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
+                        + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
+                        + "DROP TABLE IF EXISTS skill_invocation_snapshots;";
                     removeArchive.ExecuteNonQuery();
                 }
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
@@ -94,12 +102,17 @@ public sealed class LocalRepositoryRuntimeBackupTests
             {
                 ComponentVersions = new SortedDictionary<string, int>(
                     manifest.ComponentVersions
-                        .Where(static item => item.Key != "local_archive")
+                        .Where(static item => item.Key is not ("local_archive" or "skill_invocation_snapshot"))
                         .ToDictionary(static item => item.Key, static item => item.Value),
-                    StringComparer.Ordinal) { ["session"] = 13 },
+                    StringComparer.Ordinal)
+                { ["session"] = 13 },
                 RowCounts = new SortedDictionary<string, long>(
                     manifest.RowCounts
-                        .Where(static item => item.Key is not ("local_archive_current" or "local_archive_events"))
+                        .Where(static item => item.Key is not (
+                            "local_archive_current"
+                            or "local_archive_events"
+                            or "skill_invocation_snapshots"
+                            or "skill_invocation_snapshot_receipts"))
                         .ToDictionary(static item => item.Key, static item => item.Value),
                     StringComparer.Ordinal),
             });

@@ -245,6 +245,44 @@ under `app/config-cli/`, `scripts/setup.ps1`, `scripts/first-trace.ps1`, the
 remaining scripts, README, manifest, and notices. It must not contain runtime
 DB, logs, state, raw telemetry, credentials, or PII.
 
+## Skill discovery roots
+
+`start.ps1` and `install-startup-task.ps1` accept two repeatable array
+parameters:
+
+```powershell
+pwsh scripts\local-monitor\start.ps1 `
+  -SkillDiscoveryProjectPath @('C:\repos\alpha','C:\repos\beta') `
+  -SkillDiscoveryDirectory @('C:\skills')
+```
+
+The wrappers are not an independent configuration source. Each member is
+serialized only as a repeated `--skill-discovery-project-path` or
+`--skill-discovery-directory` executable option/value pair, which is the sole
+public carrier; there is no environment variable, JSON file, delimiter list, or
+inferred root. `-StartNow` transfers the same arrays, and scheduled startup
+encodes the same repeated pairs in the Task Scheduler action.
+
+- At most 16 project paths and 32 skill directories, counted before
+  deduplication. An empty member, an excess member, or combining either
+  parameter with `-SanitizedOnly` fails validation before anything launches:
+  no process is started, no task is created, and an existing task is left
+  unchanged.
+- Every value must be an absolute local path on a certified filesystem
+  (Windows NTFS or ReFS). Any invalid root aborts host startup with
+  `skill_discovery_root_configuration_invalid`; an unsupported platform aborts
+  with `skill_discovery_platform_unsupported`. Neither reason names the value
+  that failed, and the valid roots of a partly invalid configuration never
+  start a reduced service.
+- Supplying no roots is valid. It simply omits the current-file read endpoint;
+  the snapshot metadata and historical-content endpoints are unaffected.
+  `-SanitizedOnly` composes none of those endpoints at all.
+- `install-startup-task.ps1 -DryRun` reports only whether roots are present and
+  how many; no wrapper output, log, or state file prints a supplied path. The
+  active process command line and the Task Scheduler action arguments
+  necessarily retain the configured roots for the local OS user, and nothing
+  else copies them.
+
 ## Defaults
 
 - URL: `http://127.0.0.1:4320`
