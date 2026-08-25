@@ -74,17 +74,15 @@ internal static class LocalWorkspaceProjectionBackupValidation
         var text = readNow.ExecuteScalar() as string;
         if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
             throw new InvalidOperationException();
-        Execute(connection, transaction, "SAVEPOINT local_workspace_validation;");
-        try
+        using var replica = new SqliteConnection("Data Source=:memory:");
+        replica.Open();
+        connection.BackupDatabase(replica);
+        using (var replicaTransaction = replica.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, projectorNow);
-            if (!before.SequenceEqual(Snapshot(connection, transaction), StringComparer.Ordinal))
+            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, projectorNow);
+            if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
-        }
-        finally
-        {
-            Execute(connection, transaction, "ROLLBACK TO local_workspace_validation;");
-            Execute(connection, transaction, "RELEASE local_workspace_validation;");
+            replicaTransaction.Rollback();
         }
     }
 
@@ -118,11 +116,4 @@ internal static class LocalWorkspaceProjectionBackupValidation
         return rows.ToArray();
     }
 
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
 }

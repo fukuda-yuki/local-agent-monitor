@@ -18,6 +18,52 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupRestoreTests
 {
     [Fact]
+    public void LocalWorkspaceProjection_AllSixTablesRoundTripThroughProductionRestore()
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = new LocalRepositoryCatalogFixture();
+        var source = fixture.DatabasePath;
+        fixture.CreateSession(LocalRepositoryCatalogFixture.SessionId(3_702));
+        using (var connection = temp.Open(source))
+        {
+            using (var run = connection.CreateCommand())
+            {
+                run.CommandText = "INSERT INTO session_runs VALUES($run,$session,'copilot-sdk',NULL,NULL,NULL,'gpt-5',NULL,NULL,10,3,13,'completed');";
+                run.Parameters.AddWithValue("$run", Guid.CreateVersion7(DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At)).ToString("D"));
+                run.Parameters.AddWithValue("$session", LocalRepositoryCatalogFixture.SessionId(3_702));
+                run.ExecuteNonQuery();
+            }
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+            using var transaction = connection.BeginTransaction(deferred: true);
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction);
+        }
+        using (var readOnly = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            readOnly.Open();
+            using var transaction = readOnly.BeginTransaction(deferred: true);
+            LocalWorkspaceProjectionBackupValidation.Validate(readOnly, transaction);
+        }
+        var expected = temp.SnapshotOwnedRows(source, "local_workspace_");
+        var bundle = Path.Combine(temp.Root, "projection-roundtrip.zip");
+        var service = new SqliteRuntimeBackupService(new FixedTimeProvider(DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At)));
+        var backup = service.CreateAndPublish(source, bundle);
+        Assert.True(backup.Success, backup.ErrorCode);
+        using (var connection = temp.Open(source))
+            temp.Execute(connection, "DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_sessions; DELETE FROM local_workspace_projection_state; DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+
+        var restored = service.Restore(bundle, source, new RuntimeRestoreOptions());
+
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(expected, temp.SnapshotOwnedRows(source, "local_workspace_"));
+        using var verification = temp.Open(source);
+        Assert.Equal(6, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.True(temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM {table};") > 0));
+        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        using var validation = verification.BeginTransaction(deferred: true);
+        LocalWorkspaceProjectionBackupValidation.Validate(verification, validation);
+    }
+
+    [Fact]
     public void Current_deleted_before_digest_authority_round_trips_exactly()
     {
         using var temp = new RestoreTemp();
