@@ -120,7 +120,7 @@ public sealed class SqliteRuntimeBackupService
         var lease = new RuntimeBackupMonitorLease(database, stream);
         try
         {
-            var result = PrepareMonitorInitializationWithLease(database);
+            var result = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
             if (!result.Success)
             {
                 lease.Dispose();
@@ -144,7 +144,9 @@ public sealed class SqliteRuntimeBackupService
         { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
     }
 
-    private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(string database)
+    private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(
+        string database,
+        bool refreshLocalWorkspaceProjection)
     {
         if (!RecoverTransientFiles(Path.GetDirectoryName(database)!, Path.GetFileName(database))
             || !RecoverTransientFiles(Path.Combine(Path.GetDirectoryName(database)!, "runtime-backups"), Path.GetFileName(database)))
@@ -168,6 +170,8 @@ public sealed class SqliteRuntimeBackupService
             return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         }
         recoveryGuard?.Dispose();
+        if (refreshLocalWorkspaceProjection)
+            RefreshLiveLocalWorkspaceProjection(database);
         using var validationGuard = TryAcquireRecoveryGuard(database);
         if (validationGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var result = ValidateMonitorComponentVersions(database);
@@ -176,9 +180,24 @@ public sealed class SqliteRuntimeBackupService
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
     }
 
+    private void RefreshLiveLocalWorkspaceProjection(string database)
+    {
+        using var connection = Open(database, SqliteOpenMode.ReadWrite, immutableReadOnly: false);
+        using var transaction = connection.BeginTransaction();
+        using var installed = connection.CreateCommand();
+        installed.Transaction = transaction;
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=1);";
+        if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+        {
+            LocalWorkspaceProjectionSchemaV1.Validate(connection, transaction);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
+        }
+        transaction.Commit();
+    }
+
     private RuntimeBackupPreflightResult CompleteMonitorInitializationWithLease(string database)
     {
-        var preparation = PrepareMonitorInitializationWithLease(database);
+        var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
         EnsureCurrentBackupTail(database);
         checkpoint?.Invoke(CatalogAfterMonitorTailCheckpoint);
@@ -192,7 +211,7 @@ public sealed class SqliteRuntimeBackupService
 
     private RuntimeBackupPreflightResult InitializeWithLease(string database)
     {
-        var preparation = PrepareMonitorInitializationWithLease(database);
+        var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: false);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
         var recoveryGuard = TryAcquireRecoveryGuard(database);
         if (recoveryGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
