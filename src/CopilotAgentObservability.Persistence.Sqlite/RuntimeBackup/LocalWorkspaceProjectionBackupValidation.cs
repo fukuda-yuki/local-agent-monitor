@@ -102,8 +102,16 @@ internal static class LocalWorkspaceProjectionBackupValidation
             while (reader.Read()) monitorKeys.Add((reader.GetInt64(0), reader.GetInt32(1)));
         }
 
+        bool hasRetention;
+        using (var retention = connection.CreateCommand())
+        {
+            retention.Transaction = transaction;
+            retention.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retention_items');";
+            hasRetention = Convert.ToInt64(retention.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        }
         var expected = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
         var availableRawIds = new HashSet<long>();
+        if (hasRetention)
         using (var records = connection.CreateCommand())
         {
             records.Transaction = transaction;
@@ -140,6 +148,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 actual.Add((reader.GetInt64(0), reader.GetInt32(1)),
                     (reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetInt64(3)));
         }
+        if (hasRetention)
         using (var deleted = connection.CreateCommand())
         {
             deleted.Transaction = transaction;

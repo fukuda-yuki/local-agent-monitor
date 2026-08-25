@@ -186,10 +186,13 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction();
         using var installed = connection.CreateCommand();
         installed.Transaction = transaction;
-        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version IN (1,2));";
-        if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+        installed.CommandText = "SELECT version FROM schema_version WHERE component='local_workspace_projection';";
+        var version = installed.ExecuteScalar();
+        if (version is long current)
         {
-            LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
+            LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, transaction);
+            if (current == LocalWorkspaceProjectionSchemaV1.Version)
+                LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
         }
         transaction.Commit();
     }
@@ -1313,7 +1316,12 @@ public sealed class SqliteRuntimeBackupService
                 if (versions.ContainsKey("skill_invocation_snapshot"))
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
-                    LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction);
+                {
+                    if (versions["local_workspace_projection"] == 1)
+                        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, componentTransaction);
+                    else
+                        LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction);
+                }
             }
             catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
             {

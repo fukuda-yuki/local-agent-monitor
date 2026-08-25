@@ -155,6 +155,15 @@ internal static class LocalWorkspaceProjectionSchemaV1
             throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 2.");
     }
 
+    internal static void ValidateCurrentOrExactV1(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        var version = ReadVersion(connection, transaction);
+        var owned = ReadOwnedObjects(connection, transaction);
+        if (version == Version && SqliteOwnedSchemaAuthority.Equal(owned, ExpectedObjects)) return;
+        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects)) return;
+        throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema.");
+    }
+
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Read(connection, transaction, static (name, table) =>
             name.StartsWith("local_workspace_", StringComparison.OrdinalIgnoreCase)

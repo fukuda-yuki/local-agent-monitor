@@ -519,6 +519,42 @@ public sealed class RuntimeBackupRestoreTests
         }
     }
 
+    [Fact]
+    public void Monitor_startup_defers_exact_workspace_v1_migration_until_completion()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
+            temp.Execute(database, "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection';");
+        }
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var initialization = service.InitializeForMonitor(temp.Source);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        using (var database = temp.Open(temp.Source))
+        {
+            Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+        }
+
+        var completed = service.CompleteMonitorInitialization(lease);
+
+        Assert.True(completed.Success, completed.ErrorCode);
+        using var verification = temp.Open(temp.Source);
+        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+    }
+
     [Theory]
     [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('retention',2);")]
     [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('forged_component',1);")]
