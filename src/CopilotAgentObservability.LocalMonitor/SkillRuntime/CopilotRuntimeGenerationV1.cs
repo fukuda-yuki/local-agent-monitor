@@ -25,13 +25,14 @@ internal sealed class CopilotRuntimeOperationCapabilityV1 : ISkillInvocationV2Ru
     private int releaseCalls;
     private bool workCancellationDisposed;
 
-    internal CopilotRuntimeOperationCapabilityV1(CopilotRuntimeGenerationV1 owner, CancellationToken callerToken)
+    internal CopilotRuntimeOperationCapabilityV1(
+        CopilotRuntimeGenerationV1 owner,
+        CancellationToken callerToken,
+        CancellationToken leaseLostToken)
     {
         Owner = owner;
         Handle = Guid.NewGuid();
-        linkedWorkCancellation = callerToken.CanBeCanceled
-            ? CancellationTokenSource.CreateLinkedTokenSource(callerToken)
-            : new CancellationTokenSource();
+        linkedWorkCancellation = CancellationTokenSource.CreateLinkedTokenSource(callerToken, leaseLostToken);
         workToken = linkedWorkCancellation.Token;
     }
 
@@ -121,6 +122,8 @@ internal sealed class CopilotRuntimeGenerationV1
     private readonly TaskCompletionSource cleanupCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private CancellationTokenRegistration invalidationRegistration;
     private bool invalidationRegistrationAttached;
+    private CancellationToken publicationAuthorityToken;
+    private bool publicationAuthorityBound;
 
     internal CopilotRuntimeGenerationV1(
         ICopilotSkillRuntimeClient client,
@@ -220,7 +223,7 @@ internal sealed class CopilotRuntimeGenerationV1
         {
             lock (sync)
             {
-                return !invalid && !admissionClosed;
+                return !invalid && !admissionClosed && !IsAuthorityCancellationRequestedUnderLock();
             }
         }
     }
@@ -255,12 +258,13 @@ internal sealed class CopilotRuntimeGenerationV1
         {
             capability = null;
             if (shutdownGate.IsNormalShutdownStarted || invalid || admissionClosed
+                || IsAuthorityCancellationRequestedUnderLock()
                 || phase is CopilotRuntimeCandidatePhaseV1.Ready or CopilotRuntimeCandidatePhaseV1.Reserved)
             {
                 return false;
             }
 
-            capability = new CopilotRuntimeOperationCapabilityV1(this, callerToken);
+            capability = new CopilotRuntimeOperationCapabilityV1(this, callerToken, leaseLostToken);
             outstandingCapabilities[capability.Handle] = capability;
             return true;
         }
@@ -271,7 +275,8 @@ internal sealed class CopilotRuntimeGenerationV1
         ArgumentNullException.ThrowIfNull(capability);
         lock (sync)
         {
-            if (invalid || !ReferenceEquals(capability.Owner, this))
+            if (invalid || IsAuthorityCancellationRequestedUnderLock()
+                || !ReferenceEquals(capability.Owner, this))
             {
                 return false;
             }
@@ -310,6 +315,8 @@ internal sealed class CopilotRuntimeGenerationV1
             invalid = true;
             phase = CopilotRuntimeCandidatePhaseV1.Invalid;
             admissionClosed = true;
+            publicationAuthorityBound = false;
+            publicationAuthorityToken = default;
             unsealed = [.. outstandingCapabilities.Values.Where(c => c.IsUnsealedUnderOwnerLock)];
         }
 
@@ -333,6 +340,42 @@ internal sealed class CopilotRuntimeGenerationV1
     }
 
     internal bool IsLeaseLossRequested => leaseLostToken.IsCancellationRequested;
+
+    internal bool TryBindPublicationAuthority(CancellationToken cancellationToken)
+    {
+        lock (sync)
+        {
+            if (invalid || admissionClosed || leaseLostToken.IsCancellationRequested
+                || phase != CopilotRuntimeCandidatePhaseV1.Reserved || publicationAuthorityBound
+                || cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+            publicationAuthorityToken = cancellationToken;
+            publicationAuthorityBound = true;
+            return true;
+        }
+    }
+
+    internal bool TryReleasePublicationAuthority()
+    {
+        lock (sync)
+        {
+            if (!publicationAuthorityBound) return true;
+            if (publicationAuthorityToken.IsCancellationRequested)
+            {
+                admissionClosed = true;
+                return false;
+            }
+            publicationAuthorityBound = false;
+            publicationAuthorityToken = default;
+            return true;
+        }
+    }
+
+    private bool IsAuthorityCancellationRequestedUnderLock() =>
+        leaseLostToken.IsCancellationRequested
+        || publicationAuthorityBound && publicationAuthorityToken.IsCancellationRequested;
 
     internal bool TryMarkReady()
     {

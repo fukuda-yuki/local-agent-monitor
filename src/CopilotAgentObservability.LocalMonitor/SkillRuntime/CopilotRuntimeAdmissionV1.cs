@@ -24,6 +24,12 @@ internal sealed class CopilotRuntimeAdmissionV1
     private CopilotRuntimeGenerationV1? reservedCandidate;
     private readonly Action? publicationReservedForTesting;
     private readonly Action? candidateRegistrationAttachedForTesting;
+    private readonly Action? commitOwnerLockAcquiredForTesting;
+    private readonly Action? authorityCancellationRequestedForTesting;
+    private readonly Action? authorityCancellationObservedForTesting;
+    private readonly Action? reservationDisposingRegistrationForTesting;
+    private readonly Action? reservationRegistrationDisposedForTesting;
+    private readonly Action? publicationAuthorityBindingForTesting;
 
     internal sealed class PublicationReservation : IAsyncDisposable
     {
@@ -54,6 +60,7 @@ internal sealed class CopilotRuntimeAdmissionV1
                 CopilotRuntimeGenerationV1? replaced;
                 lock (owner.sync)
                 {
+                    owner.commitOwnerLockAcquiredForTesting?.Invoke();
                     Candidate.CommitReservedPublication();
                     owner.unpublishedCandidates.Remove(Candidate);
                     replaced = owner.currentGeneration;
@@ -75,10 +82,17 @@ internal sealed class CopilotRuntimeAdmissionV1
             try
             {
                 if (state == ReservationState.Disposed) return;
-                if (state == ReservationState.Active)
-                    await owner.DiscardCandidateWithoutGateAsync(Candidate).ConfigureAwait(false);
-                state = ReservationState.Disposed;
+                owner.reservationDisposingRegistrationForTesting?.Invoke();
                 cancellationRegistration.Dispose();
+                owner.reservationRegistrationDisposedForTesting?.Invoke();
+                var publicationAuthorityReleased = Candidate.TryReleasePublicationAuthority();
+                if (!publicationAuthorityReleased && state == ReservationState.Committed)
+                    owner.InvalidateCandidate(Candidate);
+                if (state == ReservationState.Active)
+                {
+                    await owner.DiscardCandidateWithoutGateAsync(Candidate).ConfigureAwait(false);
+                }
+                state = ReservationState.Disposed;
                 lock (owner.sync)
                 {
                     if (ReferenceEquals(owner.reservedCandidate, Candidate)) owner.reservedCandidate = null;
@@ -95,12 +109,24 @@ internal sealed class CopilotRuntimeAdmissionV1
     internal CopilotRuntimeAdmissionV1(
         SkillHostShutdownGateV1 shutdownGate,
         Action? publicationReservedForTesting = null,
-        Action? candidateRegistrationAttachedForTesting = null)
+        Action? candidateRegistrationAttachedForTesting = null,
+        Action? commitOwnerLockAcquiredForTesting = null,
+        Action? authorityCancellationRequestedForTesting = null,
+        Action? authorityCancellationObservedForTesting = null,
+        Action? reservationDisposingRegistrationForTesting = null,
+        Action? reservationRegistrationDisposedForTesting = null,
+        Action? publicationAuthorityBindingForTesting = null)
     {
         ArgumentNullException.ThrowIfNull(shutdownGate);
         this.shutdownGate = shutdownGate;
         this.publicationReservedForTesting = publicationReservedForTesting;
         this.candidateRegistrationAttachedForTesting = candidateRegistrationAttachedForTesting;
+        this.commitOwnerLockAcquiredForTesting = commitOwnerLockAcquiredForTesting;
+        this.authorityCancellationRequestedForTesting = authorityCancellationRequestedForTesting;
+        this.authorityCancellationObservedForTesting = authorityCancellationObservedForTesting;
+        this.reservationDisposingRegistrationForTesting = reservationDisposingRegistrationForTesting;
+        this.reservationRegistrationDisposedForTesting = reservationRegistrationDisposedForTesting;
+        this.publicationAuthorityBindingForTesting = publicationAuthorityBindingForTesting;
     }
 
     public bool IsShutdownClosed
@@ -134,7 +160,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         var candidate = new CopilotRuntimeGenerationV1(
             client, shutdownGate, certifiedIdentity, analysisScopeOwner ?? analysisScope, leaseLostToken);
         candidate.AttachInvalidationRegistration(
-            leaseLostToken.Register(() => InvalidateCandidate(candidate)));
+            leaseLostToken.Register(() => HandleAuthorityCancellation(candidate)));
         candidateRegistrationAttachedForTesting?.Invoke();
         lock (sync)
         {
@@ -163,7 +189,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(candidate);
-        var cancellationRegistration = cancellationToken.Register(() => InvalidateCandidate(candidate));
+        var cancellationRegistration = cancellationToken.Register(() => HandleAuthorityCancellation(candidate));
         await publicationGate.WaitAsync().ConfigureAwait(false);
         var duplicate = false;
         var reserved = false;
@@ -181,9 +207,13 @@ internal sealed class CopilotRuntimeAdmissionV1
                         && !candidate.IsInvalid && !candidate.IsLeaseLossRequested
                         && !cancellationToken.IsCancellationRequested)
                     {
-                        reserved = true;
-                        reservedCandidate = candidate;
-                        return new PublicationReservation(this, candidate, cancellationRegistration);
+                        publicationAuthorityBindingForTesting?.Invoke();
+                        if (candidate.TryBindPublicationAuthority(cancellationToken))
+                        {
+                            reserved = true;
+                            reservedCandidate = candidate;
+                            return new PublicationReservation(this, candidate, cancellationRegistration);
+                        }
                     }
                 }
             }
@@ -200,6 +230,14 @@ internal sealed class CopilotRuntimeAdmissionV1
             if (!reserved) publicationGate.Release();
         }
         return null;
+    }
+
+    private void HandleAuthorityCancellation(CopilotRuntimeGenerationV1 candidate)
+    {
+        authorityCancellationRequestedForTesting?.Invoke();
+        candidate.CloseAdmissionForDrain();
+        authorityCancellationObservedForTesting?.Invoke();
+        InvalidateCandidate(candidate);
     }
 
     private async Task DiscardCandidateWithoutGateAsync(CopilotRuntimeGenerationV1 candidate)
@@ -228,6 +266,7 @@ internal sealed class CopilotRuntimeAdmissionV1
         {
             if (ReferenceEquals(reservedCandidate, candidate))
             {
+                candidate.CloseAdmissionForDrain();
                 _ = InvalidateCandidateSerializedAsync(candidate);
                 return;
             }
