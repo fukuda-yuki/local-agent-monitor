@@ -112,9 +112,12 @@ try {
  $process=[Diagnostics.Process]::Start($psi);$processCleanupAuthorized=$false;$blockedCode='wrapper_test_output';$childOutput=Read-BoundedChildOutput $process
  if($process-is[Diagnostics.Process]){if(-not$process.HasExited){throw 'process exit'};$childExitCode=$process.ExitCode;$process.Dispose();$process=$null;$processCleanupAuthorized=$true}else{$childExitCode=$process.ExitCode;$process=$null;$processCleanupAuthorized=$true}
  if($childExitCode-ne0){$blockedCode='internal';try{$blockedCode=Get-BlockerCode}catch{try{$children=@(Get-ChildItem -LiteralPath $result -Force);if($children.Count-cne1-or$children[0].Name-cne$script:Issue158OwnerName){throw 'child'};[void](Get-Issue158Owner $result $runId $CandidateSha result (Get-Issue158PhysicalPath $runtime) (Get-Issue158PhysicalPath $result));$blockedCode='child_nonzero_unreported'}catch{$blockedCode='internal'}};throw 'test_process'}
- $blockedCode='wrapper_test_output'
- if($null-eq$childOutput-or-not($childOutput-is[pscustomobject])-or@($childOutput.PSObject.Properties).Count-cne3-or(@($childOutput.PSObject.Properties.Name)-join',')-cne'Stdout,StdoutOverflow,StderrNonempty'-or$childOutput.Stdout.GetType()-ne[string]-or$childOutput.StdoutOverflow.GetType()-ne[bool]-or$childOutput.StderrNonempty.GetType()-ne[bool]){throw 'test_output'}
- if($childOutput.StderrNonempty-or$childOutput.StdoutOverflow-or$childOutput.Stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'-or$childOutput.Stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9]'){throw 'test_process'}
+  $blockedCode='wrapper_test_output_contract'
+  if($null-eq$childOutput-or-not($childOutput-is[pscustomobject])-or@($childOutput.PSObject.Properties).Count-cne3-or(@($childOutput.PSObject.Properties.Name)-join',')-cne'Stdout,StdoutOverflow,StderrNonempty'-or$childOutput.Stdout.GetType()-ne[string]-or$childOutput.StdoutOverflow.GetType()-ne[bool]-or$childOutput.StderrNonempty.GetType()-ne[bool]){throw 'test_output'}
+  $blockedCode='wrapper_test_output_stderr_nonempty';if($childOutput.StderrNonempty){throw 'test_process'}
+  $blockedCode='wrapper_test_output_overflow';if($childOutput.StdoutOverflow){throw 'test_process'}
+  $blockedCode='wrapper_test_output_skip_summary';if($childOutput.Stdout-cmatch'(?m)(?:Skipped|スキップ):\s*[1-9][0-9]*\b'){throw 'test_process'}
+  $blockedCode='wrapper_test_output_pass_summary';if($childOutput.Stdout-cnotmatch'(?m)(?:Passed|合格):\s*1\b'){throw 'test_process'}
  $blockedCode='wrapper_runtime_cleanup'
  Remove-Owned $runtime runtime
  $blockedCode='wrapper_scan'
