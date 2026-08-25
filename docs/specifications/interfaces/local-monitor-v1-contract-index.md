@@ -81,6 +81,8 @@ is permitted.
 - #134 alone maps and serializes
   `GET /api/local-monitor/v1/repositories`. #156 owns its five
   management/action routes, not the composite Repository-card read.
+  Its exact success response and opaque cursor are owned solely by
+  `local-monitor-v1-repository-collection.md`.
 - The sole Session collection transport is
   `POST /api/local-monitor/v1/sessions`. Its request transport composes with
   the sole success authority in `local-monitor-v1-session-collection.md`; #134

@@ -355,12 +355,12 @@ to null.
 | `scope` | Exact `all`, `unassigned` or `repository`. The Local Monitor browser derives it from the human page path; the endpoint does not trust or require `Referer`. |
 | `repository_id` | Canonical local Repository UUIDv7 only for `scope=repository`; otherwise exactly null. The browser copies it only from a validated Repository page route. |
 | `archive_scope` | Exact `active_only` or `include_archived`; never null. |
-| `from` / `to` | Null or exact decoded UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. A non-null value must parse as a real Gregorian `DateTimeOffset` instant and re-serialize byte-for-byte to that form; `from < to` when both exist. |
+| `from` / `to` | Null or exact decoded UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. A non-null value must parse as a real Gregorian `DateTimeOffset` instant and re-serialize byte-for-byte to that form; `from < to` when both exist. Filtering is against the Session accepted ordering instant: first valid `started_at`, then `created_at`, then `last_seen_at`; invalid-time Sessions do not match a non-null bound. `from` is inclusive and `to` exclusive. |
 | `source` | Array of 0..16 distinct current source tokens from section 5. |
 | `model` | Array of 0..16 distinct dynamic values. Each has 1..128 Unicode scalars, at most 256 strict UTF-8 bytes, and no C0/C1 control or line/paragraph separator. No trim, normalization, case fold, alias or approximate match. |
 | `status` | Array of 0..16 distinct current status tokens from section 5. |
 | `has_skill`, `has_subagent`, `has_error`, `has_retry` | JSON Boolean or null; null means no predicate. |
-| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are request-memory only. |
+| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are request-memory only. Matching uses ordinal substring comparison over exactly the three current normalized fact classes `label`, `skill`, and `tool`; it never searches prompts, Skill bodies, Tool payloads/results/errors, paths, or response text. |
 | `cursor` | Null or the exact token in section 9. |
 | `limit` | Null or a canonical JSON integer 1..200. Null means 50. Decimal, exponent, string, Boolean, sign and negative-zero spellings are invalid. |
 

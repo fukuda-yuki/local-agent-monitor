@@ -524,6 +524,9 @@ That route composes catalog data with archive eligibility, Session and conflict
 counts, last-observed time, and pagination. Issue #156 supplies internal
 catalog and scope services only. It MUST NOT register, serialize, or shadow the
 composite route.
+Its exact success bytes, Repository ordering, pagination, and opaque cursor are
+owned solely by
+[`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md).
 
 Issue #156 owns these routes under the exact DC156-17 wire contract:
 
