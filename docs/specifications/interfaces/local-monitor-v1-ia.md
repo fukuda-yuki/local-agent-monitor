@@ -203,10 +203,10 @@ Selecting a row opens Session detail directly. There is no preview pane.
 
 The browser will obtain this list only through the #133/#134-owned closed
 body-bearing POST; this UI never reads Workspace or Repository tables directly.
-#133 currently defines semantic row requirements but not the complete exact
-success response wire. The POST and functional Explorer page remain
-unregistered until a later canonical #134 Workspace-read response contract
-fixes that wire; #134 then alone performs the coherent read and serialization.
+#133's semantic row requirements compose with the accepted exact success wire
+in [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md).
+#134 alone maps the POST and performs the coherent read and serialization; the
+functional Explorer page remains #138-owned.
 
 ### Compare selection mode
 

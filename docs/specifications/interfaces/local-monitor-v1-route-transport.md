@@ -56,19 +56,20 @@ This specification does not change `/api/monitor/*`,
 | Human path/query parsing, canonical URL generation, history restoration and retired-list dispatch | #136 |
 | Session collection request/query/cursor contract | this route-facing amendment to #133; pure parsing implementation is #136-owned |
 | Session collection semantic read requirements | #133/#134 |
-| Exact closed success response wire and its coherent serialization | not yet defined; a later canonical #134 Workspace-read response contract must own it before #134 alone maps and serializes the endpoint |
+| Exact closed success response wire | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md); #134 alone maps and serializes it |
 | Repository/archive scope facts used by the Workspace read | the one `ILocalRepositoryScopeSnapshotService` composed by #156/#161 |
 | Local execution/node identity and exact Session/node index | #133/#134, with the route-facing amendment in this specification |
 | AI run identity/scope lookup | #162/#163/#164, with the route-facing amendment in this specification |
 | Comparison identity, operational snapshot and expiry tombstone | #165/#166, with the route-facing amendment in this specification |
 | Human state wording and sentence-level copy | #137/#169 |
 
-#136 may implement only pure typed path/query/request/cursor parsers and URL
-builders before the later canonical #134 Workspace-read response contract is
-accepted. Neither #136 nor #134 may register an active primary page or the
-Session collection endpoint before that contract fixes the complete success
-wire. No placeholder page, fabricated data, inferred response DTO, substitute
-Workspace reader or provisional serializer is permitted.
+#136 owns only pure typed path/query/request/cursor parsers and URL builders.
+Those rules compose with the accepted exact success wire in
+[`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md),
+which supersedes #133's former GET and incomplete response prose. #134 alone
+maps and serializes the POST. No placeholder page, fabricated data, inferred
+response DTO, substitute Workspace reader or provisional serializer is
+permitted.
 
 ## 3. Primary human paths
 
@@ -491,20 +492,12 @@ filters from a cursor or looks up a saved search.
 - response never echoes `q` or model filters;
 - any returned continuation token follows section 9.
 
-#133 currently names `local-monitor-sessions.response.v1`, semantic row
-requirements, default ordering, conditional pagination and a broad 8 MiB
-ceiling. It does not define a complete closed JSON object graph, member types,
-nullability, nested property order, `next_cursor` top-level placement and
-canonical omission/null encoding beyond the semantic more-row rule, canonical
-serialization bytes or exact ceiling measurement. This specification does not
-infer those missing values.
-
-Before the POST or any primary page that consumes it is registered, a later
-canonical #134 Workspace-read response contract must fix all of those success-
-wire details, the coherent snapshot boundary and the exact no-partial-body
-overflow behavior. Until then, only pure request/query/cursor/URL parsers and
-their tests may proceed. The fixed errors below describe the eventual
-transport; they do not authorize route registration by themselves.
+The success transport in this section composes with the complete closed object
+graph, member types, nullability, exact property order, coherent snapshot rules
+and canonical bytes in
+[`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md).
+That document is the sole success authority and supersedes #133's former GET
+and incomplete response prose. The fixed errors below remain owned here.
 
 ### Fixed errors
 
