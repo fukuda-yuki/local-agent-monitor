@@ -216,10 +216,9 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   validation remains independent, and D082 adds no UI or frozen-v1 change.
   The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
   accepted Session collection request transport; q/model search values remain
-  transient and it has no GET or saved-search fallback. #133 does not yet fix
-    Its exact success wire is frozen by #171. Only pure #136 parsers may precede the
-  canonical #134 Workspace-read response contract; #134 alone maps and
-  serializes the endpoint after that gate closes.
+  transient and it has no GET or saved-search fallback. #133 did not freeze the
+  exact success wire. #171 now freezes it, and #134 activates the canonical
+  Workspace-read response contract and serializes the endpoint.
   It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
 - AI-independent observation/investigation/Compare remains complete without an

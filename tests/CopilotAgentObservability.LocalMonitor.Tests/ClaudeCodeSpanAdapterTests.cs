@@ -119,7 +119,7 @@ public sealed class ClaudeCodeSpanAdapterTests
             "tool_name", "tool_type", "mcp_tool_name", "mcp_server_hash", "agent_name",
             "request_model", "response_model", "input_tokens", "output_tokens", "total_tokens",
             "reasoning_tokens", "cache_read_tokens", "cache_creation_tokens", "status", "error_type",
-            "finish_reasons", "conversation_id", "duration_ms", "start_time", "end_time", "retry_count",
+            "finish_reasons", "conversation_id", "duration_ms", "start_time", "end_time", "retry_count", "producer_total_tokens",
         };
         Assert.All(
             canonical.RootElement.EnumerateArray(),

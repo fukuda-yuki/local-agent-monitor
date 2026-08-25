@@ -56,18 +56,18 @@ internal static class LocalWorkspaceProjectionStore
               CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k
               WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             UPDATE local_workspace_session_activity AS a SET
-              state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) THEN CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture') THEN 'capture_gap' ELSE 'source_unsupported' END WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full' THEN 'recorded' ELSE 'not_observed' END,
+              state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) THEN CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture') THEN 'capture_gap' ELSE 'source_unsupported' END WHEN a.kind<>'retry' AND (EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full') THEN 'recorded' ELSE 'not_observed' END,
               count=CASE WHEN NOT EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) AND (a.kind<>'retry') AND (EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full') THEN (SELECT COUNT(DISTINCT e.event_id) FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
-              WHERE a.kind IN ('tool','subagent','error');
+              WHERE a.kind IN ('tool','subagent','error','retry');
             INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
               SELECT session_id,run_id,'session_run',0,run_id,input_tokens,output_tokens,total_tokens,NULL,NULL,NULL FROM session_runs
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
         if (TableExists(connection, transaction, "monitor_spans"))
         {
-            ExecuteWithIds(connection, transaction, """
+            ExecuteWithIds(connection, transaction, $"""
                 INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
-                SELECT e.session_id,e.run_id,'llm_span',1,CAST(ms.raw_record_id AS TEXT)||':'||CAST(ms.span_ordinal AS TEXT),ms.input_tokens,ms.output_tokens,ms.total_tokens,ms.reasoning_tokens,ms.cache_read_tokens,ms.cache_creation_tokens
+                SELECT e.session_id,e.run_id,'llm_span',1,CAST(ms.raw_record_id AS TEXT)||':'||CAST(ms.span_ordinal AS TEXT),ms.input_tokens,ms.output_tokens,{(ColumnExists(connection, transaction, "monitor_spans", "producer_total_tokens") ? "ms.producer_total_tokens" : "NULL")},ms.reasoning_tokens,ms.cache_read_tokens,ms.cache_creation_tokens
                 FROM session_events e JOIN monitor_spans ms ON e.source_adapter='otel-exact' COLLATE BINARY AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY AND e.trace_id=ms.trace_id COLLATE BINARY
                 WHERE e.run_id IS NOT NULL AND ms.category='llm_call' AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                 """, idsJson);
@@ -75,7 +75,7 @@ internal static class LocalWorkspaceProjectionStore
                 WITH exact_spans AS (
                   SELECT DISTINCT e.session_id,e.run_id,ms.raw_record_id,ms.span_ordinal,ms.retry_count
                   FROM session_events e JOIN monitor_spans ms ON e.source_adapter='otel-exact' COLLATE BINARY AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY AND e.trace_id=ms.trace_id COLLATE BINARY
-                  WHERE e.run_id IS NOT NULL AND ms.category='llm_call' AND ms.retry_count IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
+                  WHERE e.run_id IS NOT NULL AND ms.operation='chat' COLLATE BINARY AND ms.retry_count IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
                 totals AS (SELECT session_id,SUM(retry_count) retry_count FROM exact_spans GROUP BY session_id)
                 UPDATE local_workspace_session_activity AS a SET state='recorded',count=t.retry_count FROM totals t WHERE a.session_id=t.session_id AND a.kind='retry';
                 """, idsJson);

@@ -126,7 +126,8 @@ internal static class MonitorSpanProjectionBuilder
 
         var inputTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.InputTokenKeys);
         var outputTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.OutputTokenKeys);
-        var totalTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.TotalTokenKeys);
+        var producerTotalTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, OtlpSpanReader.TotalTokenKeys);
+        var totalTokens = producerTotalTokens;
         var reasoningTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, ReasoningTokenKeys);
         var cacheReadTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, CacheReadTokenKeys);
         var cacheCreationTokens = OtlpSpanReader.ReadFirstInt(span.Attributes, CacheCreationTokenKeys);
@@ -161,6 +162,7 @@ internal static class MonitorSpanProjectionBuilder
             CacheReadTokens: cacheReadTokens,
             CacheCreationTokens: cacheCreationTokens,
             RetryCount: retryCount,
+            ProducerTotalTokens: producerTotalTokens,
             Status: status,
             ErrorType: errorType,
             FinishReasons: finishReasons,

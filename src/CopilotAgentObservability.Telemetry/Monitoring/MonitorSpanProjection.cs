@@ -27,4 +27,5 @@ internal sealed record MonitorSpanProjection(
     double? DurationMs,
     string? StartTime,
     string? EndTime,
-    int? RetryCount = null);
+    int? RetryCount = null,
+    int? ProducerTotalTokens = null);
