@@ -141,7 +141,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         var json = Issue158WindowsBlocker.Serialize("a".PadLeft(40, 'a'), "failed", OwnedSessionExecutionCheckpointV1.DriverCompleted);
         using var document = JsonDocument.Parse(json);
         Assert.Equal(9, document.RootElement.EnumerateObject().Count());
-        Assert.Equal("issue-158-windows-blocker.v5", document.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal("issue-158-windows-blocker.v6", document.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal("failed", document.RootElement.GetProperty("terminal_status").GetString());
         Assert.Equal("driver_completed", document.RootElement.GetProperty("last_checkpoint").GetString());
         Assert.Equal("none", document.RootElement.GetProperty("driver_phase").GetString());
@@ -289,7 +289,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     public void EvidenceFailureWireMapsEveryClosedValue()
     {
         Assert.Equal(
-            ["none", "observer_missing", "observer_multiple", "source_application_version", "protocol_version", "client_start_count", "status_observation_count", "probe_session_count", "execution_session_count", "retained_root_count", "retained_skill_count", "probe_inventory_count", "execution_inventory_count", "prepared_invocation_count", "same_client", "exact_tool_union", "retained_only_inventory", "probe_native_reproof", "execution_native_reproof", "callback_native_reproof"],
+            ["none", "observer_missing", "observer_multiple", "source_application_version", "protocol_version", "client_start_count", "status_observation_count", "probe_session_count", "execution_session_count", "retained_root_count", "retained_skill_count", "probe_inventory_count", "execution_inventory_count", "prepared_invocation_none", "prepared_invocation_excess", "same_client", "exact_tool_union", "retained_only_inventory", "probe_native_reproof", "execution_native_reproof", "callback_native_reproof"],
             Enum.GetValues<Issue158ExecutionEvidenceFailureV1>().Select(value => Issue158WindowsBlocker.ExecutionEvidenceWire(value)));
     }
 
@@ -309,7 +309,8 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             (valid with { RetainedSkillCount = 0 }, Issue158ExecutionEvidenceFailureV1.RetainedSkillCount),
             (valid with { ProbeInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount),
             (valid with { ExecutionInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount),
-            (valid with { PreparedInvocationCount = 1 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount),
+            (valid with { PreparedInvocationCount = 0 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationNone),
+            (valid with { PreparedInvocationCount = 3 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess),
             (valid with { SameClient = false }, Issue158ExecutionEvidenceFailureV1.SameClient),
             (valid with { ExactToolUnion = false }, Issue158ExecutionEvidenceFailureV1.ExactToolUnion),
             (valid with { RetainedOnlyInventory = false }, Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory),
@@ -320,6 +321,15 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         foreach (var item in cases)
             Assert.Equal(item.Failure, Issue158ExecutionEvidenceClassifier.Classify([item.Value]));
     }
+
+    [Theory]
+    [InlineData(0, "prepared_invocation_none")]
+    [InlineData(1, "none")]
+    [InlineData(2, "none")]
+    [InlineData(3, "prepared_invocation_excess")]
+    public void EvidenceClassifierClosesPreparedInvocationCardinality(int count, string expected) =>
+        Assert.Equal(expected, Issue158WindowsBlocker.ExecutionEvidenceWire(
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { PreparedInvocationCount = count }])));
 
     [Fact]
     public void BlockerAcceptsOnlyClosedEvidenceDetailCrossPairAndPublicationCheckpoints()
@@ -396,8 +406,10 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
                 OwnedSessionExecutionCheckpointV1.CandidatePublished, null, null, postFreeze, Issue158PostSuccessFailureV1.Unexpected));
     }
 
-    [Fact]
-    public void CurrentPersistenceFactsUseExactClaimsSnapshotsAndLifecycleRows()
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public void CurrentPersistenceFactsVerifySingleAndDoubleInvocationTopologies(bool includeAgent, long total)
     {
         var path = Path.Combine(Path.GetTempPath(), $"issue158-facts-{Guid.NewGuid():N}.db");
         var session = Guid.CreateVersion7();
@@ -411,15 +423,20 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
                     CREATE TABLE skill_invocation_snapshots(session_id TEXT,trigger TEXT);
                     CREATE TABLE skill_projection_sdk_claims(session_id TEXT);
                     CREATE TABLE session_events(session_id TEXT,type TEXT);
-                    INSERT INTO skill_invocation_snapshots VALUES($session,'user-invoked'),($session,'agent-invoked');
-                    INSERT INTO skill_projection_sdk_claims VALUES($session),($session);
+                    INSERT INTO skill_invocation_snapshots VALUES($session,'user-invoked');
+                    INSERT INTO skill_projection_sdk_claims VALUES($session);
                     INSERT INTO session_events VALUES($session,'session.start'),($session,'session.task_complete');
                     """;
                 command.Parameters.AddWithValue("$session", session.ToString("D"));
                 command.ExecuteNonQuery();
+                if (includeAgent)
+                {
+                    command.CommandText = "INSERT INTO skill_invocation_snapshots VALUES($session,'agent-invoked'); INSERT INTO skill_projection_sdk_claims VALUES($session);";
+                    command.ExecuteNonQuery();
+                }
             }
             var exact = Issue158PersistenceFactReader.Read(path, session);
-            Assert.Equal(new Issue158PersistenceFacts(2, 2, 1, 1, 1, 1), exact);
+            Assert.Equal(new Issue158PersistenceFacts(total, total, 1, 1, 1, includeAgent ? 1 : 0), exact);
             Assert.Equal(2, Issue158PersistenceFactVerifier.Verify(exact));
             using (var connection = new SqliteConnection($"Data Source={path}"))
             {
@@ -429,7 +446,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
                 command.ExecuteNonQuery();
             }
             var mismatched = Issue158PersistenceFactReader.Read(path, session);
-            Assert.Equal(1, mismatched.SdkClaims);
+            Assert.Equal(total - 1, mismatched.SdkClaims);
             Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(mismatched));
         }
         finally
@@ -438,6 +455,34 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             if (File.Exists(path)) File.Delete(path);
         }
     }
+
+    [Theory]
+    [InlineData(1, 1, 1, 1, 0)]
+    [InlineData(2, 2, 1, 1, 2)]
+    [InlineData(2, 2, 0, 2, 0)]
+    [InlineData(2, 1, 1, 1, 1)]
+    [InlineData(3, 3, 1, 1, 2)]
+    public void PersistenceVerifierRejectsInvalidTriggerAndAggregateCombinations(
+        long snapshots, long claims, long userInvoked, long agentInvoked, long taskComplete)
+    {
+        var facts = new Issue158PersistenceFacts(snapshots, claims, 1, taskComplete, userInvoked, agentInvoked);
+        Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(facts));
+    }
+
+    [Theory]
+    [InlineData(1, 2, 1, 1, 1, 1)]
+    [InlineData(2, 1, 1, 1, 1, 1)]
+    [InlineData(2, 2, 0, 1, 1, 1)]
+    [InlineData(2, 2, 2, 1, 1, 1)]
+    [InlineData(2, 2, 1, 0, 1, 1)]
+    [InlineData(2, 2, 1, 2, 1, 1)]
+    [InlineData(2, 2, 1, 1, 0, 2)]
+    [InlineData(2, 2, 1, 1, 2, 0)]
+    [InlineData(3, 3, 1, 1, 1, 2)]
+    public void PersistenceVerifierRequiresEveryIndependentDoubleTopologyFact(
+        long snapshots, long claims, long start, long complete, long user, long agent) =>
+        Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(
+            new Issue158PersistenceFacts(snapshots, claims, start, complete, user, agent)));
 
     [Fact]
     public void PersistenceReadFailureRemainsDistinctFromAggregateMismatch()
@@ -555,16 +600,125 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         Assert.Equal(0, constructed);
     }
 
-    [Fact]
-    public void ResultSerializationIsStrictAndSanitized()
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(1, 2)]
+    public void ResultSerializationIsStrictTruthfulAndSanitized(int agentInvoked, int total)
     {
-        var json = Issue158WindowsResult.Serialize(ValidObservedResult());
-        Assert.Equal("{\"schema_version\":\"issue-158-live-validation.v1\",\"candidate_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lane\":\"windows_owned_session\",\"outcome\":\"passed\",\"source_application_version\":\"1.0.75\",\"protocol_version\":3,\"counts\":{\"retained_roots\":1,\"retained_skills\":1,\"probe_sessions\":1,\"execution_sessions\":1,\"user_invoked\":1,\"agent_invoked\":1,\"task_complete\":1,\"v2_imported\":2,\"v1_imported\":2,\"snapshot_rows\":2},\"checks\":{\"operator_gate\":true,\"cli_override_absent\":true,\"retained_only_inventory\":true,\"exact_tool_union\":true,\"native_reproof\":true,\"current_generation\":true,\"metadata_route\":true,\"historical_route\":true,\"current_file_route\":true,\"shutdown_drain\":true,\"cleanup_complete\":true},\"exit_code\":0}", json);
+        var json = Issue158WindowsResult.Serialize(ValidObservedResult(agentInvoked));
         using var document = JsonDocument.Parse(json);
         Assert.Equal(9, document.RootElement.EnumerateObject().Count());
         Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("path", json, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("windows_owned_session", document.RootElement.GetProperty("lane").GetString());
+        var counts = document.RootElement.GetProperty("counts");
+        Assert.Equal(agentInvoked, counts.GetProperty("agent_invoked").GetInt64());
+        Assert.Equal(total, counts.GetProperty("v2_imported").GetInt64());
+        Assert.Equal(total, counts.GetProperty("snapshot_rows").GetInt64());
+    }
+
+    [Theory]
+    [InlineData(0, "{\"schema_version\":\"issue-158-live-validation.v1\",\"candidate_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lane\":\"windows_owned_session\",\"outcome\":\"passed\",\"source_application_version\":\"1.0.75\",\"protocol_version\":3,\"counts\":{\"retained_roots\":1,\"retained_skills\":1,\"probe_sessions\":1,\"execution_sessions\":1,\"user_invoked\":1,\"agent_invoked\":0,\"task_complete\":1,\"v2_imported\":1,\"v1_imported\":2,\"snapshot_rows\":1},\"checks\":{\"operator_gate\":true,\"cli_override_absent\":true,\"retained_only_inventory\":true,\"exact_tool_union\":true,\"native_reproof\":true,\"current_generation\":true,\"metadata_route\":true,\"historical_route\":true,\"current_file_route\":true,\"shutdown_drain\":true,\"cleanup_complete\":true},\"exit_code\":0}")]
+    [InlineData(1, "{\"schema_version\":\"issue-158-live-validation.v1\",\"candidate_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lane\":\"windows_owned_session\",\"outcome\":\"passed\",\"source_application_version\":\"1.0.75\",\"protocol_version\":3,\"counts\":{\"retained_roots\":1,\"retained_skills\":1,\"probe_sessions\":1,\"execution_sessions\":1,\"user_invoked\":1,\"agent_invoked\":1,\"task_complete\":1,\"v2_imported\":2,\"v1_imported\":2,\"snapshot_rows\":2},\"checks\":{\"operator_gate\":true,\"cli_override_absent\":true,\"retained_only_inventory\":true,\"exact_tool_union\":true,\"native_reproof\":true,\"current_generation\":true,\"metadata_route\":true,\"historical_route\":true,\"current_file_route\":true,\"shutdown_drain\":true,\"cleanup_complete\":true},\"exit_code\":0}")]
+    public void ResultSerializationPreservesTheExactSuccessfulWireContract(int agentInvoked, string expected) =>
+        Assert.Equal(expected, Issue158WindowsResult.Serialize(ValidObservedResult(agentInvoked)));
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(18)]
+    public void ResultSerializationRejectsEachIndependentCertificationFailure(int mutation)
+    {
+        var result = ValidObservedResult();
+        result = mutation switch
+        {
+            0 => result with { Evidence = result.Evidence with { PreparedInvocationCount = 1 } },
+            1 => result with { V2Imported = 1 },
+            2 => result with { SnapshotRows = 1 },
+            3 => result with { UserInvoked = 0, Evidence = result.Evidence with { PreparedInvocationCount = 1 }, V2Imported = 1, SnapshotRows = 1 },
+            4 => result with { AgentInvoked = 2, Evidence = result.Evidence with { PreparedInvocationCount = 3 }, V2Imported = 3, SnapshotRows = 3 },
+            5 => result with { TaskComplete = 0 },
+            6 => result with { V1Imported = 1 },
+            7 => result with { OperatorGate = false },
+            8 => result with { CliOverrideAbsent = false },
+            9 => result with { Evidence = result.Evidence with { RetainedOnlyInventory = false } },
+            10 => result with { Evidence = result.Evidence with { ExactToolUnion = false } },
+            11 => result with { Evidence = result.Evidence with { ProbeNativeReproof = false } },
+            12 => result with { MetadataRoute = false },
+            13 => result with { HistoricalRoute = false },
+            14 => result with { CurrentFileRoute = false },
+            15 => result with { ShutdownDrain = false },
+            16 => result with { Evidence = result.Evidence with { SameClient = false } },
+            17 => result with { Evidence = result.Evidence with { ExecutionNativeReproof = false } },
+            18 => result with { Evidence = result.Evidence with { CallbackNativeReproof = false } },
+            _ => throw new InvalidOperationException(),
+        };
+        Assert.Throws<InvalidOperationException>(() => Issue158WindowsResult.Serialize(result));
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(1, 2)]
+    [InlineData(2, 0)]
+    [InlineData(2, 1)]
+    [InlineData(2, 3)]
+    public void CommittedIdentitiesMustMatchCertifiedPreparedCardinality(int prepared, int committedCount)
+    {
+        var session = Guid.CreateVersion7();
+        var identities = Enumerable.Range(0, committedCount)
+            .Select(_ => new SkillInvocationV2CommittedIdentityV1(session, Guid.CreateVersion7())).ToArray();
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(identities, prepared));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void CommittedIdentitiesAcceptExactCertifiedPreparedCardinality(int count)
+    {
+        var session = Guid.CreateVersion7();
+        var identities = Enumerable.Range(0, count)
+            .Select(_ => new SkillInvocationV2CommittedIdentityV1(session, Guid.CreateVersion7())).ToArray();
+        Assert.Equal(count, Issue158CommittedIdentityVerifier.Verify(identities, count).Length);
+    }
+
+    [Fact]
+    public void CommittedIdentitiesRejectMixedSessionsAtCorrectCardinality()
+    {
+        var values = new[]
+        {
+            new SkillInvocationV2CommittedIdentityV1(Guid.CreateVersion7(), Guid.CreateVersion7()),
+            new SkillInvocationV2CommittedIdentityV1(Guid.CreateVersion7(), Guid.CreateVersion7()),
+        };
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 2));
+    }
+
+    [Fact]
+    public void CommittedIdentitiesRejectDuplicateSnapshotsAtCorrectCardinality()
+    {
+        var session = Guid.CreateVersion7();
+        var snapshot = Guid.CreateVersion7();
+        var values = new[]
+        {
+            new SkillInvocationV2CommittedIdentityV1(session, snapshot),
+            new SkillInvocationV2CommittedIdentityV1(session, snapshot),
+        };
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 2));
     }
 
     [Fact]
@@ -647,9 +801,13 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
         "1.0.75", 3, 1, 1, 1, 1, 1, 1, 1, 1, 2,
         true, true, true, true, true, true);
 
-    private static Issue158WindowsObservedResult ValidObservedResult() => new(
-        new string('a', 40), ValidEvidence(), 1, 1, 1, 2, 2, 2,
+    private static Issue158WindowsObservedResult ValidObservedResult(int agentInvoked = 1)
+    {
+        var total = 1 + agentInvoked;
+        return new(
+        new string('a', 40), ValidEvidence() with { PreparedInvocationCount = total }, 1, agentInvoked, 1, total, 2, total,
         true, true, true, true, true, true, true);
+    }
 
     private sealed class OwnedGateFixture : IDisposable
     {
@@ -1035,10 +1193,7 @@ internal static class Issue158WindowsOwnedSessionLane
             {
                 SkillInvocationV2CommittedIdentityV1[] values;
                 lock (identityLock) values = [.. identities];
-                if (values.Length != 2 || values.Select(static item => item.SessionId).Distinct().Count() != 1
-                    || values.Select(static item => item.SnapshotId).Distinct().Count() != 2)
-                    throw new InvalidOperationException("committed_identity_sequence");
-                return values;
+                return Issue158CommittedIdentityVerifier.Verify(values, certified.PreparedInvocationCount);
             });
             var identity = committed[0];
             var routeBase = $"/api/local-monitor/v1/sessions/{identity.SessionId:D}/skill-invocations/{identity.SnapshotId:D}";
@@ -1168,7 +1323,7 @@ internal enum Issue158ExecutionEvidenceFailureV1
 {
     None, ObserverMissing, ObserverMultiple, SourceApplicationVersion, ProtocolVersion, ClientStartCount,
     StatusObservationCount, ProbeSessionCount, ExecutionSessionCount, RetainedRootCount, RetainedSkillCount,
-    ProbeInventoryCount, ExecutionInventoryCount, PreparedInvocationCount, SameClient, ExactToolUnion,
+    ProbeInventoryCount, ExecutionInventoryCount, PreparedInvocationNone, PreparedInvocationExcess, SameClient, ExactToolUnion,
     RetainedOnlyInventory, ProbeNativeReproof, ExecutionNativeReproof, CallbackNativeReproof,
 }
 
@@ -1230,7 +1385,8 @@ internal static class Issue158ExecutionEvidenceClassifier
         if (value.RetainedSkillCount != 1) return Issue158ExecutionEvidenceFailureV1.RetainedSkillCount;
         if (value.ProbeInventoryCount < value.RetainedSkillCount) return Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount;
         if (value.ExecutionInventoryCount < value.RetainedSkillCount || value.ExecutionInventoryCount > value.ProbeInventoryCount) return Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount;
-        if (value.PreparedInvocationCount != 2) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount;
+        if (value.PreparedInvocationCount == 0) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationNone;
+        if (value.PreparedInvocationCount is < 0 or > 2) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess;
         if (!value.SameClient) return Issue158ExecutionEvidenceFailureV1.SameClient;
         if (!value.ExactToolUnion) return Issue158ExecutionEvidenceFailureV1.ExactToolUnion;
         if (!value.RetainedOnlyInventory) return Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory;
@@ -1331,10 +1487,24 @@ internal static class Issue158PersistenceFactVerifier
     internal static long Verify(Issue158PersistenceFacts facts)
     {
         var v1Imported = checked(facts.SessionStart + facts.TaskComplete);
-        if (facts is not { SnapshotRows: 2, SdkClaims: 2, SessionStart: 1, TaskComplete: 1, UserInvoked: 1, AgentInvoked: 1 }
-            || v1Imported != 2)
+        var invocationCount = checked(facts.UserInvoked + facts.AgentInvoked);
+        if (facts is not { SessionStart: 1, TaskComplete: 1, UserInvoked: 1, AgentInvoked: 0 or 1 }
+            || facts.SnapshotRows != invocationCount || facts.SdkClaims != invocationCount || v1Imported != 2)
             throw new InvalidOperationException("aggregate_counts");
         return v1Imported;
+    }
+}
+
+internal static class Issue158CommittedIdentityVerifier
+{
+    internal static SkillInvocationV2CommittedIdentityV1[] Verify(
+        SkillInvocationV2CommittedIdentityV1[] values, int preparedInvocationCount)
+    {
+        if (preparedInvocationCount is < 1 or > 2 || values.Length != preparedInvocationCount
+            || values.Select(static item => item.SessionId).Distinct().Count() != 1
+            || values.Select(static item => item.SnapshotId).Distinct().Count() != values.Length)
+            throw new InvalidOperationException("committed_identity_sequence");
+        return values;
     }
 }
 
@@ -1394,7 +1564,7 @@ internal static class Issue158WindowsBlocker
             throw new InvalidOperationException("blocker");
         return JsonSerializer.Serialize(new
         {
-            schema_version = "issue-158-windows-blocker.v5",
+            schema_version = "issue-158-windows-blocker.v6",
             candidate_sha = candidateSha,
             terminal_status = terminalStatus,
             last_checkpoint = checkpoint is null ? "none" : CheckpointWire(checkpoint.Value),
@@ -1477,7 +1647,8 @@ internal static class Issue158WindowsBlocker
         Issue158ExecutionEvidenceFailureV1.RetainedSkillCount => "retained_skill_count",
         Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount => "probe_inventory_count",
         Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount => "execution_inventory_count",
-        Issue158ExecutionEvidenceFailureV1.PreparedInvocationCount => "prepared_invocation_count",
+        Issue158ExecutionEvidenceFailureV1.PreparedInvocationNone => "prepared_invocation_none",
+        Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess => "prepared_invocation_excess",
         Issue158ExecutionEvidenceFailureV1.SameClient => "same_client",
         Issue158ExecutionEvidenceFailureV1.ExactToolUnion => "exact_tool_union",
         Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory => "retained_only_inventory",
@@ -1613,10 +1784,13 @@ internal static class Issue158WindowsResult
 
     internal static string Serialize(Issue158WindowsObservedResult result)
     {
+        var invocationCount = checked(result.UserInvoked + result.AgentInvoked);
         if (!IsCertified(result.Evidence) || result is not
-            { UserInvoked: 1, AgentInvoked: 1, TaskComplete: 1, V2Imported: 2, V1Imported: 2, SnapshotRows: 2,
+            { UserInvoked: 1, AgentInvoked: 0 or 1, TaskComplete: 1, V1Imported: 2,
               OperatorGate: true, CliOverrideAbsent: true, MetadataRoute: true, HistoricalRoute: true,
-              CurrentFileRoute: true, ShutdownDrain: true })
+              CurrentFileRoute: true, ShutdownDrain: true }
+            || result.Evidence.PreparedInvocationCount != invocationCount
+            || result.V2Imported != invocationCount || result.SnapshotRows != invocationCount)
             throw new InvalidOperationException("result_evidence");
         return JsonSerializer.Serialize(new
         {
