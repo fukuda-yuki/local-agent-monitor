@@ -6,12 +6,31 @@ internal enum SessionEventCommitStatus { Committed, Busy, Failed }
 
 internal sealed class SessionEventWriteRequest
 {
+    private enum Lifecycle { Pending, Claimed, Completed, Abandoned }
+
     private readonly TaskCompletionSource<SessionEventCommitStatus> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int lifecycle;
 
     public SessionEventWriteRequest(SessionIngestEnvelope envelope) => Envelope = envelope;
     public SessionIngestEnvelope Envelope { get; }
     public Task<SessionEventCommitStatus> Completion => completion.Task;
-    public void Complete(SessionEventCommitStatus status) => completion.TrySetResult(status);
+    public bool TryClaim() => Interlocked.CompareExchange(
+        ref lifecycle, (int)Lifecycle.Claimed, (int)Lifecycle.Pending) == (int)Lifecycle.Pending;
+
+    public bool TryAbandon()
+    {
+        if (Interlocked.CompareExchange(
+            ref lifecycle, (int)Lifecycle.Abandoned, (int)Lifecycle.Pending) != (int)Lifecycle.Pending) return false;
+        completion.TrySetResult(SessionEventCommitStatus.Failed);
+        return true;
+    }
+
+    public void Complete(SessionEventCommitStatus status)
+    {
+        if (Interlocked.CompareExchange(
+            ref lifecycle, (int)Lifecycle.Completed, (int)Lifecycle.Claimed) == (int)Lifecycle.Claimed)
+            completion.TrySetResult(status);
+    }
 }
 
 internal sealed class SessionEventQueue

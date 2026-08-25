@@ -241,8 +241,9 @@ fallback entity.
 The sole Session collection transport is the 32,768-byte closed JSON
 `POST /api/local-monitor/v1/sessions`. The former unimplemented GET is removed;
 there is no alias, saved-search handle, compatibility reader or fallback. This
-fixes the request/security boundary only; active registration waits for the
-later canonical #134 exact success-response contract.
+request/security boundary composes with the accepted exact success wire in
+[`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md);
+#134 alone owns active mapping and serialization.
 
 ## Retention
 

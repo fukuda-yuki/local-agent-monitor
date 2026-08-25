@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using GitHub.Copilot;
+using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -38,7 +39,13 @@ public sealed class SkillInvocationV2IsolationIntegrationTests
         request.Content.Headers.ContentType = new("application/json");
         using var response = await host.Client.SendAsync(request);
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(
+            Encoding.UTF8.GetBytes("{\"error\":\"local_monitor_ui_unavailable\"}"),
+            await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Empty(response.Content.Headers.Allow);
         Assert.Equal(0, queue.Count);
         Assert.Empty(store.ListMostRecent(10));
         Assert.Null(store.GetProjectionState("session-normalizer"));
@@ -89,5 +96,8 @@ public sealed class SkillInvocationV2IsolationIntegrationTests
         },
     };
 
-    private sealed class OpaqueRuntimeCapability : ISkillInvocationV2RuntimeCapability;
+    private sealed class OpaqueRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+    }
 }

@@ -32,6 +32,7 @@ internal static class SkillInvocationSdkV1Mapper
     public static bool TryMap(
         string? nativeSessionId,
         SkillInvokedEvent? sourceEvent,
+        string? certifiedDefinitionContent,
         [NotNullWhen(true)] out SkillInvocationSdkV1NormalizedEnvelope? envelope)
     {
         envelope = null;
@@ -44,6 +45,7 @@ internal static class SkillInvocationSdkV1Mapper
             || !IsWellFormedRequired(data.Name)
             || !IsWellFormedRequired(data.Path)
             || !IsWellFormedRequired(data.Content)
+            || !IsWellFormedRequired(certifiedDefinitionContent)
             || !IsWellFormedOptional(data.Description)
             || !IsWellFormedOptional(data.PluginName)
             || !IsWellFormedOptional(data.PluginVersion)
@@ -64,7 +66,7 @@ internal static class SkillInvocationSdkV1Mapper
             new SkillInvocationSdkV1NormalizedPayload(
                 data.Name,
                 data.Path,
-                data.Content,
+                certifiedDefinitionContent!,
                 allowedTools,
                 data.Description,
                 data.PluginName,

@@ -48,6 +48,10 @@
     <None Include="TestData\InstructionFindings\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\HistoricalInstructionAnalysis\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="TestData\SanitizedExport\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="TestData\LocalMonitorV1SessionCollection\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\local-monitor-v1\session-collection.response.schema.json"
+          Link="TestData\LocalMonitorV1SessionCollection\session-collection.response.schema.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\specifications\contracts\instruction-findings\v1\instruction-finding-handoff.schema.json"
           Link="TestData\InstructionFindings\instruction-finding-handoff.schema.json"
           CopyToOutputDirectory="PreserveNewest" />
@@ -72,6 +76,9 @@
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0001.json"
           Link="TestData\SkillInvocationV2\compatibility-registry-r0001.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\specifications\contracts\skill-invocation-snapshot\v1\compatibility-registry-r0002.json"
+          Link="TestData\SkillInvocationV2\compatibility-registry-r0002.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

@@ -85,7 +85,22 @@ public sealed class LocalRepositoryRuntimeBackupTests
                 using var connection = OpenWritable(path);
                 using (var removeArchive = connection.CreateCommand())
                 {
-                    removeArchive.CommandText = "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;";
+                    // skill_invocation_snapshot is parented to Session 14 exactly, so a downgraded
+                    // Session 13 archive that kept it would be incompatible rather than legacy.
+                    removeArchive.CommandText =
+                        "DELETE FROM schema_version WHERE component IN ('local_archive','skill_invocation_snapshot','local_workspace_projection');"
+                        + "DROP TABLE local_archive_events; DROP TABLE local_archive_current;"
+                        + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
+                        + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
+                        + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
+                        + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_sources;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_models;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_activity;"
+                        + "DROP TABLE IF EXISTS local_workspace_token_observations;"
+                        + "DROP TABLE IF EXISTS local_workspace_span_facts;"
+                        + "DROP TABLE IF EXISTS local_workspace_projection_state;"
+                        + "DROP TABLE IF EXISTS local_workspace_sessions;";
                     removeArchive.ExecuteNonQuery();
                 }
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
@@ -94,12 +109,17 @@ public sealed class LocalRepositoryRuntimeBackupTests
             {
                 ComponentVersions = new SortedDictionary<string, int>(
                     manifest.ComponentVersions
-                        .Where(static item => item.Key != "local_archive")
+                        .Where(static item => item.Key is not ("local_archive" or "skill_invocation_snapshot" or "local_workspace_projection"))
                         .ToDictionary(static item => item.Key, static item => item.Value),
-                    StringComparer.Ordinal) { ["session"] = 13 },
+                    StringComparer.Ordinal)
+                { ["session"] = 13 },
                 RowCounts = new SortedDictionary<string, long>(
                     manifest.RowCounts
-                        .Where(static item => item.Key is not ("local_archive_current" or "local_archive_events"))
+                        .Where(static item => item.Key is not (
+                            "local_archive_current"
+                            or "local_archive_events"
+                            or "skill_invocation_snapshots"
+                            or "skill_invocation_snapshot_receipts") && !item.Key.StartsWith("local_workspace_", StringComparison.Ordinal))
                         .ToDictionary(static item => item.Key, static item => item.Value),
                     StringComparer.Ordinal),
             });
@@ -114,6 +134,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.Equal(expected, ReadCatalogSnapshot(target));
         using var migrated = Open(target);
         Assert.Equal(14L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='session';"));
+        Assert.Equal(2L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.True(SqliteSessionStore.IsCurrentSchemaValid(migrated, null));
         Assert.Equal(0L, ScalarLong(target, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
         Assert.Equal("session_events", StringJoin(target, "SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('session_repository_observation_contexts') WHERE \"from\"='session_event_id';"));
@@ -645,6 +666,33 @@ public sealed class LocalRepositoryRuntimeBackupTests
             Assert.NotEqual("not_retained", locator.Provenance.SourceContentAvailability);
         Assert.Equal(archiveBefore, File.ReadAllBytes(transformed));
         AssertNoRuntimeBackupArtifacts(directory, previewTarget, restoreTarget);
+    }
+
+    [Fact]
+    public async Task DeletedRawTombstoneWithStaleSpanFactIsRejectedAcrossBackupSurfaces()
+    {
+        using var fixture = await CreatePopulatedCatalogAsync();
+        var directory = Path.GetDirectoryName(fixture.DatabasePath)!;
+        var valid = Path.Combine(directory, "deleted-fact-valid.zip");
+        var deleted = Path.Combine(directory, "deleted-fact-canonical.zip");
+        var corrupt = Path.Combine(directory, "deleted-fact-corrupt.zip");
+        var previewTarget = Path.Combine(directory, "deleted-fact-preview.db");
+        var restoreTarget = Path.Combine(directory, "deleted-fact-restore.db");
+        var service = new SqliteRuntimeBackupService(fixture.Clock);
+        Assert.True(service.CreateAndPublish(fixture.DatabasePath, valid).Success);
+        RepublishArchiveDatabase(valid, deleted, fixture.Clock, path => ApplyRestorableRawMutation(path, "RAW3", fixture.Clock));
+        RewriteArchiveDatabase(deleted, corrupt, path => Execute(path, """
+            INSERT INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT CAST(i.source_item_id AS INTEGER),s.span_ordinal,NULL,NULL
+            FROM retention_items i JOIN monitor_spans s ON s.raw_record_id=CAST(i.source_item_id AS INTEGER)
+            WHERE i.store_kind='raw_record' AND i.state='deleted' LIMIT 1;
+            """));
+
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Inspect(corrupt).ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Preview(corrupt, previewTarget).ErrorCode);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, service.Restore(corrupt, restoreTarget, new RuntimeRestoreOptions()).ErrorCode);
+        Assert.False(File.Exists(previewTarget));
+        Assert.False(File.Exists(restoreTarget));
     }
 
     [Fact]
@@ -2237,6 +2285,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         deleted_at='2026-08-01T00:00:00.0000000+00:00'
                     WHERE store_kind='raw_record'
                       AND source_item_id=(SELECT CAST(raw_record_id AS TEXT) FROM session_repository_observations LIMIT 1);
+                    DELETE FROM local_workspace_span_facts
+                    WHERE raw_record_id=(SELECT raw_record_id FROM session_repository_observations LIMIT 1);
                     DELETE FROM raw_records
                     WHERE id=(SELECT raw_record_id FROM session_repository_observations LIMIT 1);
                     """);

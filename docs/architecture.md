@@ -216,10 +216,9 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   validation remains independent, and D082 adds no UI or frozen-v1 change.
   The stateless body-bearing `POST /api/local-monitor/v1/sessions` is the sole
   accepted Session collection request transport; q/model search values remain
-  transient and it has no GET or saved-search fallback. #133 does not yet fix
-  its complete exact success wire. Only pure #136 parsers may precede the later
-  canonical #134 Workspace-read response contract; #134 alone maps and
-  serializes the endpoint after that gate closes.
+  transient and it has no GET or saved-search fallback. #133 did not freeze the
+  exact success wire. #171 now freezes it, and #134 activates the canonical
+  Workspace-read response contract and serializes the endpoint.
   It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
 - AI-independent observation/investigation/Compare remains complete without an
@@ -1118,3 +1117,13 @@ physical cleanup; Session aggregate fields remain a frozen read projection and
 cannot authorize deletion of any other store. Catalog adapters are exact-owner
 components for the five closed store kinds, while safe summaries, projections,
 receipts, and tombstones remain outside the raw deletion registry.
+
+## D087 owned Skill content split
+
+The current owned-session adapter validates typed SDK invocation content only
+as a required well-formed auxiliary inventory. It re-proves the retained native
+Skill under the existing root/lease authority and supplies exact proof content
+explicitly to normalizer v2; the mapper cannot implicitly promote SDK content
+to the persisted definition. Prepared bytes remain the sole post-terminal
+import input, so current-file comparison continues to compare stored native
+definition bytes with a fresh native read.

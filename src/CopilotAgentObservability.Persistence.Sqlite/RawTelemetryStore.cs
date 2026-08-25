@@ -720,6 +720,14 @@ internal sealed partial class RawTelemetryStore
             .Where(span => !string.IsNullOrWhiteSpace(span.TraceId))
             .ToList();
 
+        bool collectionFactsInstalled;
+        using (var collectionInstalled = connection.CreateCommand())
+        {
+            collectionInstalled.Transaction = transaction;
+            collectionInstalled.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=2);";
+            collectionFactsInstalled = Convert.ToInt64(collectionInstalled.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        }
+
         // Insert spans — idempotent via UNIQUE(raw_record_id, span_ordinal).
         foreach (var span in validSpans)
         {
@@ -776,6 +784,27 @@ internal sealed partial class RawTelemetryStore
             insert.ExecuteNonQuery();
         }
 
+        if (collectionFactsInstalled && validSpans.Count != 0)
+        {
+            using var collectionFacts = connection.CreateCommand();
+            collectionFacts.Transaction = transaction;
+            collectionFacts.CommandText = """
+                INSERT OR REPLACE INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+                SELECT $raw, CAST(value->>'ordinal' AS INTEGER),
+                       CASE WHEN json_type(value,'$.retry')='null' THEN NULL ELSE CAST(value->>'retry' AS INTEGER) END,
+                       CASE WHEN json_type(value,'$.total')='null' THEN NULL ELSE CAST(value->>'total' AS INTEGER) END
+                FROM json_each($facts);
+                """;
+            AddParameter(collectionFacts, "$raw", rawRecordId);
+            AddParameter(collectionFacts, "$facts", System.Text.Json.JsonSerializer.Serialize(validSpans.Select(static span => new
+            {
+                ordinal = span.SpanOrdinal,
+                retry = span.RetryCount,
+                total = span.ProducerTotalTokens,
+            })));
+            collectionFacts.ExecuteNonQuery();
+        }
+
         // Update rollup columns on monitor_traces for each affected trace_id.
         var affectedTraceIds = validSpans
             .Select(s => s.TraceId)
@@ -823,6 +852,7 @@ internal sealed partial class RawTelemetryStore
                         ReasoningTokens: null,
                         CacheReadTokens: sr.IsDBNull(13) ? null : sr.GetInt32(13),
                         CacheCreationTokens: sr.IsDBNull(14) ? null : sr.GetInt32(14),
+                        RetryCount: null,
                         Status: sr.IsDBNull(15) ? null : sr.GetString(15),
                         ErrorType: null,
                         FinishReasons: null,

@@ -1,14 +1,16 @@
 # Skill Invocation Snapshot Interface
 
-Status: **D083 decision-closed; #119 nonregistered foundation ready after the mandatory live-Issue readback; #158 implementation and release gated**
+Status: **D089 live-proof authority aligned; frozen v1 ready; #119 nonregistered parser/handoff remains conditional on mandatory live-Issue reconciliation/readback; #158 owned-session importer implementation and exact-final-candidate platform/live evidence complete; pinned full validation and fresh independent review remain release gates**
 
 This specification is the detailed authority for Issues #119, #157, and #158.
 It defines the frozen Session-ingest v1 correction, the exact Skill-only v2
 transport and runtime-capability boundary, the `skill_invocation_snapshot:1`
 component, historical content reads, and explicit bounded current-file reads.
 
-D083 resolves all eight remaining Product Owner choices. No product contract
-is left for an implementation to infer. Canonical promotion does not itself
+D083 resolves the eight wire/store/read choices. D086 supersedes only its
+Group 5 producer/topology clauses and the affected raw-analysis no-Skill rule;
+D089 further supersedes only its current-release live-proof scope.
+No product contract is left for an implementation to infer. Canonical promotion does not itself
 prove the prerequisite implementations, platform walkers, signed-in live
 runtime, focused/full validation, or independent review required below.
 
@@ -648,9 +650,16 @@ path digest byte `44` repeated 32 and length 12, and content-document digest
 byte `55` repeated 32. It decodes to exactly 726 bytes and the request
 fingerprint fixed in the artifact table.
 
-On a receipt hit, recompute the 29-field fingerprint from the request. A
-different fingerprint returns exact `409 idempotency_conflict`, zero writes.
-An identical fingerprint never enters either zero-create arm. It opens one
+On a direct receipt hit, first bind its snapshot back to the exact Event and
+prove the complete surviving non-raw graph: selected native/outer-Run links,
+Session write-time envelope, Event/snapshot/claim identity and classification
+nullability, receipt source key, content metadata, Retention ownership/lifecycle,
+tombstone structure, write-time equalities, claim equality/absence, and
+the 29-field fingerprint recomputed from persisted graph facts. Contradiction
+is exact sanitized `503 local_monitor_ui_unavailable`, zero writes, with no
+clock sample or raw-content read. Only after that proof may a different caller
+fingerprint return exact `409 idempotency_conflict`, zero writes. An identical
+fingerprint never enters either zero-create arm. It opens one
 validation-only `BEGIN IMMEDIATE` through the Retention-owned public replay
 validator, rechecks the exact receipt/fingerprint, and
 thereby serializes its consistent SQLite snapshot against Retention cleanup
@@ -677,13 +686,21 @@ row-readability, tombstone, reclassification, or graph contradiction is exact
 pre-existing v1/unsupported Event without this receipt is conflict. There is no
 adoption, ID regeneration, compatibility read, or backfill.
 
+If direct receipt lookup misses, replay performs only caller source key ->
+Event -> linked snapshot -> its single receipt recovery to detect receipt-key
+drift. A recovered receipt must pass the same persisted-graph proof. No Event,
+or an Event without a linked snapshot, remains a true miss and preserves the
+established foreign/Event collision path.
+
 The receipt recheck after a true miss has already opened the mutation
 `BEGIN IMMEDIATE` is the same semantic validator with different transaction
 ownership. Before any insert, if that recheck finds a receipt, #158 calls only
 the Retention-owned transaction-aware internal replay arm on the already-held
-connection/transaction. That arm rechecks the exact receipt/fingerprint in that
-snapshot; a different fingerprint returns 409 without sampling a clock, while
-an equal fingerprint samples `validation_at` exactly once and applies the same
+connection/transaction. That arm first proves the same exact persisted non-raw
+graph and receipt fingerprint in that snapshot; corruption returns sanitized
+503 without sampling a clock or reading raw content. Only then does a different
+caller fingerprint return 409 without sampling a clock, while an equal caller
+fingerprint samples `validation_at` exactly once and applies the same
 readable/transitional/deleted/corrupt graph rules above. It opens no connection
 or nested transaction, creates no Retention lease/row, selects no raw on the
 transitional/deleted arms, emits no raw value, and neither commits nor rolls
@@ -708,7 +725,141 @@ The closed accepted set preserves that graph; persisted selected ID and exact
 
 ## Group 5 — bundled CLI, application, SDK, and adapter identity
 
-### Current contract
+### D086 current producer contract
+
+The only producer is a raw-default Local Monitor raw-analysis session created,
+run, completed, and disposed by one exclusively owned `CopilotClient`. External
+Copilot CLI/VS Code sessions remain unavailable and unobserved. Do not list,
+resume, attach to, or read history from foreign sessions; in particular,
+`ResumeSessionAsync` is configuration-mutating and cannot certify ownership or
+the resumed runtime identity.
+
+Current r0002 deterministically admits exactly `1.0.65` and `1.0.75`, both at
+protocol `3`. For this release, versioned T0b and the final signed-in Windows
+live gate use the exact bundled `1.0.75`, protocol `3`. Deterministic compatibility
+and admission coverage for `1.0.65` is not the mandatory live lane. Every
+runtime identity observation remains exact and fail closed.
+
+For this already-implemented release, D090 retracts the contradicted claim that
+versioned T0b preceded r0002 and producer implementation. Exact post-
+implementation same-client proof is accepted together with deterministic
+r0002/identity/admission coverage and completed exact-final-candidate platform
+evidence; pinned full validation and fresh independent review remain release
+gates.
+Future registry revisions or producer/startup implementations require T0b
+before implementation. On one same signed-in bundled client T0b proves exact
+Version/ProtocolVersion status, matching
+SessionStart version, pre-creation callback registration on both sessions,
+prompt-free probe inventory, execution `DisabledSkills`, retained-root-only
+execution inventory/invocation, and exact task completion. Deterministic T0b
+alone resolves the exact admitted enabled/user-invocable retained-skill command
+through the SDK commands API, invokes it with
+`executionSession.Rpc.Commands.InvokeAsync`, requires a prompt-producing result,
+sends that exact returned prompt with `AgentMode.Autopilot`, and observes an
+exact matching typed retained `SkillInvoked` followed by an exact typed task-
+complete event. The mandatory live tuple is CLI `1.0.75`, SDK/package
+`1.0.4/1.0.4.0`, protocol `3`, adapter
+`copilot-sdk-dotnet-1.0.4+cao-skill-v2.1`, and normalizer
+`github-copilot-sdk.skill-invoked.normalize.v2`. Failure stops release. r0001 is historical
+authority, never a fallback.
+
+### D087 current content authority
+
+For the current owned producer, typed SDK `SkillInvokedData.Content` is a
+required, well-formed UTF-16 auxiliary-file inventory, not the Skill definition
+snapshot. Certified 1.0.65 and 1.0.75 exhibit this contract; the single-file
+synthetic case is exactly two LF bytes. Its arbitrary well-formed value is not
+a mismatch and is never persisted, logged, returned, or retained.
+
+After existing session, identity, and description checks, the callback validates
+that required SDK field, freshly re-proves the retained native target, and
+requires exact equality with the frozen proof. Normalizer v2 then writes exact
+callback-time `currentProof.Content` into the existing `payload.content`; all
+other payload fields remain typed SDK event values in their existing order.
+There is no transform heuristic, auxiliary enumeration parser, fallback,
+second field, later read, or reserialization. Missing or malformed upstream
+Content is `InvocationContent`; native proof failure or drift is
+`InvocationNativeReproof`; preparation and buffer failures retain their
+existing closed reasons.
+
+One admitted analysis candidate freezes the certified identity and owns the
+exact client plus retained directory scope while remaining invisible to
+current-file readers. With explicit `--skill-discovery-directory` roots it sets
+`EnableSkills=true`, `EnableConfigDiscovery=false`, and
+`SkipCustomInstructions=true`, supplies no plugin/instruction directories, and
+uses exact retained Skill directories. These explicit roots are the sole Skill
+provenance. The same certified client first creates and disposes a prompt-free
+inventory-probe Session with `OnEvent` registered before creation. That probe
+retains only the existing exact source-qualified custom raw-analysis tool
+entries and does not require `builtin:skill` or `builtin:task_complete`. It
+rejects
+name collisions and missing/unverifiable paths, then freezes all non-retained
+Skill names into `SessionConfig.DisabledSkills` for a distinct owned execution
+Session, whose `OnEvent` is also registered before creation. Before any prompt,
+execution inventory must contain no enabled non-retained Skill and no drift or
+inability to disable. Before prompt, every retained inventory path passes the
+existing native retained-root opener and lease proof; each later invocation
+path is re-proved when invoked, not trusted from SDK strings. Only
+the execution Session can produce callbacks/import. With retained roots, its
+tool allowlist is exactly the same source-qualified custom raw-analysis entries
+plus `builtin:skill` and `builtin:task_complete`. Wildcards, every other built-in,
+MCP tools, plugins, and ambient instruction/config discovery remain unavailable;
+a retained Skill's `allowed-tools` metadata cannot widen the exact allowlist.
+Production sends the ordinary requested prompt with `AgentMode.Autopilot`, does
+not force an arbitrary retained Skill invocation, and treats only the exact
+typed task-complete event as terminal. With no roots, Skills are disabled, no generation is retained, and
+the current-file service/POST is absent (outer `404`).
+
+The callback installed before session creation accepts under one lock exactly
+one matching SessionStart, 0..64 SkillInvoked callbacks with assigned ordinals,
+then exact same-session task completion. Callback time prepares each complete
+one-event v2 UTF-8 body from the frozen identity and retains only those opaque
+bytes. The aggregate cap is exactly 8,388,608 complete body bytes. Any malformed,
+out-of-order, mismatched, 65th, oversized, post-terminal, cancellation, root,
+identity, or lease failure poisons the candidate.
+
+Before completion it sends and persists nothing. The **owned-session
+post-completion buffer/import** is synchronous, process-memory-only, and non-
+durable. Zero invocations perform no v2 or v1 writes. With one or more
+invocations, after completion it sequentially obtains same-candidate
+capabilities and fresh body-bound tokens and sends exact prepared v2 bytes
+without reserialization or retry. Only after all v2 events succeed does it
+enqueue and await one-event v1 SessionStart followed by one-event v1 task-complete. A
+failure stops at once, preserves only the valid committed prefix, releases each
+capability exactly once, fails the analysis, destroys the failed candidate, and
+keeps the prior current generation. There is no durable queue or importer
+receipt, startup recovery, or automatic retry.
+
+After complete import and SDK session disposal, while the analysis run is still
+nonterminal, publication reserves the exact ready, capability-free, unpublished
+candidate behind the publication fence. Refusal, shutdown, invalidation, or
+lease loss before that reservation prevents durable analysis success. Reservation
+acceptance linearizes at the final direct authority-state check under runtime
+admission synchronization after `Ready -> Reserved`; that check reads the
+candidate lease-loss token and caller-cancellation token directly rather than
+depending on cancellation-callback completion. Cancellation observed only
+after that check is post-reservation invalidation and waits behind the fence. A winning
+reservation is held through durable run completion, the non-refusable atomic
+current-pointer swap, execution-evidence observation, and the
+`CandidatePublished` checkpoint; shutdown, lease loss, and invalidation wait for
+that sequence before removing the published generation. If durable completion
+fails, reservation abort invalidates and drains only the candidate. Publication
+order defines the latest successful generation.
+Zero invocations write no snapshot, receipt, or Session events, while a
+successful roots-configured analysis may publish a current-file generation.
+Roots with no published generation retain the existing exact `503
+skill_current_file_discovery_unavailable` result after earlier gates. Replacement, failure,
+refusal, lease loss, and explicit invalidation reject new capabilities, cancel
+unsealed work, drain capabilities, dispose client, then dispose retained scope,
+exactly once. Under D088, normal shutdown instead closes all admission,
+non-cancelingly drains the published current generation, invalidates unpublished
+candidates, and permits a later real invalidation to upgrade that shared
+exactly-once drain to canceling.
+
+### D083 r0001 historical producer contract (superseded by D086)
+
+The following text records the frozen r0001 topology and artifact identity. It
+does not authorize the current producer or release policy.
 
 The only r0001 producer composition is:
 
@@ -924,7 +1075,8 @@ data. Protocol 3 is an admission-only runtime fact: it is not added to the
 normalized wire, receipt, snapshot, database, backup, response, log, or metric;
 `adapter_version` already binds SDK 1.0.4.
 
-The inspected baseline's current application-co-located debug executable at
+Historical D083 evidence (superseded for the current release gate by D089):
+the inspected baseline's application-co-located debug executable at
 `src/CopilotAgentObservability.LocalMonitor/bin/Debug/net10.0/runtimes/win-x64/native/copilot.exe`
 is 128,372,512 bytes, hashes as
 `c1d86ddd95da68c826455f8239580166f7bf598502f83684b936403b510cd2b6`, and
@@ -937,7 +1089,8 @@ admitted** by r0001. It authorizes no producer, handoff, writer, new v2 write,
 replay label, or `source_application_version`; it is not authority to suppress
 stored metadata/historical content. On a valid configured/certified root
 surface it yields only the exact current-file discovery-unavailable result
-above, not route absence. Release activation requires a fresh application bundle
+above, not route absence. The following D083 activation requirement is
+historical and superseded for the current release gate: it requires a fresh application bundle
 that contains the exact package-selected 1.0.65 executable, forbids external
 or updating substitution, and whose same-client live status proves exact
 Version `1.0.65` and ProtocolVersion 3 before discovery or forwarding.
@@ -1200,15 +1353,15 @@ schema_fingerprint
 events
 ```
 
-| Property | Exact r0001 rule |
+| Property | Exact historical-r0001 / current-r0002 rule |
 |---|---|
 | `schema_version` | JSON integer `2` |
 | `source_adapter` | string `copilot-sdk-stream` |
 | `source_surface` | string `copilot-sdk` |
 | `native_session_id` | exact `CopilotSession.sessionId`; 1..256 Unicode scalars, no U+0000, at most 1,024 strict UTF-8 bytes |
-| `source_application_version` | string `1.0.65` obtained from the same-client runtime rule in Group 5 |
+| `source_application_version` | exact Version from the same-client certified tuple (r0001 historical `1.0.65`; current r0002 exact admitted tuple) |
 | `adapter_version` | string `copilot-sdk-dotnet-1.0.4+cao-skill-v2.1` |
-| `normalization_version` | string `github-copilot-sdk.skill-invoked.normalize.v1` |
+| `normalization_version` | r0001 historical string `github-copilot-sdk.skill-invoked.normalize.v1`; current r0002 string `github-copilot-sdk.skill-invoked.normalize.v2` |
 | `payload_schema` | string `github-copilot-sdk.skill-invoked.v1` |
 | `schema_fingerprint` | string `8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c` |
 | `events` | array containing exactly one event |
@@ -1235,18 +1388,24 @@ form, and is only source-chain provenance. Local
 `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. `run_native_id` is JSON null when SDK
 `agentId` is absent, otherwise its exact 1..256-scalar, no-U+0000, at-most-1,024
 UTF-8-byte value. `source_ephemeral` is true only for SDK semantic true; absent
-or false upstream maps to JSON false. Under r0001 the required `trace_id` and
-`span_id` properties are both JSON null because SDK 1.0.4 exposes no exact
-correlation source; a nonnull pair requires a later complete normalizer/
-registry revision. No Session/Run/name/path/time inference supplies them.
+or false upstream maps to JSON false. Under historical r0001 and current r0002,
+the required `trace_id` and `span_id` properties are both JSON null because SDK
+1.0.4 exposes no exact correlation source. No Session/Run/name/path/time
+inference supplies them.
 
-`payload` is a newly written object from typed `SkillInvokedData`, not a raw SDK
-serializer buffer. Its producer order is required `name,path,content`, then
-each present optional member in
+For current owned normalizer v2, `payload` is a newly written object whose
+`content` is exact callback-time certified native `currentProof.Content` after
+equality with the frozen proof. Typed upstream `SkillInvokedData.Content` is
+only required, well-formed transient auxiliary inventory and is never persisted
+or transformed. Every other payload field comes from typed `SkillInvokedData`,
+not a raw SDK serializer buffer, preserving producer order
+`name,path,content`, then each present optional member in
 `allowedTools,description,pluginName,pluginVersion,source,trigger` order.
 Absent optionals are omitted; JSON null is never synthesized. Strings and
 allowed-tool order are preserved without trim, case fold, normalization,
-filtering, path rewriting, or replacement repair. There is no `model`. The
+filtering, path rewriting, or replacement repair. Historical r0001 retains its
+frozen normalizer-v1 meaning. There is no transform, fallback, additional
+field, later read, or `model`. The
 receiver accepts any property order but performs one bounded raw
 `Utf8JsonReader` pass with ordinal name sets and exact `JsonReaderOptions`:
 `AllowTrailingCommas=false`, `CommentHandling=JsonCommentHandling.Disallow`, and
@@ -1353,6 +1512,11 @@ do not raise or reinterpret the general trace-ingest limit.
 
 For `POST /api/session-ingest/v2/events`, stop at the first stage:
 
+After the receipt miss, orders 15 and 16 classify the first terminal result returned
+by `SessionSkillInvocationParticipant.InsertOrVerify`; they do not prescribe that
+participant's internal check order, which Group 4 fixes as Session resolution, then
+Run resolution, then Event-conflict detection.
+
 | Order | Condition | Exact result | Writes |
 |---:|---|---|---|
 | 0 | wrong method on exact path | `405 method_not_allowed`, `Allow: POST` | zero |
@@ -1362,13 +1526,14 @@ For `POST /api/session-ingest/v2/events`, stop at the first stage:
 | 4 | any remaining gate-1 outer/header/provenance fault after the capability-header exception at order 1 | `400 invalid_request` | zero |
 | 5 | payload classification | continue with one classified candidate | deferred |
 | 6 | receipt read is busy | `503 persistence_busy` | zero |
-| 7 | receipt hit, different fingerprint | `409 idempotency_conflict` | zero |
-| 8 | receipt hit, identical fingerprint, validation-only `BEGIN IMMEDIATE` is busy | `503 persistence_busy` | zero |
-| 9 | receipt hit, identical fingerprint, owner-valid nonreadable raw-retained lifecycle or invalid stored graph | `503 local_monitor_ui_unavailable` | zero |
-| 10 | receipt hit, identical fingerprint, validation-only graph valid, rollback complete, and `TrySealReplaySuccess` wins | derived `204`; seal loss is sanitized stage-1 `503` | zero |
+| 7 | located/recovered receipt has any contradictory surviving non-raw graph, including Session envelope, classification/nullability, content metadata, Retention lifecycle/ownership, tombstone structure, source binding, or persisted fingerprint | `503 local_monitor_ui_unavailable` | zero |
+| 8 | canonical persisted graph, different caller fingerprint | `409 idempotency_conflict` | zero |
+| 9 | canonical persisted graph, identical caller fingerprint, validation-only `BEGIN IMMEDIATE` is busy | `503 persistence_busy` | zero |
+| 10 | canonical persisted non-raw graph, identical caller fingerprint, and time-dependent unreadability or raw document grammar/digest/reclassification failure | `503 local_monitor_ui_unavailable` | zero |
+| 10a | canonical persisted graph, identical caller fingerprint, validation-only graph valid, rollback complete, and `TrySealReplaySuccess` wins | derived `204`; seal loss is sanitized stage-1 `503` | zero |
 | 11 | receipt miss; exact current complete registry is unavailable, or the exact tuple is revoked/unaccepted | `503 local_monitor_ui_unavailable` | zero |
 | 12 | mutation `BEGIN IMMEDIATE` or eventual commit is busy | `503 persistence_busy` | rollback |
-| 13 | in-transaction receipt recheck now hits | Retention-owned internal replay arm on the same connection/transaction: different -> order 7; equal transitional/corrupt -> order 9; equal readable/deleted -> enclosing rollback then order 10's replay-success seal; no nested BEGIN; current registry irrelevant | zero/rollback |
+| 13 | in-transaction receipt recheck now locates or bounded-recovers a receipt | Retention-owned internal replay arm on the same connection/transaction: corrupt persisted graph -> order 7; canonical different -> order 8; canonical equal transitional/content-invalid -> order 10; canonical equal readable/deleted -> enclosing rollback then order 10a's replay-success seal; no nested BEGIN; current registry irrelevant | zero/rollback |
 | 14 | still a miss; acquire current-generation read lease and prove captured pointer/revision/tuple; if changed, recapture once; second mismatch or lease/generation failure | continue under held lease, or `503 local_monitor_ui_unavailable` | zero/rollback |
 | 15 | pre-existing `(source_adapter,source_event_id)` Event without receipt, or same first-write source/Event/receipt identity wins a uniqueness race | `409 idempotency_conflict` | rollback |
 | 16 | another storage/graph invariant fails | `503 local_monitor_ui_unavailable` | rollback |
@@ -1393,7 +1558,8 @@ become transport 400 after an admitted outer wire. Receipt lookup and its
 complete graph check always precede current-registry loading; consequently an
 identical durable retry remains 204 after registry removal or corruption. Only
 a true receipt miss captures one immutable complete current registry, requires
-the exact r0001 tuple to be accepted, and re-proves that captured object at the
+the exact parsed request/facts producer tuple to be accepted by that captured
+current registry (r0002 here), and re-proves that captured object at the
 transaction fence under the provider generation read lease held through
 commit. One pre-lease recapture is allowed; no second churn or stale commit is.
 There is no previous-registry fallback. `persistence_busy`
@@ -1651,9 +1817,18 @@ store source key, event/snapshot selection, request fingerprint, and creation
 time only; the v1 DDL has no response status/header/entity columns. Success is
 always freshly derived exact 204.
 
-Receipt lookup is first. A hit never creates Session, Run, Event, lease, claim,
-snapshot, or IDs and never consults current registry before equality. A
-different fingerprint is exact 409/zero writes. An equal fingerprint must
+Direct receipt lookup is first. On a miss, only Event -> linked snapshot ->
+single receipt recovery may detect receipt natural-key drift; an Event without
+a linked snapshot remains a true miss and later preserves the established
+foreign Event conflict. A located or recovered receipt never creates Session,
+Run, Event, lease, claim, snapshot, or IDs and never consults current registry.
+It first proves the complete surviving non-raw graph, including content metadata,
+Retention structural/lifecycle state and tombstones, the Session write-time
+envelope, and classification/nullability invariants, and recomputes the persisted
+29-field fingerprint without a clock sample or raw
+content read; corruption is exact sanitized 503/zero writes. Only a canonical
+graph plus a different caller fingerprint is exact 409/zero writes. A canonical
+equal fingerprint must
 use the separately landed Retention-owned public validation-only transaction
 in Group 4. A receipt that races a preceding miss uses the same validator's
 transaction-aware internal arm on the already-held mutation connection/
@@ -1666,6 +1841,12 @@ bytes never leave the validator. A miss alone enters the mutation
 `BEGIN IMMEDIATE` 0|1|>1 mapping and seven-authority insert described in Group
 4; a racing receipt exits it by enclosing rollback with zero writes. No
 pre-existing Event is adopted.
+
+The admitted r0001/r0002 Event stores trace correlation only and requires its
+`trace_id` null; `session_events` intentionally has no producer-span column.
+The snapshot `trace_id`/`span_id` and an available claim's
+`producer_trace_id`/`producer_span_id` are independently required null and equal,
+while a fault snapshot requires both null and has no claim.
 
 Choice B from Group 4—persist the exact selected native ID—is selected over
 unbounded binding enumeration or another selection table. The binary semantic
@@ -1815,8 +1996,8 @@ containment, normalization, case, or filesystem test. Content allows 0 through
 `allowedTools` 0..64 strings, each 1..128 scalars/512 bytes; `pluginName` and
 `pluginVersion` 0..256 bytes. Source/trigger use the exact closed schema tokens.
 The unpaired-surrogate classifications are receiver/internal-admission defense,
-not evidence expected from the r0001 SDK producer, whose pre-writer scan rejects
-them without a transport attempt.
+not evidence expected from the historical r0001 or current r0002 SDK producer;
+both pre-writer scans reject them without a transport attempt.
 
 Every state persists immutable Event/provenance, timestamps, content item,
 payload digest/length, document digest, state/reason, and snapshot/receipt.
@@ -1928,7 +2109,8 @@ Every metadata property above is always emitted. These are always nonnull:
 `available` persisted row also always emits nonnull `claim_id`, `name`, both
 body/path SHA-256 values, and both body/path byte counts. Its `source`,
 `trigger`, and `run_id` independently preserve the admitted optional value or
-literal null; r0001 `trace_id` and `span_id` are always literal null. Every
+literal null; historical r0001 and current r0002 `trace_id` and `span_id` are
+always literal null. Every
 nonavailable persisted row emits literal null for `claim_id`, `name`, `source`,
 `trigger`, `run_id`, `trace_id`, `span_id`, both body/path digests, and both
 body/path counts. Deriving `expired` or changing `current|stale|invalid` never
@@ -2501,7 +2683,7 @@ monitor
 -> retention:1
 -> skill_projection:1
 -> skill_invocation_snapshot:1
--> local_workspace_projection:1 (when released)
+-> local_workspace_projection:2 (when released)
 ```
 
 An older backup with no snapshot component installs an empty current component
@@ -2638,7 +2820,7 @@ mutation. Until that separate promotion, no such exception exists.
    native work. Retention completion-without-raw sends it, while lost/busy
    aborts with no response; both release every acquired capability and neither
    fabricates a runtime seal. Also prove zero roots still means
-   current-file route absence and no runtime mismatch relabels 1.0.65 or hides
+   current-file route absence and no runtime mismatch relabels an admitted exact version or hides
    stored evidence. Runtime-generation REDs publish mismatch/reconnect before
    callback admission, after bridge registration/before loopback send, during
    send/before route consume, after consume/before #119 parse/handoff, at each
@@ -2871,11 +3053,20 @@ mutation. Until that separate promotion, no such exception exists.
    disposal/no-retention matrix. Windows and
    Linux gates may release independently; unsupported targets prove route
    absence while historical routes remain byte-identical.
-10. Live gate: same bundled, signed-in runtime reports exact Version `1.0.65`
-    and integer ProtocolVersion 3; one
-   synthetic non-sensitive nine-property `skill.invoked` observation and one
-   discovery are mapped through SDK 1.0.4, committed/replayed, and read without
-   retaining raw user data/path evidence. Global CLI 1.0.75 is not used.
+10. Current-release T0b and final live gates: the same bundled, signed-in client must
+    prove the exact bundled `1.0.75`, protocol `3` mandatory live tuple,
+    matching SessionStart identity, prompt-free inventory probe, distinct
+    DisabledSkills-frozen execution Session, retained-root-only inventory and
+    invocation, exact completion, owned-session post-completion import, and one
+    discovery without retaining raw user data/path evidence. This live gate does
+    not replace deterministic `1.0.65` compatibility/admission coverage; no
+    global or externally selected CLI is used. The accepted post-implementation
+    proof resolves the historical sequencing conflict. After later production
+    changes, exact-final-candidate Windows/Linux live evidence was completed and
+    recorded at
+    [Issue #158 M1 live validation](../../sprints/issue-158-skill-invocation-snapshot/milestones/M1-owned-session-producer/live-validation.md).
+    Future registry revisions or producer/startup implementations must pass T0b
+    before implementation.
 11. Update and review the derived public workflow only with the implemented
     flags; run Markdown/link checks plus an exact stale search proving no #158
    workflow still names an obsolete dotted discovery configuration-key alias,
@@ -2896,8 +3087,9 @@ does not yet exist: a clean tracked spec commit; the ordered integrated
 #124-owned Session 14 -> #156-owned carrier/composition closure for #161-owned
 direct archive facts -> #161 `local_archive:1` implementation/backup/restore
 evidence; the separate Retention implementation/test result; the nonregistered
-#119 parser/handoff result; actual Windows/Linux native walker matrices; a
-signed-in bundled-1.0.65 live observation; full repository validation; and code
-review. Those are release gates, not open Product Owner choices. If any gate
+#119 parser/handoff result; full repository validation; and code review. The
+Windows/Linux native platform matrices and signed-in final live observation are
+recorded in the Issue #158 M1 live-validation evidence. The remaining items are
+release gates, not open Product Owner choices. If any gate
 disproves the pinned contract, stop and return for a new versioned decision; do
 not add fallback, compatibility, or backfill.

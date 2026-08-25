@@ -613,6 +613,11 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }
 
         ReduceSessionOutcomeAndCompleteness(connection, transaction, batch.Detail.Session.SessionId);
+        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+            connection,
+            transaction,
+            [Id(batch.Detail.Session.SessionId)],
+            timeProvider.GetUtcNow());
 
         transaction.Commit();
     }
@@ -1385,6 +1390,162 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         RetentionRawTerminalResult.Busy => SessionContentTerminalResult.Busy,
         _ => SessionContentTerminalResult.Lost,
     };
+
+    // Group 6's generic raw content route. One owner-coordinated BEGIN IMMEDIATE spans the
+    // type-only policy check, the Retention lease insertion, and the content selection, so no
+    // concurrent Event type change can commit between them. Every skill.invoked Event is
+    // indistinguishable from missing here, and the deny happens before any lease, content column
+    // selection, base64 parsing, or materialization.
+    public async ValueTask<SessionGenericRouteContentReadResult> ReadGenericRouteContentAsync(
+        Guid sessionId,
+        Guid eventId,
+        CancellationToken cancellationToken)
+    {
+        if (retentionContext is null)
+            return new(SessionGenericRouteContentDisposition.Denied, null);
+
+        var catalog = new RetentionCatalogStore(retentionContext, timeProvider);
+
+        // The gate is taken before the transaction so this route keeps the same lock order as
+        // every ordinary Retention admission.
+        using var gate = await catalog.EnterAdmissionGateAsync(cancellationToken).ConfigureAwait(false);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        SessionGenericRoutePolicy policy;
+        try
+        {
+            policy = ReadGenericRoutePolicy(connection, transaction, sessionId, eventId);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            transaction.Rollback();
+            return new(SessionGenericRouteContentDisposition.Busy, null);
+        }
+        // A malformed stored type or content state surfaces as ArgumentException from the wire
+        // parser, and a malformed schema or storage as a non-busy SqliteException. Both are the
+        // same sanitized unavailable result; neither has read a content column.
+        catch (Exception exception)
+            when (exception is SqliteException or InvalidOperationException or FormatException or ArgumentException)
+        {
+            transaction.Rollback();
+            return new(SessionGenericRouteContentDisposition.Unavailable, null);
+        }
+
+        if (policy != SessionGenericRoutePolicy.Continue)
+        {
+            transaction.Rollback();
+            return new(
+                policy == SessionGenericRoutePolicy.Unavailable
+                    ? SessionGenericRouteContentDisposition.Unavailable
+                    : SessionGenericRouteContentDisposition.NotFound,
+                null);
+        }
+
+        var request = new RetentionReadRequest(
+            new(retentionContext.StoreInstanceId, RetentionStoreKind.SessionEventContent, Id(eventId)),
+            RetentionReadKind.Access,
+            timeProvider.GetUtcNow(),
+            ExpectedRevision: null);
+
+        var result = await catalog.ReadWithinCallerTransactionAsync(
+            connection,
+            transaction,
+            request,
+            async (selectorConnection, selectorTransaction, grant, token) =>
+            {
+                using var command = selectorConnection.CreateCommand();
+                ConfigureContentReadMaterializationCommand(
+                    command,
+                    selectorTransaction,
+                    grant,
+                    retentionContext.StoreInstanceId,
+                    sessionId,
+                    eventId);
+                using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+                if (!await reader.ReadAsync(token).ConfigureAwait(false)) return null;
+                return new SessionEventContent(
+                    Guid.Parse(reader.GetString(0)),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    ParseTimestamp(reader.GetString(3)),
+                    ParseTimestamp(reader.GetString(4)));
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.Lease is { } postGrantLease && result.Disposition is { } postGrantDisposition)
+        {
+            await using (postGrantLease.ConfigureAwait(false))
+            {
+                var terminal = result.CompletePostGrantFailure();
+                return new(
+                    postGrantDisposition == RetentionReadDisposition.Busy
+                        || terminal != RetentionRawTerminalResult.CompletedWithoutRaw
+                        ? SessionGenericRouteContentDisposition.Busy
+                        : SessionGenericRouteContentDisposition.Denied,
+                    null);
+            }
+        }
+
+        if (result.Lease is { } grantedLease)
+        {
+            return new(SessionGenericRouteContentDisposition.Granted, new SessionContentReadLease(
+                grantedLease.DisposeAsync,
+                () =>
+                {
+                    var reference = grantedLease.AcquireValueReference();
+                    return new SessionContentUseReference(() => reference.Value, reference.Dispose);
+                },
+                () => MapTerminal(grantedLease.TrySealRawResponse()),
+                () => MapTerminal(grantedLease.TryCompleteWithoutRaw())));
+        }
+
+        return new(
+            result.Disposition == RetentionReadDisposition.Busy
+                ? SessionGenericRouteContentDisposition.Busy
+                : SessionGenericRouteContentDisposition.Denied,
+            null);
+    }
+
+    private const string SkillInvokedEventType = "skill.invoked";
+
+    private enum SessionGenericRoutePolicy { Continue, NotFound, Unavailable }
+
+    // Metadata-only and scalar: exactly one identity row carrying the Event type and content state.
+    // It reads no content column, so a denied result cannot have touched the payload.
+    private static SessionGenericRoutePolicy ReadGenericRoutePolicy(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid sessionId,
+        Guid eventId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT type,content_state FROM session_events WHERE session_id=$session_id AND event_id=$event_id;";
+        Add(command, "$session_id", Id(sessionId));
+        Add(command, "$event_id", Id(eventId));
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return SessionGenericRoutePolicy.NotFound;
+
+        var type = reader.GetString(0);
+        var contentState = SessionWire.ParseContentState(reader.GetString(1));
+
+        // More than one row for one exact identity is a storage contradiction, not a lookup miss.
+        if (reader.Read())
+            return SessionGenericRoutePolicy.Unavailable;
+
+        if (string.Equals(type, SkillInvokedEventType, StringComparison.Ordinal))
+            return SessionGenericRoutePolicy.NotFound;
+
+        return contentState is SessionContentState.NotCaptured
+            or SessionContentState.Redacted
+            or SessionContentState.Unsupported
+            ? SessionGenericRoutePolicy.NotFound
+            : SessionGenericRoutePolicy.Continue;
+    }
 
     internal static void ConfigureContentReadMaterializationCommand(
         SqliteCommand command,

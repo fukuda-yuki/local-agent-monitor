@@ -90,6 +90,43 @@ function Test-LocalMonitorPricingRegistryOverrideCount {
     return @($PricingRegistryOverride).Count -le 8
 }
 
+function Test-LocalMonitorSkillDiscoveryArguments {
+    param(
+        [string[]] $SkillDiscoveryProjectPath = @(),
+        [string[]] $SkillDiscoveryDirectory = @(),
+        [switch] $SanitizedOnly
+    )
+
+    $projectPaths = @($SkillDiscoveryProjectPath)
+    $directories = @($SkillDiscoveryDirectory)
+
+    foreach ($projectPath in $projectPaths) {
+        if ([string]::IsNullOrWhiteSpace([string] $projectPath)) {
+            return '--skill-discovery-project-path requires a value.'
+        }
+    }
+
+    foreach ($directory in $directories) {
+        if ([string]::IsNullOrWhiteSpace([string] $directory)) {
+            return '--skill-discovery-directory requires a value.'
+        }
+    }
+
+    if ($projectPaths.Count -gt 16) {
+        return 'local-monitor accepts at most 16 --skill-discovery-project-path values.'
+    }
+
+    if ($directories.Count -gt 32) {
+        return 'local-monitor accepts at most 32 --skill-discovery-directory values.'
+    }
+
+    if ($SanitizedOnly -and ($projectPaths.Count -gt 0 -or $directories.Count -gt 0)) {
+        return 'skill discovery options cannot be used with --sanitized-only.'
+    }
+
+    return $null
+}
+
 function ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral {
     param(
         [Parameter(Mandatory)]
@@ -118,7 +155,11 @@ function New-LocalMonitorStartupTaskArgument {
 
         [switch] $SanitizedOnly,
 
-        [string[]] $PricingRegistryOverride = @()
+        [string[]] $PricingRegistryOverride = @(),
+
+        [string[]] $SkillDiscoveryProjectPath = @(),
+
+        [string[]] $SkillDiscoveryDirectory = @()
     )
 
     $command = "& {0} -Url {1} -DbPath {2} -Mode {3} -InstallRoot {4} -NoBrowser -WaitReady" -f `
@@ -137,6 +178,22 @@ function New-LocalMonitorStartupTaskArgument {
     }
     if ($literals.Count -gt 0) {
         $command += ' -PricingRegistryOverride @(' + ($literals -join ',') + ')'
+    }
+
+    $projectPathLiterals = @()
+    foreach ($projectPath in @($SkillDiscoveryProjectPath)) {
+        $projectPathLiterals += ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $projectPath
+    }
+    if ($projectPathLiterals.Count -gt 0) {
+        $command += ' -SkillDiscoveryProjectPath @(' + ($projectPathLiterals -join ',') + ')'
+    }
+
+    $directoryLiterals = @()
+    foreach ($directory in @($SkillDiscoveryDirectory)) {
+        $directoryLiterals += ConvertTo-LocalMonitorPowerShellSingleQuotedLiteral -Value $directory
+    }
+    if ($directoryLiterals.Count -gt 0) {
+        $command += ' -SkillDiscoveryDirectory @(' + ($directoryLiterals -join ',') + ')'
     }
 
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
@@ -223,71 +280,41 @@ function ConvertTo-LocalMonitorWindowsCommandLine {
     return $serialized -join ' '
 }
 
-function Get-LocalMonitorTaskPricingRegistryOverrideState {
+function Read-LocalMonitorQuotedLiteralArray {
+    # Scans a '@(...)' quoted-literal member list starting right after the
+    # opening paren (Text[StartIndex] is the first character inside it) and
+    # returns the member Count and the index just past the closing ')', or
+    # $null when the text does not match that exact grammar. Shared by every
+    # startup-task array reader so the strict single-quoted-literal scanning
+    # rules (doubled-quote escaping, no bare/trailing commas) live in one
+    # place.
     param(
-        $Task
+        [Parameter(Mandatory)]
+        [string] $Text,
+
+        [Parameter(Mandatory)]
+        [int] $StartIndex
     )
 
-    if ($null -eq $Task) {
-        return [pscustomobject] @{ State = 'absent'; Count = 0 }
+    $position = $StartIndex
+    if ($position -lt $Text.Length -and $Text[$position] -eq [char] 41) {
+        return [pscustomobject] @{ Count = 0; EndIndex = $position + 1 }
     }
 
-    $actions = @($Task.Actions)
-    if ($actions.Count -ne 1 -or $null -eq $actions[0]) {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    $argumentsProperty = $actions[0].PSObject.Properties['Arguments']
-    if ($null -eq $argumentsProperty -or [string]::IsNullOrWhiteSpace([string] $argumentsProperty.Value)) {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    $match = [regex]::Match([string] $argumentsProperty.Value, '\A-NoProfile -ExecutionPolicy Bypass -EncodedCommand ([A-Za-z0-9+/]+={0,2})\z')
-    if (-not $match.Success) {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    try {
-        $command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($match.Groups[1].Value))
-    }
-    catch {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    $prefix = [regex]::Match($command, "\A& '(?:[^']|'')*' -Url '(?:[^']|'')*' -DbPath '(?:[^']|'')*' -Mode '(?:[^']|'')*' -InstallRoot '(?:[^']|'')*' -NoBrowser -WaitReady")
-    if (-not $prefix.Success) {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    $remaining = $command.Substring($prefix.Length)
-    if ($remaining.StartsWith(' -SanitizedOnly')) {
-        $remaining = $remaining.Substring(' -SanitizedOnly'.Length)
-    }
-    if ($remaining.Length -eq 0) {
-        return [pscustomobject] @{ State = 'absent'; Count = 0 }
-    }
-
-    $marker = ' -PricingRegistryOverride @('
-    if (-not $remaining.StartsWith($marker) -or -not $remaining.EndsWith(')')) {
-        return [pscustomobject] @{ State = 'unknown'; Count = $null }
-    }
-
-    $members = $remaining.Substring($marker.Length, $remaining.Length - $marker.Length - 1)
-    $position = 0
     $count = 0
-    while ($position -lt $members.Length) {
-        if ($members[$position] -ne [char] 39) {
-            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    while ($true) {
+        if ($position -ge $Text.Length -or $Text[$position] -ne [char] 39) {
+            return $null
         }
         $count++
         $position++
         $closed = $false
-        while ($position -lt $members.Length) {
-            if ($members[$position] -ne [char] 39) {
+        while ($position -lt $Text.Length) {
+            if ($Text[$position] -ne [char] 39) {
                 $position++
                 continue
             }
-            if ($position + 1 -lt $members.Length -and $members[$position + 1] -eq [char] 39) {
+            if ($position + 1 -lt $Text.Length -and $Text[$position + 1] -eq [char] 39) {
                 $position += 2
                 continue
             }
@@ -296,25 +323,154 @@ function Get-LocalMonitorTaskPricingRegistryOverrideState {
             break
         }
         if (-not $closed) {
-            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+            return $null
         }
-        if ($position -eq $members.Length) {
-            break
+        if ($position -ge $Text.Length) {
+            return $null
         }
-        if ($members[$position] -ne [char] 44) {
-            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+        if ($Text[$position] -eq [char] 41) {
+            return [pscustomobject] @{ Count = $count; EndIndex = $position + 1 }
+        }
+        if ($Text[$position] -ne [char] 44) {
+            return $null
         }
         $position++
-        if ($position -eq $members.Length) {
-            return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+}
+
+function Get-LocalMonitorStartupTaskArrayState {
+    # Decodes a start.ps1 startup-task '-EncodedCommand' action and returns
+    # the raw member counts of every optional array segment (never the
+    # members themselves). Returns $null when the payload does not match the
+    # exact expected grammar; each array-specific reader below applies its
+    # own occurrence-limit before reporting 'present'/'unknown'.
+    param(
+        $Task
+    )
+
+    if ($null -eq $Task) {
+        return [pscustomobject] @{
+            PricingRegistryOverrideCount   = 0
+            SkillDiscoveryProjectPathCount = 0
+            SkillDiscoveryDirectoryCount   = 0
         }
     }
 
-    if ($count -eq 0 -or $count -gt 8) {
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1 -or $null -eq $actions[0]) {
+        return $null
+    }
+
+    $argumentsProperty = $actions[0].PSObject.Properties['Arguments']
+    if ($null -eq $argumentsProperty -or [string]::IsNullOrWhiteSpace([string] $argumentsProperty.Value)) {
+        return $null
+    }
+
+    $match = [regex]::Match([string] $argumentsProperty.Value, '\A-NoProfile -ExecutionPolicy Bypass -EncodedCommand ([A-Za-z0-9+/]+={0,2})\z')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    try {
+        $command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($match.Groups[1].Value))
+    }
+    catch {
+        return $null
+    }
+
+    $prefix = [regex]::Match($command, "\A& '(?:[^']|'')*' -Url '(?:[^']|'')*' -DbPath '(?:[^']|'')*' -Mode '(?:[^']|'')*' -InstallRoot '(?:[^']|'')*' -NoBrowser -WaitReady")
+    if (-not $prefix.Success) {
+        return $null
+    }
+
+    $remaining = $command.Substring($prefix.Length)
+    if ($remaining.StartsWith(' -SanitizedOnly')) {
+        $remaining = $remaining.Substring(' -SanitizedOnly'.Length)
+    }
+
+    $counts = [ordered] @{
+        PricingRegistryOverrideCount   = 0
+        SkillDiscoveryProjectPathCount = 0
+        SkillDiscoveryDirectoryCount   = 0
+    }
+    $segments = @(
+        @{ Marker = ' -PricingRegistryOverride @('; Key = 'PricingRegistryOverrideCount' },
+        @{ Marker = ' -SkillDiscoveryProjectPath @('; Key = 'SkillDiscoveryProjectPathCount' },
+        @{ Marker = ' -SkillDiscoveryDirectory @('; Key = 'SkillDiscoveryDirectoryCount' }
+    )
+    foreach ($segment in $segments) {
+        if ($remaining.StartsWith($segment.Marker)) {
+            $parsed = Read-LocalMonitorQuotedLiteralArray -Text $remaining -StartIndex $segment.Marker.Length
+            if ($null -eq $parsed -or $parsed.Count -eq 0) {
+                return $null
+            }
+            $counts[$segment.Key] = $parsed.Count
+            $remaining = $remaining.Substring($parsed.EndIndex)
+        }
+    }
+
+    if ($remaining.Length -ne 0) {
+        return $null
+    }
+
+    return [pscustomobject] $counts
+}
+
+function Get-LocalMonitorTaskPricingRegistryOverrideState {
+    param(
+        $Task
+    )
+
+    $decoded = Get-LocalMonitorStartupTaskArrayState -Task $Task
+    if ($null -eq $decoded) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+    if ($decoded.PricingRegistryOverrideCount -eq 0) {
+        return [pscustomobject] @{ State = 'absent'; Count = 0 }
+    }
+    if ($decoded.PricingRegistryOverrideCount -gt 8) {
         return [pscustomobject] @{ State = 'unknown'; Count = $null }
     }
 
-    return [pscustomobject] @{ State = 'present'; Count = $count }
+    return [pscustomobject] @{ State = 'present'; Count = $decoded.PricingRegistryOverrideCount }
+}
+
+function Get-LocalMonitorTaskSkillDiscoveryProjectPathState {
+    param(
+        $Task
+    )
+
+    $decoded = Get-LocalMonitorStartupTaskArrayState -Task $Task
+    if ($null -eq $decoded) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+    if ($decoded.SkillDiscoveryProjectPathCount -eq 0) {
+        return [pscustomobject] @{ State = 'absent'; Count = 0 }
+    }
+    if ($decoded.SkillDiscoveryProjectPathCount -gt 16) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    return [pscustomobject] @{ State = 'present'; Count = $decoded.SkillDiscoveryProjectPathCount }
+}
+
+function Get-LocalMonitorTaskSkillDiscoveryDirectoryState {
+    param(
+        $Task
+    )
+
+    $decoded = Get-LocalMonitorStartupTaskArrayState -Task $Task
+    if ($null -eq $decoded) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+    if ($decoded.SkillDiscoveryDirectoryCount -eq 0) {
+        return [pscustomobject] @{ State = 'absent'; Count = 0 }
+    }
+    if ($decoded.SkillDiscoveryDirectoryCount -gt 32) {
+        return [pscustomobject] @{ State = 'unknown'; Count = $null }
+    }
+
+    return [pscustomobject] @{ State = 'present'; Count = $decoded.SkillDiscoveryDirectoryCount }
 }
 
 function Test-LocalMonitorLoopbackUrl {

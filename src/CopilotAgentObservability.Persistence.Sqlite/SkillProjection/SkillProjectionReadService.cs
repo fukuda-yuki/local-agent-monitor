@@ -1,3 +1,6 @@
+using System.Globalization;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed record SkillProjectionInvocationClaim(
@@ -49,11 +52,15 @@ internal sealed record SkillProjectionSessionInvocationAggregate(
 internal sealed class SkillProjectionReadService
 {
     private readonly string databasePath;
+    private readonly ISkillRegistryGenerationAuthority? registryAuthority;
 
-    internal SkillProjectionReadService(string databasePath)
+    internal SkillProjectionReadService(
+        string databasePath,
+        ISkillRegistryGenerationAuthority? registryAuthority = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.databasePath = databasePath;
+        this.registryAuthority = registryAuthority;
     }
 
     internal IReadOnlyList<SkillProjectionInvocationClaim> ListCurrentInvocations(string traceId)
@@ -215,6 +222,267 @@ internal sealed class SkillProjectionReadService
         return [];
     }
 
+    // #154 current authorization: proves the complete available snapshot/claim equality and the
+    // exact producer tuple under one SQLite transaction, then captures the registry generation,
+    // acquires a non-mutating read lease (with one pre-lease recapture), and re-proves
+    // capture/lease identity and exact acceptance before handing back an opaque capability.
+    internal SkillProjectionCurrentSdkClaimAuthorizationResult TryAcquireCurrentSdkClaimAuthorization(
+        Guid sessionId,
+        Guid snapshotId,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        if (registryAuthority is null)
+            return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+
+        var claim = ProveCurrentSdkClaim(sessionId, snapshotId, timeProvider);
+        return claim.Outcome switch
+        {
+            SkillProjectionSdkClaimProofOutcome.Busy => SkillProjectionCurrentSdkClaimAuthorizationResult.Busy,
+            SkillProjectionSdkClaimProofOutcome.Proved => AcquireGenerationAuthorization(
+                claim.Tuple!, claim.SkillName!, claim.SkillSource),
+            _ => SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable
+        };
+    }
+
+    // The metadata route's point-in-time diagnostic. It shares the claim proof above so there is
+    // one authority for "which exact producer tuple does this snapshot's claim carry", but it takes
+    // no registry generation lease: metadata reports a point observation, while only current-file
+    // holds a capability across later work.
+    internal SkillProjectionSdkClaimProofResult ProveCurrentSdkClaim(
+        Guid sessionId,
+        Guid snapshotId,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        try
+        {
+            using var connection = new SqliteConnection(
+                new SqliteConnectionStringBuilder
+                {
+                    DataSource = databasePath,
+                    Pooling = false,
+                    Mode = SqliteOpenMode.ReadWrite
+                }.ToString());
+            connection.Open();
+            using var transaction = connection.BeginTransaction(deferred: true);
+
+            var metadataResult = SkillInvocationSnapshotMetadataReader.ReadInTransaction(
+                connection,
+                transaction,
+                sessionId,
+                snapshotId,
+                timeProvider);
+
+            if (metadataResult.Outcome == SkillInvocationSnapshotMetadataOutcome.Busy)
+                return SkillProjectionSdkClaimProofResult.Busy;
+
+            // #154 has no not-found outcome; a snapshot that already passed the current-file
+            // lookup and historical-state arm cannot legitimately disappear or turn unreadable
+            // here, so every non-available shape is a graph contradiction.
+            if (metadataResult.Outcome != SkillInvocationSnapshotMetadataOutcome.Found ||
+                metadataResult.Facts is null ||
+                !metadataResult.Facts.IsAvailable ||
+                metadataResult.Facts.ClaimId is null)
+                return SkillProjectionSdkClaimProofResult.Unavailable;
+
+            var facts = metadataResult.Facts;
+
+            var claim = ReadSdkClaimRow(connection, transaction, sessionId, facts.ClaimId.Value.ToString("D"));
+            if (claim is null || !ClaimMatchesSnapshot(claim, sessionId, facts))
+                return SkillProjectionSdkClaimProofResult.Unavailable;
+
+            var proved = SkillProjectionSdkClaimProofResult.ForProved(
+                new SkillRegistryProducerTuple(
+                    claim.SourceApplicationVersion,
+                    claim.AdapterVersion,
+                    claim.NormalizationVersion,
+                    claim.PayloadSchema,
+                    claim.SchemaFingerprint),
+                claim.SkillName,
+                claim.SkillSource);
+
+            transaction.Commit();
+            return proved;
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return SkillProjectionSdkClaimProofResult.Busy;
+        }
+    }
+
+    private SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(
+        SkillRegistryProducerTuple tuple,
+        string skillName,
+        string? skillSource)
+    {
+        var authority = registryAuthority;
+        if (authority is null)
+            return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+
+        ISkillRegistryGenerationCapture? capture = null;
+        ISkillRegistryGenerationLease? lease = null;
+
+        // One pre-lease recapture is permitted: the second attempt is the last, so a second
+        // pre-lease churn or a lease-acquisition failure lands in sanitized unavailability.
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            capture = authority.CaptureGeneration();
+            if (capture is null)
+                return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+
+            if (authority.TryAcquireGenerationReadLease(capture, out lease))
+                break;
+
+            lease = null;
+        }
+
+        if (capture is null || lease is null)
+            return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+
+        try
+        {
+            if (!authority.VerifyGenerationIdentity(capture, lease))
+                return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
+
+            // Within a mechanically valid generation a revoked tuple (with a valid accepted
+            // predecessor) or an absent tuple never yields a capability.
+            if (!authority.IsProducerTupleAccepted(lease, tuple))
+                return SkillProjectionCurrentSdkClaimAuthorizationResult.NotCurrent;
+
+            var authorization = new SkillProjectionCurrentSdkClaimAuthorization(skillName, skillSource, lease);
+            lease = null;
+            return SkillProjectionCurrentSdkClaimAuthorizationResult.ForAcquired(authorization);
+        }
+        finally
+        {
+            // Disposes the lease unless ownership was transferred to the capability above.
+            lease?.Dispose();
+        }
+    }
+
+    private sealed record SdkClaimRow(
+        Guid SessionId,
+        Guid EventId,
+        string SourceApplicationVersion,
+        string AdapterVersion,
+        string NormalizationVersion,
+        string PayloadSchema,
+        string SchemaFingerprint,
+        string PayloadSha256,
+        string SourceEventId,
+        string SourceAdapter,
+        string SourceSurface,
+        string? ProducerTraceId,
+        string? ProducerSpanId,
+        string SkillName,
+        string? SkillSource,
+        string? InvocationTrigger,
+        string CreatedAtText);
+
+    private static SdkClaimRow? ReadSdkClaimRow(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid sessionId,
+        string claimId)
+    {
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                """
+                SELECT session_id, event_id, source_application_version, adapter_version,
+                       normalization_version, payload_schema, schema_fingerprint,
+                       payload_sha256,source_event_id,source_adapter,source_surface,
+                       producer_trace_id,producer_span_id,skill_name,skill_source,invocation_trigger,created_at
+                FROM skill_projection_sdk_claims
+                WHERE claim_id = @claimId AND session_id = @sessionId
+                LIMIT 2;
+                """;
+            command.Parameters.Add(new SqliteParameter("@claimId", claimId));
+            command.Parameters.Add(new SqliteParameter("@sessionId", sessionId.ToString("D")));
+
+            using var reader = command.ExecuteReader();
+            if (!reader.Read())
+                return null;
+
+            var sessionIdText = reader.GetString(0);
+            if (!Guid.TryParseExact(sessionIdText, "D", out var claimSessionId) || claimSessionId != sessionId)
+                return null;
+            if (!Guid.TryParseExact(reader.GetString(1), "D", out var eventId))
+                return null;
+
+            var row = new SdkClaimRow(
+                claimSessionId,
+                eventId,
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.GetString(8),
+                reader.GetString(9),
+                reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetString(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.GetString(16));
+
+            // The metadata graph already proved ClaimCount(...) == 1; a second row is a
+            // contradiction.
+            if (reader.Read())
+                return null;
+
+            return row;
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static bool ClaimMatchesSnapshot(
+        SdkClaimRow claim,
+        Guid sessionId,
+        SkillInvocationSnapshotMetadataFacts facts)
+    {
+        if (claim.SessionId != sessionId)
+            return false;
+
+        var eventIdText = facts.EventId.ToString("D");
+        if (!string.Equals(eventIdText, claim.EventId.ToString("D"), StringComparison.Ordinal))
+            return false;
+
+        return string.Equals(claim.SourceApplicationVersion, facts.SourceApplicationVersion, StringComparison.Ordinal) &&
+            string.Equals(claim.AdapterVersion, facts.AdapterVersion, StringComparison.Ordinal) &&
+            string.Equals(claim.NormalizationVersion, facts.NormalizationVersion, StringComparison.Ordinal) &&
+            string.Equals(claim.PayloadSchema, facts.PayloadSchema, StringComparison.Ordinal) &&
+            string.Equals(claim.SchemaFingerprint, facts.SchemaFingerprint, StringComparison.Ordinal) &&
+            string.Equals(claim.PayloadSha256, facts.PayloadSha256, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceEventId, facts.SourceEventId, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceAdapter, facts.SourceAdapter, StringComparison.Ordinal) &&
+            string.Equals(claim.SourceSurface, facts.SourceSurface, StringComparison.Ordinal) &&
+            NullableTextEquals(claim.ProducerTraceId, facts.TraceId) &&
+            NullableTextEquals(claim.ProducerSpanId, facts.SpanId) &&
+            string.Equals(claim.SkillName, facts.Name, StringComparison.Ordinal) &&
+            NullableTextEquals(claim.SkillSource, facts.Source) &&
+            NullableTextEquals(claim.InvocationTrigger, facts.Trigger) &&
+            string.Equals(claim.CreatedAtText, facts.CapturedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'+00:00'", CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    }
+
+    private static bool NullableTextEquals(string? left, string? right) =>
+        left is null && right is null ||
+        left is not null && right is not null && string.Equals(left, right, StringComparison.Ordinal);
+
     internal SkillProjectionSessionInvocationAggregate GetSessionInvocationAggregate(
         string sessionId)
     {
@@ -245,6 +513,47 @@ internal sealed class SkillProjectionReadService
         return matched == otelPairs.Count && matched == sdkClaims.Count
             ? new(matched, "current")
             : new(null, "certification_pending");
+    }
+
+    internal static IReadOnlyDictionary<string, SkillProjectionSessionInvocationAggregate> ReadSessionInvocationAggregates(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        Action<string>? commandObserver = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        if (sessionIds.Count == 0) return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
+            commandObserver?.Invoke("skills");
+            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        }
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT invocation.session_id,COUNT(*)
+            FROM skill_projection_invocations invocation
+            JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
+            JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
+            JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id
+              AND revision.current_revision=generation.compatibility_revision
+              AND revision.current_effective_state='resolved'
+              AND revision.current_exact_version=invocation.source_application_version
+            WHERE invocation.source_arm='otel_trace_span' AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input WHERE input.generation_id=generation.generation_id AND input.input_evidence_kind='deleted_before_digest_v10')
+            GROUP BY invocation.session_id ORDER BY invocation.session_id COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        commandObserver?.Invoke("skill-aggregates");
+        using var reader = command.ExecuteReader();
+        var result = new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
+        while (reader.Read()) result.Add(reader.GetString(0), new(reader.GetInt32(1), "current"));
+        return result;
     }
 
     private IReadOnlyList<(string TraceId, string SpanId)> ListCurrentOtelPairs(

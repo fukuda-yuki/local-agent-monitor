@@ -258,4 +258,279 @@ public class MonitorOptionsTests
 
         Assert.Equal("local-monitor accepts --projection-lag-threshold-seconds only once.", result.Error);
     }
+
+    [Fact]
+    public void Parse_DefaultsSkillDiscoveryOptionsToEmptyLists()
+    {
+        var result = MonitorOptions.Parse([]);
+
+        Assert.Null(result.Error);
+        Assert.NotNull(result.Options!.SkillDiscoveryProjectPaths);
+        Assert.Empty(result.Options.SkillDiscoveryProjectPaths);
+        Assert.NotNull(result.Options.SkillDiscoveryDirectories);
+        Assert.Empty(result.Options.SkillDiscoveryDirectories);
+    }
+
+    [Fact]
+    public void Parse_AcceptsSingleSkillDiscoveryProjectPath()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-project-path", @"C:\repo\one"]);
+
+        Assert.Null(result.Error);
+        Assert.Equal([@"C:\repo\one"], result.Options!.SkillDiscoveryProjectPaths);
+    }
+
+    [Fact]
+    public void Parse_Accepts16SkillDiscoveryProjectPathsPreservingOrderAndDuplicates()
+    {
+        var duplicate = Path.GetFullPath("dup-project-path");
+        var arguments = new List<string>();
+        var expected = new List<string>();
+        for (var i = 0; i < 14; i++)
+        {
+            var value = Path.GetFullPath($"project-path-{i}");
+            arguments.Add("--skill-discovery-project-path");
+            arguments.Add(value);
+            expected.Add(value);
+        }
+
+        arguments.Add("--skill-discovery-project-path");
+        arguments.Add(duplicate);
+        expected.Add(duplicate);
+        arguments.Add("--skill-discovery-project-path");
+        arguments.Add(duplicate);
+        expected.Add(duplicate);
+
+        var result = MonitorOptions.Parse(arguments.ToArray());
+
+        Assert.Null(result.Error);
+        Assert.Equal(16, result.Options!.SkillDiscoveryProjectPaths.Count);
+        Assert.Equal(expected, result.Options.SkillDiscoveryProjectPaths);
+    }
+
+    [Fact]
+    public void Parse_Rejects17thSkillDiscoveryProjectPath()
+    {
+        var arguments = Enumerable.Range(0, 17)
+            .SelectMany(i => new[] { "--skill-discovery-project-path", Path.GetFullPath($"project-path-{i}") })
+            .ToArray();
+
+        var result = MonitorOptions.Parse(arguments);
+
+        Assert.Equal("local-monitor accepts at most 16 --skill-discovery-project-path values.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_AcceptsSingleSkillDiscoveryDirectory()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-directory", @"C:\repo\dir"]);
+
+        Assert.Null(result.Error);
+        Assert.Equal([@"C:\repo\dir"], result.Options!.SkillDiscoveryDirectories);
+    }
+
+    [Fact]
+    public void Parse_Accepts32SkillDiscoveryDirectoriesPreservingOrderAndDuplicates()
+    {
+        var duplicate = Path.GetFullPath("dup-skill-dir");
+        var arguments = new List<string>();
+        var expected = new List<string>();
+        for (var i = 0; i < 30; i++)
+        {
+            var value = Path.GetFullPath($"skill-dir-{i}");
+            arguments.Add("--skill-discovery-directory");
+            arguments.Add(value);
+            expected.Add(value);
+        }
+
+        arguments.Add("--skill-discovery-directory");
+        arguments.Add(duplicate);
+        expected.Add(duplicate);
+        arguments.Add("--skill-discovery-directory");
+        arguments.Add(duplicate);
+        expected.Add(duplicate);
+
+        var result = MonitorOptions.Parse(arguments.ToArray());
+
+        Assert.Null(result.Error);
+        Assert.Equal(32, result.Options!.SkillDiscoveryDirectories.Count);
+        Assert.Equal(expected, result.Options.SkillDiscoveryDirectories);
+    }
+
+    [Fact]
+    public void Parse_Rejects33rdSkillDiscoveryDirectory()
+    {
+        var arguments = Enumerable.Range(0, 33)
+            .SelectMany(i => new[] { "--skill-discovery-directory", Path.GetFullPath($"skill-dir-{i}") })
+            .ToArray();
+
+        var result = MonitorOptions.Parse(arguments);
+
+        Assert.Equal("local-monitor accepts at most 32 --skill-discovery-directory values.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_RejectsSkillDiscoveryProjectPathAsFinalToken()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-project-path"]);
+
+        Assert.Equal("--skill-discovery-project-path requires a value.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_RejectsEmptySkillDiscoveryProjectPathValue()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-project-path", ""]);
+
+        Assert.Equal("--skill-discovery-project-path requires a value.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_RejectsSkillDiscoveryDirectoryAsFinalToken()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-directory"]);
+
+        Assert.Equal("--skill-discovery-directory requires a value.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_RejectsEmptySkillDiscoveryDirectoryValue()
+    {
+        var result = MonitorOptions.Parse(["--skill-discovery-directory", ""]);
+
+        Assert.Equal("--skill-discovery-directory requires a value.", result.Error);
+    }
+
+    [Theory]
+    [InlineData("--skill-discovery-project-path")]
+    [InlineData("--skill-discovery-directory")]
+    public void Parse_RejectsSkillDiscoveryOptionWithSanitizedOnlyBefore(string option)
+    {
+        var result = MonitorOptions.Parse(["--sanitized-only", option, @"C:\repo\value"]);
+
+        Assert.Equal("skill discovery options cannot be used with --sanitized-only.", result.Error);
+    }
+
+    [Theory]
+    [InlineData("--skill-discovery-project-path")]
+    [InlineData("--skill-discovery-directory")]
+    public void Parse_RejectsSkillDiscoveryOptionWithSanitizedOnlyAfter(string option)
+    {
+        var result = MonitorOptions.Parse([option, @"C:\repo\value", "--sanitized-only"]);
+
+        Assert.Equal("skill discovery options cannot be used with --sanitized-only.", result.Error);
+    }
+
+    [Fact]
+    public void Parse_PrecedenceMissingProjectPathBeatsMissingSkillDirectory()
+    {
+        string[] missingProjectPath = ["--skill-discovery-project-path"];
+        string[] missingSkillDirectory = ["--skill-discovery-directory"];
+
+        AssertPrecedenceBothOrders(
+            missingProjectPath,
+            missingSkillDirectory,
+            "--skill-discovery-project-path requires a value.");
+    }
+
+    [Fact]
+    public void Parse_PrecedenceMissingSkillDirectoryBeatsProjectPathCountLimit()
+    {
+        string[] missingSkillDirectory = ["--skill-discovery-directory"];
+        var over16ProjectPaths = Enumerable.Range(0, 17)
+            .SelectMany(i => new[] { "--skill-discovery-project-path", Path.GetFullPath($"project-path-{i}") })
+            .ToArray();
+
+        AssertPrecedenceBothOrders(
+            missingSkillDirectory,
+            over16ProjectPaths,
+            "--skill-discovery-directory requires a value.");
+    }
+
+    [Fact]
+    public void Parse_PrecedenceProjectPathCountLimitBeatsSkillDirectoryCountLimit()
+    {
+        var over16ProjectPaths = Enumerable.Range(0, 17)
+            .SelectMany(i => new[] { "--skill-discovery-project-path", Path.GetFullPath($"project-path-{i}") })
+            .ToArray();
+        var over32SkillDirectories = Enumerable.Range(0, 33)
+            .SelectMany(i => new[] { "--skill-discovery-directory", Path.GetFullPath($"skill-dir-{i}") })
+            .ToArray();
+
+        AssertPrecedenceBothOrders(
+            over16ProjectPaths,
+            over32SkillDirectories,
+            "local-monitor accepts at most 16 --skill-discovery-project-path values.");
+    }
+
+    [Fact]
+    public void Parse_PrecedenceSkillDirectoryCountLimitBeatsSanitizedOnlyConflict()
+    {
+        var over32SkillDirectories = Enumerable.Range(0, 33)
+            .SelectMany(i => new[] { "--skill-discovery-directory", Path.GetFullPath($"skill-dir-{i}") })
+            .ToArray();
+        string[] sanitizedOnly = ["--sanitized-only"];
+
+        AssertPrecedenceBothOrders(
+            over32SkillDirectories,
+            sanitizedOnly,
+            "local-monitor accepts at most 32 --skill-discovery-directory values.");
+    }
+
+    [Fact]
+    public void Parse_PrecedenceValidProjectPathWithSanitizedOnlyReportsConflict()
+    {
+        string[] validProjectPath = ["--skill-discovery-project-path", @"C:\repo\value"];
+        string[] sanitizedOnly = ["--sanitized-only"];
+
+        AssertPrecedenceBothOrders(
+            validProjectPath,
+            sanitizedOnly,
+            "skill discovery options cannot be used with --sanitized-only.");
+    }
+
+    [Fact]
+    public void Parse_PrecedenceAllFiveFaultsReportsMissingProjectPathValue()
+    {
+        var over16ProjectPathsPlusMissing = Enumerable.Range(0, 17)
+            .SelectMany(i => new[] { "--skill-discovery-project-path", Path.GetFullPath($"project-path-{i}") })
+            .Append("--skill-discovery-project-path")
+            .ToArray();
+        var over32SkillDirectoriesPlusMissing = Enumerable.Range(0, 33)
+            .SelectMany(i => new[] { "--skill-discovery-directory", Path.GetFullPath($"skill-dir-{i}") })
+            .Append("--skill-discovery-directory")
+            .ToArray();
+        string[] sanitizedOnly = ["--sanitized-only"];
+
+        var forward = over16ProjectPathsPlusMissing
+            .Concat(over32SkillDirectoriesPlusMissing)
+            .Concat(sanitizedOnly)
+            .ToArray();
+        var reversed = sanitizedOnly
+            .Concat(over32SkillDirectoriesPlusMissing)
+            .Concat(over16ProjectPathsPlusMissing)
+            .ToArray();
+
+        Assert.Equal("--skill-discovery-project-path requires a value.", MonitorOptions.Parse(forward).Error);
+        Assert.Equal("--skill-discovery-project-path requires a value.", MonitorOptions.Parse(reversed).Error);
+    }
+
+    [Fact]
+    public void Parse_DoesNotLeakSkillDiscoveryValueInFailureMessage()
+    {
+        const string sentinel = @"C:\SENTINEL_ROOT_VALUE";
+        var result = MonitorOptions.Parse(["--skill-discovery-project-path", sentinel, "--sanitized-only"]);
+
+        Assert.Equal("skill discovery options cannot be used with --sanitized-only.", result.Error);
+        Assert.DoesNotContain("SENTINEL", result.Error, StringComparison.Ordinal);
+    }
+
+    private static void AssertPrecedenceBothOrders(string[] first, string[] second, string expectedError)
+    {
+        var forward = first.Concat(second).ToArray();
+        var reversed = second.Concat(first).ToArray();
+
+        Assert.Equal(expectedError, MonitorOptions.Parse(forward).Error);
+        Assert.Equal(expectedError, MonitorOptions.Parse(reversed).Error);
+    }
 }

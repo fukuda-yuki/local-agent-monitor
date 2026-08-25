@@ -4,6 +4,7 @@ using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using GitHub.Copilot;
 using Microsoft.Extensions.Configuration;
+using CopilotAgentObservability.LocalMonitor.SkillRuntime;
 
 namespace CopilotAgentObservability.LocalMonitor.Analysis;
 
@@ -15,12 +16,15 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
     private readonly IAnalysisSdkDirectoryOwner directoryOwner;
     private readonly ICopilotAnalysisSdkExecutor executor;
     private readonly TimeProvider timeProvider;
+    private readonly CancellationToken hostStoppingToken;
+    private readonly CopilotRuntimeAdmissionV1? skillRuntimeAdmission;
+    private readonly Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? rootsExecutionContextFactory;
 
     public DotNetCopilotRawAnalysisRunner(
         IMonitorAnalysisStore analysisStore,
         IMonitorProjectionStore projectionStore,
         IConfiguration configuration)
-        : this(analysisStore, projectionStore, configuration, new UnconfiguredDirectoryOwner(), new CopilotAnalysisSdkExecutor(), TimeProvider.System)
+        : this(analysisStore, projectionStore, configuration, new UnconfiguredDirectoryOwner(), new CopilotAnalysisSdkExecutor(), TimeProvider.System, CancellationToken.None)
     {
     }
 
@@ -30,7 +34,10 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         IConfiguration configuration,
         IAnalysisSdkDirectoryOwner directoryOwner,
         ICopilotAnalysisSdkExecutor executor,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        CancellationToken hostStoppingToken = default,
+        CopilotRuntimeAdmissionV1? skillRuntimeAdmission = null,
+        Func<IAnalysisSdkDirectoryScope, CopilotAnalysisRootsExecutionContext>? rootsExecutionContextFactory = null)
     {
         this.analysisStore = analysisStore;
         this.projectionStore = projectionStore;
@@ -38,18 +45,66 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         this.directoryOwner = directoryOwner;
         this.executor = executor;
         this.timeProvider = timeProvider;
+        this.hostStoppingToken = hostStoppingToken;
+        this.skillRuntimeAdmission = skillRuntimeAdmission;
+        this.rootsExecutionContextFactory = rootsExecutionContextFactory;
     }
 
     public Task StartAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
     {
-        _ = Task.Run(() => RunAsync(context, CancellationToken.None), CancellationToken.None);
+        var dispatch = new AnalysisDispatchState();
+        var scheduled = Task.Run(async () =>
+        {
+            if (!dispatch.TryClaimStart()) return;
+            await RunWithHostStoppingAsync(context).ConfigureAwait(false);
+        }, hostStoppingToken);
+        _ = ObserveDispatchAsync(scheduled, dispatch, context);
         return Task.CompletedTask;
+    }
+
+    private async Task ObserveDispatchAsync(Task scheduled, AnalysisDispatchState dispatch, MonitorAnalysisContext context)
+    {
+        try
+        {
+            await scheduled.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (hostStoppingToken.IsCancellationRequested)
+        {
+            if (dispatch.TryFinalizeBeforeStart())
+            {
+                var operationToken = context.OperationToken ?? throw new InvalidOperationException("Analysis operation token is required.");
+                _ = analysisStore.FinishRun(context.RunId, operationToken, null, MonitorAnalysisStatus.Canceled,
+                    "Analysis was canceled.", timeProvider.GetUtcNow());
+            }
+        }
+        catch
+        {
+            if (dispatch.TryFinalizeBeforeStart())
+            {
+                var operationToken = context.OperationToken ?? throw new InvalidOperationException("Analysis operation token is required.");
+                _ = analysisStore.FinishRun(context.RunId, operationToken, null, MonitorAnalysisStatus.Failed,
+                    "SDK analysis failed.", timeProvider.GetUtcNow());
+            }
+        }
+    }
+
+    private async Task RunWithHostStoppingAsync(MonitorAnalysisContext context)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(hostStoppingToken);
+        await RunAsync(context, linked.Token).ConfigureAwait(false);
     }
 
     internal async Task RunAsync(MonitorAnalysisContext context, CancellationToken cancellationToken)
     {
         var operationToken = context.OperationToken ?? throw new InvalidOperationException("Analysis operation token is required.");
         RetentionRevisionFence? fence = null;
+        var durablyCompleted = false;
+        if (cancellationToken.IsCancellationRequested)
+        {
+            _ = analysisStore.FinishRun(context.RunId, operationToken, fence, MonitorAnalysisStatus.Canceled,
+                "Analysis was canceled.", timeProvider.GetUtcNow());
+            return;
+        }
         var startedAt = timeProvider.GetUtcNow();
         analysisStore.MarkRunning(context.RunId, startedAt);
         fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "running", ".NET GitHub Copilot SDK analysis started.", startedAt);
@@ -79,14 +134,31 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 throw new AnalysisOwnershipException(exception);
             }
             Exception? primaryFailure = null;
-            string result;
+            AnalysisSdkScopeOwnership? scopeOwnership = null;
+            CopilotAnalysisExecutionResult? executionResult = null;
+            Action<OwnedSessionExecutionEvidenceV1>? executionEvidenceObserver = null;
+            Action<OwnedSessionExecutionCheckpointV1>? executionCheckpointObserver = null;
             InstructionFindingHandoffV1? instructionFindingHandoff = null;
             try
             {
                 using var leaseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, scope.LeaseLostToken);
                 fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_phase", "loading_local_tool_data", timeProvider.GetUtcNow());
                 await using var data = await MonitorAnalysisToolData.CreateAsync(projectionStore, context, leaseCancellation.Token);
-                result = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), new CopilotAnalysisToolRequest(BuildPrompt(context), data), leaseCancellation.Token);
+                var request = new CopilotAnalysisToolRequest(BuildPrompt(context), data);
+                if (rootsExecutionContextFactory is null)
+                {
+                    scopeOwnership = new AnalysisSdkScopeOwnership(scope);
+                    executionResult = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), request, leaseCancellation.Token);
+                }
+                else
+                {
+                    var rootsContext = rootsExecutionContextFactory(scope);
+                    executionEvidenceObserver = rootsContext.ExecutionEvidenceObserver;
+                    executionCheckpointObserver = rootsContext.ExecutionCheckpointObserver;
+                    scopeOwnership = rootsContext.ScopeOwnership ?? new AnalysisSdkScopeOwnership(scope);
+                    executionResult = await executor.ExecuteAsync(scope.ChildDirectory, settings.ToExecutionSettings(), request,
+                        rootsContext with { ScopeOwnership = scopeOwnership }, leaseCancellation.Token);
+                }
                 instructionFindingHandoff = data.InstructionFindingCollector?.BuildHandoff();
                 if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
             }
@@ -104,7 +176,8 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
             {
                 try
                 {
-                    await scope.DisposeAsync();
+                    if (scopeOwnership is null) await scope.DisposeAsync();
+                    else await scopeOwnership.DisposeByRunnerAsync();
                 }
                 catch when (primaryFailure is not null)
                 {
@@ -115,13 +188,48 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
                 }
             }
             if (scope.IsLeaseLost) throw new AnalysisOwnershipException();
-            var completedAt = timeProvider.GetUtcNow();
-            fence = instructionFindingHandoff is null
-                ? analysisStore.CompleteRun(context.RunId, operationToken, fence, result, completedAt)
-                : analysisStore.CompleteInstructionDiagnosisRun(context.RunId, operationToken, fence, result, instructionFindingHandoff, completedAt);
+            var completedExecution = executionResult ?? throw new InvalidOperationException("SDK analysis produced no result.");
+            var candidate = completedExecution.UnpublishedCandidate;
+            CopilotRuntimeAdmissionV1.PublicationReservation? publicationReservation = null;
+            var reservationAcquisitionReturned = false;
+            try
+            {
+                if (candidate is not null && (skillRuntimeAdmission is null || scope.IsLeaseLost))
+                    throw new AnalysisOwnershipException();
+                if (candidate is not null)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    publicationReservation = await skillRuntimeAdmission!.TryReservePublicationAsync(candidate, cancellationToken).ConfigureAwait(false);
+                    reservationAcquisitionReturned = true;
+                    if (publicationReservation is null) throw new AnalysisOwnershipException();
+                }
+                await using var reservation = publicationReservation;
+                var completedAt = timeProvider.GetUtcNow();
+                fence = instructionFindingHandoff is null
+                    ? analysisStore.CompleteRun(context.RunId, operationToken, fence, completedExecution.ResultMarkdown, completedAt)
+                    : analysisStore.CompleteInstructionDiagnosisRun(context.RunId, operationToken, fence, completedExecution.ResultMarkdown, instructionFindingHandoff, completedAt);
+                durablyCompleted = true;
+                if (candidate is not null)
+                {
+                    await reservation!.CommitAsync().ConfigureAwait(false);
+                    if (completedExecution.ExecutionEvidence is not null && executionEvidenceObserver is not null)
+                    {
+                        try { executionEvidenceObserver(completedExecution.ExecutionEvidence); }
+                        catch { }
+                    }
+                    OwnedSessionExecutionCheckpointObservationV1.Notify(executionCheckpointObserver, OwnedSessionExecutionCheckpointV1.CandidatePublished);
+                }
+            }
+            catch
+            {
+                if (candidate is not null && skillRuntimeAdmission is not null && !reservationAcquisitionReturned)
+                    await skillRuntimeAdmission.DiscardCandidateAsync(candidate).ConfigureAwait(false);
+                throw;
+            }
         }
         catch (OperationCanceledException)
         {
+            if (durablyCompleted) return;
             _ = analysisStore.FinishRun(
                 context.RunId,
                 operationToken,
@@ -132,6 +240,7 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         }
         catch (PersistenceBusyException)
         {
+            if (durablyCompleted) return;
             _ = analysisStore.FinishRun(
                 context.RunId,
                 operationToken,
@@ -142,10 +251,12 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         }
         catch (AnalysisOwnershipException)
         {
+            if (durablyCompleted) return;
             _ = analysisStore.FinishRun(context.RunId, operationToken, fence, MonitorAnalysisStatus.Failed, "Local analysis ownership could not be established.", timeProvider.GetUtcNow());
         }
         catch (Exception)
         {
+            if (durablyCompleted) return;
             const string message = "SDK analysis failed.";
             fence = analysisStore.AppendEvent(context.RunId, operationToken, fence, "sdk_error", message, timeProvider.GetUtcNow());
             _ = analysisStore.FinishRun(
@@ -238,6 +349,15 @@ internal sealed class DotNetCopilotRawAnalysisRunner : IMonitorAnalysisRunner
         && string.Equals(run.SpanId, context.SpanId, StringComparison.Ordinal)
         && run.Focus == context.Focus;
 
+}
+
+internal sealed class AnalysisDispatchState
+{
+    private int state;
+
+    internal bool TryClaimStart() => Interlocked.CompareExchange(ref state, 1, 0) == 0;
+
+    internal bool TryFinalizeBeforeStart() => Interlocked.CompareExchange(ref state, 2, 0) == 0;
 }
 
 internal sealed class AnalysisOwnershipException : Exception

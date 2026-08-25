@@ -26,4 +26,6 @@ internal sealed record MonitorSpanProjection(
     string? ConversationId,
     double? DurationMs,
     string? StartTime,
-    string? EndTime);
+    string? EndTime,
+    [property: System.Text.Json.Serialization.JsonIgnore] int? RetryCount = null,
+    [property: System.Text.Json.Serialization.JsonIgnore] int? ProducerTotalTokens = null);

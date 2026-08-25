@@ -147,6 +147,39 @@ public sealed class LocalRepositoryAutomaticAdmissionTests
     }
 
     [Fact]
+    public async Task AutomaticOwnerCreatedFirst_MakesManualCreateReturnLocatorConflictWithoutWriting()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture();
+        var payload = LocalRepositoryAdmissionFixture.SpanPayload(
+            new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/RaceWidget"));
+
+        await fixture.RunAsync(payload, [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+
+        var repositoryId = fixture.ScalarText("SELECT repository_id FROM local_repositories;");
+        Assert.Equal(1, fixture.ScalarLong("SELECT revision FROM local_repositories;"));
+        Assert.Equal("observed", fixture.ScalarText("SELECT source FROM local_repository_locators;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_history WHERE action='create_observed';"));
+
+        var manualResult = await fixture.AttemptManualCreateAsync(
+            "Manual Race Widget",
+            "git@github.com:example/racewidget.git");
+
+        var rejected = Assert.IsType<LocalRepositoryMutationRejected>(manualResult);
+        Assert.Equal(LocalRepositoryMutationFailure.LocatorConflict, rejected.Failure);
+
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal(repositoryId, fixture.ScalarText("SELECT repository_id FROM local_repositories;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT revision FROM local_repositories;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_locators;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_locator_heads;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_history;"));
+        Assert.Equal("observed", fixture.ScalarText("SELECT source FROM local_repository_locators;"));
+    }
+
+    [Fact]
     public async Task ExistingObservedOwner_IsReusedWithoutRenameRevisionOrDuplicateCreationHistory()
     {
         using var fixture = new LocalRepositoryAdmissionFixture();
@@ -165,6 +198,36 @@ public sealed class LocalRepositoryAutomaticAdmissionTests
         Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_history;"));
         Assert.Null(fixture.LastProcessorException);
         Assert.Equal(["completed", "completed"], fixture.QueryStrings("SELECT state FROM local_repository_reconciliation_queue ORDER BY raw_record_id;"));
+        Assert.Equal(2, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observation_contexts;"));
+    }
+
+    [Fact]
+    public async Task ArchivedExactOwner_IsReusedWithoutRestoreOrDuplicate()
+    {
+        using var fixture = new LocalRepositoryAdmissionFixture();
+        await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(1),
+                LocalRepositoryAdmissionFixture.Span(1),
+                "https://github.com/Example/ArchivedWidget")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(1)]);
+        var repositoryId = fixture.ScalarText("SELECT repository_id FROM local_repositories;");
+
+        fixture.ArchiveRepository(repositoryId);
+        Assert.Equal(("archived", 1L), fixture.ReadRepositoryArchiveCurrent(repositoryId));
+
+        await fixture.RunAsync(
+            LocalRepositoryAdmissionFixture.SpanPayload(new LocalRepositoryAdmissionFixture.SpanInput(
+                LocalRepositoryAdmissionFixture.Trace(2),
+                LocalRepositoryAdmissionFixture.Span(2),
+                "https://github.com/example/ARCHIVEDWIDGET")),
+            [LocalRepositoryAdmissionFixture.MatchedEvent(2)]);
+
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repositories;"));
+        Assert.Equal(repositoryId, fixture.ScalarText("SELECT repository_id FROM local_repositories;"));
+        Assert.Equal(1, fixture.ScalarLong("SELECT COUNT(*) FROM local_repository_locators;"));
+        Assert.Equal(("archived", 1L), fixture.ReadRepositoryArchiveCurrent(repositoryId));
+        Assert.Equal(2, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observations;"));
         Assert.Equal(2, fixture.ScalarLong("SELECT COUNT(*) FROM session_repository_observation_contexts;"));
     }
 
@@ -726,13 +789,60 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
     }
 
     private ILocalRepositoryRawRecordProcessor CreateProcessor() =>
-        new CapturingProcessor(new SqliteLocalRepositoryCatalogStore(
+        new CapturingProcessor(CreateCatalogStore(), exception => LastProcessorException = exception);
+
+    private SqliteLocalRepositoryCatalogStore CreateCatalogStore() => new(
+        temp.DatabasePath,
+        queue,
+        new LocalRepositoryAssignmentResolver(idFactory),
+        processorTimeProvider,
+        idFactory,
+        checkpoint);
+
+    internal async Task<LocalRepositoryMutationResult> AttemptManualCreateAsync(
+        string displayName,
+        string gitHubLocator,
+        byte operationKeyFill = 2)
+    {
+        var application = new LocalRepositoryCatalogApplication(CreateCatalogStore());
+        var prepared = Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedCreate>>(
+            application.PrepareCreate(new LocalRepositoryCreateInput(displayName, gitHubLocator)));
+        return await application.ExecutePreparedAsync(
+            prepared.Prepared,
+            OperationKey(operationKeyFill),
+            _ => throw new InvalidOperationException("local_repository_manual_create_writer_must_not_run"),
+            CancellationToken.None);
+    }
+
+    internal void ArchiveRepository(string repositoryId)
+    {
+        using (var connection = Open())
+            LocalArchiveSchemaV1.Ensure(connection);
+        var store = new SqliteLocalArchiveStore(
             temp.DatabasePath,
-            queue,
-            new LocalRepositoryAssignmentResolver(idFactory),
+            SqliteLocalRepositoryTargetExistenceAuthority.Instance,
+            LocalArchiveSessionTargetExistenceAuthority.Instance,
             processorTimeProvider,
-            idFactory,
-            checkpoint), exception => LastProcessorException = exception);
+            idFactory);
+        var result = store.Mutate(
+            LocalArchiveAction.Archive,
+            LocalArchiveTargetKind.Repository,
+            [new LocalArchiveMutationTarget(repositoryId, 0)],
+            _ => "{}"u8.ToArray(),
+            CancellationToken.None);
+        Assert.Null(result.Error);
+    }
+
+    internal (string State, long Revision) ReadRepositoryArchiveCurrent(string repositoryId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT state,revision FROM local_archive_current WHERE target_kind='repository' AND target_id=$id;";
+        command.Parameters.AddWithValue("$id", repositoryId);
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        return (reader.GetString(0), reader.GetInt64(1));
+    }
 
     internal Task<LocalRepositoryReconciliationWorkOutcome> RunExistingAsync()
     {
@@ -1135,7 +1245,7 @@ internal sealed class LocalRepositoryAdmissionFixture : IDisposable
     }
 
     private static string Queue(long rawRecordId) => $"01900000-0000-7001-8000-{rawRecordId:x12}";
-    private static string OperationKey(byte fill) =>
+    internal static string OperationKey(byte fill) =>
         "lrc1_" + Convert.ToBase64String(Enumerable.Repeat(fill, 32).ToArray())
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }

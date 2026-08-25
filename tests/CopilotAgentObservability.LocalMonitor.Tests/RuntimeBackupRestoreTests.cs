@@ -18,6 +18,79 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class RuntimeBackupRestoreTests
 {
     [Fact]
+    public void LocalWorkspaceProjection_AllOwnedTablesRoundTripThroughProductionRestore()
+    {
+        using var temp = new RestoreTemp();
+        using var fixture = new LocalRepositoryCatalogFixture();
+        var source = fixture.DatabasePath;
+        fixture.CreateSession(LocalRepositoryCatalogFixture.SessionId(3_702));
+        using (var connection = temp.Open(source))
+        {
+            using (var run = connection.CreateCommand())
+            {
+                run.CommandText = "INSERT INTO session_runs VALUES($run,$session,'copilot-sdk',NULL,NULL,NULL,'gpt-5',NULL,NULL,10,3,13,'completed');";
+                run.Parameters.AddWithValue("$run", Guid.CreateVersion7(DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At)).ToString("D"));
+                run.Parameters.AddWithValue("$session", LocalRepositoryCatalogFixture.SessionId(3_702));
+                run.ExecuteNonQuery();
+            }
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+        }
+        var raw = new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At), null,
+            "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"bbbbbbbbbbbbbbbb\",\"name\":\"synthetic\"},{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"cccccccccccccccc\",\"name\":\"synthetic-child\"}]}]}]}");
+        var rawId = fixture.RawStore.Insert(raw);
+        fixture.RawStore.ApplyProjection(rawId, raw.Source, raw.ReceivedAt, MonitorProjectionBuilder.Build(raw), raw.ReceivedAt);
+        fixture.RawStore.ApplySpanProjection(rawId, MonitorSpanProjectionBuilder.Build(raw), raw.ReceivedAt);
+        using (var connection = temp.Open(source))
+        using (var transaction = connection.BeginTransaction(deferred: true))
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction);
+        foreach (var mutation in new[]
+        {
+            $"UPDATE local_workspace_span_facts SET retry_count=1 WHERE raw_record_id={rawId};",
+            $"UPDATE local_workspace_span_facts SET producer_total_tokens=1 WHERE raw_record_id={rawId};",
+            $"DELETE FROM monitor_spans WHERE raw_record_id={rawId};",
+            $"DELETE FROM local_workspace_span_facts WHERE raw_record_id={rawId} AND span_ordinal=0;",
+            $"DELETE FROM local_workspace_span_facts WHERE raw_record_id={rawId};",
+        })
+        {
+            using var connection = temp.Open(source);
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = mutation;
+            command.ExecuteNonQuery();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+            transaction.Rollback();
+        }
+        using (var readOnly = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            readOnly.Open();
+            using var transaction = readOnly.BeginTransaction(deferred: true);
+            LocalWorkspaceProjectionBackupValidation.Validate(readOnly, transaction);
+        }
+        var expected = temp.SnapshotOwnedRows(source, "local_workspace_");
+        var bundle = Path.Combine(temp.Root, "projection-roundtrip.zip");
+        var service = new SqliteRuntimeBackupService(new FixedTimeProvider(DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At)));
+        var backup = service.CreateAndPublish(source, bundle);
+        Assert.True(backup.Success, backup.ErrorCode);
+        using (var connection = temp.Open(source))
+            temp.Execute(connection, "DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_span_facts; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_sessions; DELETE FROM local_workspace_projection_state; DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+
+        var restored = service.Restore(bundle, source, new RuntimeRestoreOptions());
+
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(expected, temp.SnapshotOwnedRows(source, "local_workspace_"));
+        using var verification = temp.Open(source);
+        Assert.Equal(7, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.True(temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM {table};") > 0));
+        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        using var validation = verification.BeginTransaction(deferred: true);
+        LocalWorkspaceProjectionBackupValidation.Validate(verification, validation);
+    }
+
+    [Fact]
     public void Current_deleted_before_digest_authority_round_trips_exactly()
     {
         using var temp = new RestoreTemp();
@@ -444,6 +517,101 @@ public sealed class RuntimeBackupRestoreTests
                   AND updated_at='1970-01-01T00:00:00.0000000+00:00';
                 """));
         }
+    }
+
+    [Fact]
+    public void Monitor_startup_defers_exact_workspace_v1_migration_until_completion()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
+            temp.Execute(database, "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection';");
+        }
+        var service = new SqliteRuntimeBackupService(temp.Clock);
+
+        var initialization = service.InitializeForMonitor(temp.Source);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        using (var database = temp.Open(temp.Source))
+        {
+            Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+        }
+
+        var completed = service.CompleteMonitorInitialization(lease);
+
+        Assert.True(completed.Success, completed.ErrorCode);
+        using var verification = temp.Open(temp.Source);
+        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+    }
+
+    [Theory]
+    [InlineData("missing_stamp")]
+    [InlineData("future_version")]
+    [InlineData("v1_drift")]
+    [InlineData("v2_drift")]
+    public void Monitor_startup_preparation_rejects_invalid_workspace_ownership_without_mutation(string kind)
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
+            temp.Execute(database, kind switch
+            {
+                "missing_stamp" => "DELETE FROM schema_version WHERE component='local_workspace_projection';",
+                "future_version" => "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection';",
+                "v1_drift" => "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection'; ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
+                "v2_drift" => "ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            });
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Source);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Monitor_startup_preparation_allows_workspace_component_to_be_absent()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+            temp.Execute(database, "CREATE TABLE localXworkspaceYextension(value INTEGER); CREATE INDEX localXworkspaceYextension_index ON localXworkspaceYextension(value);");
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Source);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
     }
 
     [Theory]
@@ -2966,6 +3134,22 @@ public sealed class RuntimeBackupRestoreTests
             using (var connection = Open(mutatedPath))
             {
                 Execute(connection, "DELETE FROM schema_version WHERE component='local_archive'; DROP TABLE local_archive_events; DROP TABLE local_archive_current;");
+                // A Session 13 backup cannot legitimately declare skill_invocation_snapshot: the
+                // component's conditional trigger registry is parented to Session 14 exactly, so a
+                // downgraded archive that kept it would be incompatible rather than legacy.
+                Execute(
+                    connection,
+                    "DELETE FROM schema_version WHERE component IN ('skill_invocation_snapshot','local_workspace_projection');"
+                    + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_update_rejected;"
+                    + "DROP TRIGGER IF EXISTS skill_invocation_snapshot_session_event_delete_rejected;"
+                    + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
+                    + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_sources;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_models;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_activity;"
+                    + "DROP TABLE IF EXISTS local_workspace_token_observations;DROP TABLE IF EXISTS local_workspace_span_facts;"
+                    + "DROP TABLE IF EXISTS local_workspace_projection_state;"
+                    + "DROP TABLE IF EXISTS local_workspace_sessions;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);
                 Execute(connection, "PRAGMA wal_checkpoint(TRUNCATE);");
             }
@@ -2973,7 +3157,11 @@ public sealed class RuntimeBackupRestoreTests
             var rowCounts = new Dictionary<string, long>(StringComparer.Ordinal);
             using (var connection = Open(mutatedPath))
             {
-                foreach (var table in parsed.RowCounts.Keys.Where(static table => table is not ("local_archive_current" or "local_archive_events")))
+                foreach (var table in parsed.RowCounts.Keys.Where(static table => table is not (
+                    "local_archive_current"
+                    or "local_archive_events"
+                    or "skill_invocation_snapshots"
+                    or "skill_invocation_snapshot_receipts") && !table.StartsWith("local_workspace_", StringComparison.Ordinal)))
                     rowCounts[table] = Scalar<long>(connection, $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"")}\";");
             }
             database = File.ReadAllBytes(mutatedPath);
@@ -2987,6 +3175,8 @@ public sealed class RuntimeBackupRestoreTests
                 StringComparer.Ordinal);
             componentVersions["session"] = 13;
             componentVersions.Remove("local_archive");
+            componentVersions.Remove("skill_invocation_snapshot");
+            componentVersions.Remove("local_workspace_projection");
             var databaseHash = Convert.ToHexString(SHA256.HashData(database)).ToLowerInvariant();
             manifest = RuntimeBackupJson.WriteManifest(parsed with
             {

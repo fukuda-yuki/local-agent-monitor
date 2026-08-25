@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -14,19 +15,22 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     private const string RegistryFingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
 
     [Fact]
-    public void Load_ExposesOnlyTheExactEmbeddedR0001AcceptedTuple()
+    public void Load_ExposesOnlyTheExactEmbeddedR0002AcceptedTuples()
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
 
-        Assert.Equal(1, registry.CurrentRevision);
+        Assert.Equal(2, registry.CurrentRevision);
         Assert.Equal(SchemaFingerprint, registry.SchemaFingerprint);
-        var entry = Assert.Single(registry.Entries);
+        Assert.Equal(2, registry.History.Count);
+        var entry = registry.CurrentEntries[0];
         Assert.Equal("1.0.65", entry.Tuple.SourceApplicationVersion);
         Assert.Equal("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", entry.Tuple.AdapterVersion);
-        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v1", entry.Tuple.NormalizationVersion);
+        Assert.Equal("github-copilot-sdk.skill-invoked.normalize.v2", entry.Tuple.NormalizationVersion);
         Assert.Equal("github-copilot-sdk.skill-invoked.v1", entry.Tuple.PayloadSchema);
         Assert.Equal(SchemaFingerprint, entry.Tuple.SchemaFingerprint);
         Assert.Equal(SkillInvocationV2CompatibilityDisposition.Accepted, entry.Disposition);
+        Assert.Equal("1.0.75", registry.CurrentEntries[1].Tuple.SourceApplicationVersion);
+        Assert.All(registry.CurrentEntries, current => Assert.Equal(SkillInvocationV2CompatibilityDisposition.Accepted, current.Disposition));
         Assert.True(registry.IsAccepted(entry.Tuple));
         Assert.False(registry.IsAccepted(entry.Tuple with { SourceApplicationVersion = "1.0.66" }));
         Assert.Same(registry, SkillInvocationV2ArtifactRegistry.Load());
@@ -51,27 +55,27 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     }
 
     [Theory]
-    [InlineData(SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.DuplicateProperty)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.UnknownProperty)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.InvalidFieldType)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.NameInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.PathInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.DefinitionPathMissing)]
-    [InlineData(SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyUnicodeInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.PathUnicodeInvalid)]
-    [InlineData(SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.BodyOversized)]
-    [InlineData(SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.PathOversized)]
+    [InlineData(SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.DuplicateProperty)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.UnknownProperty)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.InvalidFieldType)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.NameInvalid)]
+    [InlineData(SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.PathInvalid)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyMissing)]
+    [InlineData(SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.DefinitionPathMissing)]
+    [InlineData(SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyUnicodeInvalid)]
+    [InlineData(SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.PathUnicodeInvalid)]
+    [InlineData(SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.BodyOversized)]
+    [InlineData(SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.PathOversized)]
     public void AcceptedEnvelope_AdmitsOnlyGate6StateReasonPairsAndNullableFacts(
-        SkillInvocationV2PayloadState state,
-        SkillInvocationV2PayloadReason reason)
+        SkillInvocationPayloadState state,
+        SkillInvocationPayloadReason reason)
     {
         var rawPayload = new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}"));
-        var facts = state == SkillInvocationV2PayloadState.Available ? AvailableFacts(source: null, trigger: null) : null;
+        var facts = state == SkillInvocationPayloadState.Available ? AvailableFacts(source: null, trigger: null) : null;
 
-        var envelope = new SkillInvocationV2AcceptedEnvelope(rawPayload, state, reason, facts);
+        var envelope = new SkillInvocationV2AcceptedEnvelope(rawPayload, state, reason, facts, SampleIdentity());
 
         Assert.Same(facts, envelope.ClaimFacts);
         Assert.Equal(facts?.Name, envelope.Name);
@@ -88,17 +92,17 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var facts = AvailableFacts();
 
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Available, SkillInvocationV2PayloadReason.None, null));
+            rawPayload, SkillInvocationPayloadState.Available, SkillInvocationPayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Malformed, SkillInvocationV2PayloadReason.None, null));
+            rawPayload, SkillInvocationPayloadState.Malformed, SkillInvocationPayloadReason.None, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.BodyUnicodeInvalid, null));
+            rawPayload, SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.BodyUnicodeInvalid, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Binary, SkillInvocationV2PayloadReason.BodyOversized, null));
+            rawPayload, SkillInvocationPayloadState.Binary, SkillInvocationPayloadReason.BodyOversized, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Oversized, SkillInvocationV2PayloadReason.NameMissing, null));
+            rawPayload, SkillInvocationPayloadState.Oversized, SkillInvocationPayloadReason.NameMissing, null, SampleIdentity()));
         Assert.Throws<ArgumentException>(() => new SkillInvocationV2AcceptedEnvelope(
-            rawPayload, SkillInvocationV2PayloadState.Missing, SkillInvocationV2PayloadReason.NameMissing, facts));
+            rawPayload, SkillInvocationPayloadState.Missing, SkillInvocationPayloadReason.NameMissing, facts, SampleIdentity()));
     }
 
     [Fact]
@@ -118,18 +122,20 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     {
         var envelope = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
-            SkillInvocationV2PayloadState.Available,
-            SkillInvocationV2PayloadReason.None,
-            AvailableFacts());
+            SkillInvocationPayloadState.Available,
+            SkillInvocationPayloadReason.None,
+            AvailableFacts(),
+            SampleIdentity());
         var capability = new ThrowingRuntimeCapability();
         var sourceEnvelopes = new[] { envelope };
-        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability);
-        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability());
+        var batch = new ParsedSkillInvocationV2Batch(sourceEnvelopes, capability, SkillInvocationV2TestIdentity.V1065, SampleNativeSessionId);
+        var other = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SkillInvocationV2TestIdentity.V1065, SampleNativeSessionId);
         sourceEnvelopes[0] = new SkillInvocationV2AcceptedEnvelope(
             new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
-            SkillInvocationV2PayloadState.Missing,
-            SkillInvocationV2PayloadReason.NameMissing,
-            null);
+            SkillInvocationPayloadState.Missing,
+            SkillInvocationPayloadReason.NameMissing,
+            null,
+            SampleIdentity());
 
         Assert.Same(capability, batch.RuntimeCapability);
         Assert.Same(envelope, Assert.Single(batch.AcceptedEnvelopes));
@@ -138,8 +144,54 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         var serialized = JsonSerializer.Serialize(batch);
 
         Assert.DoesNotContain("RuntimeCapability", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("CertifiedIdentity", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProtocolVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("RegistryRevision", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("SourceApplicationVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("AdapterVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("NormalizationVersion", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("PayloadSchema", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("SchemaFingerprint", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("1.0.65", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.normalize.v2", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-copilot-sdk.skill-invoked.v1", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime-capability-must-not-leak", batch.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Identity_NeverLeaksIntoBatchOrEnvelopeToStringOrJsonSerialization()
+    {
+        var identity = new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb",
+            new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
+            "run-SENTINEL-VALUE",
+            true,
+            null,
+            null);
+        var envelope = new SkillInvocationV2AcceptedEnvelope(
+            new SkillInvocationV2RawPayloadEvidence(Encoding.UTF8.GetBytes("{}")),
+            SkillInvocationPayloadState.Available,
+            SkillInvocationPayloadReason.None,
+            AvailableFacts(),
+            identity);
+        var batch = new ParsedSkillInvocationV2Batch([envelope], new ThrowingRuntimeCapability(), SkillInvocationV2TestIdentity.V1065, "native-SENTINEL-VALUE");
+
+        Assert.DoesNotContain("SENTINEL", batch.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("SENTINEL", JsonSerializer.Serialize(batch), StringComparison.Ordinal);
+        Assert.DoesNotContain("SENTINEL", envelope.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EventIdentity_RejectsNonnullProducerTraceOrSpanId()
+    {
+        Assert.Throws<ArgumentException>(() => new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", null, DateTimeOffset.UnixEpoch, null, false, "trace", null));
+        Assert.Throws<ArgumentException>(() => new SkillInvocationV2EventIdentity(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", null, DateTimeOffset.UnixEpoch, null, false, null, "span"));
     }
 
     [Fact]
@@ -222,6 +274,17 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         new SkillInvocationV2TextEvidence("body"),
         new SkillInvocationV2TextEvidence(".github/skills/skill.md"));
 
+    private const string SampleNativeSessionId = "native-session";
+
+    private static SkillInvocationV2EventIdentity SampleIdentity() => new(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb",
+        new DateTimeOffset(2026, 8, 9, 0, 0, 0, TimeSpan.Zero),
+        "run-1",
+        true,
+        null,
+        null);
+
     private static void AssertRejectedExact(byte[] schema, byte[] sidecar, IReadOnlyDictionary<int, byte[]> history)
     {
         var method = typeof(SkillInvocationV2ArtifactRegistry).GetMethod(
@@ -239,6 +302,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
 
     private sealed class ThrowingRuntimeCapability : ISkillInvocationV2RuntimeCapability
     {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity => SkillInvocationV2TestIdentity.V1065;
+
         public override string ToString() => "runtime-capability-must-not-leak";
 
         public override int GetHashCode() => throw new InvalidOperationException("Capability hash must not be observed.");

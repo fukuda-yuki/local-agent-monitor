@@ -1100,10 +1100,21 @@ public sealed class RawHttpTerminalMigrationTests
             nameof(ISessionStore.GetRawRetentionState) => SessionRawRetentionState.Expiring,
             nameof(ISessionStore.GetHumanEvaluation) => null,
             nameof(ISessionStore.ReadContentAsync) => ReadContent(),
+            nameof(ISessionStore.ReadGenericRouteContentAsync) => ReadGenericRouteContent(),
             _ => throw new NotSupportedException(targetMethod?.Name),
         };
 
-        private ValueTask<SessionContentReadResult> ReadContent()
+        private ValueTask<SessionContentReadResult> ReadContent() =>
+            ValueTask.FromResult(new SessionContentReadResult(
+                SessionContentReadDisposition.Granted, CreateLease()));
+
+        // The generic raw content route reads through its own operation, so the proxy serves the
+        // same granted lease there: these tests are about the terminal seal, not the policy check.
+        private ValueTask<SessionGenericRouteContentReadResult> ReadGenericRouteContent() =>
+            ValueTask.FromResult(new SessionGenericRouteContentReadResult(
+                SessionGenericRouteContentDisposition.Granted, CreateLease()));
+
+        private SessionContentReadLease CreateLease()
         {
             var content = new SessionEventContent(
                 EventId,
@@ -1135,7 +1146,7 @@ public sealed class RawHttpTerminalMigrationTests
                     };
                 },
                 () => throw new NotSupportedException());
-            return ValueTask.FromResult(new SessionContentReadResult(SessionContentReadDisposition.Granted, lease));
+            return lease;
         }
     }
 

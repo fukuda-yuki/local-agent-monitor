@@ -8,7 +8,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 |---|---|---|
 | Product definition | `docs/superpowers/specs/2026-07-28-local-monitor-v1-product-definition.md` | — |
 | IA/page hierarchy/layout/states | [`local-monitor-v1-ia.md`](local-monitor-v1-ia.md), #132 | #135–#140, #145–#146, #167 |
-| Human route/URL/Session collection request transport | [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md), PO136-A2b | #136 pure parsers; active mapping waits for the exact #134 response contract |
+| Human route/URL/Session collection request transport | [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md), PO136-A2b | #136 pure parsers |
 | Source claims/missing semantics | #129 | #137 and feature owners |
 | Repository catalog/locator/assignment | [`local-repository-catalog.md`](local-repository-catalog.md), [DC156-12–19 executable closure](local-repository-catalog-executable.md), #155 | #156 |
 | Source-version interpretation correction | [`source-compatibility-reconciliation.md`](../layers/source-compatibility-reconciliation.md), #154 | #154 |
@@ -19,7 +19,8 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Session/Repository archive | [`local-archive.md`](local-archive.md), #160, D082 | #161 |
 | Optional AI snapshots/results/history | #162 plus the run-ID route amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #163/#164 |
 | Repository Session Compare | #165 plus the identity/expiry amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
-| Repository/Session Workspace reads | #133 semantic requirements plus the collection-request/execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md); exact Session-collection success wire remains a required later canonical #134 contract | #134 after that response contract closes |
+| Session collection success response | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md), composing #133 semantics and [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) request/transport/cursor rules | #134 |
+| Other Repository/Session Workspace reads | #133 semantic requirements and the execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #134 |
 | Japanese sentence-level copy | #169 | #169 and UI owners |
 | Cross-cutting validation | #147 | #147 |
 | User documentation | accepted canonical docs | #148 |
@@ -52,11 +53,10 @@ telemetry fixes / #154
 #148 user docs
 ```
 
-The #136 pure typed path/query/request/cursor foundation may be implemented
-before #134. #133 does not yet define the complete exact Session-collection
-success wire. Active page/endpoint registration therefore remains gated on a
-later canonical #134 Workspace-read response contract as well as its semantic
-owners: #134 alone eventually maps the POST, the functional Explorer and atomic
+The #136 pure typed path/query/request/cursor foundation composes with the
+accepted exact success wire in `local-monitor-v1-session-collection.md`.
+#133's incomplete response prose is superseded by that sole success authority;
+#134 alone maps and serializes the POST. The functional Explorer and atomic
 `/traces` retirement are #138-owned, and `/historical-analysis` retirement is
 #164-owned. No placeholder route, inferred DTO/serializer or substitute reader
 is permitted.
@@ -82,11 +82,11 @@ is permitted.
   `GET /api/local-monitor/v1/repositories`. #156 owns its five
   management/action routes, not the composite Repository-card read.
 - The sole Session collection transport is
-  `POST /api/local-monitor/v1/sessions`. Its request transport is exact, but
-  #133's current response description is not a complete wire contract. #134
-  alone may map, read and serialize it only after the later canonical response
-  contract closes; there is no GET alias, saved-search handle, compatibility
-  reader, fallback or second Workspace reader.
+  `POST /api/local-monitor/v1/sessions`. Its request transport composes with
+  the sole success authority in `local-monitor-v1-session-collection.md`; #134
+  alone maps, reads and serializes it. #133's former GET and incomplete response
+  prose are superseded. There is no GET alias, saved-search handle,
+  compatibility reader, fallback or second Workspace reader.
 - Human primary paths are lowercase, slashless and exact. Matched malformed
   IDs/queries fail closed; literal/case/slash near-path aliases are empty
   no-store 404 and never redirect.

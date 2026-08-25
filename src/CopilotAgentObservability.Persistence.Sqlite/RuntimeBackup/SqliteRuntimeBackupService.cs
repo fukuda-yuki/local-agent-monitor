@@ -10,6 +10,7 @@ using CopilotAgentObservability.Persistence.Sqlite.HistoricalImport;
 using CopilotAgentObservability.Persistence.Sqlite.HistoricalInstructionAnalysis;
 using CopilotAgentObservability.Persistence.Sqlite.Pricing;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.SanitizedImport;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using Microsoft.Data.Sqlite;
@@ -38,12 +39,14 @@ public sealed class SqliteRuntimeBackupService
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
         ["local_repository_catalog"] = 1,
+        ["local_workspace_projection"] = 2,
         ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
         ["runtime_backup"] = 1,
         ["sanitized_import"] = 1,
         ["session"] = 14,
+        ["skill_invocation_snapshot"] = 1,
         ["skill_projection"] = 1,
     };
     private static readonly string[] RetentionStoreKinds = ["session_event_content", "raw_record", "analysis_run_raw", "sensitive_bundle", "analysis_sdk_directory"];
@@ -56,6 +59,8 @@ public sealed class SqliteRuntimeBackupService
         "local_archive",
         "retention",
         "skill_projection",
+        "skill_invocation_snapshot",
+        "local_workspace_projection",
         "doctor",
         "alert_engine",
         "alert_lifecycle",
@@ -115,7 +120,7 @@ public sealed class SqliteRuntimeBackupService
         var lease = new RuntimeBackupMonitorLease(database, stream);
         try
         {
-            var result = PrepareMonitorInitializationWithLease(database);
+            var result = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
             if (!result.Success)
             {
                 lease.Dispose();
@@ -139,7 +144,9 @@ public sealed class SqliteRuntimeBackupService
         { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
     }
 
-    private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(string database)
+    private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(
+        string database,
+        bool refreshLocalWorkspaceProjection)
     {
         if (!RecoverTransientFiles(Path.GetDirectoryName(database)!, Path.GetFileName(database))
             || !RecoverTransientFiles(Path.Combine(Path.GetDirectoryName(database)!, "runtime-backups"), Path.GetFileName(database)))
@@ -163,6 +170,8 @@ public sealed class SqliteRuntimeBackupService
             return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         }
         recoveryGuard?.Dispose();
+        if (refreshLocalWorkspaceProjection)
+            RefreshLiveLocalWorkspaceProjection(database);
         using var validationGuard = TryAcquireRecoveryGuard(database);
         if (validationGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
         var result = ValidateMonitorComponentVersions(database);
@@ -171,9 +180,45 @@ public sealed class SqliteRuntimeBackupService
             : new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
     }
 
+    private void RefreshLiveLocalWorkspaceProjection(string database)
+    {
+        using var connection = Open(database, SqliteOpenMode.ReadWrite, immutableReadOnly: false);
+        using var transaction = connection.BeginTransaction();
+        using var installed = connection.CreateCommand();
+        installed.Transaction = transaction;
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_version');";
+        bool hasOwnedObjects;
+        var hasVersionTable = Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+        installed.CommandText = "SELECT name,tbl_name FROM sqlite_schema;";
+        using (var reader = installed.ExecuteReader())
+        {
+            hasOwnedObjects = false;
+            while (reader.Read() && !hasOwnedObjects)
+                hasOwnedObjects = reader.GetString(0).StartsWith("local_workspace_", StringComparison.OrdinalIgnoreCase)
+                    || reader.GetString(1).StartsWith("local_workspace_", StringComparison.OrdinalIgnoreCase);
+        }
+        if (!hasVersionTable && !hasOwnedObjects)
+        {
+            transaction.Commit();
+            return;
+        }
+        if (!hasVersionTable) throw new InvalidOperationException("local_workspace_projection_component_stamp_missing");
+        installed.CommandText = "SELECT version FROM schema_version WHERE component='local_workspace_projection';";
+        var version = installed.ExecuteScalar();
+        if (version is null && !hasOwnedObjects)
+        {
+            transaction.Commit();
+            return;
+        }
+        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, transaction);
+        if (version is long current && current == LocalWorkspaceProjectionSchemaV1.Version)
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
+        transaction.Commit();
+    }
+
     private RuntimeBackupPreflightResult CompleteMonitorInitializationWithLease(string database)
     {
-        var preparation = PrepareMonitorInitializationWithLease(database);
+        var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
         EnsureCurrentBackupTail(database);
         checkpoint?.Invoke(CatalogAfterMonitorTailCheckpoint);
@@ -187,7 +232,7 @@ public sealed class SqliteRuntimeBackupService
 
     private RuntimeBackupPreflightResult InitializeWithLease(string database)
     {
-        var preparation = PrepareMonitorInitializationWithLease(database);
+        var preparation = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: false);
         if (!preparation.Success || !PathEntryExists(database)) return preparation;
         var recoveryGuard = TryAcquireRecoveryGuard(database);
         if (recoveryGuard is null) return new(false, RuntimeBackupErrorCodes.RestoreRollbackFailed);
@@ -240,7 +285,9 @@ public sealed class SqliteRuntimeBackupService
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (HasUndeclaredLocalRepositoryCatalogObjects(connection, versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
-            if (!HasValidLocalArchiveParents(versions))
+            if (!HasValidLocalArchiveParents(versions)
+                || !HasValidLocalWorkspaceProjectionParents(versions)
+                || !HasValidSkillInvocationSnapshotParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (versions.ContainsKey("local_repository_catalog")
                 && (!versions.TryGetValue("session", out var sessionVersion)
@@ -379,7 +426,9 @@ public sealed class SqliteRuntimeBackupService
                 && (!versions.TryGetValue("session", out var sessionVersion)
                     || !IsCurrentOrLegacySessionParent(sessionVersion)))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
-            if (!HasValidLocalArchiveParents(versions))
+            if (!HasValidLocalArchiveParents(versions)
+                || !HasValidLocalWorkspaceProjectionParents(versions)
+                || !HasValidSkillInvocationSnapshotParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
@@ -404,6 +453,22 @@ public sealed class SqliteRuntimeBackupService
             && sessionVersion == SupportedComponents["session"]
             && versions.TryGetValue("local_repository_catalog", out var catalogVersion)
             && catalogVersion == SupportedComponents["local_repository_catalog"];
+
+    private static bool HasValidLocalWorkspaceProjectionParents(IReadOnlyDictionary<string, int> versions) =>
+        !versions.ContainsKey("local_workspace_projection")
+        || versions.TryGetValue("session", out var sessionVersion)
+            && sessionVersion == SupportedComponents["session"];
+
+    // The child component's Session-14 conditional trigger registry only activates for the exact
+    // parent version, so a legacy Session parent is never acceptable here.
+    private static bool HasValidSkillInvocationSnapshotParents(IReadOnlyDictionary<string, int> versions) =>
+        !versions.ContainsKey("skill_invocation_snapshot")
+        || versions.TryGetValue("session", out var sessionVersion)
+            && sessionVersion == SupportedComponents["session"]
+            && versions.TryGetValue("retention", out var retentionVersion)
+            && retentionVersion == SupportedComponents["retention"]
+            && versions.TryGetValue("skill_projection", out var projectionVersion)
+            && projectionVersion == SupportedComponents["skill_projection"];
 
     private static bool IsCurrentOrLegacySessionParent(int version) =>
         version is 13 || version == SupportedComponents["session"];
@@ -1243,7 +1308,9 @@ public sealed class SqliteRuntimeBackupService
         if (!HasColumns(connection, "schema_version", "component", "version")) return false;
         if (!ValidateOwnedComponentNamespaces(connection, versions)) return false;
         if (versions.ContainsKey("local_repository_catalog")
-            || versions.ContainsKey("local_archive"))
+            || versions.ContainsKey("local_archive")
+            || versions.ContainsKey("skill_invocation_snapshot")
+            || versions.ContainsKey("local_workspace_projection"))
         {
             if (versions.ContainsKey("local_repository_catalog")
                 && (!versions.TryGetValue("session", out var localRepositorySessionVersion)
@@ -1265,6 +1332,15 @@ public sealed class SqliteRuntimeBackupService
                         componentTransaction,
                         LocalArchiveSessionTargetExistenceAuthority.Instance,
                         SqliteLocalRepositoryTargetExistenceAuthority.Instance);
+                if (versions.ContainsKey("skill_invocation_snapshot"))
+                    SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
+                if (versions.ContainsKey("local_workspace_projection"))
+                {
+                    if (versions["local_workspace_projection"] == 1)
+                        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, componentTransaction);
+                    else
+                        LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction);
+                }
             }
             catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
             {
@@ -1493,6 +1569,11 @@ public sealed class SqliteRuntimeBackupService
             foreach (var trigger in LocalArchiveSchemaV1.TriggerDefinitions)
                 allowed[trigger.Name] = (trigger.Table, trigger.Sql);
         }
+        if (versions.ContainsKey("skill_invocation_snapshot"))
+        {
+            foreach (var trigger in SkillInvocationSnapshotSchemaV1.TriggerDefinitions)
+                allowed[trigger.Name] = (trigger.Table, trigger.Sql);
+        }
 
         var actual = new HashSet<string>(StringComparer.Ordinal);
         using var command = connection.CreateCommand();
@@ -1666,6 +1747,10 @@ public sealed class SqliteRuntimeBackupService
             owners[trigger.Name] = "local_repository_catalog";
         foreach (var item in LocalArchiveSchemaV1.OwnedObjects)
             owners[item.Name] = "local_archive";
+        foreach (var item in SkillInvocationSnapshotSchemaV1.OwnedObjects)
+            owners[item.Name] = "skill_invocation_snapshot";
+        foreach (var item in LocalWorkspaceProjectionSchemaV1.OwnedObjects)
+            owners[item.Name] = "local_workspace_projection";
         if (versions.TryGetValue("monitor", out var monitorVersion)
             && monitorVersion is >= 9 and < 11
             && !versions.ContainsKey("skill_projection"))
@@ -1696,6 +1781,7 @@ public sealed class SqliteRuntimeBackupService
             "IX_session_repository_",
             "local_archive_",
             "IX_local_archive_",
+            "local_workspace_",
         };
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT name,tbl_name FROM sqlite_schema WHERE type IN ('table','index','trigger','view') ORDER BY name;";
@@ -2392,6 +2478,8 @@ public sealed class SqliteRuntimeBackupService
                 else
                     retention.InitializeForWrite(connection, transaction);
                 SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
+                SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
                 EnsureDoctorSchema(connection, transaction);
                 SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
                 HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
@@ -2501,7 +2589,7 @@ public sealed class SqliteRuntimeBackupService
         if (reader.Read()) throw new InvalidOperationException("Runtime backup migration produced invalid foreign keys.");
     }
 
-    private static void EnsureCurrentBackupTail(string path)
+    private void EnsureCurrentBackupTail(string path)
     {
         Dictionary<string, int> versions;
         using (var read = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: false))
@@ -2526,6 +2614,12 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction(deferred: false);
         LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
         LocalArchiveSchemaV1.Ensure(connection, transaction);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
+        // The child component installs only behind its declared parents. A current database that
+        // predates Retention or Skill Projection has no parent graph to hang it on, and installing
+        // it there would create the objects without a validatable owner.
+        if (versions.ContainsKey("retention") && versions.ContainsKey("skill_projection"))
+            SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
         RuntimeBackupSchemaV1.Ensure(connection, transaction);
         PricingSchemaV1.Ensure(connection, transaction);
         transaction.Commit();

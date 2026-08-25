@@ -203,10 +203,10 @@ Selecting a row opens Session detail directly. There is no preview pane.
 
 The browser will obtain this list only through the #133/#134-owned closed
 body-bearing POST; this UI never reads Workspace or Repository tables directly.
-#133 currently defines semantic row requirements but not the complete exact
-success response wire. The POST and functional Explorer page remain
-unregistered until a later canonical #134 Workspace-read response contract
-fixes that wire; #134 then alone performs the coherent read and serialization.
+#133's semantic row requirements compose with the accepted exact success wire
+in [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md).
+#134 alone maps the POST and performs the coherent read and serialization; the
+functional Explorer page remains #138-owned.
 
 ### Compare selection mode
 
@@ -593,8 +593,8 @@ At widths below 1180px, the inspector becomes a right overlay/drawer instead of 
 | Archive | [Local Archive v1](local-archive.md) + #160/D082 | #161 |
 | AI scope/history | #162 | #163/#164 |
 | Compare | #165 | #166 |
-| Workspace read APIs | #133 plus a required later exact response contract | #134 after that contract closes |
-| Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps only after its response gate closes |
+| Workspace read APIs | #133 plus accepted #171 [Session collection success contract](local-monitor-v1-session-collection.md) | #134; mapping may proceed |
+| Human route/URL/Session collection request transport | [route transport](local-monitor-v1-route-transport.md) + #136 | #136 pure parsers; #134 maps the accepted success wire |
 | Shell/header/Settings host | this spec | #135/#136 |
 | Missing states | #129 + this spec | #137 |
 | Repository selection | this spec | #167 |
