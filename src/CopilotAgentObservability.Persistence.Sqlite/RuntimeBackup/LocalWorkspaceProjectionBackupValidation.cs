@@ -103,14 +103,23 @@ internal static class LocalWorkspaceProjectionBackupValidation
         }
 
         var expected = new Dictionary<(long RawId, int Ordinal), (long? Retry, long? Total)>();
+        var availableRawIds = new HashSet<long>();
         using (var records = connection.CreateCommand())
         {
             records.Transaction = transaction;
-            records.CommandText = "SELECT id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version FROM raw_records ORDER BY id;";
+            records.CommandText = """
+                SELECT r.id,r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version
+                FROM raw_records r
+                JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(r.id AS TEXT)
+                WHERE i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
+                  AND i.deleted_at IS NULL AND i.error_code IS NULL
+                ORDER BY r.id;
+                """;
             using var reader = records.ExecuteReader();
             while (reader.Read())
             {
                 var rawId = reader.GetInt64(0);
+                availableRawIds.Add(rawId);
                 if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
                     throw new InvalidOperationException();
                 var raw = new RawTelemetryRecord(rawId, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
@@ -131,7 +140,10 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 actual.Add((reader.GetInt64(0), reader.GetInt32(1)),
                     (reader.IsDBNull(2) ? null : reader.GetInt64(2), reader.IsDBNull(3) ? null : reader.GetInt64(3)));
         }
-        if (expected.Count != actual.Count || expected.Any(pair => !actual.TryGetValue(pair.Key, out var value) || value != pair.Value))
+        if (actual.Keys.Any(key => !monitorKeys.Contains(key)))
+            throw new InvalidOperationException();
+        var availableActual = actual.Where(pair => availableRawIds.Contains(pair.Key.RawId)).ToDictionary();
+        if (expected.Count != availableActual.Count || expected.Any(pair => !availableActual.TryGetValue(pair.Key, out var value) || value != pair.Value))
             throw new InvalidOperationException();
     }
 
