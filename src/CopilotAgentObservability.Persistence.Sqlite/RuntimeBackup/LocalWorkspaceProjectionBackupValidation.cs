@@ -46,19 +46,83 @@ internal static class LocalWorkspaceProjectionBackupValidation
             if (Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0)
                 throw new InvalidOperationException();
             command.CommandText = "SELECT label_expires_at FROM local_workspace_sessions WHERE label_state='recorded';";
-            using var reader = command.ExecuteReader();
             var now = DateTimeOffset.UtcNow;
-            while (reader.Read())
+            using (var reader = command.ExecuteReader())
             {
-                var value = reader.GetString(0);
-                if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)
-                    || expiry.Offset != TimeSpan.Zero || expiry <= now)
-                    throw new InvalidOperationException();
+                while (reader.Read())
+                {
+                    var value = reader.GetString(0);
+                    if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)
+                        || expiry.Offset != TimeSpan.Zero || expiry <= now)
+                        throw new InvalidOperationException();
+                }
             }
+            ValidateCanonicalProjection(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             throw new InvalidOperationException("local_workspace_projection_backup_invalid", exception);
         }
+    }
+
+    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var before = Snapshot(connection, transaction);
+        using var readNow = connection.CreateCommand();
+        readNow.Transaction = transaction;
+        readNow.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
+        var text = readNow.ExecuteScalar() as string;
+        if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
+            throw new InvalidOperationException();
+        Execute(connection, transaction, "SAVEPOINT local_workspace_validation;");
+        try
+        {
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, projectorNow);
+            if (!before.SequenceEqual(Snapshot(connection, transaction), StringComparer.Ordinal))
+                throw new InvalidOperationException();
+        }
+        finally
+        {
+            Execute(connection, transaction, "ROLLBACK TO local_workspace_validation;");
+            Execute(connection, transaction, "RELEASE local_workspace_validation;");
+        }
+    }
+
+    private static string[] Snapshot(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var rows = new List<string>();
+        foreach (var table in LocalWorkspaceProjectionSchemaV1.TableNames.Order(StringComparer.Ordinal))
+        {
+            var columns = new List<string>();
+            using (var info = connection.CreateCommand())
+            {
+                info.Transaction = transaction;
+                info.CommandText = "SELECT name FROM pragma_table_xinfo($table) WHERE hidden=0 ORDER BY cid;";
+                info.Parameters.AddWithValue("$table", table);
+                using var reader = info.ExecuteReader();
+                while (reader.Read()) columns.Add(reader.GetString(0));
+            }
+            var projection = string.Join(',', columns.Select(static column => $"\"{column.Replace("\"", "\"\"")}\""));
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"SELECT {projection} FROM \"{table}\" ORDER BY {projection};";
+            using var data = command.ExecuteReader();
+            while (data.Read())
+            {
+                var values = new string[data.FieldCount];
+                for (var index = 0; index < values.Length; index++)
+                    values[index] = data.IsDBNull(index) ? "N" : data.GetFieldType(index) == typeof(byte[]) ? "B" + Convert.ToHexString((byte[])data.GetValue(index)) : "V" + Convert.ToString(data.GetValue(index), CultureInfo.InvariantCulture);
+                rows.Add(table + "\0" + string.Join("\0", values));
+            }
+        }
+        return rows.ToArray();
+    }
+
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
     }
 }

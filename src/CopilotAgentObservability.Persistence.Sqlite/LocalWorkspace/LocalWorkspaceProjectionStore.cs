@@ -16,7 +16,6 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
     {
-        if (sessionIds.Count == 0) return;
         var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
         ExecuteWithIds(connection, transaction, """
             DELETE FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));

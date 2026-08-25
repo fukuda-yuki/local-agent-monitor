@@ -1495,6 +1495,8 @@ public sealed class SkillProjectionGenerationTests
         Assert.Empty(
             new SkillProjectionReadService(database.Path)
                 .ListCurrentSdkClaims(sessionId));
+        using var transaction = validation.BeginTransaction(deferred: true);
+        Assert.Empty(SkillProjectionReadService.ReadSessionInvocationAggregates(validation, transaction, [sessionId]));
     }
 
     [Fact]
@@ -1523,6 +1525,8 @@ public sealed class SkillProjectionGenerationTests
 
         Assert.Null(aggregate.InvocationCount);
         Assert.Null(aggregate.State);
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.Empty(SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, [sessionId]));
     }
 
     [Fact]
