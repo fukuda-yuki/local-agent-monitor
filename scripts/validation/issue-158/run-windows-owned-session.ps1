@@ -122,7 +122,7 @@ try {
  if($LASTEXITCODE-ne0-or($scanOutput-join'')-cne'scan_result=PASSED'){throw 'scan'}
  $blockedCode='wrapper_result_validation';$preparedBytes=[IO.File]::ReadAllBytes((Join-Path $result $resultFile))
  $prepared=Get-Issue158ValidatedResult $preparedBytes $CandidateSha windows_owned_session $runtimeMarker $false
- $counts=$prepared.Json.counts;$invocations=$counts.user_invoked+$counts.agent_invoked;if($counts.user_invoked-cne1-or$counts.agent_invoked-cnotin@(0,1)-or$counts.task_complete-cne1-or$counts.v1_imported-cne2-or$counts.v2_imported-cne$invocations-or$counts.snapshot_rows-cne$invocations){throw 'result_topology'}
+ $counts=$prepared.Json.counts;$invocations=$counts.user_invoked+$counts.agent_invoked;if($counts.user_invoked-cne1-or$counts.agent_invoked-lt0-or$counts.agent_invoked-gt63-or$invocations-lt1-or$invocations-gt64-or$counts.task_complete-cne1-or$counts.v1_imported-cne2-or$counts.v2_imported-cne$invocations-or$counts.snapshot_rows-cne$invocations){throw 'result_topology'}
  $retained=$prepared.Json
  $blockedCode='wrapper_result_cleanup';Remove-Owned $result result $true
  if((Test-Path -LiteralPath $runtime)-or(Test-Path -LiteralPath $result)){throw 'cleanup'}

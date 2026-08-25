@@ -310,7 +310,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             (valid with { ProbeInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount),
             (valid with { ExecutionInventoryCount = 0 }, Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount),
             (valid with { PreparedInvocationCount = 0 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationNone),
-            (valid with { PreparedInvocationCount = 3 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess),
+            (valid with { PreparedInvocationCount = 65 }, Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess),
             (valid with { SameClient = false }, Issue158ExecutionEvidenceFailureV1.SameClient),
             (valid with { ExactToolUnion = false }, Issue158ExecutionEvidenceFailureV1.ExactToolUnion),
             (valid with { RetainedOnlyInventory = false }, Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory),
@@ -326,10 +326,20 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [InlineData(0, "prepared_invocation_none")]
     [InlineData(1, "none")]
     [InlineData(2, "none")]
-    [InlineData(3, "prepared_invocation_excess")]
+    [InlineData(3, "none")]
+    [InlineData(64, "none")]
+    [InlineData(65, "prepared_invocation_excess")]
     public void EvidenceClassifierClosesPreparedInvocationCardinality(int count, string expected) =>
         Assert.Equal(expected, Issue158WindowsBlocker.ExecutionEvidenceWire(
             Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { PreparedInvocationCount = count }])));
+
+    [Fact]
+    public void EvidenceClassifierFailsClosedForImpossibleNegativePreparedInvocationCount()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            Issue158ExecutionEvidenceClassifier.Classify([ValidEvidence() with { PreparedInvocationCount = -1 }]));
+        Assert.Equal("execution_evidence", exception.Message);
+    }
 
     [Fact]
     public void BlockerAcceptsOnlyClosedEvidenceDetailCrossPairAndPublicationCheckpoints()
@@ -461,12 +471,23 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [InlineData(2, 2, 1, 1, 2)]
     [InlineData(2, 2, 0, 2, 0)]
     [InlineData(2, 1, 1, 1, 1)]
-    [InlineData(3, 3, 1, 1, 2)]
+    [InlineData(65, 65, 1, 64, 1)]
     public void PersistenceVerifierRejectsInvalidTriggerAndAggregateCombinations(
         long snapshots, long claims, long userInvoked, long agentInvoked, long taskComplete)
     {
         var facts = new Issue158PersistenceFacts(snapshots, claims, 1, taskComplete, userInvoked, agentInvoked);
         Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(facts));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(63)]
+    public void PersistenceVerifierAcceptsAuthoritativeAgentCardinality(long agentInvoked)
+    {
+        var total = 1 + agentInvoked;
+        Assert.Equal(2, Issue158PersistenceFactVerifier.Verify(new(total, total, 1, 1, 1, agentInvoked)));
     }
 
     [Theory]
@@ -478,7 +499,8 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [InlineData(2, 2, 1, 2, 1, 1)]
     [InlineData(2, 2, 1, 1, 0, 2)]
     [InlineData(2, 2, 1, 1, 2, 0)]
-    [InlineData(3, 3, 1, 1, 1, 2)]
+    [InlineData(3, 3, 1, 1, 1, 1)]
+    [InlineData(65, 65, 1, 1, 1, 64)]
     public void PersistenceVerifierRequiresEveryIndependentDoubleTopologyFact(
         long snapshots, long claims, long start, long complete, long user, long agent) =>
         Assert.Throws<InvalidOperationException>(() => Issue158PersistenceFactVerifier.Verify(
@@ -603,6 +625,8 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [Theory]
     [InlineData(0, 1)]
     [InlineData(1, 2)]
+    [InlineData(2, 3)]
+    [InlineData(63, 64)]
     public void ResultSerializationIsStrictTruthfulAndSanitized(int agentInvoked, int total)
     {
         var json = Issue158WindowsResult.Serialize(ValidObservedResult(agentInvoked));
@@ -643,6 +667,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [InlineData(16)]
     [InlineData(17)]
     [InlineData(18)]
+    [InlineData(19)]
     public void ResultSerializationRejectsEachIndependentCertificationFailure(int mutation)
     {
         var result = ValidObservedResult();
@@ -652,7 +677,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             1 => result with { V2Imported = 1 },
             2 => result with { SnapshotRows = 1 },
             3 => result with { UserInvoked = 0, Evidence = result.Evidence with { PreparedInvocationCount = 1 }, V2Imported = 1, SnapshotRows = 1 },
-            4 => result with { AgentInvoked = 2, Evidence = result.Evidence with { PreparedInvocationCount = 3 }, V2Imported = 3, SnapshotRows = 3 },
+            4 => result with { AgentInvoked = 64, Evidence = result.Evidence with { PreparedInvocationCount = 65 }, V2Imported = 65, SnapshotRows = 65 },
             5 => result with { TaskComplete = 0 },
             6 => result with { V1Imported = 1 },
             7 => result with { OperatorGate = false },
@@ -667,6 +692,7 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             16 => result with { Evidence = result.Evidence with { SameClient = false } },
             17 => result with { Evidence = result.Evidence with { ExecutionNativeReproof = false } },
             18 => result with { Evidence = result.Evidence with { CallbackNativeReproof = false } },
+            19 => result with { Evidence = result.Evidence with { PreparedInvocationCount = 65 } },
             _ => throw new InvalidOperationException(),
         };
         Assert.Throws<InvalidOperationException>(() => Issue158WindowsResult.Serialize(result));
@@ -675,9 +701,10 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [Theory]
     [InlineData(1, 0)]
     [InlineData(1, 2)]
-    [InlineData(2, 0)]
-    [InlineData(2, 1)]
-    [InlineData(2, 3)]
+    [InlineData(3, 2)]
+    [InlineData(64, 63)]
+    [InlineData(64, 65)]
+    [InlineData(65, 65)]
     public void CommittedIdentitiesMustMatchCertifiedPreparedCardinality(int prepared, int committedCount)
     {
         var session = Guid.CreateVersion7();
@@ -689,6 +716,8 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(64)]
     public void CommittedIdentitiesAcceptExactCertifiedPreparedCardinality(int count)
     {
         var session = Guid.CreateVersion7();
@@ -719,6 +748,35 @@ public sealed class Issue158OwnedSessionLiveHarnessTests
             new SkillInvocationV2CommittedIdentityV1(session, snapshot),
         };
         Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 2));
+    }
+
+    [Fact]
+    public void CommittedIdentitiesRejectHighCardinalityMixedSessionAfterValidPrefix()
+    {
+        var session = Guid.CreateVersion7();
+        var values = Enumerable.Range(0, 64)
+            .Select(_ => new SkillInvocationV2CommittedIdentityV1(session, Guid.CreateVersion7())).ToArray();
+        values[^1] = values[^1] with { SessionId = Guid.CreateVersion7() };
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 64));
+    }
+
+    [Fact]
+    public void CommittedIdentitiesRejectHighCardinalityDuplicateSnapshotAfterValidPrefix()
+    {
+        var session = Guid.CreateVersion7();
+        var values = Enumerable.Range(0, 64)
+            .Select(_ => new SkillInvocationV2CommittedIdentityV1(session, Guid.CreateVersion7())).ToArray();
+        values[^1] = values[^1] with { SnapshotId = values[^2].SnapshotId };
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 64));
+    }
+
+    [Fact]
+    public void CommittedIdentitiesRejectHighCardinalityReplayTruncation()
+    {
+        var session = Guid.CreateVersion7();
+        var values = Enumerable.Range(0, 63)
+            .Select(_ => new SkillInvocationV2CommittedIdentityV1(session, Guid.CreateVersion7())).ToArray();
+        Assert.Throws<InvalidOperationException>(() => Issue158CommittedIdentityVerifier.Verify(values, 64));
     }
 
     [Fact]
@@ -1385,8 +1443,9 @@ internal static class Issue158ExecutionEvidenceClassifier
         if (value.RetainedSkillCount != 1) return Issue158ExecutionEvidenceFailureV1.RetainedSkillCount;
         if (value.ProbeInventoryCount < value.RetainedSkillCount) return Issue158ExecutionEvidenceFailureV1.ProbeInventoryCount;
         if (value.ExecutionInventoryCount < value.RetainedSkillCount || value.ExecutionInventoryCount > value.ProbeInventoryCount) return Issue158ExecutionEvidenceFailureV1.ExecutionInventoryCount;
+        if (value.PreparedInvocationCount < 0) throw new InvalidOperationException("execution_evidence");
         if (value.PreparedInvocationCount == 0) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationNone;
-        if (value.PreparedInvocationCount is < 0 or > 2) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess;
+        if (value.PreparedInvocationCount > 64) return Issue158ExecutionEvidenceFailureV1.PreparedInvocationExcess;
         if (!value.SameClient) return Issue158ExecutionEvidenceFailureV1.SameClient;
         if (!value.ExactToolUnion) return Issue158ExecutionEvidenceFailureV1.ExactToolUnion;
         if (!value.RetainedOnlyInventory) return Issue158ExecutionEvidenceFailureV1.RetainedOnlyInventory;
@@ -1488,7 +1547,7 @@ internal static class Issue158PersistenceFactVerifier
     {
         var v1Imported = checked(facts.SessionStart + facts.TaskComplete);
         var invocationCount = checked(facts.UserInvoked + facts.AgentInvoked);
-        if (facts is not { SessionStart: 1, TaskComplete: 1, UserInvoked: 1, AgentInvoked: 0 or 1 }
+        if (facts is not { SessionStart: 1, TaskComplete: 1, UserInvoked: 1, AgentInvoked: >= 0 and <= 63 }
             || facts.SnapshotRows != invocationCount || facts.SdkClaims != invocationCount || v1Imported != 2)
             throw new InvalidOperationException("aggregate_counts");
         return v1Imported;
@@ -1500,7 +1559,7 @@ internal static class Issue158CommittedIdentityVerifier
     internal static SkillInvocationV2CommittedIdentityV1[] Verify(
         SkillInvocationV2CommittedIdentityV1[] values, int preparedInvocationCount)
     {
-        if (preparedInvocationCount is < 1 or > 2 || values.Length != preparedInvocationCount
+        if (preparedInvocationCount is < 1 or > 64 || values.Length != preparedInvocationCount
             || values.Select(static item => item.SessionId).Distinct().Count() != 1
             || values.Select(static item => item.SnapshotId).Distinct().Count() != values.Length)
             throw new InvalidOperationException("committed_identity_sequence");
@@ -1786,7 +1845,7 @@ internal static class Issue158WindowsResult
     {
         var invocationCount = checked(result.UserInvoked + result.AgentInvoked);
         if (!IsCertified(result.Evidence) || result is not
-            { UserInvoked: 1, AgentInvoked: 0 or 1, TaskComplete: 1, V1Imported: 2,
+            { UserInvoked: 1, AgentInvoked: >= 0 and <= 63, TaskComplete: 1, V1Imported: 2,
               OperatorGate: true, CliOverrideAbsent: true, MetadataRoute: true, HistoricalRoute: true,
               CurrentFileRoute: true, ShutdownDrain: true }
             || result.Evidence.PreparedInvocationCount != invocationCount
