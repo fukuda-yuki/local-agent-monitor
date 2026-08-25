@@ -5,17 +5,25 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositorySessionSnapshotContributor
 {
     private const int MaximumSessions = 10_000;
+    private readonly TimeProvider timeProvider;
+
+    internal LocalWorkspaceSessionSnapshotContributor(TimeProvider? timeProvider = null) =>
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+
     public ValueTask<LocalRepositorySessionContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken)
     {
-        return transaction.ReadAsync(ReadRowsAsync, cancellationToken);
+        var now = timeProvider.GetUtcNow().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        return transaction.ReadAsync((connection, sqliteTransaction, token) =>
+            ReadRowsAsync(connection, sqliteTransaction, now, token), cancellationToken);
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
+        string now,
         CancellationToken cancellationToken)
     {
         var rows = new List<MutableRow>();
@@ -23,10 +31,17 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         {
             command.Transaction = transaction;
             command.CommandText = """
-                SELECT session_id,sort_group,sort_epoch_ms,label_state,label_text,status,completeness,
+                SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
+                       CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR julianday(c.expires_at)<=julianday($now)) THEN 'expired' ELSE p.label_state END,
+                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND julianday(c.expires_at)>julianday($now) THEN p.label_text END,
+                       p.status,p.completeness,p.source_state,p.model_state,
                        timing_state,started_at,ended_at,duration_ms,capture_notes,revision_seed
-                FROM local_workspace_sessions ORDER BY session_id COLLATE BINARY LIMIT 10001;
+                FROM local_workspace_sessions p
+                LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
+                LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
+                ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
                 """;
+            command.Parameters.AddWithValue("$now", now);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -35,8 +50,8 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 rows.Add(new(
                     reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6),
-                    reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9),
-                    reader.IsDBNull(10) ? null : reader.GetInt64(10), reader.GetString(11), reader.GetString(12)));
+                    reader.GetString(7), reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
+                    reader.IsDBNull(12) ? null : reader.GetInt64(12), reader.GetString(13), reader.GetString(14)));
             }
         }
         var byId = rows.ToDictionary(row => row.SessionId, StringComparer.Ordinal);
@@ -106,6 +121,8 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         private readonly string? label;
         private readonly string status;
         private readonly string completeness;
+        private readonly string sourceState;
+        private readonly string modelState;
         private readonly string timingState;
         private readonly string? startedAt;
         private readonly string? endedAt;
@@ -113,10 +130,10 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         private readonly string notes;
         private readonly string revision;
 
-        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string timingState, string? startedAt, string? endedAt, long? duration, string notes, string revision)
+        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string sourceState, string modelState, string timingState, string? startedAt, string? endedAt, long? duration, string notes, string revision)
         {
             SessionId = sessionId; this.sortGroup = sortGroup; this.sortEpoch = sortEpoch;
-            this.labelState = labelState; this.label = label; this.status = status; this.completeness = completeness;
+            this.labelState = labelState; this.label = label; this.status = status; this.completeness = completeness; this.sourceState = sourceState; this.modelState = modelState;
             this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt;
             this.duration = duration; this.notes = notes; this.revision = revision;
         }
@@ -131,7 +148,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             LocalWorkspaceFact<long> A(string kind) => Activity.TryGetValue(kind, out var fact) ? fact : new("not_observed", null);
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
             return new(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
-                Array.AsReadOnly(Sources.ToArray()), Array.AsReadOnly(Models.ToArray()), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
+                new(sourceState, Array.AsReadOnly(Sources.ToArray())), new(modelState, Array.AsReadOnly(Models.ToArray())), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
                 timingState, startedAt, endedAt, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), revision);
         }
     }

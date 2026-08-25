@@ -20,6 +20,14 @@ internal static class LocalWorkspaceProjectionBackupValidation
                      OR length(p.revision_seed)=0
                      OR (SELECT COUNT(*) FROM local_workspace_session_sources x WHERE x.session_id=p.session_id)>5
                      OR (SELECT COUNT(*) FROM local_workspace_session_models x WHERE x.session_id=p.session_id)>16
+                     OR EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id AND x.source NOT IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code'))
+                     OR EXISTS(SELECT 1 FROM local_workspace_session_models x WHERE x.session_id=p.session_id AND NOT EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=p.session_id AND r.model=x.model COLLATE BINARY))
+                     OR EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id AND NOT EXISTS(
+                       SELECT 1 FROM session_native_ids n WHERE n.session_id=p.session_id AND n.source_surface=x.source COLLATE BINARY
+                       UNION ALL SELECT 1 FROM session_runs r WHERE r.session_id=p.session_id AND r.source_surface=x.source COLLATE BINARY
+                       UNION ALL SELECT 1 FROM session_events e WHERE e.session_id=p.session_id AND e.source_surface=x.source COLLATE BINARY))
+                     OR (p.source_state='recorded')<>(EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id))
+                     OR (p.model_state='recorded')<>(EXISTS(SELECT 1 FROM local_workspace_session_models x WHERE x.session_id=p.session_id))
                      OR (SELECT COUNT(*) FROM local_workspace_session_activity x WHERE x.session_id=p.session_id)<>5
                      OR p.label_state NOT IN ('recorded','not_observed','not_captured','expired')
                      OR p.timing_state NOT IN ('recorded','not_observed','inconsistent')
@@ -30,7 +38,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
                        WHERE e.event_id=p.label_source_identity COLLATE BINARY
                          AND e.session_id=p.session_id COLLATE BINARY
                          AND e.type='user_prompt' COLLATE BINARY
-                         AND e.content_state='available')
+                         AND e.content_state='available'
+                         AND c.expires_at=p.label_expires_at COLLATE BINARY)
                      OR EXISTS(SELECT 1 FROM local_workspace_session_activity a WHERE a.session_id=p.session_id AND a.state NOT IN ('recorded','not_observed'))
                 );
                 """;

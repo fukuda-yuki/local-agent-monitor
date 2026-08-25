@@ -29,6 +29,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 label_expires_at TEXT NULL,
                 status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
                 completeness TEXT NOT NULL CHECK(completeness IN ('unbound','partial','rich','full')),
+                source_state TEXT NOT NULL CHECK(source_state IN ('recorded','not_observed','projection_invalid')),
+                model_state TEXT NOT NULL CHECK(model_state IN ('recorded','not_observed','projection_invalid')),
                 timing_state TEXT NOT NULL,
                 started_at TEXT NULL,
                 ended_at TEXT NULL,

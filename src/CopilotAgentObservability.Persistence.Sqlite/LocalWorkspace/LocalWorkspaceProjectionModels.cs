@@ -1,6 +1,7 @@
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed record LocalWorkspaceFact<T>(string State, T? Value) where T : struct;
+internal sealed record LocalWorkspaceSetFact(string State, IReadOnlyList<string> Values);
 
 internal sealed record LocalWorkspaceActivityFacts(
     LocalWorkspaceFact<long> Skill,
@@ -31,8 +32,8 @@ internal sealed record LocalWorkspaceProjectionRow(
     string? LabelText,
     string Status,
     string Completeness,
-    IReadOnlyList<string> Sources,
-    IReadOnlyList<string> Models,
+    LocalWorkspaceSetFact Sources,
+    LocalWorkspaceSetFact Models,
     LocalWorkspaceActivityFacts Activity,
     LocalWorkspaceTokenFacts Tokens,
     string TimingState,
