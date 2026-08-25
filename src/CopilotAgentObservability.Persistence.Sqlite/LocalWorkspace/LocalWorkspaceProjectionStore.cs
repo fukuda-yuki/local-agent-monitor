@@ -55,6 +55,10 @@ internal static class LocalWorkspaceProjectionStore
             INSERT INTO local_workspace_session_activity SELECT s.session_id,k.kind,'not_observed',NULL FROM sessions s
               CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k
               WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            UPDATE local_workspace_session_activity AS a SET
+              state=CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) THEN CASE WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND e.status='gap_before_capture') THEN 'capture_gap' ELSE 'source_unsupported' END WHEN EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full' THEN 'recorded' ELSE 'not_observed' END,
+              count=CASE WHEN NOT EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND (e.content_state='unsupported' OR e.status='gap_before_capture')) AND (a.kind<>'retry') AND (EXISTS(SELECT 1 FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) OR (SELECT completeness FROM sessions WHERE session_id=a.session_id)='full') THEN (SELECT COUNT(DISTINCT e.event_id) FROM session_events e WHERE e.session_id=a.session_id AND CASE a.kind WHEN 'tool' THEN e.type IN ('tool.execution_start','PreToolUse') WHEN 'subagent' THEN e.type IN ('subagent.started','SubagentStart') WHEN 'error' THEN e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed' ELSE 0 END) END
+              WHERE a.kind IN ('tool','subagent','error');
             INSERT INTO local_workspace_token_observations(session_id,execution_id,authority,authority_rank,source_identity,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens)
               SELECT session_id,run_id,'session_run',0,run_id,input_tokens,output_tokens,total_tokens,NULL,NULL,NULL FROM session_runs
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
@@ -74,15 +78,15 @@ internal static class LocalWorkspaceProjectionStore
 
     private static void ApplyLabels(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
     {
-        connection.CreateFunction<string, string?>("local_workspace_label", static json => TryReadInstruction(json, out var text) ? text : null, isDeterministic: true);
+        connection.CreateFunction<string, string, string?>("local_workspace_label", static (type, json) => TryReadInstruction(type, json, out var text) ? text : null, isDeterministic: true);
         connection.CreateFunction<string, string?>("local_workspace_search", static text => text is null ? null : Search(text), isDeterministic: true);
         connection.CreateFunction<string, string, long>("local_workspace_future", static (expiry, instant) =>
             TryCanonicalFuture(expiry, DateTimeOffset.ParseExact(instant, "O", CultureInfo.InvariantCulture)) ? 1 : 0, isDeterministic: true);
         ExecuteWithIds(connection, transaction, """
             WITH candidates AS (
-              SELECT e.session_id,e.event_id,c.expires_at,local_workspace_label(c.content_json) label_text,e.occurred_at
+              SELECT e.session_id,e.event_id,c.expires_at,local_workspace_label(e.type,c.content_json) label_text,e.occurred_at
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
-              WHERE e.type='user_prompt' COLLATE BINARY AND e.content_state='available'
+              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
                 AND local_workspace_future(c.expires_at,$now)=1),
             ranked AS (SELECT *,row_number() OVER(PARTITION BY session_id ORDER BY occurred_at COLLATE BINARY,event_id COLLATE BINARY) ordinal FROM candidates WHERE label_text IS NOT NULL)
@@ -94,13 +98,14 @@ internal static class LocalWorkspaceProjectionStore
             """, idsJson, Canonical(now));
     }
 
-    private static bool TryReadInstruction(string json, out string text)
+    private static bool TryReadInstruction(string type, string json, out string text)
     {
         text = string.Empty;
         try
         {
             using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("message", out var value) || value.ValueKind != JsonValueKind.String) return false;
+            var property = type == "user.message" ? "value" : "prompt";
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) return false;
             var builder = new StringBuilder(); var previousSpace = false;
             foreach (var rune in value.GetString()!.EnumerateRunes())
             {

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Numerics;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
@@ -87,33 +88,54 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 WITH ranked AS (
                   SELECT *,row_number() OVER(PARTITION BY session_id,execution_id ORDER BY authority_rank,authority,source_identity) ordinal
                   FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))), selected AS (SELECT * FROM ranked WHERE ordinal=1)
-                SELECT session_id,COUNT(*),SUM(input_tokens IS NOT NULL),SUM(input_tokens),SUM(output_tokens),SUM(total_tokens),SUM(reasoning_tokens),SUM(cache_read_tokens),SUM(cache_creation_tokens),
-                       MIN(authority),MAX(authority),SUM(CASE WHEN input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_read_tokens>input_tokens THEN 1 ELSE 0 END)
-                FROM selected GROUP BY session_id ORDER BY session_id;
+                SELECT session_id,execution_id,authority,input_tokens,output_tokens,total_tokens,reasoning_tokens,cache_read_tokens,cache_creation_tokens
+                FROM selected ORDER BY session_id,execution_id;
                 """;
             command.Parameters.AddWithValue("$ids", ids);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            var observations = new Dictionary<string, List<TokenObservation>>(StringComparer.Ordinal);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                if (byId.TryGetValue(reader.GetString(0), out var row)) row.TokenAggregate = ReadTokens(reader);
+            {
+                var sessionId = reader.GetString(0);
+                if (!observations.TryGetValue(sessionId, out var values)) observations[sessionId] = values = [];
+                values.Add(new(reader.GetString(2), Nullable(reader,3), Nullable(reader,4), Nullable(reader,5), Nullable(reader,6), Nullable(reader,7), Nullable(reader,8)));
+            }
+            foreach (var pair in observations) if (byId.TryGetValue(pair.Key, out var row)) row.TokenAggregate = ReadTokens(pair.Value);
         }
         return new(Array.AsReadOnly(rows.Select(static row => (ILocalRepositorySessionSnapshotRow)row.Freeze()).ToArray()));
     }
 
-    private static LocalWorkspaceTokenFacts ReadTokens(SqliteDataReader reader)
+    private static LocalWorkspaceTokenFacts ReadTokens(IReadOnlyList<TokenObservation> rows)
     {
-        var totalExecutions = reader.GetInt64(1);
-        var available = reader.GetInt64(2);
-        var authority = reader.GetString(9) == reader.GetString(10) ? reader.GetString(9) : "mixed";
-        var inconsistent = reader.GetInt64(11) != 0;
-        var input = Nullable(reader, 3); var cache = Nullable(reader, 7);
-        LocalWorkspaceFact<long> Fact(long? value) => new(value is null ? "not_observed" : "recorded", value);
-        var newInput = !inconsistent && input is not null && cache is not null ? input - cache : null;
-        var ratio = !inconsistent && input > 0 && cache is not null ? cache * 10_000 / input : null;
-        return new(authority, inconsistent ? "inconsistent" : available == totalExecutions ? "recorded" : "partial", available, totalExecutions,
-            Fact(input), Fact(Nullable(reader, 4)), Fact(Nullable(reader, 5)), Fact(Nullable(reader, 6)), Fact(cache), Fact(Nullable(reader, 8)),
-            new(newInput is null ? inconsistent ? "inconsistent" : "not_observed" : "recorded", newInput),
-            new(ratio is null ? inconsistent ? "inconsistent" : "not_observed" : "recorded", ratio));
+        var total = rows.Count; var available = rows.Count(r => r.Values.Any(v => v is not null));
+        var authority = rows.Select(r=>r.Authority).Distinct(StringComparer.Ordinal).Count()==1 ? rows[0].Authority : "mixed";
+        var overflow = false;
+        LocalWorkspaceFact<long> Fact(Func<TokenObservation,long?> select)
+        {
+            var values=rows.Select(select).ToArray(); var count=values.Count(v=>v is not null);
+            if(count==0)return new("not_observed",null); if(count!=total)return new("capture_gap",null);
+            try { long sum=0; foreach(var value in values) sum=checked(sum+value!.Value); return new("recorded",sum); }
+            catch(OverflowException){overflow=true;return new("oversized",null);}
+        }
+        var input=Fact(r=>r.Input); var output=Fact(r=>r.Output); var producerTotal=Fact(r=>r.Total); var reasoning=Fact(r=>r.Reasoning); var cache=Fact(r=>r.CacheRead); var creation=Fact(r=>r.CacheCreation);
+        var producerContradiction = false;
+        if (producerTotal.State=="recorded" && input.State=="recorded" && output.State=="recorded")
+        {
+            try { producerContradiction = producerTotal.Value != checked(input.Value!.Value + output.Value!.Value); }
+            catch (OverflowException) { overflow = true; }
+        }
+        var inconsistent=input.State=="recorded"&&cache.State=="recorded"&&cache.Value>input.Value || producerContradiction;
+        var componentGap = new[] { input, output, producerTotal, reasoning, cache, creation }.Any(f => f.State == "capture_gap");
+        var overall=overflow?"oversized":inconsistent?"inconsistent":available==0?"not_observed":available<total||componentGap?"capture_gap":"recorded";
+        LocalWorkspaceFact<long> derived;
+        if(inconsistent) derived=new("inconsistent",null); else if(input.State!="recorded"||cache.State!="recorded") derived=new(input.State=="capture_gap"||cache.State=="capture_gap"?"capture_gap":"not_observed",null); else derived=new("recorded",input.Value!.Value-cache.Value!.Value);
+        LocalWorkspaceFact<long> ratio;
+        if(inconsistent) ratio=new("inconsistent",null); else if(input.State!="recorded"||cache.State!="recorded"||input.Value==0) ratio=new(input.State=="capture_gap"||cache.State=="capture_gap"?"capture_gap":"not_observed",null); else { var value=(BigInteger)cache.Value!.Value*10_000/input.Value!.Value; ratio=value>long.MaxValue?new("oversized",null):new("recorded",(long)value); }
+        return new(authority,overall,available,total,input,output,producerTotal,reasoning,cache,creation,derived,ratio);
     }
+
+    private sealed record TokenObservation(string Authority,long? Input,long? Output,long? Total,long? Reasoning,long? CacheRead,long? CacheCreation)
+    { internal IEnumerable<long?> Values => [Input,Output,Total,Reasoning,CacheRead,CacheCreation]; }
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 

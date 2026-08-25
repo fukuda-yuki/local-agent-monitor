@@ -65,8 +65,7 @@ internal static class LocalMonitorV1CollectionApplication
         var emitted = page.Take(request.EffectiveLimit).ToArray();
         var revision = collectionRevisionOverride ?? (emitted.Length == 0 && snapshot.Sessions.Count == 0
             ? new string('0', 64)
-            : Hash("local-monitor-session-collection\0v1\0", snapshot,
-                new { request.Scope, request.RepositoryId, request.ArchiveScope, request.From, request.To, request.Sources, request.Models, request.Statuses, request.HasSkill, request.HasSubagent, request.HasError, request.HasRetry, Query = request.QueryNormalized, request.Limit, Cursor = cursorPosition }));
+            : Hash("local-monitor-session-collection\0v1\0", snapshot));
         string? next = page.Length > emitted.Length ? LocalMonitorV1SessionCursorCodec.Encode(cursorKey, request,
             new((LocalMonitorV1SessionSortGroup)emitted[^1].Projection.SortGroup, emitted[^1].Projection.SortEpochMilliseconds, emitted[^1].Projection.SessionId)) : null;
         return Write(writer =>
@@ -93,7 +92,7 @@ internal static class LocalMonitorV1CollectionApplication
         var page = candidates.Take(request.Limit + 1).ToArray(); var emitted = page.Take(request.Limit).ToArray();
         return Write(writer =>
         {
-            writer.WriteStartObject(); writer.WriteString("schema_version", "local-monitor-repositories.response.v1"); writer.WriteString("workspace_revision", Hash("local-monitor-repository-collection\0v1\0", snapshot, request));
+            writer.WriteStartObject(); writer.WriteString("schema_version", "local-monitor-repositories.response.v1"); writer.WriteString("workspace_revision", Hash("local-monitor-repository-collection\0v1\0", snapshot));
             writer.WritePropertyName("repositories"); writer.WriteStartArray();
             foreach (var repository in emitted)
             {

@@ -40,23 +40,22 @@ internal static class LocalWorkspaceProjectionBackupValidation
                        JOIN session_event_content c ON c.event_id=e.event_id
                        WHERE e.event_id=p.label_source_identity COLLATE BINARY
                          AND e.session_id=p.session_id COLLATE BINARY
-                         AND e.type='user_prompt' COLLATE BINARY
+                         AND e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted')
                          AND e.content_state='available'
                          AND c.expires_at=p.label_expires_at COLLATE BINARY)
-                     OR EXISTS(SELECT 1 FROM local_workspace_session_activity a WHERE a.session_id=p.session_id AND a.state NOT IN ('recorded','not_observed'))
+                     OR EXISTS(SELECT 1 FROM local_workspace_session_activity a WHERE a.session_id=p.session_id AND a.state NOT IN ('recorded','not_observed','capture_gap','source_unsupported'))
                 );
                 """;
             if (Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0)
                 throw new InvalidOperationException();
             command.CommandText = "SELECT label_expires_at FROM local_workspace_sessions WHERE label_state='recorded';";
-            var now = DateTimeOffset.UtcNow;
             using (var reader = command.ExecuteReader())
             {
                 while (reader.Read())
                 {
                     var value = reader.GetString(0);
                     if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)
-                        || expiry.Offset != TimeSpan.Zero || expiry <= now)
+                        || expiry.Offset != TimeSpan.Zero)
                         throw new InvalidOperationException();
                 }
             }

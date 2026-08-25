@@ -69,8 +69,8 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
-            INSERT INTO session_events VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,'synthetic','prompt-1','user_prompt','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
-            INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"message":"hello"}','2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00',randomblob(32));
+            INSERT INTO session_events VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,'synthetic','prompt-1','user.message','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"value":"hello"}','2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00',randomblob(32));
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
@@ -79,6 +79,27 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         var row = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions));
         Assert.Equal(state, row.LabelState);
         Assert.Equal(text, row.LabelText);
+    }
+
+    [Fact]
+    public async Task ContributorDoesNotExposePartialTokenSumsAndFailsOverflowClosed()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','full',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-1','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,NULL,NULL,9223372036854775807,2,NULL,'active');
+            INSERT INTO session_runs VALUES('run-2','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,'active');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        var result = await new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-25T00:00:00Z")))
+            .ReadAsync(new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+        var tokens = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).Tokens;
+        Assert.Equal("oversized", tokens.State);
+        Assert.Equal("oversized", tokens.Input.State);
+        Assert.Null(tokens.Input.Value);
+        Assert.Equal("capture_gap", tokens.Output.State);
+        Assert.Null(tokens.Output.Value);
+        Assert.Equal(2, tokens.AvailableExecutionCount);
     }
 
     private sealed class TestReadTransaction(Microsoft.Data.Sqlite.SqliteConnection connection) : ILocalRepositoryReadTransaction
