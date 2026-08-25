@@ -12,6 +12,9 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     [InlineData("UPDATE local_workspace_session_models SET model='tampered';")]
     [InlineData("UPDATE local_workspace_token_observations SET input_tokens=999;")]
     [InlineData("DELETE FROM local_workspace_session_activity WHERE kind='retry';")]
+    [InlineData("UPDATE local_workspace_sessions SET capture_notes='unknown';")]
+    [InlineData("UPDATE local_workspace_sessions SET capture_notes='raw_content_expired,raw_content_expired';")]
+    [InlineData("UPDATE local_workspace_sessions SET capture_notes='raw_content_not_captured,projection_invalid';")]
     public void ValidationRejectsSemanticProjectionTampering(string mutation)
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

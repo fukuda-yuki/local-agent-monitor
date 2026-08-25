@@ -31,7 +31,6 @@ internal static class LocalWorkspaceProjectionBackupValidation
                      OR (SELECT COUNT(*) FROM local_workspace_session_activity x WHERE x.session_id=p.session_id)<>5
                      OR p.label_state NOT IN ('recorded','not_observed','not_captured','expired')
                      OR p.timing_state NOT IN ('recorded','not_observed','inconsistent')
-                     OR p.capture_notes NOT IN ('','raw_content_expired','raw_content_not_captured')
                      OR p.label_state='recorded' AND NOT EXISTS(
                        SELECT 1 FROM session_events e
                        JOIN session_event_content c ON c.event_id=e.event_id
@@ -54,6 +53,18 @@ internal static class LocalWorkspaceProjectionBackupValidation
                     var value = reader.GetString(0);
                     if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)
                         || expiry.Offset != TimeSpan.Zero || expiry <= now)
+                        throw new InvalidOperationException();
+                }
+            }
+            command.CommandText = "SELECT capture_notes FROM local_workspace_sessions;";
+            using (var notes = command.ExecuteReader())
+            {
+                while (notes.Read())
+                {
+                    var persisted = notes.GetString(0);
+                    var parts = persisted.Length == 0 ? Array.Empty<string>() : persisted.Split(',', StringSplitOptions.None);
+                    if (!string.Equals(persisted, LocalWorkspaceProjectionStore.CanonicalizeCaptureNotes(parts), StringComparison.Ordinal)
+                        || parts.Distinct(StringComparer.Ordinal).Count() != parts.Length)
                         throw new InvalidOperationException();
                 }
             }

@@ -13,8 +13,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        Assert.Equal(["projection_invalid:0:raw_content_not_captured,projection_invalid"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+        Assert.Equal(["projection_invalid:0:projection_invalid,raw_content_not_captured"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT model_state||':'||(SELECT COUNT(*) FROM local_workspace_session_models)||':'||capture_notes FROM local_workspace_sessions;"));
+        using var validation = connection.BeginTransaction(deferred: true);
+        CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup.LocalWorkspaceProjectionBackupValidation.Validate(connection, validation);
     }
 
     [Fact]

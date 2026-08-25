@@ -40,9 +40,9 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
     }
 
     [Theory]
-    [InlineData("2026-08-25T23:59:59Z", "recorded", "hello")]
-    [InlineData("2026-08-26T00:00:00Z", "expired", null)]
-    [InlineData("2026-08-26T00:00:01Z", "expired", null)]
+    [InlineData("2026-08-25T23:59:59.9999999+00:00", "recorded", "hello")]
+    [InlineData("2026-08-26T00:00:00.0000000+00:00", "expired", null)]
+    [InlineData("2026-08-26T00:00:00.0000001+00:00", "expired", null)]
     public async Task ContributorMasksLabelAtAndAfterExactContentExpiry(string now, string state, string? text)
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

@@ -50,7 +50,7 @@ internal static class LocalWorkspaceProjectionStore
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_sources WHERE session_id IN (SELECT session_id FROM local_workspace_sessions WHERE source_state='projection_invalid');
             DELETE FROM local_workspace_session_models WHERE session_id IN (SELECT session_id FROM local_workspace_sessions WHERE model_state='projection_invalid');
-            UPDATE local_workspace_sessions SET capture_notes=CASE WHEN source_state='projection_invalid' OR model_state='projection_invalid' THEN CASE WHEN capture_notes='' THEN 'projection_invalid' ELSE capture_notes||',projection_invalid' END ELSE capture_notes END
+            UPDATE local_workspace_sessions SET capture_notes=CASE WHEN source_state='projection_invalid' OR model_state='projection_invalid' THEN CASE WHEN capture_notes='' THEN 'projection_invalid' ELSE 'projection_invalid,'||capture_notes END ELSE capture_notes END
               WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             INSERT INTO local_workspace_session_activity SELECT s.session_id,k.kind,'not_observed',NULL FROM sessions s
               CROSS JOIN (SELECT 'skill' kind UNION ALL SELECT 'tool' UNION ALL SELECT 'subagent' UNION ALL SELECT 'error' UNION ALL SELECT 'retry') k
@@ -114,6 +114,13 @@ internal static class LocalWorkspaceProjectionStore
     }
 
     private static string Search(string value) => value.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+    internal static string CanonicalizeCaptureNotes(IEnumerable<string> values)
+    {
+        var allowed = new HashSet<string>(["raw_content_not_captured", "raw_content_expired", "source_unsupported", "capture_gap", "certification_pending", "projection_invalid", "token_inconsistent", "cache_inconsistent"], StringComparer.Ordinal);
+        var notes = values.ToArray();
+        if (notes.Length > 16 || notes.Any(note => !allowed.Contains(note))) throw new InvalidOperationException("local_workspace_capture_notes_invalid");
+        return string.Join(',', notes.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
+    }
     private static bool TryCanonicalFuture(string value, DateTimeOffset now) => DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) && parsed.Offset == TimeSpan.Zero && parsed > now;
     private static string Canonical(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
     private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }

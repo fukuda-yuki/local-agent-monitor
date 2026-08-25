@@ -32,8 +32,8 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             command.Transaction = transaction;
             command.CommandText = """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
-                       CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR julianday(c.expires_at)<=julianday($now)) THEN 'expired' ELSE p.label_state END,
-                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND julianday(c.expires_at)>julianday($now) THEN p.label_text END,
+                       CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
+                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
                        timing_state,started_at,ended_at,duration_ms,capture_notes,revision_seed
                 FROM local_workspace_sessions p
