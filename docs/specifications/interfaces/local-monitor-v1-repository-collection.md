@@ -58,8 +58,8 @@ repository_revision
 
 `repository_id` is the canonical local Repository UUIDv7. `display_name` is
 the catalog-owned safe display value. `archive_state` is `active|archived`.
-Archive and Repository revisions and all counts are nonnegative integers.
-`repository_revision` is a 64-character lowercase hexadecimal revision.
+`archive_revision` and all counts are nonnegative integers.
+`repository_revision` is a 64-character lowercase hexadecimal digest revision.
 
 `active_session_count` and `last_observed_at` use only exact assigned Sessions
 that the single #156/#161 scope snapshot reports effectively eligible.
