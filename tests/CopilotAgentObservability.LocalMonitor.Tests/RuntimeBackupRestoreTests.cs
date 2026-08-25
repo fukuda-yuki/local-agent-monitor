@@ -556,6 +556,63 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Theory]
+    [InlineData("missing_stamp")]
+    [InlineData("future_version")]
+    [InlineData("v1_drift")]
+    [InlineData("v2_drift")]
+    public void Monitor_startup_preparation_rejects_invalid_workspace_ownership_without_mutation(string kind)
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        using (var database = temp.Open(temp.Source))
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
+            temp.Execute(database, kind switch
+            {
+                "missing_stamp" => "DELETE FROM schema_version WHERE component='local_workspace_projection';",
+                "future_version" => "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection';",
+                "v1_drift" => "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection'; ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
+                "v2_drift" => "ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            });
+        }
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Source);
+
+        Assert.False(initialization.Result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, initialization.Result.ErrorCode);
+        Assert.Null(initialization.Lease);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Fact]
+    public void Monitor_startup_preparation_allows_workspace_component_to_be_absent()
+    {
+        using var temp = new RestoreTemp();
+        using (var database = temp.Open(temp.Source))
+        using (var transaction = database.BeginTransaction())
+        {
+            MonitorSchemaMigrator.ApplyBaseSchema(database, transaction);
+            transaction.Commit();
+        }
+        new SqliteSessionStore(temp.Source).CreateSchema();
+        var before = SHA256.HashData(File.ReadAllBytes(temp.Source));
+
+        var initialization = new SqliteRuntimeBackupService(temp.Clock).InitializeForMonitor(temp.Source);
+
+        Assert.True(initialization.Result.Success, initialization.Result.ErrorCode);
+        using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
+        Assert.Equal(before, SHA256.HashData(File.ReadAllBytes(temp.Source)));
+    }
+
+    [Theory]
     [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('retention',2);")]
     [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version INTEGER NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('forged_component',1);")]
     [InlineData("CREATE TABLE retention_component_versions(component TEXT PRIMARY KEY,version TEXT NOT NULL); INSERT INTO retention_component_versions(component,version) VALUES('retention','1');")]

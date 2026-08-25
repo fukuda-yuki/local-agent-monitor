@@ -186,14 +186,33 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction();
         using var installed = connection.CreateCommand();
         installed.Transaction = transaction;
+        installed.CommandText = """
+            SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_version'),
+                   EXISTS(SELECT 1 FROM sqlite_schema WHERE lower(name) LIKE 'local_workspace_%' OR lower(tbl_name) LIKE 'local_workspace_%');
+            """;
+        bool hasOwnedObjects;
+        using (var reader = installed.ExecuteReader())
+        {
+            reader.Read();
+            var hasVersionTable = reader.GetInt64(0) != 0;
+            hasOwnedObjects = reader.GetInt64(1) != 0;
+            if (!hasVersionTable && !hasOwnedObjects)
+            {
+                transaction.Commit();
+                return;
+            }
+            if (!hasVersionTable) throw new InvalidOperationException("local_workspace_projection_component_stamp_missing");
+        }
         installed.CommandText = "SELECT version FROM schema_version WHERE component='local_workspace_projection';";
         var version = installed.ExecuteScalar();
-        if (version is long current)
+        if (version is null && !hasOwnedObjects)
         {
-            LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, transaction);
-            if (current == LocalWorkspaceProjectionSchemaV1.Version)
-                LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
+            transaction.Commit();
+            return;
         }
+        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV1(connection, transaction);
+        if (version is long current && current == LocalWorkspaceProjectionSchemaV1.Version)
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
         transaction.Commit();
     }
 
