@@ -2683,7 +2683,7 @@ monitor
 -> retention:1
 -> skill_projection:1
 -> skill_invocation_snapshot:1
--> local_workspace_projection:1 (when released)
+-> local_workspace_projection:2 (when released)
 ```
 
 An older backup with no snapshot component installs an empty current component

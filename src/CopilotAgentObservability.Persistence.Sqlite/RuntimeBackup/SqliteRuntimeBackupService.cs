@@ -39,7 +39,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
         ["local_repository_catalog"] = 1,
-        ["local_workspace_projection"] = 1,
+        ["local_workspace_projection"] = 2,
         ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
@@ -186,11 +186,10 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction();
         using var installed = connection.CreateCommand();
         installed.Transaction = transaction;
-        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=1);";
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version IN (1,2));";
         if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
         {
-            LocalWorkspaceProjectionSchemaV1.Validate(connection, transaction);
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
         }
         transaction.Commit();
     }

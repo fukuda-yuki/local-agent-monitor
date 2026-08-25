@@ -31,7 +31,7 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=1);";
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=2);";
         return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 1;
     }
 }

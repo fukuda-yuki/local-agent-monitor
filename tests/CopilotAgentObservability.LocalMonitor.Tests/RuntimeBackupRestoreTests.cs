@@ -34,9 +34,32 @@ public sealed class RuntimeBackupRestoreTests
                 run.ExecuteNonQuery();
             }
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
-            temp.Execute(connection, "INSERT INTO local_workspace_span_facts VALUES(1,0,0,NULL);");
-            using var transaction = connection.BeginTransaction(deferred: true);
+        }
+        var raw = new RawTelemetryRecord(null, RawTelemetrySources.RawOtlp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At), null,
+            "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"spanId\":\"bbbbbbbbbbbbbbbb\",\"name\":\"synthetic\"}]}]}]}");
+        var rawId = fixture.RawStore.Insert(raw);
+        fixture.RawStore.ApplyProjection(rawId, raw.Source, raw.ReceivedAt, MonitorProjectionBuilder.Build(raw), raw.ReceivedAt);
+        fixture.RawStore.ApplySpanProjection(rawId, MonitorSpanProjectionBuilder.Build(raw), raw.ReceivedAt);
+        using (var connection = temp.Open(source))
+        using (var transaction = connection.BeginTransaction(deferred: true))
             LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction);
+        foreach (var mutation in new[]
+        {
+            $"UPDATE local_workspace_span_facts SET retry_count=1 WHERE raw_record_id={rawId};",
+            $"UPDATE local_workspace_span_facts SET producer_total_tokens=1 WHERE raw_record_id={rawId};",
+            $"DELETE FROM monitor_spans WHERE raw_record_id={rawId};",
+        })
+        {
+            using var connection = temp.Open(source);
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = mutation;
+            command.ExecuteNonQuery();
+            Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+            transaction.Rollback();
         }
         using (var readOnly = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
         {
@@ -59,7 +82,7 @@ public sealed class RuntimeBackupRestoreTests
         using var verification = temp.Open(source);
         Assert.Equal(7, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.True(temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM {table};") > 0));
-        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         using var validation = verification.BeginTransaction(deferred: true);
         LocalWorkspaceProjectionBackupValidation.Validate(verification, validation);
     }

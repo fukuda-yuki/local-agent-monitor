@@ -72,12 +72,63 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 }
             }
             ValidateCanonicalProjection(connection, transaction);
+            ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             throw new InvalidOperationException("local_workspace_projection_backup_invalid", exception);
         }
     }
+
+    private static void ValidateSpanFacts(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using (var count = connection.CreateCommand())
+        {
+            count.Transaction = transaction;
+            count.CommandText = "SELECT COUNT(*) FROM local_workspace_span_facts;";
+            if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return;
+        }
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS(SELECT 1 FROM local_workspace_span_facts f
+              LEFT JOIN monitor_spans s ON s.raw_record_id=f.raw_record_id AND s.span_ordinal=f.span_ordinal
+              LEFT JOIN raw_records r ON r.id=f.raw_record_id
+              WHERE s.raw_record_id IS NULL OR r.id IS NULL);
+            """;
+        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0) throw new InvalidOperationException();
+        command.CommandText = """
+            SELECT f.raw_record_id,f.span_ordinal,f.retry_count,f.producer_total_tokens,
+                   r.source,r.trace_id,r.received_at,r.resource_attributes_json,r.payload_json,r.schema_version
+            FROM local_workspace_span_facts f
+            JOIN monitor_spans s ON s.raw_record_id=f.raw_record_id AND s.span_ordinal=f.span_ordinal
+            JOIN raw_records r ON r.id=f.raw_record_id
+            ORDER BY 1,2;
+            """;
+        using var reader = command.ExecuteReader();
+        var projections = new Dictionary<long, IReadOnlyDictionary<int, MonitorSpanProjection>>();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(4) || reader.IsDBNull(8)) throw new InvalidOperationException();
+            var rawId = reader.GetInt64(0);
+            if (!projections.TryGetValue(rawId, out var spans))
+            {
+                if (!DateTimeOffset.TryParseExact(reader.GetString(6), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
+                    throw new InvalidOperationException();
+                var raw = new RawTelemetryRecord(rawId, reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), receivedAt,
+                    reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8), reader.GetInt32(9));
+                spans = MonitorSpanProjectionBuilder.Build(raw).ToDictionary(static span => span.SpanOrdinal);
+                projections.Add(rawId, spans);
+            }
+            if (!spans.TryGetValue(reader.GetInt32(1), out var expected)
+                || NullableInt64(reader, 2) != expected.RetryCount
+                || NullableInt64(reader, 3) != expected.ProducerTotalTokens)
+                throw new InvalidOperationException();
+        }
+    }
+
+    private static long? NullableInt64(SqliteDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
     private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction)
     {

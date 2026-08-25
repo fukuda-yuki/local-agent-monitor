@@ -14,11 +14,43 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         transaction.Commit();
 
         Assert.Equal(
-            ["local_workspace_projection:1"],
+            ["local_workspace_projection:2"],
             Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(
             ["local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
             Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'local_workspace_%' ORDER BY name;"));
+    }
+
+    [Fact]
+    public void EnsureMigratesExactV1SixTableShapeAtomicallyAndReruns()
+    {
+        using var connection = OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Execute(connection, "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection';");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, DateTimeOffset.UnixEpoch);
+            transaction.Rollback();
+        }
+        Assert.Equal(["1"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Empty(Strings(connection, "SELECT name FROM sqlite_schema WHERE name='local_workspace_span_facts';"));
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal(["2"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(["local_workspace_span_facts"], Strings(connection, "SELECT name FROM sqlite_schema WHERE name='local_workspace_span_facts';"));
+    }
+
+    [Fact]
+    public void EnsureRejectsDriftedV1Shape()
+    {
+        using var connection = OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Execute(connection, "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection'; ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;");
+
+        Assert.Throws<InvalidOperationException>(() => LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch));
+        Assert.Equal(["1"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
     }
 
     [Fact]

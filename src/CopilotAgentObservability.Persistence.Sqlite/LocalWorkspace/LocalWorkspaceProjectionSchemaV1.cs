@@ -7,7 +7,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal static class LocalWorkspaceProjectionSchemaV1
 {
     internal const string ComponentName = "local_workspace_projection";
-    internal const int Version = 1;
+    internal const int Version = 2;
     internal static readonly string[] TableNames =
     [
         "local_workspace_sessions", "local_workspace_session_sources",
@@ -107,6 +107,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
 
     internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects { get; } =
         SqliteOwnedSchemaAuthority.Compile(Definitions);
+    private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V1ExpectedObjects { get; } =
+        SqliteOwnedSchemaAuthority.Compile(Definitions.Where(static definition => definition.Name != "local_workspace_span_facts").ToArray());
     internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
 
     internal static void Ensure(SqliteConnection connection, DateTimeOffset now)
@@ -124,6 +126,15 @@ internal static class LocalWorkspaceProjectionSchemaV1
             throw new InvalidOperationException("local_workspace_projection_component_dependency_invalid");
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
+        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects))
+        {
+            Execute(connection, transaction, Definitions.Single(static definition => definition.Name == "local_workspace_span_facts").Sql);
+            Execute(connection, transaction, "UPDATE schema_version SET version=2 WHERE component='local_workspace_projection' AND version=1;");
+            BackfillSpanFacts(connection, transaction);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
+            Validate(connection, transaction);
+            return;
+        }
         if (version is not null || owned.Count != 0)
         {
             Validate(connection, transaction);
@@ -131,7 +142,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
             return;
         }
         foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
-        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',1);");
+        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',2);");
+        BackfillSpanFacts(connection, transaction);
         LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
         Validate(connection, transaction);
     }
@@ -140,7 +152,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
     {
         if (ReadVersion(connection, transaction) != Version
             || !SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects))
-            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 1.");
+            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 2.");
     }
 
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
@@ -181,5 +193,43 @@ internal static class LocalWorkspaceProjectionSchemaV1
         command.Transaction = transaction;
         command.CommandText = sql;
         command.ExecuteNonQuery();
+    }
+
+    private static void BackfillSpanFacts(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var installed = connection.CreateCommand();
+        installed.Transaction = transaction;
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='raw_records') AND EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='monitor_spans');";
+        if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return;
+
+        var facts = new List<object>();
+        using (var records = connection.CreateCommand())
+        {
+            records.Transaction = transaction;
+            records.CommandText = "SELECT id,source,trace_id,received_at,resource_attributes_json,payload_json,schema_version FROM raw_records ORDER BY id;";
+            using var reader = records.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!DateTimeOffset.TryParseExact(reader.GetString(3), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var receivedAt))
+                    throw new InvalidOperationException("local_workspace_projection_raw_timestamp_invalid");
+                var record = new RawTelemetryRecord(reader.GetInt64(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), receivedAt,
+                    reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetInt32(6));
+                foreach (var span in MonitorSpanProjectionBuilder.Build(record))
+                    facts.Add(new { raw = record.Id, ordinal = span.SpanOrdinal, retry = span.RetryCount, total = span.ProducerTotalTokens });
+            }
+        }
+        if (facts.Count == 0) return;
+        using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT OR REPLACE INTO local_workspace_span_facts(raw_record_id,span_ordinal,retry_count,producer_total_tokens)
+            SELECT CAST(value->>'raw' AS INTEGER),CAST(value->>'ordinal' AS INTEGER),
+              CASE WHEN json_type(value,'$.retry')='null' THEN NULL ELSE CAST(value->>'retry' AS INTEGER) END,
+              CASE WHEN json_type(value,'$.total')='null' THEN NULL ELSE CAST(value->>'total' AS INTEGER) END
+            FROM json_each($facts)
+            WHERE EXISTS(SELECT 1 FROM monitor_spans s WHERE s.raw_record_id=CAST(value->>'raw' AS INTEGER) AND s.span_ordinal=CAST(value->>'ordinal' AS INTEGER));
+            """;
+        insert.Parameters.AddWithValue("$facts", System.Text.Json.JsonSerializer.Serialize(facts));
+        insert.ExecuteNonQuery();
     }
 }
