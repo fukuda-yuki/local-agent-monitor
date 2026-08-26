@@ -8,20 +8,27 @@ internal sealed class RawRecordRetentionAdapter : IRetentionDeletionAdapter
     private readonly RetentionCatalogStore catalog;
     private readonly TimeProvider timeProvider;
     private readonly ILocalWorkspaceProjectionTransactionParticipant participant;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
 
-    internal RawRecordRetentionAdapter(RetentionCatalogStore catalog, TimeProvider? timeProvider = null, ILocalWorkspaceProjectionTransactionParticipant? participant = null)
+    internal RawRecordRetentionAdapter(RetentionCatalogStore catalog, TimeProvider? timeProvider = null, ILocalWorkspaceProjectionTransactionParticipant? participant = null, ILocalWorkspacePublicationGate? publicationGate = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.participant = participant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.publicationGate = publicationGate;
     }
 
     public RetentionStoreKind StoreKind => RetentionStoreKind.RawRecord;
 
-    public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) =>
-        catalog.ExecuteSqliteDeletionAsync(
+    public async ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context)
+    {
+        await using var publicationLease = publicationGate is null
+            ? null
+            : await publicationGate.AcquireReadAsync(context.CancellationToken);
+        return await catalog.ExecuteSqliteDeletionAsync(
             context,
             (connection, transaction, grant) => DeleteRawRecordAsync(connection, transaction, grant, timeProvider, participant));
+    }
 
     private static ValueTask<int> DeleteRawRecordAsync(
         SqliteConnection connection,

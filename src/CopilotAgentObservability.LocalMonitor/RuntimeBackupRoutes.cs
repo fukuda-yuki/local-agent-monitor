@@ -14,9 +14,9 @@ internal static class RuntimeBackupRoutes
         || path == "/backup-restore"
         || path == "/backup-restore/";
 
-    internal static void Map(WebApplication app, string databasePath, TimeProvider timeProvider)
+    internal static void Map(WebApplication app, string databasePath, SqliteRuntimeBackupService service)
     {
-        var application = new Application(databasePath, timeProvider);
+        var application = new Application(databasePath, service);
         app.MapPost("/api/runtime-backup/v1/backups", context => CreateAsync(context, application));
         app.MapGet("/api/runtime-backup/v1/backups/{backupId}", (string backupId, HttpContext context) => ResultAsync(context, application, backupId));
         app.MapGet("/api/runtime-backup/v1/backups/{backupId}/archive", (string backupId, HttpContext context) => DownloadAsync(context, application, backupId));
@@ -172,11 +172,11 @@ internal static class RuntimeBackupRoutes
         private readonly ConcurrentDictionary<string, BackupApiResult> results = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, string> files = new(StringComparer.Ordinal);
 
-        internal Application(string databasePath, TimeProvider timeProvider)
+        internal Application(string databasePath, SqliteRuntimeBackupService service)
         {
             this.databasePath = Path.GetFullPath(databasePath);
             outputDirectory = Path.Combine(Path.GetDirectoryName(this.databasePath)!, "runtime-backups");
-            service = new(timeProvider);
+            this.service = service ?? throw new ArgumentNullException(nameof(service));
         }
 
         internal BackupApiResult Create()

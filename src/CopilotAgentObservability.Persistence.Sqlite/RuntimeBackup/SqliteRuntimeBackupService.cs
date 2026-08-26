@@ -345,14 +345,16 @@ public sealed class SqliteRuntimeBackupService
             || !RecoverTransientFiles(Path.GetDirectoryName(output)!, Path.GetFileName(database)))
             return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreUnavailable);
         if (PathEntryExists(output)) return CreateFailure(RuntimeBackupErrorCodes.OutputExists);
-        var externalError = ValidateExternalState(database, scanRuntimeRoot: true, immutableDatabase: false);
-        if (externalError is not null) return CreateFailure(externalError);
-        var publicationTime = timeProvider.GetUtcNow();
-        RefreshProjectionForPublication(database, publicationTime);
-        var sourcePreflight = PreflightForMigration(database, immutableReadOnly: false, publicationTime);
-        if (!sourcePreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
+        IAsyncDisposable? publicationLease = null;
         try
         {
+            publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            var externalError = ValidateExternalState(database, scanRuntimeRoot: true, immutableDatabase: false);
+            if (externalError is not null) return CreateFailure(externalError);
+            var publicationTime = timeProvider.GetUtcNow();
+            RefreshProjectionForPublication(database, publicationTime);
+            var sourcePreflight = PreflightForMigration(database, immutableReadOnly: false, publicationTime);
+            if (!sourcePreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             EnsureCurrentBackupTail(database, publicationTime);
             checkpoint?.Invoke(CatalogAfterCreateTailCheckpoint);
             if (!PreflightForMigration(database, immutableReadOnly: false, publicationTime).Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
@@ -365,6 +367,7 @@ public sealed class SqliteRuntimeBackupService
         catch (SqliteException) { return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreUnavailable); }
         catch (Exception exception) when (IsIo(exception)) { return CreateFailure(RuntimeBackupErrorCodes.PublishFailed); }
         catch (InvalidOperationException) { return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible); }
+        finally { publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
     private void RefreshProjectionForPublication(string databasePath, DateTimeOffset publicationTime)

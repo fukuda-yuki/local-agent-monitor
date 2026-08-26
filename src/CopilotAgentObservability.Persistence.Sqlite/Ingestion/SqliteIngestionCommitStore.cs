@@ -8,12 +8,14 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
     private readonly RawTelemetryStoreConnectionOptions connectionOptions;
     private readonly TimeProvider timeProvider;
     private readonly Action<IngestionCommitWritePhase>? writeFailureInjector;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant;
 
     public SqliteIngestionCommitStore(
         string databasePath,
         RawTelemetryStoreConnectionOptions? connectionOptions = null,
         TimeProvider? timeProvider = null)
-        : this(databasePath, connectionOptions, timeProvider, writeFailureInjector: null)
+        : this(databasePath, connectionOptions, timeProvider, writeFailureInjector: null, null, null)
     {
     }
 
@@ -21,7 +23,7 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         string databasePath,
         RawTelemetryStoreConnectionOptions? connectionOptions,
         Action<IngestionCommitWritePhase>? writeFailureInjector)
-        : this(databasePath, connectionOptions, timeProvider: null, writeFailureInjector)
+        : this(databasePath, connectionOptions, timeProvider: null, writeFailureInjector, null, null)
     {
     }
 
@@ -29,17 +31,22 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         string databasePath,
         RawTelemetryStoreConnectionOptions? connectionOptions,
         TimeProvider? timeProvider,
-        Action<IngestionCommitWritePhase>? writeFailureInjector)
+        Action<IngestionCommitWritePhase>? writeFailureInjector,
+        ILocalWorkspacePublicationGate? publicationGate = null,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         this.databasePath = databasePath;
         this.connectionOptions = connectionOptions ?? RawTelemetryStoreConnectionOptions.Default;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.writeFailureInjector = writeFailureInjector;
+        this.publicationGate = publicationGate;
+        this.workspaceParticipant = workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
     }
 
     public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)
     {
         ArgumentNullException.ThrowIfNull(batch);
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
         try
         {
             using var connection = OpenConnection();
@@ -86,7 +93,8 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
                     transaction,
                     resolution.TraceId,
                     priorTraceResolutions[resolution.TraceId],
-                    batch.Observation.ObservedAt);
+                    batch.Observation.ObservedAt,
+                    workspaceParticipant);
             }
             InsertProjectionDisposition(connection, transaction, rawRecordId, batch.RawRecord.ReceivedAt);
             writeFailureInjector?.Invoke(IngestionCommitWritePhase.BeforeCommit);
@@ -96,6 +104,10 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         catch (SqliteException exception) when (exception.SqliteErrorCode is 5 or 6)
         {
             throw new IngestionCommitBusyException();
+        }
+        finally
+        {
+            publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 

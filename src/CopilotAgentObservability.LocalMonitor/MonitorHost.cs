@@ -223,7 +223,13 @@ internal static class MonitorHost
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
-                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, timeProvider);
+                ?? new SqliteIngestionCommitStore(
+                    options.DatabasePath,
+                    RawTelemetryStoreConnectionOptions.MonitorWriter,
+                    timeProvider,
+                    writeFailureInjector: null,
+                    publicationGate,
+                    workspaceParticipant);
             var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
@@ -238,7 +244,9 @@ internal static class MonitorHost
         builder.Services.AddSingleton(projectionStore);
         var skillProjectionStore = new SqliteSkillProjectionStore(
             options.DatabasePath,
-            projectionRawStore);
+            projectionRawStore,
+            publicationGate: publicationGate,
+            workspaceParticipant: workspaceParticipant);
         var skillProjectionWorker = new SkillProjectionWorker(
             skillProjectionStore,
             timeProvider: timeProvider);
@@ -293,7 +301,8 @@ internal static class MonitorHost
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
         var sessionTimeProvider = timeProvider;
-        ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
+        ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(
+            options.DatabasePath, retentionContext, sessionTimeProvider, publicationGate, workspaceParticipant);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
         LocalRepositoryCatalogApplication? localRepositoryApplication = null;
@@ -422,8 +431,8 @@ internal static class MonitorHost
 
         var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
         var retentionAdapters = new RetentionAdapterRegistry([
-            new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider),
-            new RawRecordRetentionAdapter(retentionCatalog, timeProvider),
+            new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
+            new RawRecordRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
             new MonitorAnalysisRetentionAdapter(retentionCatalog),
             new SensitiveBundleRetentionAdapter(retentionCatalog, timeProvider),
             new AnalysisSdkDirectoryRetentionAdapter(retentionCatalog, timeProvider)
@@ -868,7 +877,7 @@ internal static class MonitorHost
             app.MapRazorPages();
             DoctorUiRoutes.Map(app, doctorUiApplication);
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
-            RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
+            RuntimeBackupRoutes.Map(app, options.DatabasePath, runtimeBackupService);
             SessionRoutes.MapRawContentRoute(app, sessionStore);
             MapSkillInvocationSnapshotRoutes(
                 app,

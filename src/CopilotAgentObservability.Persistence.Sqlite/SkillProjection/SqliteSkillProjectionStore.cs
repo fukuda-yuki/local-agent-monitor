@@ -67,13 +67,17 @@ internal sealed class SqliteSkillProjectionStore
     private readonly ISkillProjectionCheckpoint? checkpoint;
     private readonly Action<long>? publicationScopeAcquiredForTesting;
     private readonly Action<long>? publicationScopeReleasedForTesting;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant;
 
     internal SqliteSkillProjectionStore(
         string databasePath,
         RawTelemetryStore rawStore,
         ISkillProjectionCheckpoint? checkpoint = null,
         Action<long>? publicationScopeAcquiredForTesting = null,
-        Action<long>? publicationScopeReleasedForTesting = null)
+        Action<long>? publicationScopeReleasedForTesting = null,
+        ILocalWorkspacePublicationGate? publicationGate = null,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.rawStore = rawStore ?? throw new ArgumentNullException(nameof(rawStore));
@@ -87,6 +91,8 @@ internal sealed class SqliteSkillProjectionStore
         this.checkpoint = checkpoint;
         this.publicationScopeAcquiredForTesting = publicationScopeAcquiredForTesting;
         this.publicationScopeReleasedForTesting = publicationScopeReleasedForTesting;
+        this.publicationGate = publicationGate;
+        this.workspaceParticipant = workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
     }
 
     internal SkillProjectionQueueLease? ClaimNext(DateTimeOffset claimedAt)
@@ -364,6 +370,9 @@ internal sealed class SqliteSkillProjectionStore
         ArgumentNullException.ThrowIfNull(lease);
         ArgumentNullException.ThrowIfNull(projectedInputs);
         ArgumentNullException.ThrowIfNull(retentionLease);
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
         var persistedInputs = ReadInputs(connection, transaction, lease.GenerationId);
@@ -482,7 +491,7 @@ internal sealed class SqliteSkillProjectionStore
         var affectedSessions = new List<string>();
         using (var affectedReader = affectedCommand.ExecuteReader())
             while (affectedReader.Read()) affectedSessions.Add(affectedReader.GetString(0));
-        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+        workspaceParticipant.RefreshSessions(
             connection, transaction, affectedSessions, transactionAt);
         checkpoint?.Reached(SkillProjectionCheckpoint.BeforePublishCommitClaim);
         if (!publications.TryClaimCommittedHandles(out var publicationClaim))
@@ -497,6 +506,8 @@ internal sealed class SqliteSkillProjectionStore
             checkpoint?.Reached(SkillProjectionCheckpoint.AfterPublishCommitBeforeClaimRelease);
         }
         return SkillProjectionWorkOutcome.Published;
+        }
+        finally { publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
     internal SkillProjectionWorkOutcome RecordInputUnavailable(
@@ -542,6 +553,9 @@ internal sealed class SqliteSkillProjectionStore
         string errorCode,
         SkillProjectionWorkOutcome outcome)
     {
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
         checkpoint?.Reached(
@@ -584,6 +598,8 @@ internal sealed class SqliteSkillProjectionStore
             ("$lease_generation", lease.LeaseGeneration));
         transaction.Commit();
         return outcome;
+        }
+        finally { publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
     private static SkillProjectionWorkOutcome FinishSuperseded(

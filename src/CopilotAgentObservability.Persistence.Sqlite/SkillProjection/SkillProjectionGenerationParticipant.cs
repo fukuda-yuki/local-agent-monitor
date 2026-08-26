@@ -16,7 +16,8 @@ internal static class SkillProjectionGenerationParticipant
         SqliteTransaction transaction,
         string traceId,
         TraceSourceVersionResolutionRow? before,
-        DateTimeOffset admittedAt)
+        DateTimeOffset admittedAt,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         var after = SourceCompatibilityReconciler.ReadEffectiveTrace(connection, transaction, traceId)
             ?? throw new InvalidOperationException("source_compatibility_trace_not_found");
@@ -67,7 +68,8 @@ internal static class SkillProjectionGenerationParticipant
             after.SourceApplicationVersion,
             CurrentProjectorVersion,
             admittedAt,
-            bumpCompatibilityRevision: semanticChange);
+            bumpCompatibilityRevision: semanticChange,
+            workspaceParticipant);
     }
 
     internal static SkillProjectionGenerationChange Advance(
@@ -78,7 +80,8 @@ internal static class SkillProjectionGenerationParticipant
         string? exactVersion,
         string projectorVersion,
         DateTimeOffset changedAt,
-        bool bumpCompatibilityRevision)
+        bool bumpCompatibilityRevision,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         var now = Timestamp(changedAt);
         var compatibilityRevision = EnsureAndReadCompatibilityRevision(
@@ -162,7 +165,7 @@ internal static class SkillProjectionGenerationParticipant
             ("$trace_id", traceId),
             ("$desired_generation_id", resolved || inputUnavailable ? generationId : DBNull.Value),
             ("$updated_at", now));
-        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+        (workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance).RefreshSessions(
             connection, transaction, invalidatedSessions, changedAt);
         return new(compatibilityRevision, generationId, frontierDigest);
     }
