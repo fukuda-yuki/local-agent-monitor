@@ -103,9 +103,11 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson);
         }
         ApplyLabels(connection, transaction, idsJson, now);
-        ApplySearchFacts(connection, transaction, idsJson, now, skillRegistryAuthority);
+        var skillProjection = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, sessionIds, now, skillRegistryAuthority);
+        ApplySearchFacts(connection, transaction, idsJson, now, skillProjection);
         if (TableExists(connection, transaction, "local_workspace_execution_headers"))
-            RefreshDetailProjection(connection, transaction, sessionIds);
+            RefreshDetailProjection(connection, transaction, sessionIds, skillProjection, now);
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
@@ -114,7 +116,9 @@ internal static class LocalWorkspaceProjectionStore
     private static void RefreshDetailProjection(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds)
+        IReadOnlyCollection<string> sessionIds,
+        IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> skillProjection,
+        DateTimeOffset now)
     {
         var ids = sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var idsJson = JsonSerializer.Serialize(ids);
@@ -125,91 +129,144 @@ internal static class LocalWorkspaceProjectionStore
             DELETE FROM local_workspace_execution_headers WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
 
-        var executions = new List<(string SessionId, string RunId, string? Model, string Status, string? StartedAt)>();
-        using (var command = connection.CreateCommand())
+        using (var limits = connection.CreateCommand())
         {
-            command.Transaction = transaction;
-            command.CommandText = "SELECT session_id,run_id,model,status,started_at FROM session_runs WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,run_id COLLATE BINARY;";
-            command.Parameters.AddWithValue("$ids", idsJson);
-            using var reader = command.ExecuteReader();
-            while (reader.Read()) executions.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+            limits.Transaction = transaction;
+            limits.CommandText = "SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>256);";
+            limits.Parameters.AddWithValue("$ids", idsJson);
+            if (Convert.ToInt64(limits.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
         }
-        foreach (var group in executions.GroupBy(static item => item.SessionId, StringComparer.Ordinal))
-        {
-            if (group.Count() > 256) throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
-            long ordinal = 0;
-            foreach (var item in group)
+        Execute(connection, transaction, """
+            INSERT INTO local_workspace_execution_headers(execution_id,session_id,source_kind,source_identity,source_ordinal,lifecycle,status,model,time_authority,start_utc_ticks,end_utc_ticks,duration_ms)
+            SELECT local_workspace_execution_id('session_run',r.run_id),r.session_id,'session_run',r.run_id,
+                   row_number() OVER(PARTITION BY r.session_id ORDER BY r.run_id COLLATE BINARY)-1,
+                   CASE r.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
+                   CASE r.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,r.model,
+                   CASE WHEN local_workspace_ticks(r.started_at) IS NOT NULL THEN 'recorded' WHEN r.started_at IS NULL THEN 'missing' ELSE 'invalid' END,
+                   local_workspace_ticks(r.started_at),
+                   CASE WHEN local_workspace_ticks(r.started_at) IS NOT NULL AND local_workspace_ticks(r.ended_at)>=local_workspace_ticks(r.started_at) THEN local_workspace_ticks(r.ended_at) END,
+                   CASE WHEN local_workspace_ticks(r.started_at) IS NOT NULL AND local_workspace_ticks(r.ended_at)>=local_workspace_ticks(r.started_at) THEN (local_workspace_ticks(r.ended_at)-local_workspace_ticks(r.started_at))/10000 END
+            FROM session_runs r WHERE r.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,activity_state,token_state)
+            SELECT local_workspace_node_id('execution_root',h.source_identity),h.session_id,h.execution_id,'execution_root',h.source_identity,0,NULL,'exact','execution','not_observed',NULL,
+                   CASE h.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
+                   CASE h.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
+                   h.time_authority,h.start_utc_ticks,'not_observed','not_observed'
+            FROM local_workspace_execution_headers h WHERE h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,activity_state,token_state,event_id)
+            SELECT local_workspace_node_id('session_event',e.event_id),e.session_id,h.execution_id,'session_event',e.event_id,
+                   row_number() OVER(PARTITION BY e.run_id ORDER BY e.event_id COLLATE BINARY),NULL,'unknown',local_workspace_node_kind(e.type),'recorded',e.type,
+                   CASE e.status WHEN 'active' THEN 'started' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
+                   CASE e.status WHEN 'active' THEN 'active' WHEN 'completed' THEN 'completed' WHEN 'failed' THEN 'failed' ELSE 'unknown' END,
+                   CASE WHEN local_workspace_ticks(e.occurred_at) IS NOT NULL THEN 'recorded' WHEN e.occurred_at IS NULL THEN 'missing' ELSE 'invalid' END,
+                   local_workspace_ticks(e.occurred_at),'not_observed','not_observed',e.event_id
+            FROM session_events e JOIN local_workspace_execution_headers h ON h.session_id=e.session_id AND h.source_identity=e.run_id
+            WHERE e.run_id IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,activity_state,token_state)
+            SELECT local_workspace_node_id('unknown_relation_group',h.source_identity),h.session_id,h.execution_id,'unknown_relation_group',h.source_identity,
+                   (SELECT COUNT(*)+1 FROM session_events x WHERE x.run_id=h.source_identity),NULL,'unknown','unknown_relation_group','not_observed',NULL,'unknown','unknown','missing',NULL,'not_observed','not_observed'
+            FROM local_workspace_execution_headers h WHERE h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND EXISTS(SELECT 1 FROM session_events e LEFT JOIN session_events p ON p.event_id=e.parent_event_id AND p.run_id=e.run_id
+                         WHERE e.run_id=h.source_identity AND e.parent_event_id IS NOT NULL AND p.event_id IS NULL);
+            UPDATE local_workspace_nodes AS n SET
+              parent_node_id=CASE WHEN e.parent_event_id IS NULL THEN local_workspace_node_id('execution_root',e.run_id)
+                                  WHEN p.event_id IS NOT NULL THEN local_workspace_node_id('session_event',p.event_id)
+                                  ELSE local_workspace_node_id('unknown_relation_group',e.run_id) END,
+              relationship_authority=CASE WHEN e.parent_event_id IS NULL OR p.event_id IS NOT NULL THEN 'exact' ELSE 'unknown' END
+            FROM session_events e LEFT JOIN session_events p ON p.event_id=e.parent_event_id AND p.run_id=e.run_id
+            WHERE n.source_kind='session_event' AND n.source_identity=e.event_id AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
+            SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes
+            WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND parent_node_id IS NOT NULL AND relationship_authority IN ('exact','explicit');
+            """, ("$ids", idsJson));
+
+        var canonicalSkillsJson = JsonSerializer.Serialize(skillProjection
+            .Where(static pair => pair.Value.State == "current")
+            .SelectMany(static pair => pair.Value.Invocations)
+            .Select(static invocation => new
             {
-                var executionId = StableExecutionId(item.SessionId, "session_run", item.RunId);
-                var (authority, ticks) = Time(item.StartedAt);
-                Execute(connection, transaction, "INSERT INTO local_workspace_execution_headers VALUES($execution,$session,'session_run',$source,$ordinal,$status,$model,$time,$ticks);",
-                    ("$execution", executionId), ("$session", item.SessionId), ("$source", item.RunId), ("$ordinal", ordinal++),
-                    ("$status", item.Status), ("$model", item.Model), ("$time", authority), ("$ticks", ticks));
-                var root = StableNodeId("execution_root", item.RunId);
-                Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'execution_root',$source,0,NULL,'exact','execution','not_observed',NULL,NULL,$status,$time,$ticks,'not_observed','not_observed');",
-                    ("$node", root), ("$session", item.SessionId), ("$execution", executionId), ("$source", item.RunId),
-                    ("$status", item.Status), ("$time", authority), ("$ticks", ticks));
-            }
+                identity = invocation.CanonicalIdentity,
+                session = invocation.SessionId,
+                trace = invocation.ProducerTraceId,
+                span = invocation.ProducerSpanId,
+                otel = invocation.OtelSourceIdentity,
+                sdk = invocation.SdkSourceIdentity,
+                name = invocation.SdkSkillName ?? invocation.OtelSkillName
+            }));
+        var sdkJoin = TableExists(connection, transaction, "skill_invocation_snapshots")
+            ? "LEFT JOIN skill_invocation_snapshots s ON s.session_id=c.session_id AND c.sdk_source_identity='sdk:'||s.claim_id"
+            : "LEFT JOIN (SELECT NULL session_id,NULL claim_id,NULL event_id WHERE 0) s ON 0";
+        Execute(connection, transaction, $"""
+            WITH canonical AS (
+              SELECT value->>'identity' canonical_identity,value->>'session' session_id,
+                     value->>'trace' trace_id,value->>'span' span_id,value->>'otel' otel_source_identity,
+                     value->>'sdk' sdk_source_identity,value->>'name' skill_name
+              FROM json_each($skills)),
+            resolved AS (
+              SELECT c.*,e.event_id,e.run_id,e.occurred_at,
+                     row_number() OVER(PARTITION BY c.canonical_identity ORDER BY e.event_id COLLATE BINARY) resolution_ordinal,
+                     count(*) OVER(PARTITION BY c.canonical_identity) resolution_count
+              FROM canonical c
+              {sdkJoin}
+              JOIN session_events e ON e.session_id=c.session_id AND e.run_id IS NOT NULL AND
+                ((c.trace_id IS NOT NULL AND c.span_id IS NOT NULL AND e.trace_id=c.trace_id AND e.source_event_id=c.trace_id||'/'||c.span_id)
+                 OR (s.event_id IS NOT NULL AND e.event_id=s.event_id))),
+            admitted AS (
+              SELECT * FROM resolved WHERE resolution_ordinal=1 AND resolution_count=1),
+            rows AS (
+              SELECT a.*,h.execution_id,local_workspace_node_id('skill_invocation',a.canonical_identity) node_id,
+                     local_workspace_node_id('execution_root',h.source_identity) parent_node_id,
+                     (SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id)+
+                       row_number() OVER(PARTITION BY h.execution_id ORDER BY a.canonical_identity COLLATE BINARY) source_ordinal
+              FROM admitted a JOIN local_workspace_execution_headers h ON h.session_id=a.session_id AND h.source_identity=a.run_id)
+            INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,activity_state,token_state,trace_id,span_id,event_id,otel_source_identity,sdk_source_identity)
+            SELECT node_id,session_id,execution_id,'skill_invocation',canonical_identity,source_ordinal,parent_node_id,'exact','skill',
+                   CASE WHEN skill_name IS NULL OR trim(skill_name)='' THEN 'invalid' ELSE 'recorded' END,
+                   CASE WHEN skill_name IS NULL OR trim(skill_name)='' THEN NULL ELSE skill_name END,
+                   'completed','completed',CASE WHEN local_workspace_ticks(occurred_at) IS NULL THEN CASE WHEN occurred_at IS NULL THEN 'missing' ELSE 'invalid' END ELSE 'recorded' END,
+                   local_workspace_ticks(occurred_at),'recorded','not_observed',trace_id,span_id,event_id,otel_source_identity,sdk_source_identity
+            FROM rows;
+            INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
+            SELECT node_id,parent_node_id,'parent','exact',source_ordinal FROM local_workspace_nodes
+            WHERE source_kind='skill_invocation' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            """, ("$ids", idsJson), ("$skills", canonicalSkillsJson));
+
+        if (TableExists(connection, transaction, "session_event_content"))
+        {
+            var contentSql = TableExists(connection, transaction, "retention_items")
+                ? """
+                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,retention_owner_token,availability_state)
+                  SELECT n.node_id,local_workspace_content_part(e.type),'session_event_content',e.event_id,
+                    CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND typeof(c.retention_owner_token)='blob' AND length(c.retention_owner_token)=32 AND i.source_item_id IS NOT NULL AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,
+                    CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL THEN 'deleted'
+                         WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
+                         WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))>1048576 THEN 'oversized'
+                         WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured'
+                         WHEN e.content_state='available' AND typeof(c.retention_owner_token)='blob' AND length(c.retention_owner_token)=32 AND i.source_item_id IS NOT NULL AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) THEN 'available'
+                         ELSE 'invalid' END
+                  FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
+                  LEFT JOIN session_event_content c ON c.event_id=e.event_id
+                  LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id AND i.expires_at=c.expires_at
+                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                  """
+                : """
+                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,retention_owner_token,availability_state)
+                  SELECT n.node_id,local_workspace_content_part(e.type),'session_event_content',e.event_id,NULL,
+                    CASE WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' WHEN e.content_state='expired_pending_deletion' THEN 'expired' ELSE 'invalid' END
+                  FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
+                  LEFT JOIN session_event_content c ON c.event_id=e.event_id
+                  WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                  """;
+            Execute(connection, transaction, contentSql, ("$ids", idsJson), ("$now", Canonical(now)));
         }
 
-        var events = new List<(string EventId, string SessionId, string RunId, string? ParentId, string Type, string OccurredAt, string? Status, string? MatchKind, string ContentState)>();
-        using (var command = connection.CreateCommand())
-        {
-            command.Transaction = transaction;
-            command.CommandText = "SELECT event_id,session_id,run_id,parent_event_id,type,occurred_at,status,match_kind,content_state FROM session_events WHERE run_id IS NOT NULL AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,run_id,event_id COLLATE BINARY;";
-            command.Parameters.AddWithValue("$ids", idsJson);
-            using var reader = command.ExecuteReader();
-            while (reader.Read()) events.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
-        }
-        foreach (var session in events.GroupBy(static item => item.SessionId, StringComparer.Ordinal))
-            if (session.Count() + executions.Count(item => item.SessionId == session.Key) > 4096)
-                throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
-        foreach (var group in events.GroupBy(static item => (item.SessionId, item.RunId)))
-        {
-            var executionId = StableExecutionId(group.Key.SessionId, "session_run", group.Key.RunId);
-            long ordinal = 1;
-            foreach (var item in group)
-            {
-                var node = StableNodeId("session_event", item.EventId);
-                var (authority, ticks) = Time(item.OccurredAt);
-                Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'session_event',$source,$ordinal,NULL,'unknown',$kind,'recorded',$name,NULL,$status,$time,$ticks,'not_observed','not_observed');",
-                    ("$node", node), ("$session", item.SessionId), ("$execution", executionId), ("$source", item.EventId), ("$ordinal", ordinal++),
-                    ("$kind", NodeKind(item.Type)), ("$name", item.Type), ("$status", item.Status), ("$time", authority), ("$ticks", ticks));
-            }
-        }
-        var eventsById = events.ToDictionary(static item => item.EventId, StringComparer.Ordinal);
-        foreach (var group in events.GroupBy(static item => (item.SessionId, item.RunId)))
-        {
-            if (!group.Any(item => item.ParentId is not null
-                    && (!eventsById.TryGetValue(item.ParentId, out var parent) || parent.RunId != item.RunId)))
-                continue;
-            var executionId = StableExecutionId(group.Key.SessionId, "session_run", group.Key.RunId);
-            var node = StableNodeId("unknown_relation_group", group.Key.RunId);
-            Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'unknown_relation_group',$source,$ordinal,NULL,'unknown','unknown_relation_group','not_observed',NULL,NULL,NULL,'missing',NULL,'not_observed','not_observed');",
-                ("$node", node), ("$session", group.Key.SessionId), ("$execution", executionId), ("$source", group.Key.RunId), ("$ordinal", group.LongCount() + 1));
-        }
-        foreach (var item in events)
-        {
-            var node = StableNodeId("session_event", item.EventId);
-            var parentIsSameExecution = item.ParentId is not null
-                && eventsById.TryGetValue(item.ParentId, out var parentEvent)
-                && parentEvent.RunId == item.RunId;
-            var parent = item.ParentId is null
-                ? StableNodeId("execution_root", item.RunId)
-                : parentIsSameExecution
-                    ? StableNodeId("session_event", item.ParentId)
-                    : StableNodeId("unknown_relation_group", item.RunId);
-            var relation = item.ParentId is null || parentIsSameExecution
-                ? item.ParentId is not null && item.MatchKind == "explicit_link" ? "explicit" : "exact"
-                : "unknown";
-            Execute(connection, transaction, "UPDATE local_workspace_nodes SET parent_node_id=$parent,relationship_authority=$authority WHERE node_id=$node AND EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=$parent AND p.execution_id=local_workspace_nodes.execution_id); INSERT INTO local_workspace_node_edges SELECT $node,$parent,'parent',$authority,source_ordinal FROM local_workspace_nodes WHERE node_id=$node AND parent_node_id=$parent AND $authority IN ('exact','explicit');",
-                ("$node", node), ("$parent", parent), ("$authority", relation));
-            if (TableExists(connection, transaction, "session_event_content"))
-                Execute(connection, transaction, TableExists(connection, transaction, "retention_items")
-                    ? "INSERT INTO local_workspace_node_content_refs SELECT $node,'event_content','session_event_content',e.event_id,CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.state IN ('expiring','retained_by_policy') AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL THEN 'deleted' WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') THEN 'expired' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))>1048576 THEN 'oversized' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.state IN ('expiring','retained_by_policy') THEN 'available' WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' ELSE 'invalid' END FROM session_events e LEFT JOIN session_event_content c ON c.event_id=e.event_id LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id WHERE e.event_id=$event;"
-                    : "INSERT INTO local_workspace_node_content_refs SELECT $node,'event_content','session_event_content',e.event_id,CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,CASE WHEN e.content_state='expired_pending_deletion' THEN 'expired' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))>1048576 THEN 'oversized' WHEN e.content_state='available' AND c.event_id IS NOT NULL THEN 'available' WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' ELSE 'invalid' END FROM session_events e LEFT JOIN session_event_content c ON c.event_id=e.event_id WHERE e.event_id=$event;",
-                    ("$node", node), ("$event", item.EventId));
-        }
+        using var bound = connection.CreateCommand();
+        bound.Transaction = transaction;
+        bound.CommandText = "SELECT EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>4096);";
+        bound.Parameters.AddWithValue("$ids", idsJson);
+        if (Convert.ToInt64(bound.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
     }
 
     internal static string StableExecutionId(string sessionId, string sourceKind, string sourceIdentity)
@@ -256,6 +313,16 @@ internal static class LocalWorkspaceProjectionStore
         _ => "event",
     };
 
+    private static string ContentPart(string type) => type switch
+    {
+        "user.message" or "UserPromptSubmit" or "userPromptSubmitted" => "instruction",
+        "tool.execution_start" or "PreToolUse" => "tool_input",
+        "tool.execution_end" or "PostToolUse" => "tool_result",
+        "PostToolUseFailure" or "StopFailure" or "subagent.failed" => "error_message",
+        "subagent.started" or "SubagentStart" => "subagent_input",
+        _ => "event_content",
+    };
+
     private static void ApplyLabels(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
     {
         connection.CreateFunction<string, string, string?>("local_workspace_label", static (type, json) => TryReadInstruction(type, json, out var text) ? text : null, isDeterministic: true);
@@ -295,7 +362,12 @@ internal static class LocalWorkspaceProjectionStore
             """, idsJson, Canonical(now));
     }
 
-    private static void ApplySearchFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
+    private static void ApplySearchFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string idsJson,
+        DateTimeOffset now,
+        IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> skillProjection)
     {
         if (TableExists(connection, transaction, "retention_items"))
             ExecuteWithIds(connection, transaction, """
@@ -312,20 +384,30 @@ internal static class LocalWorkspaceProjectionStore
                 SELECT session_id,'label',label_source_identity,local_workspace_search(label_text),label_expires_at
                 FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                 """, idsJson);
-        var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
-        var skillProjection = SkillProjectionReadService.ReadCurrentInvocationProjection(
-            connection, transaction, sessionIds, now, skillRegistryAuthority);
-        foreach (var pair in skillProjection)
+        var skillJson = JsonSerializer.Serialize(skillProjection.Select(pair => new
         {
-            using var activity = connection.CreateCommand();
-            activity.Transaction = transaction;
-            activity.CommandText = "UPDATE local_workspace_session_activity SET state=$state,count=$count WHERE session_id=$session AND kind='skill';";
-            activity.Parameters.AddWithValue("$state", pair.Value.State == "current" ? "recorded" : pair.Value.State);
-            activity.Parameters.AddWithValue("$count", (object?)pair.Value.InvocationCount ?? DBNull.Value);
-            activity.Parameters.AddWithValue("$session", pair.Key);
-            activity.ExecuteNonQuery();
-            foreach (var fact in pair.Value.SearchFacts)
-                InsertSkillSearchFact(connection, transaction, fact.SessionId, fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
+            session = pair.Key,
+            state = pair.Value.State == "current" ? "recorded" : pair.Value.State,
+            count = pair.Value.InvocationCount,
+            facts = pair.Value.SearchFacts.Select(fact => new { source = fact.SourceIdentity, name = fact.SkillName, expires = fact.ExpiresAt })
+        }));
+        using (var skills = connection.CreateCommand())
+        {
+            skills.Transaction = transaction;
+            skills.CommandText = """
+                WITH projection AS (
+                  SELECT value->>'session' session_id,value->>'state' state,
+                         CASE WHEN json_type(value,'$.count')='null' THEN NULL ELSE CAST(value->>'count' AS INTEGER) END count,
+                         value->'facts' facts
+                  FROM json_each($projection))
+                UPDATE local_workspace_session_activity AS a SET state=p.state,count=p.count
+                FROM projection p WHERE a.session_id=p.session_id AND a.kind='skill';
+                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT p.value->>'session','skill',f.value->>'source',local_workspace_search(f.value->>'name'),f.value->>'expires'
+                FROM json_each($projection) p JOIN json_each(p.value->'facts') f;
+                """;
+            skills.Parameters.AddWithValue("$projection", skillJson);
+            skills.ExecuteNonQuery();
         }
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
@@ -343,29 +425,16 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson, Canonical(now));
     }
 
-    private static void InsertSkillSearchFact(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        string sessionId,
-        string sourceIdentity,
-        string skillName,
-        string? expiresAt)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at) VALUES($session,'skill',$source,local_workspace_search($name),$expires_at);";
-        command.Parameters.AddWithValue("$session", sessionId);
-        command.Parameters.AddWithValue("$source", sourceIdentity);
-        command.Parameters.AddWithValue("$name", skillName);
-        command.Parameters.AddWithValue("$expires_at", (object?)expiresAt ?? DBNull.Value);
-        command.ExecuteNonQuery();
-    }
-
     private static void RegisterProjectionFunctions(SqliteConnection connection)
     {
         connection.CreateFunction<string?, long?>("local_workspace_epoch", static value => TryInstant(value, out var instant) ? instant.ToUnixTimeMilliseconds() : null, isDeterministic: true);
         connection.CreateFunction<string?, string?>("local_workspace_canonical", static value => TryInstant(value, out var instant) ? Canonical(instant) : null, isDeterministic: true);
         connection.CreateFunction<string?, string?>("local_workspace_search", static value => value is null ? null : Search(value), isDeterministic: true);
+        connection.CreateFunction<string, string, string>("local_workspace_node_id", StableNodeId, isDeterministic: true);
+        connection.CreateFunction<string, string, string>("local_workspace_execution_id", static (kind, identity) => StableExecutionId(string.Empty, kind, identity), isDeterministic: true);
+        connection.CreateFunction<string, string>("local_workspace_node_kind", NodeKind, isDeterministic: true);
+        connection.CreateFunction<string, string>("local_workspace_content_part", ContentPart, isDeterministic: true);
+        connection.CreateFunction<string?, long?>("local_workspace_ticks", static value => Time(value).Ticks, isDeterministic: true);
     }
 
     private static bool TryInstant(string? value, out DateTimeOffset instant)

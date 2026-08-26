@@ -160,6 +160,44 @@ public sealed class LocalWorkspaceProjectionSchemaTests
             Strings(connection, "SELECT parent_node_id FROM local_workspace_nodes WHERE source_identity='event-b';"));
     }
 
+    [Theory]
+    [InlineData(4095, true)]
+    [InlineData(4096, false)]
+    public void NodeBoundCountsExecutionRoot(int eventCount, bool succeeds)
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        using (var transaction = connection.BeginTransaction())
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO session_events VALUES($id,'0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,NULL,NULL,'synthetic',$id,'event','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);";
+            var id = command.Parameters.Add("$id", SqliteType.Text);
+            for (var index = 0; index < eventCount; index++) { id.Value = $"event-{index:D4}"; command.ExecuteNonQuery(); }
+            transaction.Commit();
+        }
+
+        if (succeeds)
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+            Assert.Equal(4096, Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Length);
+        }
+        else
+        {
+            Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() => LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
+            Assert.Empty(Strings(connection, "SELECT component FROM schema_version WHERE component='local_workspace_projection';"));
+        }
+    }
+
+    [Fact]
+    public void ExactParentProofDoesNotUseSessionMatchKind()
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown'); INSERT INTO session_events VALUES('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,NULL,NULL,'synthetic','source-a','event','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL); INSERT INTO session_events VALUES('event-b','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','event-a',NULL,NULL,'synthetic','source-b','event','2026-08-24T00:00:01.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,'explicit_link',NULL,NULL);");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal(["exact"], Strings(connection, "SELECT relationship_authority FROM local_workspace_nodes WHERE source_identity='event-b';"));
+    }
+
     [Fact]
     public void EnsureRejectsMalformedOwnedSchemaWithoutCommittingPartialInstall()
     {

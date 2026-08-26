@@ -129,14 +129,18 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 source_kind TEXT NOT NULL CHECK(source_kind='session_run'),
                 source_identity TEXT NOT NULL,
                 source_ordinal INTEGER NOT NULL CHECK(source_ordinal>=0),
-                status TEXT NULL,
+                lifecycle TEXT NOT NULL CHECK(lifecycle IN ('selected','started','completed','failed','deselected','unknown')),
+                status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
                 model TEXT NULL,
                 time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
                 start_utc_ticks INTEGER NULL,
+                end_utc_ticks INTEGER NULL,
+                duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms>=0),
                 UNIQUE(session_id,source_kind,source_identity),
                 UNIQUE(session_id,source_ordinal),
                 FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
-                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL))
+                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL)),
+                CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000))
             );
             """),
         new("index", "local_workspace_executions_by_session", "local_workspace_execution_headers", "CREATE INDEX local_workspace_executions_by_session ON local_workspace_execution_headers(session_id,time_authority,start_utc_ticks,source_ordinal,execution_id);"),
@@ -145,7 +149,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 node_id TEXT PRIMARY KEY CHECK(length(node_id)=37 AND substr(node_id,1,5)='node-'),
                 session_id TEXT NOT NULL,
                 execution_id TEXT NOT NULL,
-                source_kind TEXT NOT NULL CHECK(source_kind IN ('execution_root','session_event','unknown_relation_group')),
+                source_kind TEXT NOT NULL CHECK(source_kind IN ('execution_root','session_event','skill_invocation','unknown_relation_group')),
                 source_identity TEXT NOT NULL,
                 source_ordinal INTEGER NOT NULL CHECK(source_ordinal>=0),
                 parent_node_id TEXT NULL,
@@ -153,19 +157,26 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 kind TEXT NOT NULL CHECK(kind IN ('execution','agent','skill','tool','subagent','event','error','retry','permission','unknown_relation_group')),
                 name_state TEXT NOT NULL CHECK(name_state IN ('recorded','not_observed','invalid')),
                 name_text TEXT NULL,
-                lifecycle TEXT NULL,
-                status TEXT NULL,
+                lifecycle TEXT NOT NULL CHECK(lifecycle IN ('selected','started','completed','failed','deselected','unknown')),
+                status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
                 time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
                 start_utc_ticks INTEGER NULL,
                 activity_state TEXT NOT NULL,
                 token_state TEXT NOT NULL,
+                trace_id TEXT NULL,
+                span_id TEXT NULL,
+                event_id TEXT NULL,
+                otel_source_identity TEXT NULL,
+                sdk_source_identity TEXT NULL,
                 UNIQUE(session_id,source_kind,source_identity),
                 UNIQUE(execution_id,source_ordinal,node_id),
                 FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 FOREIGN KEY(execution_id) REFERENCES local_workspace_execution_headers(execution_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 FOREIGN KEY(parent_node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 CHECK((name_state='recorded')=(name_text IS NOT NULL)),
-                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL))
+                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL)),
+                CHECK((trace_id IS NULL)=(span_id IS NULL)),
+                CHECK(source_kind<>'skill_invocation' OR otel_source_identity IS NOT NULL OR sdk_source_identity IS NOT NULL)
             );
             """),
         new("index", "local_workspace_nodes_by_parent", "local_workspace_nodes", "CREATE INDEX local_workspace_nodes_by_parent ON local_workspace_nodes(execution_id,parent_node_id,time_authority,start_utc_ticks,source_ordinal,node_id);"),
@@ -290,6 +301,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         {
             foreach (var definition in Definitions.Skip(V3Definitions.Count)) Execute(connection, transaction, definition.Sql);
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
+            ValidateSemanticRows(connection, transaction);
             Execute(connection, transaction, "UPDATE schema_version SET version=4 WHERE component='local_workspace_projection' AND version=3;");
             Validate(connection, transaction);
             return;
@@ -298,12 +310,14 @@ internal static class LocalWorkspaceProjectionSchemaV1
         {
             Validate(connection, transaction);
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
+            ValidateSemanticRows(connection, transaction);
             return;
         }
         foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
-        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);");
         BackfillSpanFacts(connection, transaction);
         RefreshProjection(connection, transaction, now, skillRegistryAuthority);
+        ValidateSemanticRows(connection, transaction);
+        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);");
         Validate(connection, transaction);
     }
 
@@ -331,6 +345,30 @@ internal static class LocalWorkspaceProjectionSchemaV1
         if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects)) return;
         if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects)) return;
         throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema.");
+    }
+
+    private static void ValidateSemanticRows(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+              EXISTS(SELECT 1 FROM local_workspace_execution_headers h
+                     WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity))
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes n
+                     WHERE n.node_id<>local_workspace_node_id(n.source_kind,n.source_identity)
+                        OR NOT EXISTS(SELECT 1 FROM local_workspace_execution_headers h WHERE h.execution_id=n.execution_id AND h.session_id=n.session_id)
+                        OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id)))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_edges e
+                     WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
+                     WHERE c.store_kind<>'session_event_content' OR n.source_kind<>'session_event' OR n.source_identity<>c.source_item_id)
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)
+              OR EXISTS(SELECT 1 FROM local_workspace_execution_headers GROUP BY session_id HAVING COUNT(*)>256)
+              OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4096);
+            """;
+        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidOperationException("local_workspace_projection_semantic_validation_failed");
     }
 
 

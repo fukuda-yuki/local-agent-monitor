@@ -6,6 +6,34 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         new(new StructuralRegistryAuthority());
 
     [Fact]
+    public void DetailProjectionClassifiesAllSixExactRawCarriersWithCurrentRetentionAdmission()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES
+              ('event-1','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-1','user.message','2026-08-24T00:00:00.0000000+00:00','available'),
+              ('event-2','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-2','PreToolUse','2026-08-24T00:00:01.0000000+00:00','available'),
+              ('event-3','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-3','PostToolUse','2026-08-24T00:00:02.0000000+00:00','available'),
+              ('event-4','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-4','StopFailure','2026-08-24T00:00:03.0000000+00:00','available'),
+              ('event-5','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-5','SubagentStart','2026-08-24T00:00:04.0000000+00:00','available'),
+              ('event-6','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-6','event','2026-08-24T00:00:05.0000000+00:00','available');
+            INSERT INTO session_event_content SELECT event_id,'application/json','{}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32) FROM session_events;
+            INSERT INTO retention_items SELECT 'session_event_content',event_id,'expiring',NULL,NULL,NULL,'2026-09-01T00:00:00.0000000+00:00' FROM session_events;
+            PRAGMA foreign_keys=ON;
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(
+            ["error_message:available", "event_content:available", "instruction:available", "subagent_input:available", "tool_input:available", "tool_result:available"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT part||':'||availability_state FROM local_workspace_node_content_refs ORDER BY part;"));
+    }
+
+    [Fact]
     public void UnconfiguredParticipantIsNoOpOnlyWhenProjectionIsAbsent()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
