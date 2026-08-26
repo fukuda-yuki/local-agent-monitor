@@ -75,9 +75,20 @@ public sealed class SqliteRuntimeBackupService
     private readonly Action<string>? checkpoint;
     private readonly Func<string, string> installedDoctorCheck;
     private readonly Func<string, bool> restoreFailureCleanup;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
     private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
 
-    public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) : this(timeProvider, null, null) { }
+    public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) : this(timeProvider, null, null, null) { }
+
+    internal SqliteRuntimeBackupService(
+        TimeProvider timeProvider,
+        ISkillRegistryGenerationAuthority skillRegistryAuthority,
+        ILocalWorkspacePublicationGate publicationGate)
+        : this(timeProvider, null, null, null)
+    {
+        this.skillRegistryAuthority = skillRegistryAuthority ?? throw new ArgumentNullException(nameof(skillRegistryAuthority));
+        this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
+    }
 
     internal SqliteRuntimeBackupService(TimeProvider? timeProvider, Action<string>? checkpoint) :
         this(timeProvider, checkpoint, null)
@@ -117,35 +128,51 @@ public sealed class SqliteRuntimeBackupService
 
     public (RuntimeBackupPreflightResult Result, RuntimeBackupMonitorLease? Lease) InitializeForMonitor(string databasePath)
     {
-        if (!TryFullFile(databasePath, mustExist: false, out var database))
-            return (new(false, RuntimeBackupErrorCodes.InvalidArguments), null);
-        var stream = TryAcquireRestoreLease(database + ".runtime-restore.lock");
-        if (stream is null) return (new(false, RuntimeBackupErrorCodes.MonitorMustBeStopped), null);
-        var lease = new RuntimeBackupMonitorLease(database, stream);
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
         try
         {
-            var result = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
-            if (!result.Success)
+            if (!TryFullFile(databasePath, mustExist: false, out var database))
+                return (new(false, RuntimeBackupErrorCodes.InvalidArguments), null);
+            var stream = TryAcquireRestoreLease(database + ".runtime-restore.lock");
+            if (stream is null) return (new(false, RuntimeBackupErrorCodes.MonitorMustBeStopped), null);
+            var lease = new RuntimeBackupMonitorLease(database, stream);
+            try
+            {
+                var result = PrepareMonitorInitializationWithLease(database, refreshLocalWorkspaceProjection: true);
+                if (!result.Success)
+                {
+                    lease.Dispose();
+                    return (result, null);
+                }
+                return (result, lease);
+            }
+            catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException || IsIo(exception))
             {
                 lease.Dispose();
-                return (result, null);
+                return (new(false, RuntimeBackupErrorCodes.RestoreIncompatible), null);
             }
-            return (result, lease);
         }
-        catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException || IsIo(exception))
+        finally
         {
-            lease.Dispose();
-            return (new(false, RuntimeBackupErrorCodes.RestoreIncompatible), null);
+            publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 
     public RuntimeBackupPreflightResult CompleteMonitorInitialization(RuntimeBackupMonitorLease lease)
     {
-        ArgumentNullException.ThrowIfNull(lease);
-        if (!lease.IsActive) return new(false, RuntimeBackupErrorCodes.MonitorMustBeStopped);
-        try { return CompleteMonitorInitializationWithLease(lease.DatabasePath); }
-        catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException || IsIo(exception))
-        { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
+            ArgumentNullException.ThrowIfNull(lease);
+            if (!lease.IsActive) return new(false, RuntimeBackupErrorCodes.MonitorMustBeStopped);
+            try { return CompleteMonitorInitializationWithLease(lease.DatabasePath); }
+            catch (Exception exception) when (exception is RuntimeBackupException or SqliteException or InvalidOperationException || IsIo(exception))
+            { return new(false, RuntimeBackupErrorCodes.RestoreIncompatible); }
+        }
+        finally
+        {
+            publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     private RuntimeBackupPreflightResult PrepareMonitorInitializationWithLease(
@@ -216,7 +243,7 @@ public sealed class SqliteRuntimeBackupService
         }
         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, transaction);
         if (version is long current && current == LocalWorkspaceProjectionSchemaV1.Version)
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(), skillRegistryAuthority);
         transaction.Commit();
     }
 
@@ -2500,7 +2527,7 @@ public sealed class SqliteRuntimeBackupService
                     retention.InitializeForWrite(connection, transaction);
                 SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
                 SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
-                LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow(), skillRegistryAuthority);
                 EnsureDoctorSchema(connection, transaction);
                 SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
                 HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);
@@ -2635,7 +2662,11 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction(deferred: false);
         LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
         LocalArchiveSchemaV1.Ensure(connection, transaction);
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, publicationTime ?? timeProvider.GetUtcNow());
+        LocalWorkspaceProjectionSchemaV1.Ensure(
+            connection,
+            transaction,
+            publicationTime ?? timeProvider.GetUtcNow(),
+            skillRegistryAuthority);
         // The child component installs only behind its declared parents. A current database that
         // predates Retention or Skill Projection has no parent graph to hang it on, and installing
         // it there would create the objects without a validatable owner.

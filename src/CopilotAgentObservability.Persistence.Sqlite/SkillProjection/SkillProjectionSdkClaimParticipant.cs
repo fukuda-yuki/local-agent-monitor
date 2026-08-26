@@ -36,17 +36,25 @@ internal static class SkillProjectionSdkClaimParticipant
         SqliteConnection connection,
         SqliteTransaction transaction,
         SkillProjectionSdkClaimWrite claim)
+        => InsertOrVerify(connection, transaction, claim, LocalWorkspaceProjectionTransactionParticipant.Instance);
+
+    internal static SkillProjectionSdkClaimWriteOutcome InsertOrVerify(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SkillProjectionSdkClaimWrite claim,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(claim);
+        ArgumentNullException.ThrowIfNull(workspaceParticipant);
 
         var createdAt = FormatCreatedAt(claim.CreatedAt);
         var collisions = ReadCollisions(connection, transaction, claim);
         if (collisions.Count == 0)
         {
             Insert(connection, transaction, claim, createdAt);
-            LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+            workspaceParticipant.RefreshSessions(
                 connection, transaction, [claim.SessionId], claim.CreatedAt);
             return SkillProjectionSdkClaimWriteOutcome.Inserted;
         }

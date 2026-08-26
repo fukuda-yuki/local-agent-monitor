@@ -14,8 +14,14 @@ internal interface ILocalWorkspaceProjectionTransactionParticipant
 internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWorkspaceProjectionTransactionParticipant
 {
     internal static LocalWorkspaceProjectionTransactionParticipant Instance { get; } = new();
+    private readonly ISkillRegistryGenerationAuthority? skillRegistryAuthority;
 
     private LocalWorkspaceProjectionTransactionParticipant() { }
+
+    internal LocalWorkspaceProjectionTransactionParticipant(ISkillRegistryGenerationAuthority skillRegistryAuthority)
+    {
+        this.skillRegistryAuthority = skillRegistryAuthority ?? throw new ArgumentNullException(nameof(skillRegistryAuthority));
+    }
 
     public void RefreshSessions(
         SqliteConnection connection,
@@ -24,7 +30,7 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
         DateTimeOffset now)
     {
         if (sessionIds.Count == 0 || !IsInstalled(connection, transaction)) return;
-        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now);
+        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now, skillRegistryAuthority);
     }
 
     private static bool IsInstalled(SqliteConnection connection, SqliteTransaction transaction)

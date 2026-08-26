@@ -165,7 +165,24 @@ internal static class LocalWorkspaceProjectionSchemaV1
         transaction.Commit();
     }
 
+    internal static void Ensure(
+        SqliteConnection connection,
+        DateTimeOffset now,
+        ISkillRegistryGenerationAuthority skillRegistryAuthority)
+    {
+        using var transaction = connection.BeginTransaction();
+        Ensure(connection, transaction, now, skillRegistryAuthority);
+        transaction.Commit();
+    }
+
     internal static void Ensure(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
+        => Ensure(connection, transaction, now, null);
+
+    internal static void Ensure(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset now,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -186,7 +203,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
             foreach (var table in V2TableNames.Reverse()) Execute(connection, transaction, $"DROP TABLE {table};");
             foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
             BackfillSpanFacts(connection, transaction);
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, now, skillRegistryAuthority);
             Execute(connection, transaction, "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection' AND version=2;");
             Validate(connection, transaction);
             return;
@@ -194,13 +211,13 @@ internal static class LocalWorkspaceProjectionSchemaV1
         if (version is not null || owned.Count != 0)
         {
             Validate(connection, transaction);
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, now, skillRegistryAuthority);
             return;
         }
         foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
         Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',3);");
         BackfillSpanFacts(connection, transaction);
-        LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, now, skillRegistryAuthority);
         Validate(connection, transaction);
     }
 

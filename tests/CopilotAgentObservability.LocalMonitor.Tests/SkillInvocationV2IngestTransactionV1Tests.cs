@@ -51,6 +51,34 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
     }
 
     [Fact]
+    public void Execute_FreshAvailableRequestPublishesWorkspaceFactInOwningCommit()
+    {
+        using var database = new TestDatabase();
+        var authority = new RegistryAuthority();
+        using (var connection = database.Open())
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, WriteAt, authority);
+        var participant = new LocalWorkspaceProjectionTransactionParticipant(authority);
+        var gate = new LocalWorkspacePublicationGate();
+
+        var result = SkillInvocationV2IngestTransactionV1.Execute(
+            database.Path,
+            Derive(AvailablePayload),
+            authority,
+            new CountingTimeProvider(WriteAt),
+            () => true,
+            () => true,
+            CancellationToken.None,
+            gate,
+            participant);
+
+        Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, result.Outcome);
+        Assert.Equal("review", Scalar(database,
+            "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+        Assert.Equal(FormatTimestamp(WriteAt.AddDays(90)), Scalar(database,
+            "SELECT expires_at FROM local_workspace_session_search_facts WHERE kind='skill';"));
+    }
+
+    [Fact]
     public void Execute_1075Request_PersistsExactFrozenFiveFieldIdentity()
     {
         using var database = new TestDatabase();

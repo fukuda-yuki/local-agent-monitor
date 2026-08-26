@@ -10,18 +10,27 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
 {
     private readonly object syncRoot = new();
     private readonly HashSet<GenerationLease> outstandingLeases = new();
+    private readonly ILocalWorkspacePublicationGate publicationGate;
     private Generation? currentGeneration;
 
     internal event Action<ISkillRegistryGenerationAuthority>? CurrentGenerationChanging;
 
     internal SkillInvocationV2RegistryProviderV1()
-        : this(SkillInvocationV2ArtifactRegistry.Load())
+        : this(SkillInvocationV2ArtifactRegistry.Load(), new LocalWorkspacePublicationGate())
     {
     }
 
     internal SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry registry)
+        : this(registry, new LocalWorkspacePublicationGate())
+    {
+    }
+
+    internal SkillInvocationV2RegistryProviderV1(
+        SkillInvocationV2ArtifactRegistry registry,
+        ILocalWorkspacePublicationGate publicationGate)
     {
         ArgumentNullException.ThrowIfNull(registry);
+        this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
         currentGeneration = new Generation(Guid.NewGuid(), registry);
     }
 
@@ -89,16 +98,24 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
     {
         ArgumentNullException.ThrowIfNull(registry);
         var incoming = new Generation(Guid.NewGuid(), registry);
+        var publicationLease = publicationGate.AcquireWriteAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
 
-        lock (syncRoot)
+        try
         {
-            while (outstandingLeases.Count > 0)
+            lock (syncRoot)
             {
-                Monitor.Wait(syncRoot);
-            }
+                while (outstandingLeases.Count > 0)
+                {
+                    Monitor.Wait(syncRoot);
+                }
 
-            CurrentGenerationChanging?.Invoke(new ProposedGenerationAuthority(incoming));
-            currentGeneration = incoming;
+                CurrentGenerationChanging?.Invoke(new ProposedGenerationAuthority(incoming));
+                currentGeneration = incoming;
+            }
+        }
+        finally
+        {
+            publicationLease.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 

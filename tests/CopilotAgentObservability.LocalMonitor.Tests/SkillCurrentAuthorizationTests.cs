@@ -54,6 +54,7 @@ public sealed class SkillCurrentAuthorizationTests
         RefreshWorkspace(database, authority);
 
         Assert.Equal(["demo-skill"], SearchFacts(database));
+        Assert.Equal("2026-04-01T00:00:00.0000000+00:00", SearchFactExpiry(database));
         Assert.Equal(0, authority.OutstandingLeaseCount);
     }
 
@@ -400,6 +401,36 @@ public sealed class SkillCurrentAuthorizationTests
     }
 
     [Fact]
+    public async Task RealProvider_HoldsPublicationWriteLeaseAcrossCallbackAndPointerAssignment()
+    {
+        var gate = new LocalWorkspacePublicationGate();
+        var provider = new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), gate);
+        var callbackEntered = new ManualResetEventSlim();
+        var releaseCallback = new ManualResetEventSlim();
+        provider.CurrentGenerationChanging += _ =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var publication = Task.Run(() => provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load()));
+        Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(5)));
+        var collectionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var collection = Task.Run(async () =>
+        {
+            await using var lease = await gate.AcquireReadAsync(CancellationToken.None);
+            collectionEntered.SetResult();
+        });
+
+        await Task.Yield();
+        Assert.False(collectionEntered.Task.IsCompleted);
+        releaseCallback.Set();
+        await publication.WaitAsync(TimeSpan.FromSeconds(5));
+        await collection.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(collectionEntered.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
     public void RealProvidersKeepGenerationAuthorityInstanceScopedAcrossSequentialPublications()
     {
         var firstHost = new SkillInvocationV2RegistryProviderV1();
@@ -497,6 +528,14 @@ public sealed class SkillCurrentAuthorizationTests
         var result = new List<string>();
         while (reader.Read()) result.Add(reader.GetString(0));
         return result.ToArray();
+    }
+
+    private static string? SearchFactExpiry(TestDatabase database)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT expires_at FROM local_workspace_session_search_facts WHERE kind='skill';";
+        return command.ExecuteScalar() as string;
     }
 
     private sealed class ScriptedRegistryGenerationAuthority : ISkillRegistryGenerationAuthority

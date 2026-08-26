@@ -21,6 +21,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     private readonly Action? finalReturnObserver;
     private readonly Func<SqliteConnection>? connectionFactory;
     private readonly Action<string, int>? catalogRowObserver;
+    private readonly ILocalWorkspacePublicationGate publicationGate;
 
     internal SqliteLocalRepositoryScopeSnapshotService(
         string databasePath,
@@ -33,7 +34,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         Action<SqliteConnection>? connectionOpenedObserver = null,
         Action? finalReturnObserver = null,
         Func<SqliteConnection>? connectionFactory = null,
-        Action<string, int>? catalogRowObserver = null)
+        Action<string, int>? catalogRowObserver = null,
+        ILocalWorkspacePublicationGate? publicationGate = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(sessionContributor);
@@ -51,6 +53,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         this.finalReturnObserver = finalReturnObserver;
         this.connectionFactory = connectionFactory;
         this.catalogRowObserver = catalogRowObserver;
+        this.publicationGate = publicationGate ?? new LocalWorkspacePublicationGate();
     }
 
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
@@ -59,6 +62,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     {
         ValidateRequest(request);
         cancellationToken.ThrowIfCancellationRequested();
+        await using var publicationLease = await publicationGate.AcquireReadAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             using var connection = Open();

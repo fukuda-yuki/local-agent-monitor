@@ -640,7 +640,11 @@ internal sealed class SkillProjectionReadService
                 new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint),
                 claim.SkillName, claim.SkillSource).Authorization;
             if (authorization is not null)
-                result.Add(new(identity.SessionId.ToString("D"), facts.ClaimId.Value.ToString("D"), authorization.SkillName));
+                result.Add(new(
+                    identity.SessionId.ToString("D"),
+                    facts.ClaimId.Value.ToString("D"),
+                    authorization.SkillName,
+                    facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
         }
         return result;
     }
