@@ -284,7 +284,9 @@ internal static class SkillInvocationSnapshotMetadataReader
         && string.Equals(row.AdapterVersion, snapshot.AdapterVersion, StringComparison.Ordinal)
         && string.Equals(row.NormalizationVersion, snapshot.NormalizationVersion, StringComparison.Ordinal)
         && string.Equals(row.SchemaFingerprint, snapshot.SchemaFingerprint, StringComparison.Ordinal)
-        && row.TraceId is null && snapshot.TraceId is null && snapshot.SpanId is null
+        && NullableTextEquals(row.TraceId, snapshot.TraceId)
+        && ((snapshot.TraceId is null && snapshot.SpanId is null)
+            || (snapshot.TraceId is not null && snapshot.SpanId is not null))
         && (snapshot.State == AvailableState
             ? NullableTextEquals(row.RunId, snapshot.RunId)
             : snapshot.RunId is null && snapshot.TraceId is null && snapshot.SpanId is null);

@@ -592,14 +592,21 @@ internal sealed class SkillProjectionReadService
                 static _ => new SkillProjectionCurrentInvocationProjection(null, "unavailable", []),
                 StringComparer.Ordinal);
         var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
+        IReadOnlySet<string> unavailableSdkSessions = new HashSet<string>(StringComparer.Ordinal);
         var sdk = registryAuthority is null
             ? []
-            : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority, new FixedProjectionTimeProvider(acceptedAt));
+            : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority,
+                new FixedProjectionTimeProvider(acceptedAt), out unavailableSdkSessions);
         var result = new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
         var otelBySession = otel.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
         var sdkBySession = sdk.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
         foreach (var sessionId in sessionIds.Distinct(StringComparer.Ordinal))
         {
+            if (unavailableSdkSessions.Contains(sessionId))
+            {
+                result[sessionId] = new(null, "unavailable", []);
+                continue;
+            }
             var sessionOtel = otelBySession.GetValueOrDefault(sessionId, []);
             var sessionSdk = sdkBySession.GetValueOrDefault(sessionId, []);
             sessionOtel = DeduplicateExactProducerPairs(sessionOtel);
@@ -679,8 +686,11 @@ internal sealed class SkillProjectionReadService
 
     private static IReadOnlyList<InvocationFact> ReadCurrentSdkInvocationFacts(
         SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds,
-        ISkillRegistryGenerationAuthority registryAuthority, TimeProvider timeProvider)
+        ISkillRegistryGenerationAuthority registryAuthority, TimeProvider timeProvider,
+        out IReadOnlySet<string> unavailableSessions)
     {
+        var unavailable = new HashSet<string>(StringComparer.Ordinal);
+        unavailableSessions = unavailable;
         if (!TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -697,8 +707,11 @@ internal sealed class SkillProjectionReadService
             if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found || metadata.Facts is not { IsAvailable: true, RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable, ClaimId: not null } facts) continue;
             var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
             if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
-            using var authorization = AcquireGenerationAuthorization(registryAuthority,
-                new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint), claim.SkillName, claim.SkillSource).Authorization;
+            var authorizationResult = AcquireGenerationAuthorization(registryAuthority,
+                new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint), claim.SkillName, claim.SkillSource);
+            if (authorizationResult.Outcome is SkillRegistryCurrentAuthorizationOutcome.Busy or SkillRegistryCurrentAuthorizationOutcome.Unavailable)
+                unavailable.Add(identity.SessionId.ToString("D"));
+            using var authorization = authorizationResult.Authorization;
             if (authorization is null) continue;
             result.Add(new(new(identity.SessionId.ToString("D"), "sdk:" + facts.ClaimId.Value.ToString("D"), authorization.SkillName,
                 facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)), claim.ProducerTraceId, claim.ProducerSpanId));
