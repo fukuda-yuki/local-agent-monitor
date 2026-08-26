@@ -53,7 +53,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     [InlineData("deleted", "deleted")]
     [InlineData("read_denied", "read_denied")]
     [InlineData("error", "invalid")]
-    [InlineData("tombstone", "invalid")]
+    [InlineData("tombstone", "deleted")]
     public void RawRetentionBindingDriftFailsClosedAndClearsCapability(string mutation, string expectedState)
     {
         using var connection = OpenRawRetentionFixture(32);
@@ -82,6 +82,27 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 
         Assert.Equal([$"{expectedState}:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
+    }
+
+    [Fact]
+    public void CommittedDeletionSurvivesPhysicalContentRemovalAsExactTombstoneFact()
+    {
+        using var connection = OpenRawRetentionFixture(32);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            UPDATE retention_items SET state='deleted',deleted_at='2026-08-25T00:00:00.0000000+00:00' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';
+            INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at)
+              SELECT item_id,'2026-08-25T00:00:00.0000000+00:00','2026-08-25T00:00:00.0000000+00:00' FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';
+            DELETE FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';
+            """);
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["event_content:deleted:1:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT part||':'||availability_state||':'||(retention_owner_token IS NULL)||':'||(retention_item_id IS NOT NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
     }
 
     [Fact]
@@ -390,6 +411,22 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         Assert.Equal(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT trace_id FROM local_workspace_execution_headers;"));
         Assert.Equal(["recorded:639231264010000000:639231264010000000:0"],
             LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT time_authority||':'||start_utc_ticks||':'||end_utc_ticks||':'||duration_ms FROM local_workspace_nodes WHERE source_identity='event-a';"));
+    }
+
+    [Fact]
+    public void ExecutionTokenArithmeticViolationIsInconsistentWithoutExposingInvalidTotal()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,10,3,99,'active');
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["inconsistent:0|recorded:10|recorded:3|inconsistent:1"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT token_state||':'||available_execution_count||'|'||input_token_state||':'||input_tokens||'|'||output_token_state||':'||output_tokens||'|'||total_token_state||':'||(total_tokens IS NULL) FROM local_workspace_execution_headers;"));
     }
 
     [Theory]

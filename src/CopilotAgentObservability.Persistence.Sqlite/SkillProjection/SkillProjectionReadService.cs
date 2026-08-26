@@ -123,6 +123,7 @@ internal sealed class SkillProjectionReadService
             ORDER BY invocation.invocation_id;
             """;
         command.Parameters.AddWithValue("$trace_id", traceId);
+        SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var rows = new List<SkillProjectionInvocationClaim>();
         while (reader.Read())
@@ -187,6 +188,7 @@ internal sealed class SkillProjectionReadService
             ORDER BY inventory.inventory_id,name.name_ordinal;
             """;
         command.Parameters.AddWithValue("$trace_id", traceId);
+        SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var order = new List<long>();
         var accumulators = new Dictionary<long, InventoryAccumulator>();
@@ -423,6 +425,7 @@ internal sealed class SkillProjectionReadService
             command.Parameters.Add(new SqliteParameter("@claimId", claimId));
             command.Parameters.Add(new SqliteParameter("@sessionId", sessionId.ToString("D")));
 
+            SqliteCommandExecutionObserver.Executing();
             using var reader = command.ExecuteReader();
             if (!reader.Read())
                 return null;
@@ -684,6 +687,7 @@ internal sealed class SkillProjectionReadService
             ORDER BY invocation.session_id COLLATE BINARY,invocation.invocation_id;
             """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var result = new List<InvocationFact>();
         while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null, null));
@@ -812,6 +816,7 @@ internal sealed class SkillProjectionReadService
             """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
         command.Parameters.AddWithValue("$now", timeProvider.GetUtcNow().ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        SqliteCommandExecutionObserver.Executing();
         using var reader = command.ExecuteReader();
         var result = new List<StructurallyValidSdkCandidate>();
         while (reader.Read())
@@ -837,6 +842,7 @@ internal sealed class SkillProjectionReadService
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
+        SqliteCommandExecutionObserver.Executing();
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 
@@ -846,6 +852,7 @@ internal sealed class SkillProjectionReadService
         command.Transaction = transaction;
         command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
         command.Parameters.AddWithValue("$name", name);
+        SqliteCommandExecutionObserver.Executing();
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 

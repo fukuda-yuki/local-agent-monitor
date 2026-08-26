@@ -451,6 +451,14 @@ internal static class LocalWorkspaceProjectionSchemaV1
         var retentionValidation = TableExists(connection, transaction, "retention_items") && TableExists(connection, transaction, "retention_store_instances") && TableExists(connection, transaction, "retention_tombstones")
             ? """
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.retention_item_id IS NOT NULL AND (i.item_id IS NULL OR i.store_kind<>c.store_kind OR i.source_item_id<>c.source_item_id
+                       OR i.store_instance_id<>c.retention_store_instance_id OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.availability_state='deleted' AND (c.retention_owner_token IS NOT NULL OR i.item_id IS NULL
+                       OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))))
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
                      JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id JOIN session_event_content s ON s.event_id=e.event_id
                      LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
                      WHERE c.availability_state='available' AND (i.store_instance_id<>c.retention_store_instance_id OR i.store_instance_id<>(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
@@ -472,7 +480,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
                         OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id)))
               OR EXISTS(SELECT 1 FROM local_workspace_node_edges e
                      WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id)
-                        OR (e.relation_kind='parent' AND e.relationship_authority<>(SELECT n.relationship_authority FROM local_workspace_nodes n WHERE n.node_id=e.node_id)))
+                        OR (e.relation_kind='parent' AND (e.related_node_id<>(SELECT n.parent_node_id FROM local_workspace_nodes n WHERE n.node_id=e.node_id)
+                          OR e.relationship_authority<>(SELECT n.relationship_authority FROM local_workspace_nodes n WHERE n.node_id=e.node_id))))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
                      WHERE c.store_kind<>'session_event_content' OR n.source_kind<>'session_event' OR n.source_identity<>c.source_item_id)
               {retentionValidation}

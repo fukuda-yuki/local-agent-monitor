@@ -111,7 +111,7 @@ internal static class LocalWorkspaceProjectionStore
             RefreshDetailProjection(connection, transaction, sessionIds, skillProjection, now);
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
-        state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
+        state.Parameters.AddWithValue("$now", Canonical(now)); SqliteCommandExecutionObserver.Executing(); state.ExecuteNonQuery();
     }
 
     private static void RefreshDetailProjection(
@@ -135,6 +135,7 @@ internal static class LocalWorkspaceProjectionStore
             limits.Transaction = transaction;
             limits.CommandText = "SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>256);";
             limits.Parameters.AddWithValue("$ids", idsJson);
+            SqliteCommandExecutionObserver.Executing();
             if (Convert.ToInt64(limits.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
                 throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
         }
@@ -197,22 +198,28 @@ internal static class LocalWorkspaceProjectionStore
               subagent_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='subagent')='recorded' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND e.type IN ('subagent.started','SubagentStart')) END,
               error_activity_state=COALESCE((SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='error'),'not_observed'),
               error_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='error')='recorded' THEN (SELECT COUNT(*) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND (e.type IN ('PostToolUseFailure','StopFailure','subagent.failed') OR e.terminal_outcome='failed')) END,
-              retry_activity_state=COALESCE((SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='retry'),'not_observed'),
-              retry_activity_count=CASE WHEN (SELECT state FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='retry')='recorded' THEN (SELECT count FROM local_workspace_session_activity a WHERE a.session_id=h.session_id AND a.kind='retry') END,
-              token_authority=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'none' ELSE c.authority END,
-              token_state=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
-              available_execution_count=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 0 ELSE 1 END,
-              input_token_state=CASE WHEN c.input_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
-              input_tokens=c.input_tokens,output_tokens=c.output_tokens,total_tokens=c.total_tokens,reasoning_tokens=c.reasoning_tokens,
+              retry_activity_state='not_observed',
+              retry_activity_count=NULL,
+              token_authority=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'none'
+                WHEN (c.total_tokens IS NOT NULL AND c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL AND c.total_tokens<>c.input_tokens+c.output_tokens) OR (c.cache_read_tokens IS NOT NULL AND (c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens)) THEN 'none' ELSE c.authority END,
+              token_state=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 'not_observed'
+                WHEN (c.total_tokens IS NOT NULL AND c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL AND c.total_tokens<>c.input_tokens+c.output_tokens) OR (c.cache_read_tokens IS NOT NULL AND (c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens)) THEN 'inconsistent' ELSE 'recorded' END,
+              available_execution_count=CASE WHEN c.input_tokens IS NULL AND c.output_tokens IS NULL AND c.total_tokens IS NULL AND c.reasoning_tokens IS NULL AND c.cache_read_tokens IS NULL AND c.cache_creation_tokens IS NULL THEN 0
+                WHEN (c.total_tokens IS NOT NULL AND c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL AND c.total_tokens<>c.input_tokens+c.output_tokens) OR (c.cache_read_tokens IS NOT NULL AND (c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens)) THEN 0 ELSE 1 END,
+              input_token_state=CASE WHEN c.input_tokens IS NULL THEN 'not_observed' WHEN c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens>c.input_tokens THEN 'inconsistent' ELSE 'recorded' END,
+              input_tokens=CASE WHEN c.input_tokens IS NOT NULL AND NOT (c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens>c.input_tokens) THEN c.input_tokens END,
+              output_tokens=CASE WHEN c.output_tokens IS NOT NULL THEN c.output_tokens END,
+              total_tokens=CASE WHEN c.total_tokens IS NOT NULL AND NOT (c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL AND c.total_tokens<>c.input_tokens+c.output_tokens) THEN c.total_tokens END,
+              reasoning_tokens=c.reasoning_tokens,
               output_token_state=CASE WHEN c.output_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
-              total_token_state=CASE WHEN c.total_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
+              total_token_state=CASE WHEN c.total_tokens IS NULL THEN 'not_observed' WHEN c.input_tokens IS NOT NULL AND c.output_tokens IS NOT NULL AND c.total_tokens<>c.input_tokens+c.output_tokens THEN 'inconsistent' ELSE 'recorded' END,
               reasoning_token_state=CASE WHEN c.reasoning_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
-              cache_read_token_state=CASE WHEN c.cache_read_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
+              cache_read_token_state=CASE WHEN c.cache_read_tokens IS NULL THEN 'not_observed' WHEN c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens THEN 'inconsistent' ELSE 'recorded' END,
               cache_creation_token_state=CASE WHEN c.cache_creation_tokens IS NULL THEN 'not_observed' ELSE 'recorded' END,
-              cache_read_tokens=c.cache_read_tokens,cache_creation_tokens=c.cache_creation_tokens,
-              new_input_token_state=CASE WHEN c.input_tokens IS NOT NULL AND c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens<=c.input_tokens THEN 'recorded' ELSE 'not_observed' END,
+              cache_read_tokens=CASE WHEN c.cache_read_tokens IS NOT NULL AND c.input_tokens IS NOT NULL AND c.cache_read_tokens<=c.input_tokens THEN c.cache_read_tokens END,cache_creation_tokens=c.cache_creation_tokens,
+              new_input_token_state=CASE WHEN c.cache_read_tokens IS NOT NULL AND (c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens) THEN 'inconsistent' WHEN c.input_tokens IS NOT NULL AND c.cache_read_tokens IS NOT NULL THEN 'recorded' ELSE 'not_observed' END,
               new_input_tokens=CASE WHEN c.input_tokens IS NOT NULL AND c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens<=c.input_tokens THEN c.input_tokens-c.cache_read_tokens END,
-              cache_read_ratio_state=CASE WHEN c.input_tokens>0 AND c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens<=c.input_tokens THEN 'recorded' ELSE 'not_observed' END,
+              cache_read_ratio_state=CASE WHEN c.cache_read_tokens IS NOT NULL AND (c.input_tokens IS NULL OR c.cache_read_tokens>c.input_tokens) THEN 'inconsistent' WHEN c.input_tokens>0 AND c.cache_read_tokens IS NOT NULL THEN 'recorded' ELSE 'not_observed' END,
               cache_read_ratio_basis_points=CASE WHEN c.input_tokens>0 AND c.cache_read_tokens IS NOT NULL AND c.cache_read_tokens<=c.input_tokens THEN (c.cache_read_tokens*10000)/c.input_tokens END
             FROM (SELECT h2.execution_id local_execution_id,c.* FROM local_workspace_execution_headers h2 LEFT JOIN chosen c ON c.session_id=h2.session_id AND c.execution_id=h2.source_identity) c
             WHERE h.execution_id=c.local_execution_id AND h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
@@ -232,6 +239,22 @@ internal static class LocalWorkspaceProjectionStore
               retry_activity_state=CASE WHEN kind='retry' THEN 'recorded' ELSE 'not_observed' END,retry_activity_count=CASE WHEN kind='retry' THEN 1 END
             WHERE source_kind='session_event' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, ("$ids", idsJson));
+
+        if (TableExists(connection, transaction, "monitor_spans"))
+        {
+            Execute(connection, transaction, """
+                WITH exact_spans AS (
+                  SELECT DISTINCT e.session_id,e.run_id,ms.raw_record_id,ms.span_ordinal,f.retry_count
+                  FROM session_events e JOIN monitor_spans ms ON e.source_adapter='otel-exact' COLLATE BINARY AND e.source_event_id=ms.trace_id||'/'||ms.span_id COLLATE BINARY AND e.trace_id=ms.trace_id COLLATE BINARY
+                  JOIN local_workspace_span_facts f ON f.raw_record_id=ms.raw_record_id AND f.span_ordinal=ms.span_ordinal
+                  WHERE e.run_id IS NOT NULL AND ms.operation='chat' COLLATE BINARY AND f.retry_count IS NOT NULL AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
+                totals AS (SELECT session_id,run_id,SUM(retry_count) retry_count FROM exact_spans GROUP BY session_id,run_id)
+                UPDATE local_workspace_execution_headers AS h SET retry_activity_state='recorded',retry_activity_count=t.retry_count
+                FROM totals t WHERE h.session_id=t.session_id AND h.source_identity=t.run_id;
+                UPDATE local_workspace_nodes AS n SET retry_activity_state=h.retry_activity_state,retry_activity_count=h.retry_activity_count
+                FROM local_workspace_execution_headers h WHERE n.source_kind='execution_root' AND n.execution_id=h.execution_id AND h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, ("$ids", idsJson));
+        }
 
         var canonicalSkillsJson = JsonSerializer.Serialize(skillProjection
             .Where(static pair => pair.Value.State == "current")
@@ -263,9 +286,9 @@ internal static class LocalWorkspaceProjectionStore
             unresolved AS (
               SELECT c.*,h.execution_id FROM canonical c JOIN local_workspace_execution_headers h
                 ON h.session_id=c.session_id AND h.source_kind=c.execution_source_kind AND h.source_identity=c.execution_source_identity
-              WHERE c.sdk_parent_source_event_id IS NOT NULL AND
+              WHERE c.sdk_parent_source_event_id IS NOT NULL AND (
                 (SELECT COUNT(*) FROM session_events p WHERE p.session_id=c.session_id AND p.run_id=c.execution_source_identity AND p.source_event_id=c.sdk_parent_source_event_id)<>1
-                OR NOT EXISTS(SELECT 1 FROM session_events p WHERE p.session_id=c.session_id AND p.run_id=c.execution_source_identity AND p.source_adapter=c.sdk_source_adapter AND p.source_event_id=c.sdk_parent_source_event_id))
+                OR NOT EXISTS(SELECT 1 FROM session_events p WHERE p.session_id=c.session_id AND p.run_id=c.execution_source_identity AND p.source_adapter=c.sdk_source_adapter AND p.source_event_id=c.sdk_parent_source_event_id)))
             INSERT OR IGNORE INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,token_state)
             SELECT local_workspace_node_id('unknown_relation_group',u.execution_source_identity),u.session_id,u.execution_id,'unknown_relation_group',u.execution_source_identity,
                    (SELECT COUNT(*)+1 FROM local_workspace_nodes n WHERE n.execution_id=u.execution_id),NULL,'unknown','unknown_relation_group','not_observed',NULL,'unknown','unknown','missing',NULL,'not_observed'
@@ -324,13 +347,13 @@ internal static class LocalWorkspaceProjectionStore
                     local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),
                     local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json),
                     e.content_state||'|'||COALESCE(c.captured_at,'')||'|'||COALESCE(c.expires_at,'')||'|'||COALESCE(i.item_id,'')||'|'||COALESCE(i.store_instance_id,'')||'|'||COALESCE(CAST(i.revision AS TEXT),'')||'|'||COALESCE(i.state,''),
-                    i.item_id,i.store_instance_id,c.captured_at,c.expires_at,i.revision,i.ownership_receipt,
+                    i.item_id,i.store_instance_id,COALESCE(c.captured_at,i.captured_at),COALESCE(c.expires_at,i.expires_at),i.revision,i.ownership_receipt,
                     CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
                       AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at AND typeof(c.retention_owner_token)='blob' AND length(c.retention_owner_token)=32
                       AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt)=1
                       AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
                       AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)<=1048576 THEN c.retention_owner_token END,
-                    CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL THEN 'deleted'
+                    CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id) THEN 'deleted'
                          WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
                          WHEN e.content_state='available' AND c.event_id IS NOT NULL AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)>1048576 THEN 'oversized'
                          WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured'
@@ -340,7 +363,9 @@ internal static class LocalWorkspaceProjectionStore
                          ELSE 'invalid' END
                   FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
                   LEFT JOIN session_event_content c ON c.event_id=e.event_id
-                  LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at
+                  LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
+                    AND ((c.event_id IS NOT NULL AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at)
+                      OR i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))
                   WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                   """
                 : """
@@ -362,6 +387,7 @@ internal static class LocalWorkspaceProjectionStore
         bound.Transaction = transaction;
         bound.CommandText = "SELECT EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id HAVING COUNT(*)>4096);";
         bound.Parameters.AddWithValue("$ids", idsJson);
+        SqliteCommandExecutionObserver.Executing();
         if (Convert.ToInt64(bound.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
     }
@@ -543,6 +569,7 @@ internal static class LocalWorkspaceProjectionStore
                 FROM json_each($projection) p JOIN json_each(p.value->'facts') f;
                 """;
             skills.Parameters.AddWithValue("$projection", skillJson);
+            SqliteCommandExecutionObserver.Executing();
             skills.ExecuteNonQuery();
         }
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
@@ -631,12 +658,12 @@ internal static class LocalWorkspaceProjectionStore
     }
     private static bool TryCanonicalFuture(string value, DateTimeOffset now) => DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) && parsed.Offset == TimeSpan.Zero && parsed > now;
     private static string Canonical(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-    private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }
-    private static void ExecuteWithIds(SqliteConnection connection, SqliteTransaction transaction, string sql, string ids, string? now = null) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now); command.ExecuteNonQuery(); }
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.ExecuteNonQuery(); }
-    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; foreach (var (name,value) in parameters) command.Parameters.AddWithValue(name,value ?? DBNull.Value); command.ExecuteNonQuery(); }
-    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", name); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0; }
-    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction transaction, string table, string name) { using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText=$"SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=$name);"; command.Parameters.AddWithValue("$name",name); return Convert.ToInt64(command.ExecuteScalar(),CultureInfo.InvariantCulture)!=0; }
+    private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; SqliteCommandExecutionObserver.Executing(); using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }
+    private static void ExecuteWithIds(SqliteConnection connection, SqliteTransaction transaction, string sql, string ids, string? now = null) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now); SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; foreach (var (name,value) in parameters) command.Parameters.AddWithValue(name,value ?? DBNull.Value); SqliteCommandExecutionObserver.Executing(); command.ExecuteNonQuery(); }
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", name); SqliteCommandExecutionObserver.Executing(); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0; }
+    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction transaction, string table, string name) { using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText=$"SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=$name);"; command.Parameters.AddWithValue("$name",name); SqliteCommandExecutionObserver.Executing(); return Convert.ToInt64(command.ExecuteScalar(),CultureInfo.InvariantCulture)!=0; }
 
     private static long RetentionReceiptMatches(string? storeInstanceId, string? eventId, string? contentKind,
         string? capturedAt, string? expiresAt, string? sessionId, string? runId, string? sourceAdapter,

@@ -343,33 +343,16 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         }
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
 
-        var statements = 0;
-        string? previous = null;
-        strdelegate_trace trace = (_, sql) =>
-        {
-            // sqlite3_trace repeats the owning top-level statement once for each
-            // foreign-key trigger subprogram. Count the prepared top-level statement,
-            // while still detecting any row-dependent command loop with distinct SQL.
-            if (string.Equals(previous, sql, StringComparison.Ordinal)) return;
-            previous = sql;
-            statements++;
-        };
-        raw.sqlite3_trace(connection.Handle, trace, null);
-        try
-        {
-            using var transaction = connection.BeginTransaction();
-            LocalWorkspaceProjectionStore.RefreshSessionsStructural(
-                connection,
-                transaction,
-                ["0198f5b8-0c00-7000-8000-000000000001"],
-                DateTimeOffset.UnixEpoch);
-            transaction.Rollback();
-        }
-        finally
-        {
-            raw.sqlite3_trace(connection.Handle, (strdelegate_trace?)null, null);
-        }
-        return statements;
+        var commandExecutions = 0;
+        using var observation = SqliteCommandExecutionObserver.Begin(() => commandExecutions++);
+        using var observedTransaction = connection.BeginTransaction();
+        LocalWorkspaceProjectionStore.RefreshSessionsStructural(
+            connection,
+            observedTransaction,
+            ["0198f5b8-0c00-7000-8000-000000000001"],
+            DateTimeOffset.UnixEpoch);
+        observedTransaction.Rollback();
+        return commandExecutions;
     }
 
     private static string[] Strings(SqliteTransaction transaction, string sql)

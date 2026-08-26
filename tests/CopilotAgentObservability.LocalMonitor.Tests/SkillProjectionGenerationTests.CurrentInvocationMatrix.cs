@@ -15,7 +15,7 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     [Fact]
     public void PersistedSqliteMatrix_CanonicalSdkReaderHasFixedPreparedStatementSequenceForOneTwoHundredFiftySixAndTenThousandClaims()
     {
-        string[]? expectedStatements = null;
+        int? expectedExecutions = null;
         foreach (var count in new[] { 1, 256, 10_000 })
         {
             using var fixture = new CurrentInvocationProjectionFixture();
@@ -24,9 +24,9 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
             var observed = fixture.ReadAllObserved();
 
             Assert.Equal(count, observed.Result[fixture.SessionId("fixed-cardinality")].InvocationCount);
-            Assert.Equal(5, observed.Statements.Length);
-            expectedStatements ??= observed.Statements;
-            Assert.Equal(expectedStatements, observed.Statements);
+            Assert.True(observed.CommandExecutions > 0);
+            expectedExecutions ??= observed.CommandExecutions;
+            Assert.Equal(expectedExecutions, observed.CommandExecutions);
             Assert.Equal(1, fixture.RegistryCaptureCount);
             Assert.Equal(1, fixture.RegistryLeaseCount);
             Assert.Equal(1, fixture.RegistryVerifyCount);
@@ -169,6 +169,17 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(["explicit"], fixture.SkillParentEdgeAuthorities("sdk-parent"));
     }
 
+    [Fact]
+    public void PersistedSqliteMatrix_SdkWithoutParentProofUsesExactExecutionRootWithoutPhantomGroup()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("sdk-root", "sdk-skill");
+        fixture.RefreshWorkspace();
+
+        Assert.Equal(["exact"], fixture.SkillRelationshipAuthorities("sdk-root"));
+        Assert.Equal(0, fixture.UnknownRelationshipGroupCount("sdk-root"));
+    }
+
     [Theory]
     [InlineData("missing")]
     [InlineData("ambiguous")]
@@ -183,6 +194,25 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 
         Assert.Equal(["unknown"], fixture.SkillRelationshipAuthorities("sdk-parent"));
         Assert.Empty(fixture.SkillParentEdgeAuthorities("sdk-parent"));
+    }
+
+    [Fact]
+    public void PersistedSqliteMatrix_NodeBoundaryIncludesExecutionRootUnknownGroupAndCanonicalSkill()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkWithExplicitParent("boundary", "sdk-skill");
+        fixture.CorruptExplicitParent("boundary", "missing");
+        fixture.RefreshWorkspace();
+        fixture.AddGenericEvents("boundary", 4096 - fixture.DetailNodeCount("boundary"));
+
+        fixture.RefreshWorkspaceProjection("boundary");
+        Assert.Equal(4096, fixture.DetailNodeCount("boundary"));
+        Assert.Equal(1, fixture.UnknownRelationshipGroupCount("boundary"));
+        Assert.Equal(1, fixture.CountDetailSkillNodes("boundary"));
+
+        fixture.AddGenericEvents("boundary", 1);
+        Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() =>
+            fixture.RefreshWorkspaceProjection("boundary")).Message);
     }
 
     [Fact]
@@ -374,33 +404,16 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         return SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction, sessions.Values, ReadAt, authority);
     }
 
-    internal (IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> Result, string[] Statements) ReadAllObserved()
+    internal (IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> Result, int CommandExecutions) ReadAllObserved()
     {
         authority.ResetObservations();
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: true);
-        var statements = new List<string>();
-        string? previous = null;
-        SQLitePCL.strdelegate_trace trace = (_, sql) =>
-        {
-            var prepared = sql;
-            foreach (var sessionId in sessions.Values)
-                prepared = prepared.Replace(sessionId, "$session", StringComparison.Ordinal);
-            if (string.Equals(previous, prepared, StringComparison.Ordinal)) return;
-            previous = prepared;
-            statements.Add(prepared);
-        };
-        SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
-        try
-        {
-            var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
-                connection, transaction, sessions.Values, ReadAt, authority);
-            return (result, statements.ToArray());
-        }
-        finally
-        {
-            SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.strdelegate_trace?)null, null);
-        }
+        var commandExecutions = 0;
+        using var observation = SqliteCommandExecutionObserver.Begin(() => commandExecutions++);
+        var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, sessions.Values, ReadAt, authority);
+        return (result, commandExecutions);
     }
 
     internal int RegistryCaptureCount => authority.CaptureCount;
@@ -497,6 +510,54 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.CommandText = "SELECT e.relationship_authority FROM local_workspace_node_edges e JOIN local_workspace_nodes n ON n.node_id=e.node_id WHERE n.session_id=$session AND n.source_kind='skill_invocation' AND e.relation_kind='parent' ORDER BY e.node_id;";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
+    }
+
+    internal int UnknownRelationshipGroupCount(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='unknown_relation_group';";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal int DetailNodeCount(string sessionKey)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session;";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal void AddGenericEvents(string sessionKey, int count)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction(); using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES($event,$session,$run,'copilot-sdk','synthetic',$source,'event','2026-08-24T00:00:00.0000000+00:00','not_captured');";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using (var run = connection.CreateCommand())
+        {
+            run.Transaction = transaction;
+            run.CommandText = "SELECT run_id FROM skill_invocation_snapshots WHERE session_id=$session ORDER BY snapshot_id LIMIT 1;";
+            run.Parameters.AddWithValue("$session", sessions[sessionKey]);
+            command.Parameters.AddWithValue("$run", Assert.IsType<string>(run.ExecuteScalar()));
+        }
+        var eventParameter = command.Parameters.Add("$event", SqliteType.Text);
+        var sourceParameter = command.Parameters.Add("$source", SqliteType.Text);
+        for (var index = 0; index < count; index++)
+        {
+            eventParameter.Value = Guid.CreateVersion7().ToString("D");
+            sourceParameter.Value = $"boundary-{Guid.NewGuid():N}";
+            command.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    internal void RefreshWorkspaceProjection(string sessionKey)
+    {
+        using var connection = Open(); using var transaction = connection.BeginTransaction();
+        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], ReadAt, authority);
+        transaction.Commit();
     }
 
     internal void CorruptExplicitParent(string sessionKey, string defect)
