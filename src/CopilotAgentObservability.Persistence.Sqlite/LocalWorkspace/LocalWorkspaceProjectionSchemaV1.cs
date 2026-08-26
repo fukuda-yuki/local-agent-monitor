@@ -7,15 +7,16 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal static class LocalWorkspaceProjectionSchemaV1
 {
     internal const string ComponentName = "local_workspace_projection";
-    internal const int Version = 3;
+    internal const int Version = 4;
     internal static readonly string[] TableNames =
     [
         "local_workspace_sessions", "local_workspace_session_sources",
         "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_activity",
         "local_workspace_token_observations", "local_workspace_span_facts", "local_workspace_projection_state",
+        "local_workspace_execution_headers", "local_workspace_nodes", "local_workspace_node_edges", "local_workspace_node_content_refs",
     ];
 
-    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V3Definitions =
     [
         new("table", "local_workspace_sessions", "local_workspace_sessions", """
             CREATE TABLE local_workspace_sessions (
@@ -118,6 +119,82 @@ internal static class LocalWorkspaceProjectionSchemaV1
             );
             """),
     ];
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> Definitions =
+    [
+        .. V3Definitions,
+        new("table", "local_workspace_execution_headers", "local_workspace_execution_headers", """
+            CREATE TABLE local_workspace_execution_headers (
+                execution_id TEXT PRIMARY KEY CHECK(length(execution_id)=36),
+                session_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL CHECK(source_kind='session_run'),
+                source_identity TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL CHECK(source_ordinal>=0),
+                status TEXT NULL,
+                model TEXT NULL,
+                time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
+                start_utc_ticks INTEGER NULL,
+                UNIQUE(session_id,source_kind,source_identity),
+                UNIQUE(session_id,source_ordinal),
+                FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL))
+            );
+            """),
+        new("index", "local_workspace_executions_by_session", "local_workspace_execution_headers", "CREATE INDEX local_workspace_executions_by_session ON local_workspace_execution_headers(session_id,time_authority,start_utc_ticks,source_ordinal,execution_id);"),
+        new("table", "local_workspace_nodes", "local_workspace_nodes", """
+            CREATE TABLE local_workspace_nodes (
+                node_id TEXT PRIMARY KEY CHECK(length(node_id)=37 AND substr(node_id,1,5)='node-'),
+                session_id TEXT NOT NULL,
+                execution_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL CHECK(source_kind IN ('execution_root','session_event','unknown_relation_group')),
+                source_identity TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL CHECK(source_ordinal>=0),
+                parent_node_id TEXT NULL,
+                relationship_authority TEXT NOT NULL CHECK(relationship_authority IN ('exact','explicit','unknown')),
+                kind TEXT NOT NULL CHECK(kind IN ('execution','agent','skill','tool','subagent','event','error','retry','permission','unknown_relation_group')),
+                name_state TEXT NOT NULL CHECK(name_state IN ('recorded','not_observed','invalid')),
+                name_text TEXT NULL,
+                lifecycle TEXT NULL,
+                status TEXT NULL,
+                time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
+                start_utc_ticks INTEGER NULL,
+                activity_state TEXT NOT NULL,
+                token_state TEXT NOT NULL,
+                UNIQUE(session_id,source_kind,source_identity),
+                UNIQUE(execution_id,source_ordinal,node_id),
+                FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                FOREIGN KEY(execution_id) REFERENCES local_workspace_execution_headers(execution_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                FOREIGN KEY(parent_node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                CHECK((name_state='recorded')=(name_text IS NOT NULL)),
+                CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL))
+            );
+            """),
+        new("index", "local_workspace_nodes_by_parent", "local_workspace_nodes", "CREATE INDEX local_workspace_nodes_by_parent ON local_workspace_nodes(execution_id,parent_node_id,time_authority,start_utc_ticks,source_ordinal,node_id);"),
+        new("table", "local_workspace_node_edges", "local_workspace_node_edges", """
+            CREATE TABLE local_workspace_node_edges (
+                node_id TEXT NOT NULL,
+                related_node_id TEXT NOT NULL,
+                relation_kind TEXT NOT NULL CHECK(relation_kind IN ('parent','retry','recovery')),
+                relationship_authority TEXT NOT NULL CHECK(relationship_authority IN ('exact','explicit')),
+                source_ordinal INTEGER NOT NULL CHECK(source_ordinal>=0),
+                PRIMARY KEY(node_id,related_node_id,relation_kind),
+                FOREIGN KEY(node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                FOREIGN KEY(related_node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE
+            );
+            """),
+        new("table", "local_workspace_node_content_refs", "local_workspace_node_content_refs", """
+            CREATE TABLE local_workspace_node_content_refs (
+                node_id TEXT NOT NULL,
+                part TEXT NOT NULL CHECK(part IN ('instruction','tool_input','tool_result','error_message','subagent_input','event_content')),
+                store_kind TEXT NOT NULL,
+                source_item_id TEXT NOT NULL,
+                retention_owner_token BLOB NULL CHECK(retention_owner_token IS NULL OR (typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32)),
+                availability_state TEXT NOT NULL CHECK(availability_state IN ('available','not_captured','expired','deleted','read_denied','oversized','invalid')),
+                PRIMARY KEY(node_id,part),
+                FOREIGN KEY(node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+                CHECK((availability_state='available')=(retention_owner_token IS NOT NULL))
+            );
+            """),
+    ];
 
     internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects { get; } =
         SqliteOwnedSchemaAuthority.Compile(Definitions);
@@ -148,7 +225,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         );
         """);
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V2Definitions =
-        [V2Sessions, .. Definitions.Where(static definition => definition.Name is not ("local_workspace_sessions" or "local_workspace_session_search_facts" or "local_workspace_search_facts_by_text" or "local_workspace_search_facts_by_session"))];
+        [V2Sessions, .. V3Definitions.Where(static definition => definition.Name is not ("local_workspace_sessions" or "local_workspace_session_search_facts" or "local_workspace_search_facts_by_text" or "local_workspace_search_facts_by_session"))];
     private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V2ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(V2Definitions);
     private static readonly string[] V2TableNames = V2Definitions.Where(static definition => definition.Type == "table").Select(static definition => definition.Name).ToArray();
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V1Definitions =
@@ -157,6 +234,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
     internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
     internal static IEnumerable<string> ExactV1SchemaSql => V1Definitions.Select(static definition => definition.Sql);
     internal static IEnumerable<string> ExactV2SchemaSql => V2Definitions.Select(static definition => definition.Sql);
+    internal static IEnumerable<string> ExactV3SchemaSql => V3Definitions.Select(static definition => definition.Sql);
 
     internal static void Ensure(SqliteConnection connection, DateTimeOffset now)
     {
@@ -201,10 +279,18 @@ internal static class LocalWorkspaceProjectionSchemaV1
         if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects))
         {
             foreach (var table in V2TableNames.Reverse()) Execute(connection, transaction, $"DROP TABLE {table};");
-            foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
+            foreach (var definition in V3Definitions) Execute(connection, transaction, definition.Sql);
             BackfillSpanFacts(connection, transaction);
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
             Execute(connection, transaction, "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection' AND version=2;");
+            version = 3;
+            owned = ReadOwnedObjects(connection, transaction);
+        }
+        if (version == 3 && SqliteOwnedSchemaAuthority.Equal(owned, SqliteOwnedSchemaAuthority.Compile(V3Definitions)))
+        {
+            foreach (var definition in Definitions.Skip(V3Definitions.Count)) Execute(connection, transaction, definition.Sql);
+            RefreshProjection(connection, transaction, now, skillRegistryAuthority);
+            Execute(connection, transaction, "UPDATE schema_version SET version=4 WHERE component='local_workspace_projection' AND version=3;");
             Validate(connection, transaction);
             return;
         }
@@ -215,7 +301,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
             return;
         }
         foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
-        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',3);");
+        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',4);");
         BackfillSpanFacts(connection, transaction);
         RefreshProjection(connection, transaction, now, skillRegistryAuthority);
         Validate(connection, transaction);
@@ -233,7 +319,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
     {
         if (ReadVersion(connection, transaction) != Version
             || !SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects))
-            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 3.");
+            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 4.");
     }
 
     internal static void ValidateCurrentOrExactLegacy(SqliteConnection connection, SqliteTransaction? transaction)
@@ -241,6 +327,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
         if (version == Version && SqliteOwnedSchemaAuthority.Equal(owned, ExpectedObjects)) return;
+        if (version == 3 && SqliteOwnedSchemaAuthority.Equal(owned, SqliteOwnedSchemaAuthority.Compile(V3Definitions))) return;
         if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects)) return;
         if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects)) return;
         throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema.");

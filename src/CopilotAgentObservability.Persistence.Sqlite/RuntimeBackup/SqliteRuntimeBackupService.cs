@@ -38,7 +38,7 @@ public sealed class SqliteRuntimeBackupService
         ["historical_instruction_analysis"] = 1,
         ["local_archive"] = 1,
         ["local_repository_catalog"] = 1,
-        ["local_workspace_projection"] = 3,
+        ["local_workspace_projection"] = 4,
         ["monitor"] = 11,
         ["pricing"] = 1,
         ["retention"] = 1,
@@ -393,7 +393,7 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction(deferred: false);
         using var installed = connection.CreateCommand();
         installed.Transaction = transaction;
-        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=3);";
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=4);";
         if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime,
                 skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
@@ -1276,7 +1276,7 @@ public sealed class SqliteRuntimeBackupService
         SqliteConnection connection,
         IReadOnlyDictionary<string, int> versions)
     {
-        if (!versions.TryGetValue("local_workspace_projection", out var version) || version != 3)
+        if (!versions.TryGetValue("local_workspace_projection", out var version) || version != 4)
             return null;
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
@@ -1458,7 +1458,7 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
-                    if (versions["local_workspace_projection"] is 1 or 2)
+                    if (versions["local_workspace_projection"] is 1 or 2 or 3)
                         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
                     else
                     {

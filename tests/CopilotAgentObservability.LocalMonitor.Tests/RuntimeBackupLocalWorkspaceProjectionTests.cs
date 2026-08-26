@@ -305,12 +305,12 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
-    public void CurrentBackupInventoryIncludesVersionAndAllSixRowCounts()
+    public void CurrentBackupInventoryIncludesVersionAndAllTwelveRowCounts()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
-        Assert.Equal(8, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.Equal(12, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table =>
             Assert.Equal([table], LocalWorkspaceProjectionSchemaTests.Strings(connection, $"SELECT name FROM sqlite_schema WHERE type='table' AND name='{table}';")));
     }

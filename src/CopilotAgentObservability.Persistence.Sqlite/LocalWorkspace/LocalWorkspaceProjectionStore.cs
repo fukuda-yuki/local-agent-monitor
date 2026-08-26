@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -102,10 +104,131 @@ internal static class LocalWorkspaceProjectionStore
         }
         ApplyLabels(connection, transaction, idsJson, now);
         ApplySearchFacts(connection, transaction, idsJson, now, skillRegistryAuthority);
+        if (TableExists(connection, transaction, "local_workspace_execution_headers"))
+            RefreshDetailProjection(connection, transaction, sessionIds);
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
     }
+
+    private static void RefreshDetailProjection(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        var ids = sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var idsJson = JsonSerializer.Serialize(ids);
+        ExecuteWithIds(connection, transaction, "DELETE FROM local_workspace_execution_headers WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));", idsJson);
+
+        var executions = new List<(string SessionId, string RunId, string? Model, string Status, string? StartedAt)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT session_id,run_id,model,status,started_at FROM session_runs WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,run_id COLLATE BINARY;";
+            command.Parameters.AddWithValue("$ids", idsJson);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) executions.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+        foreach (var group in executions.GroupBy(static item => item.SessionId, StringComparer.Ordinal))
+        {
+            if (group.Count() > 256) throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
+            long ordinal = 0;
+            foreach (var item in group)
+            {
+                var executionId = StableExecutionId(item.SessionId, "session_run", item.RunId);
+                var (authority, ticks) = Time(item.StartedAt);
+                Execute(connection, transaction, "INSERT INTO local_workspace_execution_headers VALUES($execution,$session,'session_run',$source,$ordinal,$status,$model,$time,$ticks);",
+                    ("$execution", executionId), ("$session", item.SessionId), ("$source", item.RunId), ("$ordinal", ordinal++),
+                    ("$status", item.Status), ("$model", item.Model), ("$time", authority), ("$ticks", ticks));
+                var root = StableNodeId("execution_root", item.RunId);
+                Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'execution_root',$source,0,NULL,'exact','execution','not_observed',NULL,NULL,$status,$time,$ticks,'not_observed','not_observed');",
+                    ("$node", root), ("$session", item.SessionId), ("$execution", executionId), ("$source", item.RunId),
+                    ("$status", item.Status), ("$time", authority), ("$ticks", ticks));
+            }
+        }
+
+        var events = new List<(string EventId, string SessionId, string RunId, string? ParentId, string Type, string OccurredAt, string? Status, string? MatchKind, string ContentState)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT event_id,session_id,run_id,parent_event_id,type,occurred_at,status,match_kind,content_state FROM session_events WHERE run_id IS NOT NULL AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,run_id,event_id COLLATE BINARY;";
+            command.Parameters.AddWithValue("$ids", idsJson);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) events.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8)));
+        }
+        foreach (var session in events.GroupBy(static item => item.SessionId, StringComparer.Ordinal))
+            if (session.Count() + executions.Count(item => item.SessionId == session.Key) > 4096)
+                throw new InvalidOperationException("local_workspace_projection_workspace_too_large");
+        foreach (var group in events.GroupBy(static item => (item.SessionId, item.RunId)))
+        {
+            var executionId = StableExecutionId(group.Key.SessionId, "session_run", group.Key.RunId);
+            long ordinal = 1;
+            foreach (var item in group)
+            {
+                var node = StableNodeId("session_event", item.EventId);
+                var (authority, ticks) = Time(item.OccurredAt);
+                Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'session_event',$source,$ordinal,NULL,'unknown',$kind,'recorded',$name,NULL,$status,$time,$ticks,'not_observed','not_observed');",
+                    ("$node", node), ("$session", item.SessionId), ("$execution", executionId), ("$source", item.EventId), ("$ordinal", ordinal++),
+                    ("$kind", NodeKind(item.Type)), ("$name", item.Type), ("$status", item.Status), ("$time", authority), ("$ticks", ticks));
+            }
+        }
+        foreach (var item in events)
+        {
+            var node = StableNodeId("session_event", item.EventId);
+            var parent = item.ParentId is null ? StableNodeId("execution_root", item.RunId) : StableNodeId("session_event", item.ParentId);
+            var relation = item.ParentId is not null && item.MatchKind == "explicit_link" ? "explicit" : "exact";
+            Execute(connection, transaction, "UPDATE local_workspace_nodes SET parent_node_id=$parent,relationship_authority=$authority WHERE node_id=$node AND EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=$parent AND p.execution_id=local_workspace_nodes.execution_id); INSERT INTO local_workspace_node_edges SELECT $node,$parent,'parent',$authority,source_ordinal FROM local_workspace_nodes WHERE node_id=$node AND parent_node_id=$parent;",
+                ("$node", node), ("$parent", parent), ("$authority", relation));
+            if (TableExists(connection, transaction, "session_event_content"))
+                Execute(connection, transaction, TableExists(connection, transaction, "retention_items")
+                    ? "INSERT INTO local_workspace_node_content_refs SELECT $node,'event_content','session_event_content',e.event_id,CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.state IN ('expiring','retained_by_policy') AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL THEN 'deleted' WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') THEN 'expired' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))>1048576 THEN 'oversized' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.state IN ('expiring','retained_by_policy') THEN 'available' WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' ELSE 'invalid' END FROM session_events e LEFT JOIN session_event_content c ON c.event_id=e.event_id LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id WHERE e.event_id=$event;"
+                    : "INSERT INTO local_workspace_node_content_refs SELECT $node,'event_content','session_event_content',e.event_id,CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,CASE WHEN e.content_state='expired_pending_deletion' THEN 'expired' WHEN e.content_state='available' AND c.event_id IS NOT NULL AND length(CAST(c.content_json AS BLOB))>1048576 THEN 'oversized' WHEN e.content_state='available' AND c.event_id IS NOT NULL THEN 'available' WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' ELSE 'invalid' END FROM session_events e LEFT JOIN session_event_content c ON c.event_id=e.event_id WHERE e.event_id=$event;",
+                    ("$node", node), ("$event", item.EventId));
+        }
+    }
+
+    internal static string StableExecutionId(string sessionId, string sourceKind, string sourceIdentity)
+    {
+        var bytes = Hash("local-workspace-execution-id\0v1\0", sessionId, sourceKind, sourceIdentity);
+        bytes[6] = (byte)((bytes[6] & 0x0f) | 0x70);
+        bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
+        return new Guid(bytes.AsSpan(0, 16), bigEndian: true).ToString("D", CultureInfo.InvariantCulture);
+    }
+
+    internal static string StableNodeId(string sourceKind, string sourceIdentity) =>
+        "node-" + Convert.ToHexString(Hash("local-workspace-node-id\0v1\0" + sourceKind + "\0", sourceKind, sourceIdentity).AsSpan(0, 16)).ToLowerInvariant();
+
+    private static byte[] Hash(string domain, params string[] values)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Encoding.ASCII.GetBytes(domain));
+        Span<byte> length = stackalloc byte[4];
+        foreach (var value in values)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+            hash.AppendData(length);
+            hash.AppendData(bytes);
+        }
+        return hash.GetHashAndReset();
+    }
+
+    private static (string Authority, long? Ticks) Time(string? value)
+    {
+        if (value is null) return ("missing", null);
+        return DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant)
+            ? ("recorded", instant.UtcTicks)
+            : ("invalid", null);
+    }
+
+    private static string NodeKind(string type) => type switch
+    {
+        "skill.invoked" => "skill",
+        "tool.execution_start" or "PreToolUse" => "tool",
+        "subagent.started" or "SubagentStart" => "subagent",
+        "PostToolUseFailure" or "StopFailure" or "subagent.failed" => "error",
+        _ => "event",
+    };
 
     private static void ApplyLabels(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
     {
@@ -276,6 +399,7 @@ internal static class LocalWorkspaceProjectionStore
     private static string[] ReadSessionIds(SqliteConnection connection, SqliteTransaction transaction) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT session_id FROM sessions ORDER BY session_id;"; using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray(); }
     private static void ExecuteWithIds(SqliteConnection connection, SqliteTransaction transaction, string sql, string ids, string? now = null) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now); command.ExecuteNonQuery(); }
     private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.ExecuteNonQuery(); }
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, params (string Name, object? Value)[] parameters) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; foreach (var (name,value) in parameters) command.Parameters.AddWithValue(name,value ?? DBNull.Value); command.ExecuteNonQuery(); }
     private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name) { using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);"; command.Parameters.AddWithValue("$name", name); return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0; }
     private static bool ColumnExists(SqliteConnection connection, SqliteTransaction transaction, string table, string name) { using var command=connection.CreateCommand(); command.Transaction=transaction; command.CommandText=$"SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=$name);"; command.Parameters.AddWithValue("$name",name); return Convert.ToInt64(command.ExecuteScalar(),CultureInfo.InvariantCulture)!=0; }
 }

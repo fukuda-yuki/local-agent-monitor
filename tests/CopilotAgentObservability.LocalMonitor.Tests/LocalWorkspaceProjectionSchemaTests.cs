@@ -14,10 +14,10 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         transaction.Commit();
 
         Assert.Equal(
-            ["local_workspace_projection:3"],
+            ["local_workspace_projection:4"],
             Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(
-            ["local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
+            ["local_workspace_execution_headers", "local_workspace_node_content_refs", "local_workspace_node_edges", "local_workspace_nodes", "local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
             Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'local_workspace_%' ORDER BY name;"));
     }
 
@@ -37,7 +37,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
 
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-        Assert.Equal(["3"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(["4"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(["local_workspace_span_facts"], Strings(connection, "SELECT name FROM sqlite_schema WHERE name='local_workspace_span_facts';"));
     }
 
@@ -51,7 +51,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         using (var transaction = connection.BeginTransaction())
         {
             LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, DateTimeOffset.UnixEpoch);
-            Assert.Equal(["3"], Strings(transaction, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+            Assert.Equal(["4"], Strings(transaction, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
             transaction.Rollback();
         }
 
@@ -61,7 +61,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
 
-        Assert.Equal(["3"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(["4"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(
             ["local_workspace_session_search_facts", "local_workspace_span_facts"],
             Strings(connection, "SELECT name FROM sqlite_schema WHERE name IN ('local_workspace_span_facts','local_workspace_session_search_facts') ORDER BY name;"));
@@ -75,7 +75,65 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         Execute(connection, "ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;");
 
         Assert.Throws<InvalidOperationException>(() => LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch));
+        Assert.Equal(["4"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+    }
+
+    [Fact]
+    public void EnsureMigratesExactV3ToV4AtomicallyAndBackfillsStableExactIdentities()
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,'gpt-5',NULL,NULL,10,3,13,'active'); INSERT INTO session_events VALUES('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000003','copilot-sdk',NULL,NULL,NULL,'synthetic','source-1','tool.execution_start','invalid-time','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        var execution = Strings(connection, "SELECT execution_id FROM local_workspace_execution_headers;").Single();
+        var node = Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='session_event';").Single();
+        Assert.Matches("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", execution);
+        Assert.Matches("^node-[0-9a-f]{32}$", node);
+        Assert.Equal(["invalid"], Strings(connection, "SELECT time_authority FROM local_workspace_nodes WHERE source_kind='session_event';"));
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        Assert.Equal([execution], Strings(connection, "SELECT execution_id FROM local_workspace_execution_headers;"));
+        Assert.Equal([node], Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='session_event';"));
+    }
+
+    [Fact]
+    public void EnsureMigratesLiteralExactV3AndRollbackRemovesEveryV4Object()
+    {
+        using var connection = OpenSessionDatabase();
+        foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV3SchemaSql) Execute(connection, sql);
+        Execute(connection, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',3);");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, DateTimeOffset.UnixEpoch);
+            Assert.Equal(["4"], Strings(transaction, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+            transaction.Rollback();
+        }
+
         Assert.Equal(["3"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Empty(Strings(connection, "SELECT name FROM sqlite_schema WHERE name='local_workspace_nodes';"));
+    }
+
+    [Theory]
+    [InlineData(256, true)]
+    [InlineData(257, false)]
+    public void ExecutionBoundIsExactAndNeverTruncates(int count, bool succeeds)
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');");
+        for (var index = 0; index < count; index++)
+            Execute(connection, $"INSERT INTO session_runs VALUES('run-{index:D4}','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+
+        if (succeeds)
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+            Assert.Equal(count, Strings(connection, "SELECT execution_id FROM local_workspace_execution_headers;").Length);
+        }
+        else
+        {
+            Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() =>
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
+            Assert.Empty(Strings(connection, "SELECT component FROM schema_version WHERE component='local_workspace_projection';"));
+        }
     }
 
     [Fact]
