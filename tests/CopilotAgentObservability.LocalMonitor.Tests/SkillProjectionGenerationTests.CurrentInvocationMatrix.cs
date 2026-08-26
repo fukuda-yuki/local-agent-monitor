@@ -95,18 +95,33 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
-    public async Task PersistedSqliteMatrix_ProductionCollectionQHasSkillAndSerializedSummaryShareAuthority()
+    public async Task PersistedSqliteMatrix_ProductionCollectionQOnlyIncludesAdmittedAndExcludesPending()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
         fixture.SeedSdkOnly("admitted", "Needle-Skill");
         fixture.SeedMismatchedPair("pending", "Needle-Skill", "11", "12", "13", "14");
 
-        using var filtered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: "needle-skill", hasSkill: true));
-        var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
-        Assert.Equal(fixture.SessionId("admitted"), admitted.GetProperty("session_id").GetString());
-        var admittedSkill = admitted.GetProperty("summary").GetProperty("skill");
-        Assert.Equal("recorded", admittedSkill.GetProperty("state").GetString());
-        Assert.Equal(1, admittedSkill.GetProperty("count").GetInt32());
+        using var filtered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: "needle-skill", hasSkill: null));
+        AssertFilteredAdmittedSummary(fixture, filtered);
+    }
+
+    [Fact]
+    public async Task PersistedSqliteMatrix_ProductionCollectionHasSkillOnlyIncludesAdmittedAndExcludesPending()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("admitted", "Needle-Skill");
+        fixture.SeedMismatchedPair("pending", "Needle-Skill", "11", "12", "13", "14");
+
+        using var filtered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: true));
+        AssertFilteredAdmittedSummary(fixture, filtered);
+    }
+
+    [Fact]
+    public async Task PersistedSqliteMatrix_ProductionCollectionSerializesPendingSummaryWithoutPromotingIt()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("admitted", "Needle-Skill");
+        fixture.SeedMismatchedPair("pending", "Needle-Skill", "11", "12", "13", "14");
 
         using var unfiltered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: null));
         var pending = Assert.Single(unfiltered.RootElement.GetProperty("items").EnumerateArray(),
@@ -114,6 +129,16 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         var pendingSkill = pending.GetProperty("summary").GetProperty("skill");
         Assert.Equal("certification_pending", pendingSkill.GetProperty("state").GetString());
         Assert.Equal(JsonValueKind.Null, pendingSkill.GetProperty("count").ValueKind);
+    }
+
+    private static void AssertFilteredAdmittedSummary(CurrentInvocationProjectionFixture fixture, JsonDocument filtered)
+    {
+        var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(fixture.SessionId("admitted"), admitted.GetProperty("session_id").GetString());
+        Assert.NotEqual(fixture.SessionId("pending"), admitted.GetProperty("session_id").GetString());
+        var admittedSkill = admitted.GetProperty("summary").GetProperty("skill");
+        Assert.Equal("recorded", admittedSkill.GetProperty("state").GetString());
+        Assert.Equal(1, admittedSkill.GetProperty("count").GetInt32());
     }
 }
 
