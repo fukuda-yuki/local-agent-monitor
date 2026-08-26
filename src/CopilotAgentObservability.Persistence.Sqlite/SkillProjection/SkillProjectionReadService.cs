@@ -582,7 +582,8 @@ internal sealed class SkillProjectionReadService
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,item.expires_at
+            SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
+                   CASE WHEN item.state='retained_by_policy' THEN NULL ELSE item.expires_at END
             FROM skill_projection_invocations invocation
             JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id
             JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id

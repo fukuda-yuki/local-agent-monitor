@@ -200,6 +200,20 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
 
         var beforeExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
         var atExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-26T00:00:00Z"));
+        using (var pin = connection.CreateCommand())
+        {
+            pin.Transaction = transaction;
+            pin.CommandText = "UPDATE retention_items SET state='retained_by_policy';";
+            pin.ExecuteNonQuery();
+        }
+        var pinnedAfterExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
+        using (var unpin = connection.CreateCommand())
+        {
+            unpin.Transaction = transaction;
+            unpin.CommandText = "UPDATE retention_items SET state='expiring';";
+            unpin.ExecuteNonQuery();
+        }
+        var unpinnedAfterExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
         using (var delete = connection.CreateCommand())
         {
             delete.Transaction = transaction;
@@ -211,6 +225,8 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
         Assert.Equal("2026-08-26T00:00:00.0000000+00:00", Assert.Single(beforeExpiry).ExpiresAt);
         Assert.Equal("41:3", Assert.Single(beforeExpiry).SourceIdentity);
         Assert.Empty(atExpiry);
+        Assert.Null(Assert.Single(pinnedAfterExpiry).ExpiresAt);
+        Assert.Empty(unpinnedAfterExpiry);
         Assert.Empty(afterDelete);
     }
 

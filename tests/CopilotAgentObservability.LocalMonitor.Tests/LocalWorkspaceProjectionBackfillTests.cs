@@ -134,6 +134,51 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Fact]
+    public async Task ParticipantKeepsPinnedLabelAndToolSearchFactsPastHistoricalExpiryUntilUnpinned()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY,source TEXT,trace_id TEXT,received_at TEXT,resource_attributes_json TEXT,payload_json TEXT,schema_version INTEGER);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_events VALUES
+              ('0198f5b8-0c00-7000-8000-000000000002','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,NULL,NULL,NULL,'synthetic','prompt-1','user.message','2026-08-24T00:00:00.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+              ('0198f5b8-0c00-7000-8000-000000000003','0198f5b8-0c00-7000-8000-000000000001',NULL,NULL,'trace-1','span-1',NULL,'otel-exact','trace-1/span-1','tool.execution_start','2026-08-24T00:00:01.0000000+00:00','available',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"value":"Pinned label"}','2026-08-24T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00',randomblob(32));
+            INSERT INTO raw_records VALUES(41,'otlp','trace-1','2026-08-24T00:00:00.0000000+00:00',NULL,'{}',1);
+            INSERT INTO monitor_spans(raw_record_id,trace_id,span_id,span_ordinal,operation,category,tool_name) VALUES(41,'trace-1','span-1',3,'execute_tool','tool_call','PinnedTool');
+            INSERT INTO retention_items VALUES
+              ('session_event_content','0198f5b8-0c00-7000-8000-000000000002','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00'),
+              ('raw_record','41','retained_by_policy',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00');
+            PRAGMA foreign_keys=ON;
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
+
+        Assert.Equal(["label:pinned label:null", "tool:pinnedtool:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT kind||':'||normalized_text||':'||COALESCE(expires_at,'null') FROM local_workspace_session_search_facts ORDER BY kind;"));
+        Assert.Equal(["recorded:Pinned label:2026-08-26T00:00:00.0000000+00:00"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT label_state||':'||label_text||':'||COALESCE(label_expires_at,'null') FROM local_workspace_sessions;"));
+        var pinned = Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single((await new LocalWorkspaceSessionSnapshotContributor(
+            new FixedTimeProvider(DateTimeOffset.Parse("2026-08-27T00:00:00Z"))).ReadAsync(
+                new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None)).Sessions));
+        Assert.Equal("recorded", pinned.LabelState);
+        Assert.Equal("Pinned label", pinned.LabelText);
+        Assert.Equal(["pinned label", "pinnedtool"], pinned.SearchTexts);
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE retention_items SET state='expiring';");
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal(["not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT label_state FROM local_workspace_sessions;"));
+        Assert.Empty(LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT normalized_text FROM local_workspace_session_search_facts;"));
+    }
+
+    [Fact]
     public void ExactLlmSpanFallbackIsStoredButSessionRunWinsSameExecution()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
@@ -184,5 +229,19 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         }
         public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => false;
         public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
+    }
+
+    private sealed class TestReadTransaction(Microsoft.Data.Sqlite.SqliteConnection connection) : ILocalRepositoryReadTransaction
+    {
+        public async ValueTask<T> ReadAsync<T>(Func<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction, CancellationToken, ValueTask<T>> read, CancellationToken cancellationToken)
+        {
+            using var transaction = connection.BeginTransaction(deferred: true);
+            return await read(connection, transaction, cancellationToken);
+        }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 }

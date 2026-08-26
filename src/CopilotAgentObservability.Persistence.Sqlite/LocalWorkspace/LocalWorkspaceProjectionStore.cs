@@ -108,29 +108,56 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string, string?>("local_workspace_search", static text => text is null ? null : Search(text), isDeterministic: true);
         connection.CreateFunction<string, string, long>("local_workspace_future", static (expiry, instant) =>
             TryCanonicalFuture(expiry, DateTimeOffset.ParseExact(instant, "O", CultureInfo.InvariantCulture)) ? 1 : 0, isDeterministic: true);
-        ExecuteWithIds(connection, transaction, """
-            WITH candidates AS (
-              SELECT e.session_id,e.event_id,c.expires_at,local_workspace_label(e.type,c.content_json) label_text,e.occurred_at
+        var candidates = TableExists(connection, transaction, "retention_items")
+            ? """
+              SELECT e.session_id,e.event_id,c.expires_at source_expires_at,
+                     CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END effective_expires_at,
+                     local_workspace_label(e.type,c.content_json) label_text,e.occurred_at
+              FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
+              JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
+                AND i.expires_at=c.expires_at
+              WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
+                AND i.state IN ('expiring','retained_by_policy') AND i.read_denied_at IS NULL
+                AND i.deleted_at IS NULL AND i.error_code IS NULL
+                AND (i.state='retained_by_policy' OR local_workspace_future(i.expires_at,$now)=1)
+                AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              """
+            : """
+              SELECT e.session_id,e.event_id,c.expires_at source_expires_at,c.expires_at effective_expires_at,local_workspace_label(e.type,c.content_json) label_text,e.occurred_at
               FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
               WHERE e.type IN ('user.message','UserPromptSubmit','userPromptSubmitted') AND e.content_state='available'
                 AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-                AND local_workspace_future(c.expires_at,$now)=1),
+                AND local_workspace_future(c.expires_at,$now)=1
+              """;
+        ExecuteWithIds(connection, transaction, $"""
+            WITH candidates AS (
+              {candidates}),
             ranked AS (SELECT *,row_number() OVER(PARTITION BY session_id ORDER BY occurred_at COLLATE BINARY,event_id COLLATE BINARY) ordinal FROM candidates WHERE label_text IS NOT NULL)
             UPDATE local_workspace_sessions AS p SET
               label_state='recorded',label_text=r.label_text,
-              label_source_identity=r.event_id,label_expires_at=r.expires_at,
-              revision_seed=p.revision_seed||'|'||r.event_id||'|'||r.expires_at
+              label_source_identity=r.event_id,label_expires_at=r.source_expires_at,
+              revision_seed=p.revision_seed||'|'||r.event_id||'|'||r.source_expires_at
             FROM ranked r WHERE r.ordinal=1 AND r.session_id=p.session_id;
             """, idsJson, Canonical(now));
     }
 
     private static void ApplySearchFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
-        ExecuteWithIds(connection, transaction, """
-            INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
-            SELECT session_id,'label',label_source_identity,local_workspace_search(label_text),label_expires_at
-            FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-            """, idsJson);
+        if (TableExists(connection, transaction, "retention_items"))
+            ExecuteWithIds(connection, transaction, """
+                INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT p.session_id,'label',p.label_source_identity,local_workspace_search(p.label_text),
+                       CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END
+                FROM local_workspace_sessions p JOIN retention_items i
+                  ON i.store_kind='session_event_content' AND i.source_item_id=p.label_source_identity AND i.expires_at=p.label_expires_at
+                WHERE p.label_state='recorded' AND p.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
+        else
+            ExecuteWithIds(connection, transaction, """
+                INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT session_id,'label',label_source_identity,local_workspace_search(label_text),label_expires_at
+                FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
         var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
         foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds, now))
             InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
@@ -140,7 +167,8 @@ internal static class LocalWorkspaceProjectionStore
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
-                SELECT e.session_id,'tool',CAST(m.raw_record_id AS TEXT)||':'||CAST(m.span_ordinal AS TEXT),local_workspace_search(m.tool_name),i.expires_at
+                SELECT e.session_id,'tool',CAST(m.raw_record_id AS TEXT)||':'||CAST(m.span_ordinal AS TEXT),local_workspace_search(m.tool_name),
+                       CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END
                 FROM session_events e JOIN monitor_spans m ON e.source_adapter='otel-exact' AND e.source_event_id=m.trace_id||'/'||m.span_id
                 JOIN raw_records r ON r.id=m.raw_record_id
                 JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(m.raw_record_id AS TEXT)
