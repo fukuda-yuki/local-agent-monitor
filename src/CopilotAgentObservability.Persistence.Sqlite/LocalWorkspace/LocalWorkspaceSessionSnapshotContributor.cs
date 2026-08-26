@@ -65,7 +65,17 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         var ids = System.Text.Json.JsonSerializer.Serialize(byId.Keys.Order(StringComparer.Ordinal));
         await ReadPairs(connection, transaction, "sources", "SELECT session_id,source FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,source;", ids, byId, static (row, value) => row.Sources.Add(value), statementObserver, cancellationToken);
         await ReadPairs(connection, transaction, "models", "SELECT session_id,model FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,model;", ids, byId, static (row, value) => row.Models.Add(value), statementObserver, cancellationToken);
-        await ReadPairs(connection, transaction, "search", "SELECT session_id,normalized_text FROM local_workspace_session_search_facts WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY session_id,normalized_text ORDER BY session_id,normalized_text COLLATE BINARY;", ids, byId, static (row, value) => row.SearchTexts.Add(value), statementObserver, cancellationToken);
+        await ReadPairs(connection, transaction, "search", $"""
+            SELECT f.session_id,f.normalized_text FROM local_workspace_session_search_facts f
+            WHERE f.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND (f.expires_at IS NULL OR f.expires_at COLLATE BINARY > $now COLLATE BINARY)
+              AND (f.kind='skill' OR (f.kind='label' AND EXISTS(
+                SELECT 1 FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
+                WHERE e.session_id=f.session_id AND e.event_id=f.source_identity AND e.content_state='available'
+                  AND c.expires_at=f.expires_at COLLATE BINARY AND c.expires_at COLLATE BINARY > $now COLLATE BINARY))
+                OR f.kind='tool')
+            GROUP BY f.session_id,f.normalized_text ORDER BY f.session_id,f.normalized_text COLLATE BINARY;
+            """, ids, byId, static (row, value) => row.SearchTexts.Add(value), statementObserver, cancellationToken, now);
         using (var command = connection.CreateCommand())
         {
             statementObserver?.Invoke("activity");
@@ -134,10 +144,10 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
-    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, string ids, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token)
+    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, string ids, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token, string? now = null)
     {
         statementObserver?.Invoke(name);
-        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids);
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now);
         using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
         while (await reader.ReadAsync(token).ConfigureAwait(false)) if (rows.TryGetValue(reader.GetString(0), out var row)) add(row, reader.GetString(1));
     }

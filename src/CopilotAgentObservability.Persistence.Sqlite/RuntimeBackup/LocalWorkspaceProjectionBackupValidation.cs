@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 internal static class LocalWorkspaceProjectionBackupValidation
 {
-    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction)
+    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime = null)
     {
         try
         {
@@ -87,7 +87,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
-            ValidateCanonicalProjection(connection, transaction);
+            ValidateCanonicalProjection(connection, transaction, publicationTime);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
@@ -183,21 +183,25 @@ internal static class LocalWorkspaceProjectionBackupValidation
             throw new InvalidOperationException();
     }
 
-    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction)
+    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime)
     {
         var before = Snapshot(connection, transaction);
-        using var readNow = connection.CreateCommand();
-        readNow.Transaction = transaction;
-        readNow.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
-        var text = readNow.ExecuteScalar() as string;
-        if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
-            throw new InvalidOperationException();
+        if (publicationTime is null)
+        {
+            using var readNow = connection.CreateCommand();
+            readNow.Transaction = transaction;
+            readNow.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
+            var text = readNow.ExecuteScalar() as string;
+            if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
+                throw new InvalidOperationException();
+            publicationTime = projectorNow;
+        }
         using var replica = new SqliteConnection("Data Source=:memory:");
         replica.Open();
         connection.BackupDatabase(replica);
         using (var replicaTransaction = replica.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, projectorNow);
+            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value);
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();

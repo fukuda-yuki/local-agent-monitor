@@ -82,6 +82,29 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
     }
 
     [Fact]
+    public async Task ContributorExcludesExpiredLabelAndToolSearchFactsAtReadTime()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,tool_name TEXT);
+            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
+            INSERT INTO local_workspace_session_search_facts VALUES
+              ('0198f5b8-0c00-7000-8000-000000000001','label','label-1','expired label','2026-08-26T00:00:00.0000000+00:00'),
+              ('0198f5b8-0c00-7000-8000-000000000001','tool','1:0','expired tool','2026-08-26T00:00:00.0000000+00:00');
+            """);
+
+        var result = await new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(DateTimeOffset.Parse("2026-08-26T00:00:00Z")))
+            .ReadAsync(new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+
+        Assert.Empty(Assert.IsType<LocalWorkspaceProjectionRow>(Assert.Single(result.Sessions)).SearchTexts);
+    }
+
+    [Fact]
     public async Task ContributorDoesNotExposePartialTokenSumsAndFailsOverflowClosed()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

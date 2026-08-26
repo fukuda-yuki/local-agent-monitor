@@ -123,11 +123,12 @@ internal static class LocalWorkspaceProjectionStore
             InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName);
         foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
             InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName);
-        if (TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
+        if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
                 SELECT e.session_id,'tool',CAST(m.raw_record_id AS TEXT)||':'||CAST(m.span_ordinal AS TEXT),local_workspace_search(m.tool_name),i.expires_at
                 FROM session_events e JOIN monitor_spans m ON e.source_adapter='otel-exact' AND e.source_event_id=m.trace_id||'/'||m.span_id
+                JOIN raw_records r ON r.id=m.raw_record_id
                 JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(m.raw_record_id AS TEXT)
                 WHERE m.tool_name IS NOT NULL AND length(m.tool_name)>0 AND i.state IN ('expiring','retained_by_policy')
                   AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
