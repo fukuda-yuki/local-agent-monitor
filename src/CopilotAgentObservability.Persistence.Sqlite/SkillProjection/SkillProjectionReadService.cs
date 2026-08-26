@@ -693,30 +693,30 @@ internal sealed class SkillProjectionReadService
         var unavailable = new HashSet<string>(StringComparer.Ordinal);
         unavailableSessions = unavailable;
         if (!TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
-        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        using var reader = command.ExecuteReader();
-        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
-        while (reader.Read()) if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId)) identities.Add((sessionId, snapshotId));
-        reader.Close();
+        var candidates = ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider);
         var result = new List<InvocationFact>();
-        foreach (var identity in identities)
+        var authorizations = new Dictionary<SkillRegistryProducerTuple, SkillProjectionCurrentSdkClaimAuthorizationResult>();
+        try
         {
-            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
-            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found || metadata.Facts is not { IsAvailable: true, RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable, ClaimId: not null } facts) continue;
-            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
-            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
-            var authorizationResult = AcquireGenerationAuthorization(registryAuthority,
-                new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint), claim.SkillName, claim.SkillSource);
-            if (authorizationResult.Outcome is SkillRegistryCurrentAuthorizationOutcome.Busy or SkillRegistryCurrentAuthorizationOutcome.Unavailable)
-                unavailable.Add(identity.SessionId.ToString("D"));
-            using var authorization = authorizationResult.Authorization;
-            if (authorization is null) continue;
-            result.Add(new(new(identity.SessionId.ToString("D"), "sdk:" + facts.ClaimId.Value.ToString("D"), authorization.SkillName,
-                facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)), claim.ProducerTraceId, claim.ProducerSpanId,
-                facts.RunId?.ToString("D"), facts.EventId.ToString("D"), facts.SourceParentEventId));
+            foreach (var candidate in candidates)
+            {
+                var tuple = new SkillRegistryProducerTuple(candidate.SourceApplicationVersion, candidate.AdapterVersion,
+                    candidate.NormalizationVersion, candidate.PayloadSchema, candidate.SchemaFingerprint);
+                if (!authorizations.TryGetValue(tuple, out var authorizationResult))
+                {
+                    authorizationResult = AcquireGenerationAuthorization(registryAuthority, tuple, candidate.SkillName, candidate.SkillSource);
+                    authorizations.Add(tuple, authorizationResult);
+                }
+                if (authorizationResult.Outcome is SkillRegistryCurrentAuthorizationOutcome.Busy or SkillRegistryCurrentAuthorizationOutcome.Unavailable)
+                    unavailable.Add(candidate.SessionId);
+                if (authorizationResult.Authorization is null) continue;
+                result.Add(new(new(candidate.SessionId, "sdk:" + candidate.ClaimId, candidate.SkillName, candidate.ExpiresAt),
+                    candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId));
+            }
+        }
+        finally
+        {
+            foreach (var authorization in authorizations.Values) authorization.Authorization?.Dispose();
         }
         return result;
     }
@@ -730,35 +730,99 @@ internal sealed class SkillProjectionReadService
         if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
             || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
 
+        return ReadStructurallyValidSdkCandidates(connection, transaction, sessionIds, timeProvider)
+            .Select(static candidate => new SkillProjectionCurrentSearchFact(candidate.SessionId, candidate.ClaimId,
+                candidate.SkillName, candidate.ExpiresAt)).ToArray();
+    }
+
+    private sealed record StructurallyValidSdkCandidate(string SessionId, string ClaimId, string EventId, string? RunId,
+        string? SourceParentEventId, string SourceApplicationVersion, string AdapterVersion, string NormalizationVersion,
+        string PayloadSchema, string SchemaFingerprint, string SkillName, string? SkillSource,
+        string? ProducerTraceId, string? ProducerSpanId, string? ExpiresAt, string ReceiptFingerprint,
+        string SourceAdapter, string SourceEventId, string SourceSurface, string NativeSessionId, string? RunNativeId,
+        bool SourceEphemeral, DateTimeOffset OccurredAt, string PayloadSha256, ulong PayloadBytes, string State,
+        string Reason, string? Trigger, string? BodySha256, ulong? BodyUtf8Bytes, string? DefinitionPathSha256,
+        ulong? DefinitionPathUtf8Bytes, string ContentDocumentSha256)
+    {
+        internal bool HasValidReceiptFingerprint() => string.Equals(ReceiptFingerprint,
+            SkillInvocationSnapshotReceiptFingerprint.Compute(new(SourceAdapter, SourceEventId, SourceSurface,
+                NativeSessionId, RunNativeId, SourceParentEventId, SourceEphemeral, ProducerTraceId, ProducerSpanId,
+                OccurredAt, SourceApplicationVersion, AdapterVersion, NormalizationVersion, PayloadSchema,
+                SchemaFingerprint, PayloadSha256, PayloadBytes, State, Reason, SkillName, SkillSource, Trigger,
+                BodySha256, BodyUtf8Bytes, DefinitionPathSha256, DefinitionPathUtf8Bytes, ContentDocumentSha256)),
+            StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<StructurallyValidSdkCandidate> ReadStructurallyValidSdkCandidates(
+        SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, TimeProvider timeProvider)
+    {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
+        command.CommandText = """
+            SELECT s.session_id,s.claim_id,s.event_id,s.run_id,s.source_parent_event_id,
+                   s.source_application_version,s.adapter_version,s.normalization_version,s.payload_schema,s.schema_fingerprint,
+                   s.name,s.source,s.trace_id,s.span_id,CASE WHEN i.state='retained_by_policy' THEN NULL ELSE i.expires_at END,r.request_fingerprint_sha256,
+                   e.source_adapter,e.source_event_id,e.source_surface,s.native_session_id,u.native_run_id,
+                   s.source_ephemeral,e.occurred_at,s.payload_sha256,s.payload_bytes,s.state,s.reason,s.trigger,
+                   s.body_sha256,s.body_utf8_bytes,s.definition_path_sha256,s.definition_path_utf8_bytes,s.content_document_sha256
+            FROM skill_invocation_snapshots s
+            JOIN session_events e ON e.session_id=s.session_id AND e.event_id=s.event_id
+            JOIN skill_invocation_snapshot_receipts r ON r.snapshot_id=s.snapshot_id
+            JOIN retention_items i ON i.item_id=s.content_item_id AND i.store_kind='session_event_content'
+              AND i.source_item_id=s.event_id AND i.captured_at=s.captured_at
+            JOIN session_event_content c ON c.event_id=s.event_id AND c.content_kind='application/json'
+              AND c.captured_at=s.captured_at AND c.expires_at=i.expires_at
+            JOIN sessions se ON se.session_id=s.session_id AND se.created_at<=s.captured_at AND se.updated_at>=s.captured_at
+            JOIN session_native_ids n ON n.source_surface='copilot-sdk' AND n.native_session_id=s.native_session_id
+              AND n.session_id=s.session_id AND n.binding_kind IN ('native','explicit_resume','explicit_handoff')
+            JOIN skill_projection_sdk_claims k ON k.claim_id=s.claim_id AND k.session_id=s.session_id AND k.event_id=s.event_id
+              AND k.source_application_version=s.source_application_version AND k.adapter_version=s.adapter_version
+              AND k.normalization_version=s.normalization_version AND k.payload_schema=s.payload_schema
+              AND k.schema_fingerprint=s.schema_fingerprint AND k.source_event_id=e.source_event_id
+              AND k.source_adapter=e.source_adapter AND k.source_surface=e.source_surface AND k.payload_sha256=s.payload_sha256
+              AND k.producer_trace_id IS s.trace_id AND k.producer_span_id IS s.span_id AND k.skill_name=s.name
+              AND k.skill_source IS s.source AND k.invocation_trigger IS s.trigger AND k.created_at=s.captured_at
+            LEFT JOIN session_runs u ON u.session_id=s.session_id AND u.run_id=s.run_id
+            WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND s.state='available' AND s.reason='none' AND s.claim_id IS NOT NULL AND s.name IS NOT NULL
+              AND s.body_sha256 IS NOT NULL AND s.body_utf8_bytes IS NOT NULL
+              AND s.definition_path_sha256 IS NOT NULL AND s.definition_path_utf8_bytes IS NOT NULL
+              AND ((s.trace_id IS NULL AND s.span_id IS NULL) OR (s.trace_id IS NOT NULL AND s.span_id IS NOT NULL))
+              AND s.created_at=s.captured_at AND e.type='skill.invoked' AND e.source_adapter='copilot-sdk-stream'
+              AND e.source_surface='copilot-sdk' AND e.content_state='available'
+              AND e.status IS NULL AND e.match_kind IS NULL AND e.parent_event_id IS NULL
+              AND e.terminal_outcome IS NULL AND e.terminal_policy_version IS NULL
+              AND e.source_application_version=s.source_application_version AND e.adapter_version=s.adapter_version
+              AND e.normalization_version=s.normalization_version AND e.schema_fingerprint=s.schema_fingerprint
+              AND e.trace_id IS s.trace_id AND e.run_id IS s.run_id
+              AND r.source_adapter=e.source_adapter AND r.source_event_id=e.source_event_id AND r.created_at=s.captured_at
+              AND i.state IN ('retained_by_policy','expiring') AND i.read_denied_at IS NULL AND i.deleted_at IS NULL
+              AND i.error_code IS NULL AND (i.state='retained_by_policy' OR i.expires_at>$now)
+              AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
+              AND (s.run_id IS NULL OR (u.source_surface='copilot-sdk' AND u.native_run_id IS NOT NULL AND length(u.native_run_id)>0
+                AND (SELECT COUNT(*) FROM session_runs ux WHERE ux.session_id=s.session_id AND ux.source_surface='copilot-sdk' AND ux.native_run_id=u.native_run_id)=1))
+              AND (SELECT COUNT(*) FROM skill_invocation_snapshot_receipts rx WHERE rx.snapshot_id=s.snapshot_id)=1
+              AND (SELECT COUNT(*) FROM skill_projection_sdk_claims kx WHERE kx.claim_id=s.claim_id AND kx.session_id=s.session_id)=1
+            ORDER BY s.session_id COLLATE BINARY,s.snapshot_id COLLATE BINARY;
+            """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        command.Parameters.AddWithValue("$now", timeProvider.GetUtcNow().ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         using var reader = command.ExecuteReader();
-        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
+        var result = new List<StructurallyValidSdkCandidate>();
         while (reader.Read())
-            if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId))
-                identities.Add((sessionId, snapshotId));
-        reader.Close();
-
-        var result = new List<SkillProjectionCurrentSearchFact>();
-        foreach (var identity in identities)
         {
-            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
-            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
-                || metadata.Facts is not
-                {
-                    IsAvailable: true,
-                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
-                    ClaimId: not null,
-                } facts) continue;
-            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
-            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
-            result.Add(new(
-                identity.SessionId.ToString("D"),
-                facts.ClaimId.Value.ToString("D"),
-                claim.SkillName,
-                facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
+            var candidate = new StructurallyValidSdkCandidate(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
+                reader.GetString(8), reader.GetString(9), reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetString(14),
+                reader.GetString(15), reader.GetString(16), reader.GetString(17), reader.GetString(18), reader.GetString(19),
+                reader.IsDBNull(20) ? null : reader.GetString(20), reader.GetInt64(21) == 1,
+                DateTimeOffset.Parse(reader.GetString(22), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                reader.GetString(23), checked((ulong)reader.GetInt64(24)), reader.GetString(25), reader.GetString(26),
+                reader.IsDBNull(27) ? null : reader.GetString(27), reader.IsDBNull(28) ? null : reader.GetString(28),
+                reader.IsDBNull(29) ? null : checked((ulong)reader.GetInt64(29)), reader.IsDBNull(30) ? null : reader.GetString(30),
+                reader.IsDBNull(31) ? null : checked((ulong)reader.GetInt64(31)), reader.GetString(32));
+            if (candidate.HasValidReceiptFingerprint()) result.Add(candidate);
         }
         return result;
     }
