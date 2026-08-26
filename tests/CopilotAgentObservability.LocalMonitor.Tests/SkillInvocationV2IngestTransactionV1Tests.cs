@@ -51,6 +51,54 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
     }
 
     [Fact]
+    public void Execute_FreshAvailableRequestPublishesWorkspaceFactInOwningCommit()
+    {
+        using var database = new TestDatabase();
+        var authority = new RegistryAuthority();
+        using (var connection = database.Open())
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, WriteAt, authority);
+        var participant = new LocalWorkspaceProjectionTransactionParticipant(authority);
+        var gate = new LocalWorkspacePublicationGate();
+
+        var result = SkillInvocationV2IngestTransactionV1.Execute(
+            database.Path,
+            Derive(AvailablePayload),
+            authority,
+            new CountingTimeProvider(WriteAt),
+            () => true,
+            () => true,
+            CancellationToken.None,
+            gate,
+            participant);
+
+        Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, result.Outcome);
+        Assert.Equal("review", Scalar(database,
+            "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+        Assert.Equal(FormatTimestamp(WriteAt.AddDays(90)), Scalar(database,
+            "SELECT expires_at FROM local_workspace_session_search_facts WHERE kind='skill';"));
+    }
+
+    [Fact]
+    public void Execute_InstalledWorkspaceWithoutParticipantFailsClosedAndRollsBack()
+    {
+        using var database = new TestDatabase();
+        var authority = new RegistryAuthority();
+        using (var connection = database.Open())
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, WriteAt, authority);
+
+        var result = SkillInvocationV2IngestTransactionV1.Execute(
+            database.Path,
+            Derive(AvailablePayload),
+            authority,
+            new CountingTimeProvider(WriteAt),
+            () => true,
+            () => true,
+            CancellationToken.None);
+
+        AssertUnavailableWithoutWrites(database, result);
+    }
+
+    [Fact]
     public void Execute_1075Request_PersistsExactFrozenFiveFieldIdentity()
     {
         using var database = new TestDatabase();
@@ -464,7 +512,8 @@ public sealed class SkillInvocationV2IngestTransactionV1Tests
         Func<bool>? sealReplay = null,
         Func<bool>? sealCommit = null) =>
         SkillInvocationV2IngestTransactionV1.Execute(
-            database.Path, facts, authority, clock, sealReplay ?? (() => true), sealCommit ?? (() => true), CancellationToken.None);
+            database.Path, facts, authority, clock, sealReplay ?? (() => true), sealCommit ?? (() => true), CancellationToken.None,
+            workspaceParticipant: new LocalWorkspaceProjectionTransactionParticipant(authority));
 
     private static SkillInvocationV2IngestResultV1 ExecuteDuringStorageContention(
         TestDatabase database,

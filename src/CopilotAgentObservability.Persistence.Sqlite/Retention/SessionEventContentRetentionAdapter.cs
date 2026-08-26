@@ -5,21 +5,28 @@ internal sealed class SessionEventContentRetentionAdapter : IRetentionDeletionAd
     private readonly RetentionCatalogStore catalog;
     private readonly TimeProvider timeProvider;
     private readonly ILocalWorkspaceProjectionTransactionParticipant participant;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
 
     internal SessionEventContentRetentionAdapter(
         RetentionCatalogStore catalog,
         TimeProvider? timeProvider = null,
-        ILocalWorkspaceProjectionTransactionParticipant? participant = null)
+        ILocalWorkspaceProjectionTransactionParticipant? participant = null,
+        ILocalWorkspacePublicationGate? publicationGate = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.timeProvider = timeProvider ?? TimeProvider.System;
-        this.participant = participant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.participant = participant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.publicationGate = publicationGate;
     }
 
     public RetentionStoreKind StoreKind => RetentionStoreKind.SessionEventContent;
 
-    public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) =>
-        catalog.ExecuteSqliteDeletionAsync(context, (connection, transaction, grant) =>
+    public async ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context)
+    {
+        await using var publicationLease = publicationGate is null
+            ? null
+            : await publicationGate.AcquireReadAsync(context.CancellationToken);
+        return await catalog.ExecuteSqliteDeletionAsync(context, (connection, transaction, grant) =>
         {
             string? sessionId;
             using (var owner = connection.CreateCommand())
@@ -39,4 +46,5 @@ internal sealed class SessionEventContentRetentionAdapter : IRetentionDeletionAd
                 participant.RefreshSessions(connection, transaction, [sessionId], timeProvider.GetUtcNow());
             return ValueTask.FromResult(deleted ? 1 : -1);
         });
+    }
 }

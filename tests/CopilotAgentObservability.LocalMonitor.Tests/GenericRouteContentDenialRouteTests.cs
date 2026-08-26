@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Net;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -18,7 +20,7 @@ public sealed class GenericRouteContentDenialRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var write = SeedSkillInvocation(temp.DatabasePath, "native-route-denied");
+        var write = SeedSkillInvocation(temp.DatabasePath, host.Services, "native-route-denied");
 
         using var response = await host.Client.GetAsync(
             $"/sessions/{write.NewSessionId:D}/events/{write.EventId:D}/content");
@@ -43,7 +45,7 @@ public sealed class GenericRouteContentDenialRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var write = SeedSkillInvocation(temp.DatabasePath, "native-route-unavailable");
+        var write = SeedSkillInvocation(temp.DatabasePath, host.Services, "native-route-unavailable");
         Execute(temp.DatabasePath, "ALTER TABLE session_events RENAME TO session_events_moved;");
 
         using var response = await host.Client.GetAsync(
@@ -132,7 +134,10 @@ public sealed class GenericRouteContentDenialRouteTests
         Assert.False(bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }));
     }
 
-    private static SessionSkillInvocationWrite SeedSkillInvocation(string databasePath, string nativeSessionId)
+    private static SessionSkillInvocationWrite SeedSkillInvocation(
+        string databasePath,
+        IServiceProvider services,
+        string nativeSessionId)
     {
         var write = new SessionSkillInvocationWrite(
             SourceAdapter: DefaultAdapter,
@@ -168,7 +173,12 @@ public sealed class GenericRouteContentDenialRouteTests
 
         using var connection = Open(databasePath);
         using var transaction = connection.BeginTransaction();
-        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write);
+        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+            connection,
+            transaction,
+            write,
+            services.GetRequiredService<ILocalWorkspaceProjectionTransactionParticipant>(),
+            out _);
         Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, outcome);
         transaction.Commit();
         return write;

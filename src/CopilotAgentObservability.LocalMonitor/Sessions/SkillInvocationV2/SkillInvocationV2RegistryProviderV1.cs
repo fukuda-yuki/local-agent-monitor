@@ -10,16 +10,27 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
 {
     private readonly object syncRoot = new();
     private readonly HashSet<GenerationLease> outstandingLeases = new();
+    private readonly ILocalWorkspacePublicationGate publicationGate;
     private Generation? currentGeneration;
 
+    internal event Action<ISkillRegistryGenerationAuthority>? CurrentGenerationChanging;
+
     internal SkillInvocationV2RegistryProviderV1()
-        : this(SkillInvocationV2ArtifactRegistry.Load())
+        : this(SkillInvocationV2ArtifactRegistry.Load(), new LocalWorkspacePublicationGate())
     {
     }
 
     internal SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry registry)
+        : this(registry, new LocalWorkspacePublicationGate())
+    {
+    }
+
+    internal SkillInvocationV2RegistryProviderV1(
+        SkillInvocationV2ArtifactRegistry registry,
+        ILocalWorkspacePublicationGate publicationGate)
     {
         ArgumentNullException.ThrowIfNull(registry);
+        this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
         currentGeneration = new Generation(Guid.NewGuid(), registry);
     }
 
@@ -87,17 +98,52 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
     {
         ArgumentNullException.ThrowIfNull(registry);
         var incoming = new Generation(Guid.NewGuid(), registry);
+        var publicationLease = publicationGate.AcquireWriteAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
 
-        lock (syncRoot)
+        try
         {
-            while (outstandingLeases.Count > 0)
+            lock (syncRoot)
             {
-                Monitor.Wait(syncRoot);
-            }
+                while (outstandingLeases.Count > 0)
+                {
+                    Monitor.Wait(syncRoot);
+                }
 
-            currentGeneration = incoming;
+                CurrentGenerationChanging?.Invoke(new ProposedGenerationAuthority(incoming));
+                currentGeneration = incoming;
+            }
+        }
+        finally
+        {
+            publicationLease.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
+
+    private sealed class ProposedGenerationAuthority(Generation generation) : ISkillRegistryGenerationAuthority
+    {
+        public ISkillRegistryGenerationCapture CaptureGeneration() => new GenerationCapture(generation);
+        public bool TryAcquireGenerationReadLease(ISkillRegistryGenerationCapture capture, [NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            if (capture is not GenerationCapture typed || !ReferenceEquals(typed.Generation, generation)) { lease = null; return false; }
+            lease = new ProposedGenerationLease(generation); return true;
+        }
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
+            capture is GenerationCapture typedCapture && lease is ProposedGenerationLease typedLease
+            && ReferenceEquals(typedCapture.Generation, generation) && ReferenceEquals(typedLease.Generation, generation);
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
+        {
+            if (lease is not ProposedGenerationLease typed || !ReferenceEquals(typed.Generation, generation)) return false;
+            ArgumentNullException.ThrowIfNull(tuple);
+            return generation.Registry.IsAccepted(new(tuple.SourceApplicationVersion, tuple.AdapterVersion, tuple.NormalizationVersion, tuple.PayloadSchema, tuple.SchemaFingerprint));
+        }
+    }
+
+    private sealed class ProposedGenerationLease(Generation generation) : ISkillRegistryGenerationLease
+    {
+        internal Generation Generation { get; } = generation;
+        public void Dispose() { }
+    }
+
 
     internal int OutstandingLeaseCount
     {

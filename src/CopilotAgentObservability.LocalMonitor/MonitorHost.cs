@@ -96,13 +96,25 @@ internal static class MonitorHost
             ?? DefaultPricingCatalogProvider.Create(options.PricingRegistryOverridePaths ?? []);
         var runtimeOptions = options with { PricingRegistryOverridePaths = [] };
         var timeProvider = testOptions?.TimeProvider ?? TimeProvider.System;
-        var runtimeBackupService = new SqliteRuntimeBackupService(timeProvider);
+        var publicationGate = new LocalWorkspacePublicationGate();
+        var skillRegistryAuthority = new SkillInvocationV2RegistryProviderV1(
+            SkillInvocationV2ArtifactRegistry.Load(), publicationGate);
+        var workspaceParticipant = new LocalWorkspaceProjectionTransactionParticipant(skillRegistryAuthority);
+        var runtimeBackupService = new SqliteRuntimeBackupService(timeProvider, skillRegistryAuthority, publicationGate);
         var initialization = runtimeBackupService.InitializeForMonitor(options.DatabasePath);
         if (!initialization.Result.Success) throw new InvalidOperationException(initialization.Result.ErrorCode);
         var monitorLease = initialization.Lease!;
         try
         {
-            return BuildCore(runtimeOptions, testOptions, runtimeBackupService, monitorLease, pricingCatalogProvider);
+            return BuildCore(
+                runtimeOptions,
+                testOptions,
+                runtimeBackupService,
+                monitorLease,
+                pricingCatalogProvider,
+                publicationGate,
+                skillRegistryAuthority,
+                workspaceParticipant);
         }
         catch
         {
@@ -116,7 +128,10 @@ internal static class MonitorHost
         MonitorHostTestOptions? testOptions,
         SqliteRuntimeBackupService runtimeBackupService,
         RuntimeBackupMonitorLease monitorLease,
-        IPricingCatalogProvider pricingCatalogProvider)
+        IPricingCatalogProvider pricingCatalogProvider,
+        ILocalWorkspacePublicationGate publicationGate,
+        SkillInvocationV2RegistryProviderV1 skillRegistryAuthority,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -208,7 +223,13 @@ internal static class MonitorHost
         if (testOptions?.StartWriter ?? true)
         {
             var commitStore = testOptions?.IngestionCommitStore
-                ?? new SqliteIngestionCommitStore(options.DatabasePath, RawTelemetryStoreConnectionOptions.MonitorWriter, timeProvider);
+                ?? new SqliteIngestionCommitStore(
+                    options.DatabasePath,
+                    RawTelemetryStoreConnectionOptions.MonitorWriter,
+                    timeProvider,
+                    writeFailureInjector: null,
+                    publicationGate,
+                    workspaceParticipant);
             var worker = new IngestionWriterWorker(queue, commitStore, compatibilityStore, health);
             builder.Services.AddHostedService(_ => worker);
         }
@@ -223,13 +244,24 @@ internal static class MonitorHost
         builder.Services.AddSingleton(projectionStore);
         var skillProjectionStore = new SqliteSkillProjectionStore(
             options.DatabasePath,
-            projectionRawStore);
+            projectionRawStore,
+            publicationGate: publicationGate,
+            workspaceParticipant: workspaceParticipant);
         var skillProjectionWorker = new SkillProjectionWorker(
             skillProjectionStore,
             timeProvider: timeProvider);
         builder.Services.AddSingleton(skillProjectionStore);
-        var skillRegistryAuthority = new SkillInvocationV2RegistryProviderV1();
+        skillRegistryAuthority.CurrentGenerationChanging += proposedAuthority =>
+        {
+            using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={options.DatabasePath};Pooling=False");
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(), proposedAuthority);
+            transaction.Commit();
+        };
         builder.Services.AddSingleton(skillRegistryAuthority);
+        builder.Services.AddSingleton(publicationGate);
+        builder.Services.AddSingleton(workspaceParticipant);
 
         // The runtime admission exists on every raw-default host, but no generation is admitted
         // until the owned producer chain certifies a tuple accepted by the artifact registry. Until then the
@@ -269,7 +301,8 @@ internal static class MonitorHost
         analysisStore.CreateSchema();
         builder.Services.AddSingleton(analysisStore);
         var sessionTimeProvider = timeProvider;
-        ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(options.DatabasePath, retentionContext, sessionTimeProvider);
+        ISessionStore sessionStore = testOptions?.SessionStore ?? new SqliteSessionStore(
+            options.DatabasePath, retentionContext, sessionTimeProvider, publicationGate, workspaceParticipant);
         sessionStore.CreateSchema();
         builder.Services.AddSingleton(sessionStore);
         LocalRepositoryCatalogApplication? localRepositoryApplication = null;
@@ -398,8 +431,8 @@ internal static class MonitorHost
 
         var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
         var retentionAdapters = new RetentionAdapterRegistry([
-            new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider),
-            new RawRecordRetentionAdapter(retentionCatalog),
+            new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
+            new RawRecordRetentionAdapter(retentionCatalog, timeProvider, workspaceParticipant, publicationGate),
             new MonitorAnalysisRetentionAdapter(retentionCatalog),
             new SensitiveBundleRetentionAdapter(retentionCatalog, timeProvider),
             new AnalysisSdkDirectoryRetentionAdapter(retentionCatalog, timeProvider)
@@ -516,7 +549,8 @@ internal static class MonitorHost
                 ?? new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
-                    services.GetRequiredService<ILocalArchiveFactSnapshotContributor>()));
+                    services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
+                    publicationGate: publicationGate));
             if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
             {
                 builder.Services.AddHostedService(_ => localRepositoryHostedService);
@@ -820,7 +854,8 @@ internal static class MonitorHost
         }
         DoctorRoutes.Map(app, doctorApplication);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
-        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
+        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, publicationGate, workspaceParticipant,
+            testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
         RawReplayRoutes.Map(
             app,
@@ -843,7 +878,7 @@ internal static class MonitorHost
             app.MapRazorPages();
             DoctorUiRoutes.Map(app, doctorUiApplication);
             DoctorEvidenceRoutes.Map(app, compatibilityStore, sessionStore);
-            RuntimeBackupRoutes.Map(app, options.DatabasePath, timeProvider);
+            RuntimeBackupRoutes.Map(app, options.DatabasePath, runtimeBackupService);
             SessionRoutes.MapRawContentRoute(app, sessionStore);
             MapSkillInvocationSnapshotRoutes(
                 app,
@@ -870,7 +905,9 @@ internal static class MonitorHost
                             timeProvider,
                             transfer.TrySealReplaySuccess,
                             transfer.TrySealCommit,
-                            transfer.WorkToken);
+                            transfer.WorkToken,
+                            publicationGate,
+                            workspaceParticipant);
                         SkillInvocationV2CommittedObservationV1.Notify(
                             result,
                             testOptions?.SkillInvocationV2CommittedObserver);

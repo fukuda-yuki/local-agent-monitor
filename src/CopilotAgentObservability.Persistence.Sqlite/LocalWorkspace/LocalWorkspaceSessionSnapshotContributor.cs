@@ -33,16 +33,34 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         CancellationToken cancellationToken)
     {
         var rows = new List<MutableRow>();
+        var retentionInstalled = TableExists(connection, transaction, "retention_items");
         using (var command = connection.CreateCommand())
         {
             statementObserver?.Invoke("sessions");
             command.Transaction = transaction;
-            command.CommandText = """
+            command.CommandText = retentionInstalled ? """
+                SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
+                       CASE WHEN p.label_state='recorded' AND CASE WHEN c.event_id IS NOT NULL
+                         AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                         AND i.expires_at=c.expires_at COLLATE BINARY
+                         AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN 1 ELSE 0 END=0 THEN 'expired' ELSE p.label_state END,
+                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL
+                         AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                         AND i.expires_at=c.expires_at COLLATE BINARY
+                         AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN p.label_text END,
+                       p.status,p.completeness,p.source_state,p.model_state,
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                FROM local_workspace_sessions p
+                LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
+                LEFT JOIN session_event_content c ON c.event_id=e.event_id
+                LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
+                ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
+                """ : """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
                        CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
                        CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
                        p.status,p.completeness,p.source_state,p.model_state,
-                       timing_state,started_at,ended_at,last_seen_at,duration_ms,capture_notes,revision_seed
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
@@ -58,13 +76,35 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                     reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6),
                     reader.GetString(7), reader.GetString(8), reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11),
-                    reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetInt64(13), reader.GetString(14), reader.GetString(15)));
+                    reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetInt64(13), reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.GetString(15), reader.GetString(16)));
             }
         }
         var byId = rows.ToDictionary(row => row.SessionId, StringComparer.Ordinal);
         var ids = System.Text.Json.JsonSerializer.Serialize(byId.Keys.Order(StringComparer.Ordinal));
         await ReadPairs(connection, transaction, "sources", "SELECT session_id,source FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,source;", ids, byId, static (row, value) => row.Sources.Add(value), statementObserver, cancellationToken);
         await ReadPairs(connection, transaction, "models", "SELECT session_id,model FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id,model;", ids, byId, static (row, value) => row.Models.Add(value), statementObserver, cancellationToken);
+        var labelAuthority = retentionInstalled
+            ? """
+              SELECT 1 FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
+              JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id AND i.expires_at=c.expires_at
+              WHERE e.session_id=f.session_id AND e.event_id=f.source_identity AND e.content_state='available'
+                AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY))
+              """
+            : """
+              SELECT 1 FROM session_events e JOIN session_event_content c ON c.event_id=e.event_id
+              WHERE e.session_id=f.session_id AND e.event_id=f.source_identity AND e.content_state='available'
+                AND c.expires_at=f.expires_at COLLATE BINARY AND c.expires_at COLLATE BINARY > $now COLLATE BINARY
+              """;
+        await ReadPairs(connection, transaction, "search", $"""
+            SELECT f.session_id,f.normalized_text FROM local_workspace_session_search_facts f
+            WHERE f.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND (f.expires_at IS NULL OR f.expires_at COLLATE BINARY > $now COLLATE BINARY)
+              AND (f.kind='skill' OR (f.kind='label' AND EXISTS(
+                {labelAuthority}))
+                OR f.kind='tool')
+            GROUP BY f.session_id,f.normalized_text ORDER BY f.session_id,f.normalized_text COLLATE BINARY;
+            """, ids, byId, static (row, value) => row.SearchTexts.Add(value), statementObserver, cancellationToken, now);
         using (var command = connection.CreateCommand())
         {
             statementObserver?.Invoke("activity");
@@ -133,10 +173,19 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
 
     private static long? Nullable(SqliteDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
-    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, string ids, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token)
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
+        command.Parameters.AddWithValue("$name", name);
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
+    private static async Task ReadPairs(SqliteConnection connection, SqliteTransaction transaction, string name, string sql, string ids, Dictionary<string, MutableRow> rows, Action<MutableRow, string> add, Action<string>? statementObserver, CancellationToken token, string? now = null)
     {
         statementObserver?.Invoke(name);
-        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids);
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = sql; command.Parameters.AddWithValue("$ids", ids); if (now is not null) command.Parameters.AddWithValue("$now", now);
         using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
         while (await reader.ReadAsync(token).ConfigureAwait(false)) if (rows.TryGetValue(reader.GetString(0), out var row)) add(row, reader.GetString(1));
     }
@@ -154,22 +203,24 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         private readonly string timingState;
         private readonly string? startedAt;
         private readonly string? endedAt;
-        private readonly string lastSeenAt;
+        private readonly string? lastSeenAt;
+        private readonly long? lastSeenEpoch;
         private readonly long? duration;
         private readonly string notes;
         private readonly string revision;
 
-        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string sourceState, string modelState, string timingState, string? startedAt, string? endedAt, string lastSeenAt, long? duration, string notes, string revision)
+        internal MutableRow(string sessionId, long sortGroup, long sortEpoch, string labelState, string? label, string status, string completeness, string sourceState, string modelState, string timingState, string? startedAt, string? endedAt, string? lastSeenAt, long? lastSeenEpoch, long? duration, string notes, string revision)
         {
             SessionId = sessionId; this.sortGroup = sortGroup; this.sortEpoch = sortEpoch;
             this.labelState = labelState; this.label = label; this.status = status; this.completeness = completeness; this.sourceState = sourceState; this.modelState = modelState;
-            this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt; this.lastSeenAt = lastSeenAt;
+            this.timingState = timingState; this.startedAt = startedAt; this.endedAt = endedAt; this.lastSeenAt = lastSeenAt; this.lastSeenEpoch = lastSeenEpoch;
             this.duration = duration; this.notes = notes; this.revision = revision;
         }
 
         internal string SessionId { get; }
         internal List<string> Sources { get; } = [];
         internal List<string> Models { get; } = [];
+        internal List<string> SearchTexts { get; } = [];
         internal Dictionary<string, LocalWorkspaceFact<long>> Activity { get; } = new(StringComparer.Ordinal);
         internal LocalWorkspaceTokenFacts? TokenAggregate { get; set; }
         internal LocalWorkspaceProjectionRow Freeze()
@@ -178,7 +229,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             var tokens = TokenAggregate ?? new("none", "not_observed", 0, 0, new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null), new("not_observed", null));
             return new(SessionId, sortGroup, sortEpoch, labelState, label, status, completeness,
                 new(sourceState, Array.AsReadOnly(Sources.ToArray())), new(modelState, Array.AsReadOnly(Models.ToArray())), new(A("skill"), A("tool"), A("subagent"), A("error"), A("retry")), tokens,
-                timingState, startedAt, endedAt, lastSeenAt, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), revision);
+                timingState, startedAt, endedAt, lastSeenAt, lastSeenEpoch, duration, Array.AsReadOnly(notes.Length == 0 ? [] : notes.Split(',', StringSplitOptions.RemoveEmptyEntries)), Array.AsReadOnly(SearchTexts.ToArray()), revision);
         }
     }
 }

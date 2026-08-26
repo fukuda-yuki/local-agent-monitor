@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using GitHub.Copilot;
+using Microsoft.Extensions.DependencyInjection;
 using SkillInvocationNormalizedJsonV1 = CopilotAgentObservability.LocalMonitor.Tests.SkillInvocationNormalizedJsonTestWriter;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -55,11 +56,8 @@ public sealed class SkillInvocationV2IsolationIntegrationTests
     public async Task FrozenV1SkillInvoked_KeepsNoContentAndUnsupportedMetricWithEmpty204Response()
     {
         using var temp = new MonitorTempDirectory();
-        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
-        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions
-        {
-            SessionStore = store,
-        });
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        var store = host.Services.GetRequiredService<ISessionStore>();
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/session-ingest/v1/events")
         {
             Content = new StringContent(FrozenV1SkillInvokedEnvelope, Encoding.UTF8, "application/json"),

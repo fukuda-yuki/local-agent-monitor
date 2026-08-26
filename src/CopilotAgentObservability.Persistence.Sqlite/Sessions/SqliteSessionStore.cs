@@ -34,6 +34,8 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
     private readonly Action<string>? writeCheckpoint;
     private readonly SQLitePCL.strdelegate_trace? statementObserver;
     private readonly RetentionCatalogContext? retentionContext;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant = UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
     private readonly int busyTimeoutMilliseconds = 5000;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
@@ -53,6 +55,18 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }
 
         this.retentionContext = retentionContext;
+    }
+
+    internal SqliteSessionStore(
+        string databasePath,
+        RetentionCatalogContext retentionContext,
+        TimeProvider timeProvider,
+        ILocalWorkspacePublicationGate publicationGate,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant)
+        : this(databasePath, retentionContext, timeProvider)
+    {
+        this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
+        this.workspaceParticipant = workspaceParticipant ?? throw new ArgumentNullException(nameof(workspaceParticipant));
     }
 
     internal SqliteSessionStore(string databasePath, Action<string> comparisonCheckpoint)
@@ -456,6 +470,9 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
             throw new RetentionCatalogUnavailableException();
         }
         writeCheckpoint?.Invoke("before-session-write");
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
         RetentionCatalogStore? catalog = retentionContext is null ? null : new RetentionCatalogStore(retentionContext, timeProvider);
@@ -613,13 +630,15 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
         }
 
         ReduceSessionOutcomeAndCompleteness(connection, transaction, batch.Detail.Session.SessionId);
-        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+        workspaceParticipant.RefreshSessions(
             connection,
             transaction,
             [Id(batch.Detail.Session.SessionId)],
             timeProvider.GetUtcNow());
 
         transaction.Commit();
+        }
+        finally { publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
     private static bool IsExactOtelEvent(ObservedSessionEvent item) =>

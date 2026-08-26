@@ -8,6 +8,7 @@ using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -82,10 +83,7 @@ public sealed class SourceCompatibilityIngestionTests
             UseUserSecrets = false,
             TimeProvider = new FixedTimeProvider(now),
         });
-        var sessionStore = new SqliteSessionStore(
-            temp.DatabasePath,
-            temp.RetentionContext,
-            new FixedTimeProvider(now));
+        var sessionStore = host.Services.GetRequiredService<ISessionStore>();
         var sessionId = Guid.CreateVersion7();
         sessionStore.Write(new(new(
             new ObservedSession(

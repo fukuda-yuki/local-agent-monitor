@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+namespace CopilotAgentObservability.Persistence.Sqlite;
 
 public enum SkillInvocationV2CompatibilityDisposition
 {
@@ -25,14 +25,15 @@ public sealed record SkillInvocationV2CompatibilityRegistryEntry(
 
 public sealed record SkillInvocationV2CompatibilityRegistryRevision(
     int Revision,
-    IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries);
+    IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries,
+    string ArtifactFingerprint);
 
 public sealed class SkillInvocationV2ArtifactRegistry
 {
-    private const string SchemaResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
-    private const string SidecarResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
-    private const string RegistryR0001ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0001.json";
-    private const string RegistryR0002ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0002.json";
+    private const string SchemaResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
+    private const string SidecarResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
+    private const string RegistryR0001ResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.compatibility-registry-r0001.json";
+    private const string RegistryR0002ResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.compatibility-registry-r0002.json";
     private const string SchemaFingerprintValue = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string RegistryR0001Fingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
     private const string RegistryR0002Fingerprint = "e3da4e7334f4e1645de315820181d2752f71ddb9aeba4355a659d185165daaf6";
@@ -65,7 +66,27 @@ public sealed class SkillInvocationV2ArtifactRegistry
 
     public IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision> History => history;
 
+    public const string CurrentWriterVersion = "runtime-backup-writer-r0002";
+
     public static SkillInvocationV2ArtifactRegistry Load() => Current.Value;
+
+    public bool TryResolveWriterVersion(
+        string writerVersion,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SkillInvocationV2CompatibilityRegistryRevision? revision)
+    {
+        var expected = writerVersion switch
+        {
+            "1.0.0" => (Revision: 1, Fingerprint: RegistryR0001Fingerprint),
+            CurrentWriterVersion => (Revision: 2, Fingerprint: RegistryR0002Fingerprint),
+            _ => default
+        };
+        revision = expected.Revision == 0
+            ? null
+            : history.SingleOrDefault(item =>
+                item.Revision == expected.Revision
+                && string.Equals(item.ArtifactFingerprint, expected.Fingerprint, StringComparison.Ordinal));
+        return revision is not null;
+    }
 
     public bool IsAccepted(SkillInvocationV2CompatibilityTuple tuple)
     {
@@ -135,8 +156,8 @@ public sealed class SkillInvocationV2ArtifactRegistry
 
         var history = new[]
         {
-            new SkillInvocationV2CompatibilityRegistryRevision(1, Array.AsReadOnly(r0001Entries.ToArray())),
-            new SkillInvocationV2CompatibilityRegistryRevision(2, Array.AsReadOnly(r0002Entries.ToArray()))
+            new SkillInvocationV2CompatibilityRegistryRevision(1, Array.AsReadOnly(r0001Entries.ToArray()), RegistryR0001Fingerprint),
+            new SkillInvocationV2CompatibilityRegistryRevision(2, Array.AsReadOnly(r0002Entries.ToArray()), RegistryR0002Fingerprint)
         };
         return new SkillInvocationV2ArtifactRegistry(2, history, r0002Entries);
     }

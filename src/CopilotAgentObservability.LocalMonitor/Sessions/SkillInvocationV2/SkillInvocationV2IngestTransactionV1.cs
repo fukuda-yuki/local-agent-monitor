@@ -43,7 +43,9 @@ internal static class SkillInvocationV2IngestTransactionV1
         TimeProvider timeProvider,
         Func<bool> trySealReplaySuccess,
         Func<bool> trySealCommit,
-        CancellationToken workToken)
+        CancellationToken workToken,
+        ILocalWorkspacePublicationGate? publicationGate = null,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(facts);
@@ -103,8 +105,11 @@ internal static class SkillInvocationV2IngestTransactionV1
         if (workToken.IsCancellationRequested)
             return Unavailable(false);
 
+        IAsyncDisposable? publicationLease = null;
         try
         {
+            if (publicationGate is not null)
+                publicationLease = publicationGate.AcquireReadAsync(workToken).AsTask().GetAwaiter().GetResult();
             using var connection = RetentionCatalogConnectionPolicy.OpenOrdinary(databasePath, SqliteOpenMode.ReadWrite);
             using var transaction = connection.BeginTransaction(deferred: false);
             return ExecuteMutation(
@@ -117,7 +122,8 @@ internal static class SkillInvocationV2IngestTransactionV1
                 timeProvider,
                 trySealReplaySuccess,
                 trySealCommit,
-                workToken);
+                workToken,
+                workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance);
         }
         // Busy classification is deliberately limited to this component's own storage operations:
         // persistence_busy exclusively represents a SQLite read/write lock or commit-busy result.
@@ -128,6 +134,15 @@ internal static class SkillInvocationV2IngestTransactionV1
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             return Unavailable(false);
+        }
+        catch (OperationCanceledException) when (workToken.IsCancellationRequested)
+        {
+            return Unavailable(false);
+        }
+        finally
+        {
+            if (publicationLease is not null)
+                publicationLease.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 
@@ -141,7 +156,8 @@ internal static class SkillInvocationV2IngestTransactionV1
         TimeProvider timeProvider,
         Func<bool> trySealReplaySuccess,
         Func<bool> trySealCommit,
-        CancellationToken workToken)
+        CancellationToken workToken,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant)
     {
         var transactionReplay = SkillInvocationSnapshotReplayValidator.ValidateInTransaction(
             connection,
@@ -214,7 +230,8 @@ internal static class SkillInvocationV2IngestTransactionV1
             try
             {
                 var write = BuildWrite(facts, writeAt, expiresAt);
-                writeOutcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write, out insertedIdentity);
+                writeOutcome = SessionSkillInvocationParticipant.InsertOrVerify(
+                    connection, transaction, write, workspaceParticipant, out insertedIdentity);
             }
             catch (SqliteException exception) when (IsBusy(exception))
             {

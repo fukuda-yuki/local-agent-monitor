@@ -22,209 +22,266 @@ internal sealed partial class RetentionMutationApplicationService
             canonicalRequest,
             FailureJson(RetentionMutationErrorCodes.RequestInvalid),
             null);
-        using var connection = TryOpenMutationConnection();
-        if (connection is null)
-            return new(null, RetentionMutationErrorCodes.CatalogUnavailable);
+        var publicationLease = publicationGate?.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
         try
         {
-            mutationCheckpoint?.Invoke("before_transaction");
-        }
-        catch
-        {
-            return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
-        }
-        using var transaction = catalog.BeginMutationTransaction(connection);
-        try
-        {
-            var bindingByToken = catalog.ReadConfirmationBindingByTokenWithinTransaction(connection, transaction, request!.ConfirmationToken);
-            if (bindingByToken is not null
-                && !string.Equals(bindingByToken.WorkflowIdempotencyKey, workflowKey, StringComparison.Ordinal))
-            {
-                transaction.Rollback();
-                return new(null, RetentionMutationErrorCodes.RequestInvalid);
-            }
-
-            var lookup = catalog.LookupIdempotencyWithinTransaction(connection, transaction, lookupRequest);
-            if (lookup is not null)
-            {
-                var replay = ReplayOrFailure(lookup);
-                if (lookup.Disposition == RetentionIdempotencyDisposition.Replayed && replay.Result is { } replayedResult)
-                    catalog.MarkOperationReceiptReplayedWithinTransaction(connection, transaction, replayedResult.OperationId, timeProvider.GetUtcNow().ToUniversalTime());
-                transaction.Commit();
-                return replay;
-            }
-
-            var now = timeProvider.GetUtcNow().ToUniversalTime();
-            var validation = catalog.ValidateConfirmationTokenWithinTransaction(connection, transaction, request.ConfirmationToken);
-            var earlyEvaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
-            {
-                TokenValid = validation.Disposition != RetentionConfirmationValidationDisposition.Invalid,
-                TokenConsumed = validation.Disposition == RetentionConfirmationValidationDisposition.Consumed,
-                TokenUnexpired = validation.Disposition != RetentionConfirmationValidationDisposition.Expired
-            });
-            if (!earlyEvaluation.Passed)
-                return CommitFailure(connection, transaction, lookupRequest, earlyEvaluation.Code!);
-
-            var binding = validation.Binding!;
-            var storedPreview = catalog.ReadMutationPreviewWithinTransaction(connection, transaction, binding.PreviewId);
-            var bindingMatches = storedPreview is not null
-                && BindingMatches(request, binding, storedPreview.Response);
-            if (!bindingMatches)
-            {
-                var bindingEvaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput { BindingMatches = false });
-                return CommitFailure(connection, transaction, lookupRequest, bindingEvaluation.Code!);
-            }
-
-            var materialization = catalog.MaterializeMutationPreviewWithinTransaction(
-                connection,
-                transaction,
-                new(binding.TargetKind, binding.TargetId),
-                binding.Operation,
-                binding.Scope,
-                now);
-            var currentProjection = materialization.Projection;
-            var targetItems = currentProjection?.TargetItems ?? [];
-            var itemIds = targetItems.Select(static item => item.ItemId).ToArray();
-            RetentionMutationVersionVector? currentVector = null;
-            if (materialization.Outcome == RetentionMutationPreviewProjectionOutcome.Ready && targetItems.Count > 0)
-                currentVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
-
-            var targetSetMatches = currentVector is not null
-                && string.Equals(binding.TargetItemSetDigest, currentVector.TargetItemSetDigest, StringComparison.Ordinal);
-            var pinVectorMatches = targetSetMatches
-                && TargetItemsMatchPinVector(storedPreview!.Response.TargetItems, targetItems);
-            var retentionMatches = targetSetMatches
-                && TargetItemsMatchRetention(storedPreview!.Response.TargetItems, targetItems);
-            var conflictMatches = materialization.Outcome == RetentionMutationPreviewProjectionOutcome.Ready
-                && string.Equals(binding.ConflictVersion, RetentionMutationDigests.ConflictVersion(materialization.ConflictSnapshot.Select(static item => new RetentionMutationConflictItem(item.ItemId, item.ConflictCode, item.LeaseGeneration))), StringComparison.Ordinal)
-                && string.Equals(binding.ActiveConflictSnapshot, RetentionMutationApplicationCanonicalization.ConflictSnapshot(materialization.ConflictSnapshot.Select(static item => new RetentionMutationConflictItem(item.ItemId, item.ConflictCode, item.LeaseGeneration))), StringComparison.Ordinal);
-            var versionMatches = currentVector is not null
-                && string.Equals(binding.ExpectedStateVersion, currentVector.ExpectedStateVersion, StringComparison.Ordinal);
-            var evaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
-            {
-                TargetSetMatches = targetSetMatches,
-                PinVectorMatches = pinVectorMatches,
-                RetentionMatches = retentionMatches,
-                ConflictMatches = conflictMatches,
-                VersionMatches = versionMatches
-            });
-            if (!evaluation.Passed)
-                return CommitFailure(connection, transaction, lookupRequest, evaluation.Code!);
-
-            var transitions = targetItems
-                .Select(item => (Item: item, Evaluation: RetentionMutationTransitions.EvaluateCommit(
-                    binding.Operation,
-                    new RetentionMutationItemState(
-                        item.State,
-                        item.CapturedAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed),
-                        item.ExpiresAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed),
-                        item.PolicyId,
-                        item.PolicyVersion,
-                        item.Revision),
-                    now)))
-                .ToArray();
-            var transitionFailure = transitions.Select(static value => value.Evaluation).FirstOrDefault(static value => value.Classification != RetentionMutationStageClassification.CommitStageOutcome);
-            if (transitionFailure is not null)
-                return CommitFailure(connection, transaction, lookupRequest, transitionFailure.Code!);
-
-            var operationId = operationIdGenerator();
-            var completedAt = now;
-            var finalItems = new List<RetentionPreviewItem>(transitions.Length);
-            var stateUpdateIndex = 0;
-            foreach (var transition in transitions)
-            {
-                finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, binding.Operation, now,
-                    () => $"state_update_{++stateUpdateIndex}"));
-                mutationCheckpoint?.Invoke("state_mutated");
-            }
-
-            var consumed = catalog.TryConsumeConfirmationWithinTransaction(connection, transaction, request.ConfirmationToken);
-            if (consumed.Disposition != RetentionConfirmationConsumptionDisposition.Consumed || consumed.Binding is null)
-                throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
-            mutationCheckpoint?.Invoke("token_consumed");
-            catalog.SetConfirmationOperationIdWithinTransaction(connection, transaction, binding.ConfirmationId, operationId);
-
-            var resultVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
-            var completionCode = ResolveCompletionCode(binding.Operation, transitions);
-            var result = new RetentionMutationResult(
-                RetentionMutationConstants.SchemaVersion,
-                operationId,
-                completionCode,
-                binding.TargetKind,
-                binding.TargetId,
-                binding.Operation,
-                binding.Scope,
-                finalItems.Count,
-                PinState(finalItems.Select(static item => item.State)),
-                RetentionMutationLifecycleCounts.From(finalItems.Select(static item => item.State)),
-                finalItems.Any(static item => item.ReadDeniedAt is not null),
-                auditEventIdGenerator(),
-                binding.ExpectedStateVersion,
-                resultVector.ExpectedStateVersion,
-                RetentionMutationConstants.BackupWarningCode,
-                false,
-                completedAt,
-                completedAt);
-
-            var auditEvent = new RetentionAuditEvent(
-                result.AuditEventId!,
-                result.OperationId,
-                RetentionMutationConstants.EventType,
-                binding.TargetKind,
-                binding.TargetId,
-                binding.TargetKind == RetentionMutationTargetKind.Session
-                    ? binding.TargetId
-                    : catalog.ReadSessionIdForItemWithinTransaction(connection, transaction, binding.TargetId),
-                completedAt,
-                RetentionMutationConstants.ActorLabel,
-                binding.Operation,
-                binding.ReasonCode,
-                storedPreview!.Comment,
-                PinState(storedPreview!.Response.TargetItems.Select(static item => item.State)),
-                result.PinState,
-                RetentionMutationLifecycleCounts.From(storedPreview.Response.TargetItems.Select(static item => item.State)),
-                result.LifecycleCounts,
-                workflowKey!,
-                binding.ExpectedStateVersion,
-                result.ResultVersion,
-                binding.TargetItemSetDigest,
-                completionCode,
-                null);
-
-            catalog.InsertOperationReceiptWithinTransaction(connection, transaction, result, binding.TargetItemSetDigest);
-            mutationCheckpoint?.Invoke("receipt_written");
+            using var connection = TryOpenMutationConnection();
+            if (connection is null)
+                return new(null, RetentionMutationErrorCodes.CatalogUnavailable);
             try
             {
-                catalog.AppendAuditEventWithinTransaction(connection, transaction, auditEvent);
+                mutationCheckpoint?.Invoke("before_transaction");
             }
-            catch (SqliteException)
+            catch
+            {
+                return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
+            }
+            using var transaction = catalog.BeginMutationTransaction(connection);
+            try
+            {
+                var bindingByToken = catalog.ReadConfirmationBindingByTokenWithinTransaction(connection, transaction, request!.ConfirmationToken);
+                if (bindingByToken is not null
+                    && !string.Equals(bindingByToken.WorkflowIdempotencyKey, workflowKey, StringComparison.Ordinal))
+                {
+                    transaction.Rollback();
+                    return new(null, RetentionMutationErrorCodes.RequestInvalid);
+                }
+
+                var lookup = catalog.LookupIdempotencyWithinTransaction(connection, transaction, lookupRequest);
+                if (lookup is not null)
+                {
+                    var replay = ReplayOrFailure(lookup);
+                    if (lookup.Disposition == RetentionIdempotencyDisposition.Replayed && replay.Result is { } replayedResult)
+                        catalog.MarkOperationReceiptReplayedWithinTransaction(connection, transaction, replayedResult.OperationId, timeProvider.GetUtcNow().ToUniversalTime());
+                    transaction.Commit();
+                    return replay;
+                }
+
+                var now = timeProvider.GetUtcNow().ToUniversalTime();
+                var validation = catalog.ValidateConfirmationTokenWithinTransaction(connection, transaction, request.ConfirmationToken);
+                var earlyEvaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
+                {
+                    TokenValid = validation.Disposition != RetentionConfirmationValidationDisposition.Invalid,
+                    TokenConsumed = validation.Disposition == RetentionConfirmationValidationDisposition.Consumed,
+                    TokenUnexpired = validation.Disposition != RetentionConfirmationValidationDisposition.Expired
+                });
+                if (!earlyEvaluation.Passed)
+                    return CommitFailure(connection, transaction, lookupRequest, earlyEvaluation.Code!);
+
+                var binding = validation.Binding!;
+                var storedPreview = catalog.ReadMutationPreviewWithinTransaction(connection, transaction, binding.PreviewId);
+                var bindingMatches = storedPreview is not null
+                    && BindingMatches(request, binding, storedPreview.Response);
+                if (!bindingMatches)
+                {
+                    var bindingEvaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput { BindingMatches = false });
+                    return CommitFailure(connection, transaction, lookupRequest, bindingEvaluation.Code!);
+                }
+
+                var materialization = catalog.MaterializeMutationPreviewWithinTransaction(
+                    connection,
+                    transaction,
+                    new(binding.TargetKind, binding.TargetId),
+                    binding.Operation,
+                    binding.Scope,
+                    now);
+                var currentProjection = materialization.Projection;
+                var targetItems = currentProjection?.TargetItems ?? [];
+                var itemIds = targetItems.Select(static item => item.ItemId).ToArray();
+                RetentionMutationVersionVector? currentVector = null;
+                if (materialization.Outcome == RetentionMutationPreviewProjectionOutcome.Ready && targetItems.Count > 0)
+                    currentVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
+
+                var targetSetMatches = currentVector is not null
+                    && string.Equals(binding.TargetItemSetDigest, currentVector.TargetItemSetDigest, StringComparison.Ordinal);
+                var pinVectorMatches = targetSetMatches
+                    && TargetItemsMatchPinVector(storedPreview!.Response.TargetItems, targetItems);
+                var retentionMatches = targetSetMatches
+                    && TargetItemsMatchRetention(storedPreview!.Response.TargetItems, targetItems);
+                var conflictMatches = materialization.Outcome == RetentionMutationPreviewProjectionOutcome.Ready
+                    && string.Equals(binding.ConflictVersion, RetentionMutationDigests.ConflictVersion(materialization.ConflictSnapshot.Select(static item => new RetentionMutationConflictItem(item.ItemId, item.ConflictCode, item.LeaseGeneration))), StringComparison.Ordinal)
+                    && string.Equals(binding.ActiveConflictSnapshot, RetentionMutationApplicationCanonicalization.ConflictSnapshot(materialization.ConflictSnapshot.Select(static item => new RetentionMutationConflictItem(item.ItemId, item.ConflictCode, item.LeaseGeneration))), StringComparison.Ordinal);
+                var versionMatches = currentVector is not null
+                    && string.Equals(binding.ExpectedStateVersion, currentVector.ExpectedStateVersion, StringComparison.Ordinal);
+                var evaluation = RetentionMutationEvaluationOrder.Evaluate(new RetentionMutationEvaluationInput
+                {
+                    TargetSetMatches = targetSetMatches,
+                    PinVectorMatches = pinVectorMatches,
+                    RetentionMatches = retentionMatches,
+                    ConflictMatches = conflictMatches,
+                    VersionMatches = versionMatches
+                });
+                if (!evaluation.Passed)
+                    return CommitFailure(connection, transaction, lookupRequest, evaluation.Code!);
+
+                var transitions = targetItems
+                    .Select(item => (Item: item, Evaluation: RetentionMutationTransitions.EvaluateCommit(
+                        binding.Operation,
+                        new RetentionMutationItemState(
+                            item.State,
+                            item.CapturedAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed),
+                            item.ExpiresAt ?? throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed),
+                            item.PolicyId,
+                            item.PolicyVersion,
+                            item.Revision),
+                        now)))
+                    .ToArray();
+                var transitionFailure = transitions.Select(static value => value.Evaluation).FirstOrDefault(static value => value.Classification != RetentionMutationStageClassification.CommitStageOutcome);
+                if (transitionFailure is not null)
+                    return CommitFailure(connection, transaction, lookupRequest, transitionFailure.Code!);
+
+                var operationId = operationIdGenerator();
+                var completedAt = now;
+                var finalItems = new List<RetentionPreviewItem>(transitions.Length);
+                var stateUpdateIndex = 0;
+                foreach (var transition in transitions)
+                {
+                    finalItems.Add(ApplyTransition(connection, transaction, transition.Item, transition.Evaluation, binding.Operation, now,
+                        () => $"state_update_{++stateUpdateIndex}"));
+                    mutationCheckpoint?.Invoke("state_mutated");
+                }
+
+                var consumed = catalog.TryConsumeConfirmationWithinTransaction(connection, transaction, request.ConfirmationToken);
+                if (consumed.Disposition != RetentionConfirmationConsumptionDisposition.Consumed || consumed.Binding is null)
+                    throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+                mutationCheckpoint?.Invoke("token_consumed");
+                catalog.SetConfirmationOperationIdWithinTransaction(connection, transaction, binding.ConfirmationId, operationId);
+
+                var resultVector = catalog.MaterializeMutationVersionVectorWithinTransaction(connection, transaction, itemIds);
+                var completionCode = ResolveCompletionCode(binding.Operation, transitions);
+                var result = new RetentionMutationResult(
+                    RetentionMutationConstants.SchemaVersion,
+                    operationId,
+                    completionCode,
+                    binding.TargetKind,
+                    binding.TargetId,
+                    binding.Operation,
+                    binding.Scope,
+                    finalItems.Count,
+                    PinState(finalItems.Select(static item => item.State)),
+                    RetentionMutationLifecycleCounts.From(finalItems.Select(static item => item.State)),
+                    finalItems.Any(static item => item.ReadDeniedAt is not null),
+                    auditEventIdGenerator(),
+                    binding.ExpectedStateVersion,
+                    resultVector.ExpectedStateVersion,
+                    RetentionMutationConstants.BackupWarningCode,
+                    false,
+                    completedAt,
+                    completedAt);
+
+                var auditEvent = new RetentionAuditEvent(
+                    result.AuditEventId!,
+                    result.OperationId,
+                    RetentionMutationConstants.EventType,
+                    binding.TargetKind,
+                    binding.TargetId,
+                    binding.TargetKind == RetentionMutationTargetKind.Session
+                        ? binding.TargetId
+                        : catalog.ReadSessionIdForItemWithinTransaction(connection, transaction, binding.TargetId),
+                    completedAt,
+                    RetentionMutationConstants.ActorLabel,
+                    binding.Operation,
+                    binding.ReasonCode,
+                    storedPreview!.Comment,
+                    PinState(storedPreview!.Response.TargetItems.Select(static item => item.State)),
+                    result.PinState,
+                    RetentionMutationLifecycleCounts.From(storedPreview.Response.TargetItems.Select(static item => item.State)),
+                    result.LifecycleCounts,
+                    workflowKey!,
+                    binding.ExpectedStateVersion,
+                    result.ResultVersion,
+                    binding.TargetItemSetDigest,
+                    completionCode,
+                    null);
+
+                catalog.InsertOperationReceiptWithinTransaction(connection, transaction, result, binding.TargetItemSetDigest);
+                mutationCheckpoint?.Invoke("receipt_written");
+                try
+                {
+                    catalog.AppendAuditEventWithinTransaction(connection, transaction, auditEvent);
+                }
+                catch (SqliteException)
+                {
+                    try { transaction.Rollback(); }
+                    catch (Exception rollbackException) when (rollbackException is InvalidOperationException or SqliteException) { }
+                    return new(null, RetentionMutationErrorCodes.AuditWriteFailed);
+                }
+                mutationCheckpoint?.Invoke("audit_written");
+                var committedIdempotency = catalog.GetOrCreateIdempotencyWithinTransaction(
+                    connection,
+                    transaction,
+                    lookupRequest with { ResultJson = JsonSerializer.Serialize(result), CompletionCode = completionCode });
+                if (committedIdempotency.Disposition != RetentionIdempotencyDisposition.Created)
+                    throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
+                mutationCheckpoint?.Invoke("idempotency_written");
+                workspaceParticipant.RefreshSessions(connection, transaction, ReadAffectedSessionIds(connection, transaction, itemIds), now);
+                transaction.Commit();
+                return new(result, null);
+            }
+            catch (NotSupportedException)
+            {
+                transaction.Rollback();
+                throw;
+            }
+            catch
             {
                 try { transaction.Rollback(); }
                 catch (Exception rollbackException) when (rollbackException is InvalidOperationException or SqliteException) { }
-                return new(null, RetentionMutationErrorCodes.AuditWriteFailed);
+                return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
             }
-            mutationCheckpoint?.Invoke("audit_written");
-            var committedIdempotency = catalog.GetOrCreateIdempotencyWithinTransaction(
-                connection,
-                transaction,
-                lookupRequest with { ResultJson = JsonSerializer.Serialize(result), CompletionCode = completionCode });
-            if (committedIdempotency.Disposition != RetentionIdempotencyDisposition.Created)
-                throw new InvalidOperationException(RetentionMutationErrorCodes.MutationTransactionFailed);
-            mutationCheckpoint?.Invoke("idempotency_written");
-            transaction.Commit();
-            return new(result, null);
         }
-        catch (NotSupportedException)
+        finally
         {
-            transaction.Rollback();
-            throw;
+            publicationLease?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
-        catch
-        {
-            try { transaction.Rollback(); }
-            catch (Exception rollbackException) when (rollbackException is InvalidOperationException or SqliteException) { }
-            return new(null, RetentionMutationErrorCodes.MutationTransactionFailed);
-        }
+    }
+
+    private static string[] ReadAffectedSessionIds(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> itemIds)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = TableExists(connection, transaction, "monitor_spans")
+            ? """
+            WITH affected AS (
+              SELECT i.store_kind,i.source_item_id
+              FROM retention_items i
+              WHERE i.item_id IN (SELECT CAST(value AS TEXT) FROM json_each($item_ids))
+            )
+            SELECT e.session_id
+            FROM affected a JOIN session_events e
+              ON a.store_kind='session_event_content' AND e.event_id=a.source_item_id
+            UNION
+            SELECT e.session_id
+            FROM affected a
+            JOIN monitor_spans m ON a.store_kind='raw_record' AND CAST(m.raw_record_id AS TEXT)=a.source_item_id
+            JOIN session_events e ON e.source_adapter='otel-exact'
+              AND e.source_event_id=m.trace_id||'/'||m.span_id
+            ORDER BY 1 COLLATE BINARY;
+            """
+            : """
+            SELECT e.session_id
+            FROM retention_items i JOIN session_events e ON e.event_id=i.source_item_id
+            WHERE i.store_kind='session_event_content'
+              AND i.item_id IN (SELECT CAST(value AS TEXT) FROM json_each($item_ids))
+            ORDER BY e.session_id COLLATE BINARY;
+            """;
+        command.Parameters.AddWithValue("$item_ids", JsonSerializer.Serialize(itemIds));
+        using var reader = command.ExecuteReader();
+        var sessionIds = new List<string>();
+        while (reader.Read()) sessionIds.Add(reader.GetString(0));
+        return sessionIds.ToArray();
+    }
+
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
+        command.Parameters.AddWithValue("$name", tableName);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 
     private SqliteConnection? TryOpenMutationConnection()

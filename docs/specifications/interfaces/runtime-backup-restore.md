@@ -185,6 +185,36 @@ The sole `files` row is
 The manifest does not contain its own checksum. The command/result separately
 returns the SHA-256 of the complete ZIP.
 
+For a current `local_workspace_projection:3` archive,
+`source_application_version` is also the immutable writer-provenance key for
+offline structural validation. The embedded Skill invocation registry owns a
+closed exact mapping from each supported writer version to one embedded
+registry revision and that registry artifact's exact SHA-256 fingerprint. The
+mapping admits exactly legacy writer ID `1.0.0` at registry r0001 and immutable
+writer ID `runtime-backup-writer-r0002` at registry r0002. These IDs are
+archive-format provenance tokens owned by the runtime-backup/registry contract;
+they are not package versions, assembly informational versions, Git revisions,
+or values inferred from the inspecting build. Manifest creation emits
+`runtime-backup-writer-r0002`. Inspection uses only this closed exact mapping;
+no prefix, wildcard, or current-assembly fallback is permitted. Each resolved
+revision and fingerprint must exactly match the complete validated embedded
+registry history. Unknown, unmapped, ambiguous, missing, or
+fingerprint-mismatched provenance is `restore_incompatible`; validation never
+uses a wildcard, the current registry pointer, the producer tuple's application
+version, or an empty authority fallback.
+
+Structural Workspace validation uses the manifest-resolved fixed historical
+authority and the archived projection state's exact `refreshed_at` to refresh
+an in-memory canonical replica. Every refresh-derived row in every owned
+Workspace table must match the archive exactly with ordinal, type-aware
+equality. This includes Session, source, model, activity, token, label, Tool,
+SDK Skill, OTel Skill, search, and projection-state rows, so missing expected
+rows and fabricated rows both fail. The independent exact raw/Retention
+reconstruction remains authoritative for `local_workspace_span_facts`.
+Restore may subsequently refresh staging with the current fixed authority,
+including removal of a historically valid tuple that is now revoked;
+inspection itself never replays current disposition.
+
 `snapshot` records `method=sqlite_online_backup`, the source journal mode,
 `integrity_check=ok`, `foreign_key_check=ok`, and one opaque snapshot ID derived
 from the database checksum. `component_versions` records every row from the
@@ -437,13 +467,30 @@ and [Skill Projection](../layers/skill-projection.md).
 
 `skill_invocation_snapshot:1` is likewise independent, is not a Retention kind,
 and is registered immediately after `skill_projection:1` and before the future
-`local_workspace_projection:2`. Its complete contract is owned by
+`local_workspace_projection:3`. Restore staging accepts exact v1 through its supported
+v1-to-v2 step and exact v2 through the direct v2-to-v3 step for their atomic
+v2-to-v3 migration; runtime readers accept only v3. Its complete contract is owned by
 [Skill Invocation Snapshot](skill-invocation-snapshot.md). It owns invocation
 index/metadata and equality receipts only. Session Event content remains the
 sole raw owner and carries the historical payload document exactly once;
 snapshot backup adds no body/path copy, raw column, ZIP member, sanitized
 carrier, or empty sanitized marker. OTel-only `not_captured` observations have
 no snapshot row to back up.
+
+Runtime backup uses three deliberately distinct Workspace validation contexts.
+Live publication (`create`, including online publication) loads the canonical
+embedded #154 registry history, acquires the host/private publication gate, and
+refreshes with that immutable current-generation authority before validating or
+copying the database. Archive `inspect` is structural only: it proves the exact
+v3 objects, normalized facts, source identities, and Retention graph/lifetimes,
+but does not reinterpret a historical SDK tuple against the executable's current
+registry or claim that the tuple is currently authorized. Preview and restore
+staging load the same canonical registry implementation used by Local Monitor
+and rerun v1/v2-to-v3 or current-v3 Workspace projection with one fixed authority
+before comparison or atomic swap. A missing, incomplete, or invalid registry
+history is `restore_incompatible` before the first database mutation; it is never
+treated as an empty generation. Revoked SDK claims remain stored but cannot
+produce a current Workspace fact.
 
 The canonical component DDL artifact is exact UTF-8 without BOM, LF only, one
 final LF, 9,213 bytes, and SHA-256

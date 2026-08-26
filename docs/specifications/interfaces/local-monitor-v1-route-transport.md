@@ -1,13 +1,14 @@
-# Local Monitor v1 Route and Session Explorer Transport
+# Local Monitor v1 Route and Collection Transport
 
 Status: **Accepted current authority**
 Authority: Issue #136, PO136-A2b
 Accepted: 2026-08-09
 
 This specification owns the exact human-route grammar, browser URL state,
-HTTP method/status/header behavior, and the Session Explorer collection
-request transport for Local Monitor v1. It amends the route-facing seams of
-#133, #162 and #165 without moving their domain ownership.
+HTTP method/status/header behavior, the Repository collection GET transport,
+and the Session Explorer collection request transport for Local Monitor v1. It
+amends the route-facing seams of #133, #162 and #165 without moving their
+domain ownership.
 
 The page hierarchy and presentation remain owned by
 [Local Monitor v1 IA](local-monitor-v1-ia.md). Raw-local posture remains owned
@@ -16,6 +17,9 @@ data requirements and projections remain #133/#134-owned. The accepted #171
 success wire in
 [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md)
 composes with this transport, so #134 mapping may proceed.
+The Repository success/cursor authority in
+[`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md)
+also composes with the exact GET transport below.
 Optional AI storage remains #162/#163/#164-owned. Comparison formulas and
 snapshots remain #165/#166-owned.
 
@@ -58,6 +62,8 @@ This specification does not change `/api/monitor/*`,
 | Session collection request/query/cursor contract | this route-facing amendment to #133; pure parsing implementation is #136-owned |
 | Session collection semantic read requirements | #133/#134 |
 | Exact closed success response wire | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md); #134 alone maps and serializes it |
+| Repository collection GET/query transport | this specification; #134 implements the route and parser |
+| Repository collection success/cursor wire | [`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md); #134 alone maps and serializes it |
 | Repository/archive scope facts used by the Workspace read | the one `ILocalRepositoryScopeSnapshotService` composed by #156/#161 |
 | Local execution/node identity and exact Session/node index | #133/#134, with the route-facing amendment in this specification |
 | AI run identity/scope lookup | #162/#163/#164, with the route-facing amendment in this specification |
@@ -355,12 +361,12 @@ to null.
 | `scope` | Exact `all`, `unassigned` or `repository`. The Local Monitor browser derives it from the human page path; the endpoint does not trust or require `Referer`. |
 | `repository_id` | Canonical local Repository UUIDv7 only for `scope=repository`; otherwise exactly null. The browser copies it only from a validated Repository page route. |
 | `archive_scope` | Exact `active_only` or `include_archived`; never null. |
-| `from` / `to` | Null or exact decoded UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. A non-null value must parse as a real Gregorian `DateTimeOffset` instant and re-serialize byte-for-byte to that form; `from < to` when both exist. |
+| `from` / `to` | Null or exact decoded UTC `yyyy-MM-ddTHH:mm:ss.fffffff+00:00`. A non-null value must parse as a real Gregorian `DateTimeOffset` instant and re-serialize byte-for-byte to that form; `from < to` when both exist. After that validation, each bound is converted to a signed Unix epoch millisecond as `floor((UTC instant - 1970-01-01T00:00:00Z) / 1ms)`, exactly matching `DateTimeOffset.ToUnixTimeMilliseconds` and the projection/cursor time basis. Filtering compares the Session accepted ordering epoch millisecond—first valid `started_at`, then `created_at`, then `last_seen_at`—with `from` inclusive (`>=`) and `to` exclusive (`<`); invalid-time Sessions do not match a non-null bound. Sub-millisecond fractions add no comparison precision, and pre-epoch values floor toward negative infinity (`1969-12-31T23:59:59.9999999+00:00`, one tick before the epoch, becomes `-1ms`). Two wire-distinct bounds in the same millisecond bucket may therefore form an empty effective interval even though parser-level `from < to` holds. Cursor request binding remains over the exact canonical request semantics and wire values; it does not substitute quantized timestamp text. |
 | `source` | Array of 0..16 distinct current source tokens from section 5. |
 | `model` | Array of 0..16 distinct dynamic values. Each has 1..128 Unicode scalars, at most 256 strict UTF-8 bytes, and no C0/C1 control or line/paragraph separator. No trim, normalization, case fold, alias or approximate match. |
 | `status` | Array of 0..16 distinct current status tokens from section 5. |
 | `has_skill`, `has_subagent`, `has_error`, `has_retry` | JSON Boolean or null; null means no predicate. |
-| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are request-memory only. |
+| `q` | Null or 1..200 Unicode scalars and at most 800 strict UTF-8 bytes, with no unpaired surrogate. NFKC followed by invariant lowercase must remain nonempty and at most 800 UTF-8 bytes. Original and normalized values are request-memory only. Matching uses ordinal substring comparison over exactly the three current normalized fact classes `label`, `skill`, and `tool`; it never searches prompts, Skill bodies, Tool payloads/results/errors, paths, or response text. |
 | `cursor` | Null or the exact token in section 9. |
 | `limit` | Null or a canonical JSON integer 1..200. Null means 50. Decimal, exponent, string, Boolean, sign and negative-zero spellings are invalid. |
 
@@ -368,6 +374,83 @@ Array entries cannot be null. Input array order is nonsemantic; the validated
 set is ordinal-sorted for query execution and cursor framing. Text-identical
 duplicate entries are invalid. An unknown source/status token is
 `400 invalid_request`, never a broad/no-filter search.
+
+## 7A. Repository collection GET transport
+
+The exact route is:
+
+```text
+GET /api/local-monitor/v1/repositories
+```
+
+It is registered in raw-default composition only and is absent in
+`--sanitized-only` and receiver-only composition. Loopback/Host validation uses
+the accepted Local Monitor guard. A present `Origin` must equal the effective
+loopback origin, `Sec-Fetch-Site: cross-site` is rejected, CORS is disabled,
+and no response has `Access-Control-Allow-*`. GET and HEAD require no CSRF or
+idempotency header and consume no request body.
+
+The query is closed to the generated order `archive_scope, after, limit`.
+Input key order is nonsemantic. Unknown or empty keys, duplicate singletons,
+or malformed structure outside the value of exactly one `after` component are
+`400 invalid_request`. Once the grammar identifies exactly one `after`
+component, every value is passed unchanged to cursor validation: empty,
+short, padded, percent-bearing, raw `+`, whitespace, semicolon-bearing,
+multi-`=` and other malformed or noncanonical values are `400 invalid_cursor`.
+A trailing `?` with no component is equivalent to no query. Names and
+non-cursor values are ordinal case-sensitive and are never trimmed or repaired.
+
+| Query | Exact contract |
+| --- | --- |
+| `archive_scope` | Optional singleton. Missing means `active_only`; present is exactly `active_only` or `include_archived`. |
+| `after` | Optional singleton. Missing means the first page; present is exactly one canonical unpadded base64url Repository cursor of 135 ASCII characters from [`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md). It is never a Repository ID. |
+| `limit` | Optional singleton. Missing means effective limit 50; present is a canonical unsigned decimal integer 1..200 with no sign, leading zero, decimal point, exponent, whitespace, or negative-zero spelling. |
+
+Changing `archive_scope` or effective `limit` invalidates `after`; the server
+does not repair the cursor or restart at page one. The first applicable failure
+wins in this exact order:
+
+1. Host guard;
+2. exact route and method dispatch, including the shared-path Repository catalog POST contract;
+3. same-origin guard;
+4. closed query structure, names, duplicates, and non-cursor parameter values;
+5. cursor syntax, canonical encoding, version, UUIDv7 position, tag, process
+   key, and exact archive-scope/effective-limit binding;
+6. one coherent #156/#161 scope snapshot and bounded #134 serialization.
+
+GET success is status `200`, exact
+`Content-Type: application/json; charset=utf-8`, and
+`Cache-Control: no-store`. It has no `Location`, `ETag`, `Set-Cookie`, CORS
+header, or content negotiation. Its complete entity and property order are
+owned solely by
+[`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md).
+
+HEAD follows the winning GET status, content type, no-store header, and exact
+representation `Content-Length`, but emits zero entity bytes. The shared path
+also retains the separately owned Repository catalog POST create contract.
+PUT, PATCH, DELETE, OPTIONS, and every other method that is neither GET, HEAD,
+nor the registered POST return exact `405 {"error":"method_not_allowed"}`
+before query validation, with integrated `Allow: GET, HEAD, POST`; no `OPTIONS`
+request becomes a CORS preflight response. The collection read surface itself
+contributes exactly GET and HEAD to that integrated method set.
+
+Every nonempty response is compact strict UTF-8 JSON without BOM, indentation,
+trailing whitespace, or newline. Errors and status are closed to:
+
+| Condition | Status and exact body |
+| --- | --- |
+| Non-loopback/invalid Host | `400 {"error":"invalid_host"}` |
+| Cross-site/origin rejection | `403 {"error":"csrf_rejected"}` |
+| Invalid query structure, unknown/duplicate parameter, or invalid non-cursor value | `400 {"error":"invalid_request"}` |
+| Malformed, noncanonical, tampered, restarted, or filter-mismatched cursor | `400 {"error":"invalid_cursor"}` |
+| Complete success entity exceeds the exact 8,388,608 UTF-8 entity-byte ceiling owned by the Repository success contract | `409 {"error":"workspace_too_large"}` |
+| SQLite remains busy after the accepted bounded policy | `503 {"error":"persistence_busy"}` |
+| Raw-default composition unavailable | `503 {"error":"local_monitor_ui_unavailable"}` |
+| Method other than GET/HEAD or the separately owned Repository catalog POST | `405 {"error":"method_not_allowed"}` |
+
+Every error has `Cache-Control: no-store` and nonempty JSON has the exact JSON
+content type above. Error bodies never echo the raw target, query value,
+cursor, Repository ID, path, exception, stack, SQL, or inner detail.
 
 ## 8. Request validation precedence
 

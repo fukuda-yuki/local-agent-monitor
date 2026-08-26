@@ -724,7 +724,7 @@ internal sealed partial class RawTelemetryStore
         using (var collectionInstalled = connection.CreateCommand())
         {
             collectionInstalled.Transaction = transaction;
-            collectionInstalled.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=2);";
+            collectionInstalled.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=3);";
             collectionFactsInstalled = Convert.ToInt64(collectionInstalled.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
         }
 

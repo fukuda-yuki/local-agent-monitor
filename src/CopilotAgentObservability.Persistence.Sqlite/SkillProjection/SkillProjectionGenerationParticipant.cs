@@ -16,7 +16,8 @@ internal static class SkillProjectionGenerationParticipant
         SqliteTransaction transaction,
         string traceId,
         TraceSourceVersionResolutionRow? before,
-        DateTimeOffset admittedAt)
+        DateTimeOffset admittedAt,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         var after = SourceCompatibilityReconciler.ReadEffectiveTrace(connection, transaction, traceId)
             ?? throw new InvalidOperationException("source_compatibility_trace_not_found");
@@ -67,7 +68,8 @@ internal static class SkillProjectionGenerationParticipant
             after.SourceApplicationVersion,
             CurrentProjectorVersion,
             admittedAt,
-            bumpCompatibilityRevision: semanticChange);
+            bumpCompatibilityRevision: semanticChange,
+            workspaceParticipant);
     }
 
     internal static SkillProjectionGenerationChange Advance(
@@ -78,7 +80,8 @@ internal static class SkillProjectionGenerationParticipant
         string? exactVersion,
         string projectorVersion,
         DateTimeOffset changedAt,
-        bool bumpCompatibilityRevision)
+        bool bumpCompatibilityRevision,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         var now = Timestamp(changedAt);
         var compatibilityRevision = EnsureAndReadCompatibilityRevision(
@@ -102,6 +105,16 @@ internal static class SkillProjectionGenerationParticipant
             transaction,
             "SELECT current_generation_id FROM skill_projection_trace_heads WHERE trace_id=$trace_id;",
             ("$trace_id", traceId));
+        var invalidatedSessions = new List<string>();
+        if (oldCurrent is not null)
+        {
+            using var sessions = connection.CreateCommand();
+            sessions.Transaction = transaction;
+            sessions.CommandText = "SELECT DISTINCT session_id FROM skill_projection_invocations WHERE generation_id=$generation_id AND session_id IS NOT NULL ORDER BY session_id;";
+            sessions.Parameters.AddWithValue("$generation_id", oldCurrent.Value);
+            using var reader = sessions.ExecuteReader();
+            while (reader.Read()) invalidatedSessions.Add(reader.GetString(0));
+        }
         if (oldDesired is not null)
         {
             SupersedeGeneration(connection, transaction, oldDesired.Value, now);
@@ -152,6 +165,8 @@ internal static class SkillProjectionGenerationParticipant
             ("$trace_id", traceId),
             ("$desired_generation_id", resolved || inputUnavailable ? generationId : DBNull.Value),
             ("$updated_at", now));
+        (workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance).RefreshSessions(
+            connection, transaction, invalidatedSessions, changedAt);
         return new(compatibilityRevision, generationId, frontierDigest);
     }
 

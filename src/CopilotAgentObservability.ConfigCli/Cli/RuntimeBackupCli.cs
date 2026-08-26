@@ -1,21 +1,30 @@
 using System.Text;
 using CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
+using CopilotAgentObservability.Persistence.Sqlite;
 
 namespace CopilotAgentObservability.ConfigCli;
 
 internal static class RuntimeBackupCli
 {
     internal static int Run(string[] args, TextWriter output, TextWriter error)
+        => Run(args, output, error, FixedSkillRegistryGenerationAuthority.Load);
+
+    internal static int Run(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        Func<ISkillRegistryGenerationAuthority> authorityFactory)
     {
+        ArgumentNullException.ThrowIfNull(authorityFactory);
         if (args.Length == 0) return Error(error, RuntimeBackupErrorCodes.InvalidArguments);
         try
         {
             return args[0] switch
             {
-                "create" => Create(args, output, error),
+                "create" => Create(args, output, error, authorityFactory),
                 "inspect" => Inspect(args, output, error),
-                "preview" => Preview(args, output, error),
-                "restore" => Restore(args, output, error),
+                "preview" => Preview(args, output, error, authorityFactory),
+                "restore" => Restore(args, output, error, authorityFactory),
                 _ => Error(error, RuntimeBackupErrorCodes.InvalidArguments),
             };
         }
@@ -26,11 +35,13 @@ internal static class RuntimeBackupCli
         }
     }
 
-    private static int Create(string[] args, TextWriter output, TextWriter error)
+    private static int Create(string[] args, TextWriter output, TextWriter error, Func<ISkillRegistryGenerationAuthority> authorityFactory)
     {
         if (!TryOptions(args, ["--database", "--output"], [], out var values, out var flags) || flags.Count != 0)
             return Error(error, RuntimeBackupErrorCodes.InvalidArguments);
-        var result = new SqliteRuntimeBackupService().CreateAndPublish(values["--database"], values["--output"]);
+        if (!TryCreateOfflineService(authorityFactory, out var service, out var gate))
+            return Error(error, RuntimeBackupErrorCodes.RestoreIncompatible);
+        var result = service.CreateAndPublish(values["--database"], values["--output"]);
         return Result(result.Success, result.ErrorCode, result, output, error);
     }
 
@@ -42,15 +53,25 @@ internal static class RuntimeBackupCli
         return Result(result.Success, result.ErrorCode, result, output, error);
     }
 
-    private static int Preview(string[] args, TextWriter output, TextWriter error)
+    private static int Preview(string[] args, TextWriter output, TextWriter error, Func<ISkillRegistryGenerationAuthority> authorityFactory)
     {
         if (!TryOptions(args, ["--bundle", "--database"], [], out var values, out var flags) || flags.Count != 0)
             return Error(error, RuntimeBackupErrorCodes.InvalidArguments);
-        var result = new SqliteRuntimeBackupService().Preview(values["--bundle"], values["--database"]);
-        return Result(result.Success, result.ErrorCode, result, output, error);
+        if (!TryCreateOfflineService(authorityFactory, out var service, out var gate))
+            return Error(error, RuntimeBackupErrorCodes.RestoreIncompatible);
+        var lease = gate.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
+            var result = service.Preview(values["--bundle"], values["--database"]);
+            return Result(result.Success, result.ErrorCode, result, output, error);
+        }
+        finally
+        {
+            lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
-    private static int Restore(string[] args, TextWriter output, TextWriter error)
+    private static int Restore(string[] args, TextWriter output, TextWriter error, Func<ISkillRegistryGenerationAuthority> authorityFactory)
     {
         if (!TryOptions(args, ["--bundle", "--database"], ["--pre-restore-output", "--confirmation"], out var values, out var flags)
             || flags.Except(["--allow-resurrection"], StringComparer.Ordinal).Any()
@@ -60,8 +81,36 @@ internal static class RuntimeBackupCli
             values.GetValueOrDefault("--pre-restore-output"),
             flags.Contains("--allow-resurrection"),
             values.GetValueOrDefault("--confirmation"));
-        var result = new SqliteRuntimeBackupService().Restore(values["--bundle"], values["--database"], options);
-        return Result(result.Success, result.ErrorCode, result, output, error);
+        if (!TryCreateOfflineService(authorityFactory, out var service, out var gate))
+            return Error(error, RuntimeBackupErrorCodes.RestoreIncompatible);
+        var lease = gate.AcquireReadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        try
+        {
+            var result = service.Restore(values["--bundle"], values["--database"], options);
+            return Result(result.Success, result.ErrorCode, result, output, error);
+        }
+        finally
+        {
+            lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    private static bool TryCreateOfflineService(
+        Func<ISkillRegistryGenerationAuthority> authorityFactory,
+        out SqliteRuntimeBackupService service,
+        out LocalWorkspacePublicationGate gate)
+    {
+        gate = new LocalWorkspacePublicationGate();
+        try
+        {
+            service = new SqliteRuntimeBackupService(TimeProvider.System, authorityFactory(), gate);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            service = null!;
+            return false;
+        }
     }
 
     private static int Result<T>(bool success, string? code, T value, TextWriter output, TextWriter error)

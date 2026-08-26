@@ -99,6 +99,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         + "DROP TABLE IF EXISTS local_workspace_session_activity;"
                         + "DROP TABLE IF EXISTS local_workspace_token_observations;"
                         + "DROP TABLE IF EXISTS local_workspace_span_facts;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_search_facts;"
                         + "DROP TABLE IF EXISTS local_workspace_projection_state;"
                         + "DROP TABLE IF EXISTS local_workspace_sessions;";
                     removeArchive.ExecuteNonQuery();
@@ -134,7 +135,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.Equal(expected, ReadCatalogSnapshot(target));
         using var migrated = Open(target);
         Assert.Equal(14L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(2L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(3L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.True(SqliteSessionStore.IsCurrentSchemaValid(migrated, null));
         Assert.Equal(0L, ScalarLong(target, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
         Assert.Equal("session_events", StringJoin(target, "SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('session_repository_observation_contexts') WHERE \"from\"='session_event_id';"));
@@ -478,7 +479,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var corrupt = Path.Combine(directory, $"authority-corrupt-{caseId}.zip");
         var probe = Path.Combine(directory, $"authority-probe-{caseId}.db");
         var service = new SqliteRuntimeBackupService(fixture.Clock);
-        Assert.True(service.CreateAndPublish(fixture.DatabasePath, valid).Success);
+        var created = service.CreateAndPublish(fixture.DatabasePath, valid);
+        Assert.True(created.Success, created.ErrorCode);
         RewriteArchiveDatabase(valid, corrupt, path => ApplyOwnerSemanticArchiveMutation(path, caseId));
         ExtractArchiveDatabase(corrupt, probe);
         AssertAcceptedMutationContradictionShape(caseId, probe);
@@ -534,7 +536,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var previewTarget = Path.Combine(directory, $"success-preview-{archiveCase.Id}.db");
         var restoreTarget = Path.Combine(directory, $"success-restore-{archiveCase.Id}.db");
         var service = new SqliteRuntimeBackupService(fixture.Clock);
-        Assert.True(service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        var created = service.CreateAndPublish(fixture.DatabasePath, archive);
+        Assert.True(created.Success, created.ErrorCode);
         var archiveBefore = File.ReadAllBytes(archive);
 
         var inspection = service.Inspect(archive);

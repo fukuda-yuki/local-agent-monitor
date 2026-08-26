@@ -49,6 +49,12 @@ internal sealed record SkillProjectionSessionInvocationAggregate(
     int? InvocationCount,
     string? State);
 
+internal sealed record SkillProjectionCurrentSearchFact(
+    string SessionId,
+    string SourceIdentity,
+    string SkillName,
+    string? ExpiresAt = null);
+
 internal sealed class SkillProjectionReadService
 {
     private readonly string databasePath;
@@ -315,10 +321,16 @@ internal sealed class SkillProjectionReadService
     private SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(
         SkillRegistryProducerTuple tuple,
         string skillName,
+        string? skillSource) =>
+        AcquireGenerationAuthorization(registryAuthority, tuple, skillName, skillSource);
+
+    private static SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(
+        ISkillRegistryGenerationAuthority? registryAuthority,
+        SkillRegistryProducerTuple tuple,
+        string skillName,
         string? skillSource)
     {
-        var authority = registryAuthority;
-        if (authority is null)
+        if (registryAuthority is null)
             return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
         ISkillRegistryGenerationCapture? capture = null;
@@ -328,11 +340,11 @@ internal sealed class SkillProjectionReadService
         // pre-lease churn or a lease-acquisition failure lands in sanitized unavailability.
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            capture = authority.CaptureGeneration();
+            capture = registryAuthority.CaptureGeneration();
             if (capture is null)
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
-            if (authority.TryAcquireGenerationReadLease(capture, out lease))
+            if (registryAuthority.TryAcquireGenerationReadLease(capture, out lease))
                 break;
 
             lease = null;
@@ -343,12 +355,12 @@ internal sealed class SkillProjectionReadService
 
         try
         {
-            if (!authority.VerifyGenerationIdentity(capture, lease))
+            if (!registryAuthority.VerifyGenerationIdentity(capture, lease))
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
             // Within a mechanically valid generation a revoked tuple (with a valid accepted
             // predecessor) or an absent tuple never yields a capability.
-            if (!authority.IsProducerTupleAccepted(lease, tuple))
+            if (!registryAuthority.IsProducerTupleAccepted(lease, tuple))
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.NotCurrent;
 
             var authorization = new SkillProjectionCurrentSdkClaimAuthorization(skillName, skillSource, lease);
@@ -554,6 +566,159 @@ internal sealed class SkillProjectionReadService
         var result = new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
         while (reader.Read()) result.Add(reader.GetString(0), new(reader.GetInt32(1), "current"));
         return result;
+    }
+
+    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadCurrentOtelSearchFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        DateTimeOffset acceptedAt)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)) return [];
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
+                   CASE WHEN item.state='retained_by_policy' THEN NULL ELSE item.expires_at END
+            FROM skill_projection_invocations invocation
+            JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id
+            JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id
+              AND head.current_generation_id=invocation.generation_id
+            JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id
+              AND revision.current_revision=generation.compatibility_revision
+              AND revision.current_effective_state='resolved'
+              AND revision.current_exact_version=invocation.source_application_version
+            JOIN raw_records raw ON raw.id=invocation.raw_record_id
+            JOIN retention_items item ON item.store_kind='raw_record'
+              AND item.source_item_id=CAST(invocation.raw_record_id AS TEXT)
+            WHERE invocation.source_arm='otel_trace_span'
+              AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
+              AND generation.lifecycle='current'
+              AND item.state IN ('expiring','retained_by_policy')
+              AND item.read_denied_at IS NULL AND item.deleted_at IS NULL AND item.error_code IS NULL
+              AND (item.state='retained_by_policy' OR item.expires_at COLLATE BINARY > $accepted_at COLLATE BINARY)
+              AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input
+                WHERE input.generation_id=generation.generation_id
+                  AND input.input_evidence_kind='deleted_before_digest_v10')
+            ORDER BY invocation.session_id COLLATE BINARY,invocation.invocation_id;
+            """;
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        command.Parameters.AddWithValue("$accepted_at", acceptedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        using var reader = command.ExecuteReader();
+        var result = new List<SkillProjectionCurrentSearchFact>();
+        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3)));
+        return result;
+    }
+
+    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadCurrentSdkSearchFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        ISkillRegistryGenerationAuthority registryAuthority,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(registryAuthority);
+        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
+            || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        using var reader = command.ExecuteReader();
+        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
+        while (reader.Read())
+            if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId))
+                identities.Add((sessionId, snapshotId));
+        reader.Close();
+
+        var result = new List<SkillProjectionCurrentSearchFact>();
+        foreach (var identity in identities)
+        {
+            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
+            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
+                || metadata.Facts is not
+                {
+                    IsAvailable: true,
+                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
+                    ClaimId: not null,
+                } facts) continue;
+            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
+            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
+            using var authorization = AcquireGenerationAuthorization(registryAuthority,
+                new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint),
+                claim.SkillName, claim.SkillSource).Authorization;
+            if (authorization is not null)
+                result.Add(new(
+                    identity.SessionId.ToString("D"),
+                    facts.ClaimId.Value.ToString("D"),
+                    authorization.SkillName,
+                    facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadStructurallyValidSdkSearchFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        TimeProvider timeProvider)
+    {
+        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
+            || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        using var reader = command.ExecuteReader();
+        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
+        while (reader.Read())
+            if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId))
+                identities.Add((sessionId, snapshotId));
+        reader.Close();
+
+        var result = new List<SkillProjectionCurrentSearchFact>();
+        foreach (var identity in identities)
+        {
+            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
+            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
+                || metadata.Facts is not
+                {
+                    IsAvailable: true,
+                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
+                    ClaimId: not null,
+                } facts) continue;
+            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
+            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
+            result.Add(new(
+                identity.SessionId.ToString("D"),
+                facts.ClaimId.Value.ToString("D"),
+                claim.SkillName,
+                facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
+        }
+        return result;
+    }
+
+    private static bool ComponentInstalled(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static bool TableInstalled(SqliteConnection connection, SqliteTransaction transaction, string name)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
+        command.Parameters.AddWithValue("$name", name);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 
     private IReadOnlyList<(string TraceId, string SpanId)> ListCurrentOtelPairs(

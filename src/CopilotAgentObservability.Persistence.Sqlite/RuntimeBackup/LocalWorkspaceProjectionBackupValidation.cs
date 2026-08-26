@@ -5,7 +5,12 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 internal static class LocalWorkspaceProjectionBackupValidation
 {
-    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction)
+    internal static void Validate(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime = null,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
+        SqliteConnection? canonicalReplica = null)
     {
         try
         {
@@ -18,10 +23,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
                   LEFT JOIN sessions s ON s.session_id=p.session_id
                   WHERE s.session_id IS NULL
                      OR length(p.revision_seed)=0
-                     OR p.last_seen_at<>s.last_seen_at COLLATE BINARY
-                     OR p.sort_group<>CASE WHEN s.started_at IS NULL THEN 1 ELSE 0 END
-                     OR s.started_at IS NULL AND p.sort_epoch_ms<>0
-                     OR s.started_at IS NOT NULL AND p.sort_epoch_ms<>MAX(0,CAST((julianday(s.started_at)-2440587.5)*86400000 AS INTEGER))
+                     OR (p.sort_group=1 AND p.sort_epoch_ms<>0)
+                     OR (p.last_seen_at IS NULL)<>(p.last_seen_epoch_ms IS NULL)
                      OR (SELECT COUNT(*) FROM local_workspace_session_sources x WHERE x.session_id=p.session_id)>5
                      OR (SELECT COUNT(*) FROM local_workspace_session_models x WHERE x.session_id=p.session_id)>16
                      OR EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id AND x.source NOT IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code'))
@@ -59,6 +62,24 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
+            command.CommandText = "SELECT last_seen_at,last_seen_epoch_ms FROM local_workspace_sessions WHERE last_seen_at IS NOT NULL;";
+            using (var timing = command.ExecuteReader())
+            {
+                while (timing.Read())
+                {
+                    if (!DateTimeOffset.TryParseExact(timing.GetString(0), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant)
+                        || instant.Offset != TimeSpan.Zero || instant.ToUnixTimeMilliseconds() != timing.GetInt64(1))
+                        throw new InvalidOperationException();
+                }
+            }
+            command.CommandText = "SELECT normalized_text FROM local_workspace_session_search_facts;";
+            using (var facts = command.ExecuteReader())
+                while (facts.Read())
+                {
+                    var value = facts.GetString(0);
+                    if (value.Length == 0 || !string.Equals(value, value.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), StringComparison.Ordinal))
+                        throw new InvalidOperationException();
+                }
             command.CommandText = "SELECT capture_notes FROM local_workspace_sessions;";
             using (var notes = command.ExecuteReader())
             {
@@ -71,12 +92,58 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
-            ValidateCanonicalProjection(connection, transaction);
+            ValidateSdkFactGraph(connection, transaction, publicationTime);
+            ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             throw new InvalidOperationException("local_workspace_projection_backup_invalid", exception);
+        }
+    }
+
+    private static void ValidateSdkFactGraph(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime)
+    {
+        using var timeCommand = connection.CreateCommand();
+        timeCommand.Transaction = transaction;
+        timeCommand.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
+        var timeText = publicationTime?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
+            ?? timeCommand.ExecuteScalar() as string;
+        if (timeText is null || !DateTimeOffset.TryParseExact(timeText, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant))
+            throw new InvalidOperationException();
+
+        using var idsCommand = connection.CreateCommand();
+        idsCommand.Transaction = transaction;
+        idsCommand.CommandText = "SELECT session_id FROM local_workspace_sessions ORDER BY session_id COLLATE BINARY;";
+        using var idsReader = idsCommand.ExecuteReader();
+        var sessionIds = new List<string>();
+        while (idsReader.Read()) sessionIds.Add(idsReader.GetString(0));
+        idsReader.Close();
+
+        var expected = SkillProjectionReadService.ReadStructurallyValidSdkSearchFacts(
+                connection, transaction, sessionIds, new StructuralValidationTimeProvider(instant))
+            .Select(static fact => (fact.SessionId, SourceIdentity: "sdk:" + fact.SourceIdentity,
+                NormalizedText: fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), fact.ExpiresAt))
+            .ToHashSet();
+
+        using var factsCommand = connection.CreateCommand();
+        factsCommand.Transaction = transaction;
+        factsCommand.CommandText = "SELECT session_id,source_identity,normalized_text,expires_at FROM local_workspace_session_search_facts WHERE kind='skill' ORDER BY session_id,source_identity,normalized_text;";
+        using var factsReader = factsCommand.ExecuteReader();
+        while (factsReader.Read())
+        {
+            var sourceIdentity = factsReader.GetString(1);
+            if (sourceIdentity.StartsWith("otel:", StringComparison.Ordinal)) continue;
+            if (!sourceIdentity.StartsWith("sdk:", StringComparison.Ordinal)) throw new InvalidOperationException();
+            var actual = (
+                factsReader.GetString(0),
+                sourceIdentity,
+                factsReader.GetString(2),
+                factsReader.IsDBNull(3) ? null : factsReader.GetString(3));
+            if (!expected.Contains(actual)) throw new InvalidOperationException();
         }
     }
 
@@ -167,21 +234,37 @@ internal static class LocalWorkspaceProjectionBackupValidation
             throw new InvalidOperationException();
     }
 
-    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction)
+    private static void ValidateCanonicalProjection(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority,
+        SqliteConnection? canonicalReplica)
     {
         var before = Snapshot(connection, transaction);
-        using var readNow = connection.CreateCommand();
-        readNow.Transaction = transaction;
-        readNow.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
-        var text = readNow.ExecuteScalar() as string;
-        if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
-            throw new InvalidOperationException();
-        using var replica = new SqliteConnection("Data Source=:memory:");
-        replica.Open();
-        connection.BackupDatabase(replica);
+        if (publicationTime is null)
+        {
+            using var readNow = connection.CreateCommand();
+            readNow.Transaction = transaction;
+            readNow.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
+            var text = readNow.ExecuteScalar() as string;
+            if (text is null || !DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var projectorNow))
+                throw new InvalidOperationException();
+            publicationTime = projectorNow;
+        }
+        using var ownedReplica = canonicalReplica is null ? new SqliteConnection("Data Source=:memory:") : null;
+        var replica = canonicalReplica ?? ownedReplica!;
+        if (replica.State != System.Data.ConnectionState.Open)
+        {
+            replica.Open();
+            connection.BackupDatabase(replica);
+        }
         using (var replicaTransaction = replica.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, projectorNow);
+            if (skillRegistryAuthority is null)
+                LocalWorkspaceProjectionStore.RefreshStructural(replica, replicaTransaction, publicationTime.Value);
+            else
+                LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();
@@ -216,6 +299,11 @@ internal static class LocalWorkspaceProjectionBackupValidation
             }
         }
         return rows.ToArray();
+    }
+
+    private sealed class StructuralValidationTimeProvider(DateTimeOffset instant) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => instant;
     }
 
 }

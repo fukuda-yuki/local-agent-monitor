@@ -7,6 +7,47 @@ namespace CopilotAgentObservability.ConfigCli.Tests;
 
 public sealed class RuntimeBackupCliTests
 {
+    [Theory]
+    [InlineData("create")]
+    [InlineData("restore")]
+    public void Authority_load_failure_is_incompatible_before_database_mutation(string command)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"runtime-backup-authority-failure-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var database = Path.Combine(root, "monitor.db");
+        var bundle = Path.Combine(root, "backup.zip");
+        var output = Path.Combine(root, "created.zip");
+        try
+        {
+            CreateDatabase(database, "unchanged");
+            File.WriteAllBytes(bundle, [1, 2, 3]);
+            var before = File.ReadAllBytes(database);
+            var standardOutput = new StringWriter();
+            var error = new StringWriter();
+            var arguments = command == "create"
+                ? new[] { "create", "--database", database, "--output", output }
+                : new[] { "restore", "--bundle", bundle, "--database", database };
+
+            var exit = RuntimeBackupCli.Run(
+                arguments,
+                standardOutput,
+                error,
+                () => throw new InvalidOperationException("synthetic registry failure"));
+
+            Assert.Equal(3, exit);
+            Assert.Equal("restore_incompatible" + Environment.NewLine, error.ToString());
+            Assert.Equal(before, File.ReadAllBytes(database));
+            Assert.False(File.Exists(output));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { Directory.Delete(root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     [Fact]
     public void Help_lists_the_closed_runtime_backup_command_family()
     {

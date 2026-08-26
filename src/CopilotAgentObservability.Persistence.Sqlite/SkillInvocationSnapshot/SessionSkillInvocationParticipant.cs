@@ -71,11 +71,20 @@ internal static class SessionSkillInvocationParticipant
         SqliteTransaction transaction,
         SessionSkillInvocationWrite write,
         out SessionSkillInvocationInsertedIdentity? insertedIdentity)
+        => InsertOrVerify(connection, transaction, write, UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance, out insertedIdentity);
+
+    internal static SessionSkillInvocationWriteOutcome InsertOrVerify(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        SessionSkillInvocationWrite write,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant,
+        out SessionSkillInvocationInsertedIdentity? insertedIdentity)
     {
         insertedIdentity = null;
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
         ArgumentNullException.ThrowIfNull(write);
+        ArgumentNullException.ThrowIfNull(workspaceParticipant);
         Validate(write);
 
         if (ReceiptExists(connection, transaction, write.SourceAdapter, write.SourceEventId))
@@ -106,11 +115,13 @@ internal static class SessionSkillInvocationParticipant
         if (isAvailable)
         {
             claimId = write.ClaimId!.Value.ToString("D");
-            InsertClaim(connection, transaction, write, sessionId, claimId, payloadSha256);
+            InsertClaim(connection, transaction, write, sessionId, claimId, payloadSha256, workspaceParticipant);
         }
 
         InsertSnapshot(connection, transaction, write, sessionId, isAvailable ? runId : null, claimId, contentItemId, payloadSha256, documentSha256);
         InsertReceipt(connection, transaction, write, payloadSha256, documentSha256);
+        workspaceParticipant.RefreshSessions(
+            connection, transaction, [sessionId], write.WriteAt);
 
         insertedIdentity = new(Guid.Parse(sessionId), write.SnapshotId);
 
@@ -355,7 +366,8 @@ internal static class SessionSkillInvocationParticipant
 
     private static void InsertClaim(
         SqliteConnection connection, SqliteTransaction transaction, SessionSkillInvocationWrite write,
-        string sessionId, string claimId, string payloadSha256)
+        string sessionId, string claimId, string payloadSha256,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant)
     {
         var claim = new SkillProjectionSdkClaimWrite(
             claimId,
@@ -376,7 +388,7 @@ internal static class SessionSkillInvocationParticipant
             write.Source,
             write.Trigger,
             write.WriteAt);
-        SkillProjectionSdkClaimParticipant.InsertOrVerify(connection, transaction, claim);
+        SkillProjectionSdkClaimParticipant.InsertOrVerify(connection, transaction, claim, workspaceParticipant);
     }
 
     private static void InsertSnapshot(

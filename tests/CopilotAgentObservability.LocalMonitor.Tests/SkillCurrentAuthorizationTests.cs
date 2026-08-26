@@ -44,6 +44,62 @@ public sealed class SkillCurrentAuthorizationTests
     }
 
     [Fact]
+    public void WorkspaceSearchFactUsesCurrentValidSdkAuthorization()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-current");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Equal(["demo-skill"], SearchFacts(database));
+        Assert.Equal("2026-04-01T00:00:00.0000000+00:00", SearchFactExpiry(database));
+        Assert.Equal(0, authority.OutstandingLeaseCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsRevokedSdkAuthorization()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-revoked");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]) { TupleAccepted = _ => false };
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+        Assert.Equal(0, authority.OutstandingLeaseCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsInvalidSdkSnapshotGraph()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-invalid", state: "malformed", reason: "duplicate_property");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+        Assert.Equal(0, authority.LeaseAttemptCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsUnavailableSdkGeneration()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-stale");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [], captureAvailable: [false]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+    }
+
+    [Fact]
     public void OnePreLeaseChurn_RecapturesOnce_ThenAcquires()
     {
         using var database = new TestDatabase();
@@ -320,6 +376,85 @@ public sealed class SkillCurrentAuthorizationTests
         freshLease!.Dispose();
     }
 
+    [Fact]
+    public void RealProvider_FailedProposedGenerationRefreshLeavesCurrentGenerationUnchanged()
+    {
+        var provider = new SkillInvocationV2RegistryProviderV1();
+        var original = provider.CaptureGeneration();
+        Assert.NotNull(original);
+        ISkillRegistryGenerationCapture? proposed = null;
+        provider.CurrentGenerationChanging += authority =>
+        {
+            proposed = authority.CaptureGeneration();
+            throw new InvalidOperationException("projection_refresh_failed");
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load()));
+
+        Assert.Equal("projection_refresh_failed", exception.Message);
+        Assert.True(provider.TryAcquireGenerationReadLease(original!, out var originalLease));
+        originalLease!.Dispose();
+        Assert.NotNull(proposed);
+        Assert.False(provider.TryAcquireGenerationReadLease(proposed!, out var prematureLease));
+        Assert.Null(prematureLease);
+    }
+
+    [Fact]
+    public async Task RealProvider_HoldsPublicationWriteLeaseAcrossCallbackAndPointerAssignment()
+    {
+        var gate = new LocalWorkspacePublicationGate();
+        var provider = new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), gate);
+        var callbackEntered = new ManualResetEventSlim();
+        var releaseCallback = new ManualResetEventSlim();
+        provider.CurrentGenerationChanging += _ =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var publication = Task.Run(() => provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load()));
+        Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(5)));
+        var collectionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var collection = Task.Run(async () =>
+        {
+            await using var lease = await gate.AcquireReadAsync(CancellationToken.None);
+            collectionEntered.SetResult();
+        });
+
+        await Task.Yield();
+        Assert.False(collectionEntered.Task.IsCompleted);
+        releaseCallback.Set();
+        await publication.WaitAsync(TimeSpan.FromSeconds(5));
+        await collection.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(collectionEntered.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public void RealProvidersKeepGenerationAuthorityInstanceScopedAcrossSequentialPublications()
+    {
+        var firstHost = new SkillInvocationV2RegistryProviderV1();
+        var secondHost = new SkillInvocationV2RegistryProviderV1();
+        var firstBefore = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(firstHost.CaptureGeneration());
+        var secondBefore = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(secondHost.CaptureGeneration());
+
+        firstHost.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+
+        Assert.False(firstHost.TryAcquireGenerationReadLease(firstBefore, out var firstStaleLease));
+        Assert.Null(firstStaleLease);
+        Assert.True(secondHost.TryAcquireGenerationReadLease(secondBefore, out var secondLease));
+        Assert.NotNull(secondLease);
+        Assert.True(secondHost.VerifyGenerationIdentity(secondBefore, secondLease!));
+        secondLease!.Dispose();
+
+        secondHost.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+        var firstCurrent = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(firstHost.CaptureGeneration());
+        Assert.True(firstHost.TryAcquireGenerationReadLease(firstCurrent, out var firstCurrentLease));
+        Assert.NotNull(firstCurrentLease);
+        Assert.True(firstHost.VerifyGenerationIdentity(firstCurrent, firstCurrentLease!));
+        firstCurrentLease!.Dispose();
+    }
+
     private static FixedTimeProvider Time() => new(ValidationAt);
 
     private static SessionSkillInvocationWrite NewWrite(
@@ -365,7 +500,10 @@ public sealed class SkillCurrentAuthorizationTests
     {
         using var connection = database.Open();
         using var transaction = connection.BeginTransaction();
-        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write);
+        var participant = new LocalWorkspaceProjectionTransactionParticipant(
+            new ScriptedRegistryGenerationAuthority(Enumerable.Repeat(true, 64)));
+        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+            connection, transaction, write, participant, out _);
         transaction.Commit();
         return outcome;
     }
@@ -373,6 +511,34 @@ public sealed class SkillCurrentAuthorizationTests
     private sealed class FixedTimeProvider(DateTimeOffset instant) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => instant;
+    }
+
+    private static void RefreshWorkspace(TestDatabase database, ISkillRegistryGenerationAuthority authority)
+    {
+        using var connection = database.Open();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ValidationAt);
+        using var transaction = connection.BeginTransaction();
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, ValidationAt, authority);
+        transaction.Commit();
+    }
+
+    private static string[] SearchFacts(TestDatabase database)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill' ORDER BY normalized_text COLLATE BINARY;";
+        using var reader = command.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result.ToArray();
+    }
+
+    private static string? SearchFactExpiry(TestDatabase database)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT expires_at FROM local_workspace_session_search_facts WHERE kind='skill';";
+        return command.ExecuteScalar() as string;
     }
 
     private sealed class ScriptedRegistryGenerationAuthority : ISkillRegistryGenerationAuthority

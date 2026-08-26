@@ -50,7 +50,8 @@ internal sealed record SkillInvocationSnapshotMetadataFacts(
     ulong? BodyUtf8Bytes,
     string? DefinitionPathSha256,
     ulong? DefinitionPathUtf8Bytes,
-    SkillInvocationSnapshotMetadataRetentionProjection RetentionProjection);
+    SkillInvocationSnapshotMetadataRetentionProjection RetentionProjection,
+    DateTimeOffset? EffectiveExpiresAt);
 
 internal sealed record SkillInvocationSnapshotMetadataReadResult(
     SkillInvocationSnapshotMetadataOutcome Outcome,
@@ -261,7 +262,10 @@ internal static class SkillInvocationSnapshotMetadataReader
             BodyUtf8Bytes: (ulong?)snapshot.BodyUtf8Bytes,
             DefinitionPathSha256: snapshot.DefinitionPathSha256,
             DefinitionPathUtf8Bytes: (ulong?)snapshot.DefinitionPathUtf8Bytes,
-            RetentionProjection: projection);
+            RetentionProjection: projection,
+            EffectiveExpiresAt: item.CatalogItem.State == RetentionItemLifecycle.Expiring
+                ? item.CatalogItem.ExpiresAt
+                : null);
 
         return SkillInvocationSnapshotMetadataReadResult.ForFound(facts);
     }
