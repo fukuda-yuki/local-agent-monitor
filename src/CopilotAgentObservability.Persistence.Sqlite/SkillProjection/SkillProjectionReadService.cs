@@ -52,7 +52,8 @@ internal sealed record SkillProjectionSessionInvocationAggregate(
 internal sealed record SkillProjectionCurrentSearchFact(
     string SessionId,
     string SourceIdentity,
-    string SkillName);
+    string SkillName,
+    string? ExpiresAt = null);
 
 internal sealed class SkillProjectionReadService
 {
@@ -564,7 +565,8 @@ internal sealed class SkillProjectionReadService
     internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadCurrentOtelSearchFacts(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds)
+        IReadOnlyCollection<string> sessionIds,
+        DateTimeOffset acceptedAt)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -574,7 +576,7 @@ internal sealed class SkillProjectionReadService
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT invocation.session_id,CAST(invocation.invocation_id AS TEXT),invocation.skill_name
+            SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,item.expires_at
             FROM skill_projection_invocations invocation
             JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id
             JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id
@@ -583,18 +585,25 @@ internal sealed class SkillProjectionReadService
               AND revision.current_revision=generation.compatibility_revision
               AND revision.current_effective_state='resolved'
               AND revision.current_exact_version=invocation.source_application_version
+            JOIN raw_records raw ON raw.id=invocation.raw_record_id
+            JOIN retention_items item ON item.store_kind='raw_record'
+              AND item.source_item_id=CAST(invocation.raw_record_id AS TEXT)
             WHERE invocation.source_arm='otel_trace_span'
               AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
               AND generation.lifecycle='current'
+              AND item.state IN ('expiring','retained_by_policy')
+              AND item.read_denied_at IS NULL AND item.deleted_at IS NULL AND item.error_code IS NULL
+              AND (item.state='retained_by_policy' OR item.expires_at COLLATE BINARY > $accepted_at COLLATE BINARY)
               AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input
                 WHERE input.generation_id=generation.generation_id
                   AND input.input_evidence_kind='deleted_before_digest_v10')
             ORDER BY invocation.session_id COLLATE BINARY,invocation.invocation_id;
             """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        command.Parameters.AddWithValue("$accepted_at", acceptedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         using var reader = command.ExecuteReader();
         var result = new List<SkillProjectionCurrentSearchFact>();
-        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3)));
         return result;
     }
 

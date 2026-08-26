@@ -119,10 +119,10 @@ internal static class LocalWorkspaceProjectionStore
             FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
         var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
-        foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds))
-            InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName);
+        foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds, now))
+            InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
         foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
-            InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName);
+            InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
@@ -130,7 +130,8 @@ internal static class LocalWorkspaceProjectionStore
                 FROM session_events e JOIN monitor_spans m ON e.source_adapter='otel-exact' AND e.source_event_id=m.trace_id||'/'||m.span_id
                 JOIN raw_records r ON r.id=m.raw_record_id
                 JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(m.raw_record_id AS TEXT)
-                WHERE m.tool_name IS NOT NULL AND length(m.tool_name)>0 AND i.state IN ('expiring','retained_by_policy')
+                WHERE m.operation='execute_tool' COLLATE BINARY AND m.category='tool_call' COLLATE BINARY
+                  AND m.tool_name IS NOT NULL AND length(m.tool_name)>0 AND i.state IN ('expiring','retained_by_policy')
                   AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
                   AND (i.state='retained_by_policy' OR i.expires_at COLLATE BINARY > $now COLLATE BINARY)
                   AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
@@ -142,14 +143,16 @@ internal static class LocalWorkspaceProjectionStore
         SqliteTransaction transaction,
         string sessionId,
         string sourceIdentity,
-        string skillName)
+        string skillName,
+        string? expiresAt)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at) VALUES($session,'skill',$source,local_workspace_search($name),NULL);";
+        command.CommandText = "INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at) VALUES($session,'skill',$source,local_workspace_search($name),$expires_at);";
         command.Parameters.AddWithValue("$session", sessionId);
         command.Parameters.AddWithValue("$source", sourceIdentity);
         command.Parameters.AddWithValue("$name", skillName);
+        command.Parameters.AddWithValue("$expires_at", (object?)expiresAt ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 

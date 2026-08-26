@@ -408,7 +408,7 @@ internal static class MonitorHost
         var retentionCatalog = new RetentionCatalogStore(retentionContext, timeProvider);
         var retentionAdapters = new RetentionAdapterRegistry([
             new SessionEventContentRetentionAdapter(retentionCatalog, timeProvider),
-            new RawRecordRetentionAdapter(retentionCatalog),
+            new RawRecordRetentionAdapter(retentionCatalog, timeProvider),
             new MonitorAnalysisRetentionAdapter(retentionCatalog),
             new SensitiveBundleRetentionAdapter(retentionCatalog, timeProvider),
             new AnalysisSdkDirectoryRetentionAdapter(retentionCatalog, timeProvider)

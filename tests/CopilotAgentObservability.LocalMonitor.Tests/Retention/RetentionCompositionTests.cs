@@ -29,6 +29,20 @@ public sealed class RetentionCompositionTests
     }
 
     [Fact]
+    public void Build_PassesHostTimeProviderToRawRecordRetentionAdapter()
+    {
+        using var tempDirectory = new MonitorTempDirectory();
+        var time = new MutableTimeProvider(DateTimeOffset.Parse("2040-01-02T03:04:05Z"));
+        using var app = MonitorHost.Build(
+            new MonitorOptions(tempDirectory.DatabasePath, "http://127.0.0.1:0", false, 31_457_280),
+            new MonitorHostTestOptions { TimeProvider = time, StartWriter = false, StartProjectionWorker = false, StartRetentionCleanupWorker = false, UseUserSecrets = false });
+        var adapter = Assert.IsType<RawRecordRetentionAdapter>(app.Services.GetRequiredService<RetentionAdapterRegistry>().Get(RetentionStoreKind.RawRecord));
+        var field = typeof(RawRecordRetentionAdapter).GetField("timeProvider", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        Assert.Same(time, field!.GetValue(adapter));
+    }
+
+    [Fact]
     public void Build_CanDisableRetentionWorkerForDeterministicHostTests()
     {
         using var tempDirectory = new MonitorTempDirectory();
