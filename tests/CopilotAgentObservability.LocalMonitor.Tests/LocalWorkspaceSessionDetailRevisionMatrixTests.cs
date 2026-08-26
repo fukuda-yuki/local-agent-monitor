@@ -5,7 +5,9 @@ using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.LocalMonitor.Tests.Retention;
+using CopilotAgentObservability.LocalMonitor.Retention;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -198,6 +200,72 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         Assert.Equal("read_denied", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
     }
 
+    [Fact]
+    public async Task RetentionExpiryAtCapturedClockPublishesExpiredNodeContentAndFencesPriorRevision()
+    {
+        using var fixture = await RetentionRevisionFixture.CreateAsync();
+        var before = await fixture.ReadSummaryAsync();
+
+        fixture.AdvanceToExpiry();
+        await fixture.RunCoordinatorToDeletingAsync();
+        var after = await fixture.ReadSummaryAsync();
+
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+        await fixture.AssertNodeContentStateAsync(after, "read_denied");
+        await fixture.AssertStaleAsync(before);
+    }
+
+    [Fact]
+    public async Task RetentionReadDenialPublishesExactNodeContentAndFencesPriorRevision()
+    {
+        using var fixture = await RetentionRevisionFixture.CreateAsync();
+        var before = await fixture.ReadSummaryAsync();
+
+        fixture.AdvanceToExpiry();
+        var read = await fixture.ReadTargetAsync();
+        fixture.RefreshProjection();
+        var after = await fixture.ReadSummaryAsync();
+
+        Assert.Equal(RetentionReadDisposition.LifecycleDenied, read.Disposition);
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+        await fixture.AssertNodeContentStateAsync(after, "read_denied");
+        await fixture.AssertStaleAsync(before);
+    }
+
+    [Fact]
+    public async Task RetentionDeleteNowPublishesQueuedThenDeletingRevisionsAndExactNodeContent()
+    {
+        using var fixture = await RetentionRevisionFixture.CreateAsync();
+        var before = await fixture.ReadSummaryAsync();
+
+        fixture.DeleteNow();
+        var queued = await fixture.ReadSummaryAsync();
+        Assert.NotEqual(before.WorkspaceRevision, queued.WorkspaceRevision);
+        await fixture.AssertNodeContentStateAsync(queued, "read_denied");
+        await fixture.AssertStaleAsync(before);
+
+        await fixture.RunCoordinatorToDeletingAsync();
+        var deleting = await fixture.ReadSummaryAsync();
+        Assert.NotEqual(queued.WorkspaceRevision, deleting.WorkspaceRevision);
+        await fixture.AssertNodeContentStateAsync(deleting, "read_denied");
+        await fixture.AssertStaleAsync(queued);
+    }
+
+    [Fact]
+    public async Task RetentionWorkerInjectedRollbackLeavesRevisionProjectionContentAndTombstonesUnchanged()
+    {
+        using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(failAfterRefresh: true, refreshAfterQueue: true);
+        var service = DetailService(fixture.Path);
+        var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        var rowsBefore = fixture.RevisionStateRows();
+
+        Assert.NotSame(RetentionAdapterResult.Deleted, await fixture.Adapter.DeleteAsync(fixture.Context));
+
+        var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        Assert.Equal(before.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.Equal(rowsBefore, fixture.RevisionStateRows());
+    }
+
     [Theory]
     [InlineData("timeline")]
     [InlineData("node")]
@@ -363,6 +431,161 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         public void Dispose(){host.DisposeAsync().AsTask().GetAwaiter().GetResult();temp.Dispose();}
     }
 
+    private sealed class RetentionRevisionFixture : IDisposable
+    {
+        private readonly SessionEventContentRetentionAdapterTests.Fixture inner;
+        private readonly ILocalRepositorySessionDetailSnapshotService service;
+        private DetailRouteHost? routes;
+        private BlockingAdapter? blockingAdapter;
+        private Task? coordinatorRun;
+
+        private RetentionRevisionFixture(SessionEventContentRetentionAdapterTests.Fixture inner)
+        {
+            this.inner = inner;
+            service = DetailService(inner.Path);
+        }
+
+        internal static async Task<RetentionRevisionFixture> CreateAsync()
+        {
+            var inner = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(prepareDeletion: false);
+            return new(inner);
+        }
+
+        internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadSummaryAsync() =>
+            service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, inner.SessionId), CancellationToken.None);
+
+        internal void AdvanceToExpiry()
+        {
+            using var connection = Open(inner.Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT expires_at FROM retention_items WHERE source_item_id=$source;";
+            command.Parameters.AddWithValue("$source", inner.TargetEventId);
+            var expiry = DateTimeOffset.Parse((string)command.ExecuteScalar()!);
+            inner.Time.Advance(expiry - inner.Time.GetUtcNow());
+        }
+
+        internal async ValueTask<RetentionReadResult<string>> ReadTargetAsync()
+        {
+            var key = new RetentionOwnershipKey(inner.Catalog.StoreInstanceId, RetentionStoreKind.SessionEventContent, inner.TargetEventId);
+            return await inner.Catalog.ReadAsync(new(key, RetentionReadKind.Access, inner.Time.GetUtcNow(), 1),
+                (_, _, _, _) => ValueTask.FromResult<string?>("raw-must-not-be-returned"), CancellationToken.None);
+        }
+
+        internal void DeleteNow()
+        {
+            var application = new RetentionMutationApplicationService(inner.Catalog, inner.Time, workspaceParticipant: inner.Participant);
+            var key = RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat((byte)91, 32).ToArray());
+            var preview = Assert.IsType<RetentionMutationPreviewResponse>(application.CreatePreview(
+                new(new(RetentionMutationTargetKind.Item, ItemId()), RetentionMutationOperation.DeleteNow,
+                    RetentionMutationScope.SingleItem, RetentionMutationReasonCodes.TestCleanup, null), key).Preview);
+            var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(application.IssueConfirmation(
+                new(preview.PreviewId, preview.PreviewDigest), key).Confirmation);
+            var result = application.ExecuteMutation(new(confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow,
+                RetentionMutationScope.SingleItem, RetentionMutationTargetKind.Item, ItemId()), key);
+            Assert.Equal(RetentionMutationCompletionCodes.DeleteQueued, result.Result?.ResultCode);
+            Assert.Equal("deletion_queued", RetentionState());
+        }
+
+        internal async Task RunCoordinatorToDeletingAsync()
+        {
+            blockingAdapter = new(inner.Adapter);
+            var registry = new RetentionAdapterRegistry([
+                blockingAdapter,
+                new UnreachableRetentionAdapter(RetentionStoreKind.RawRecord),
+                new UnreachableRetentionAdapter(RetentionStoreKind.AnalysisRunRaw),
+                new UnreachableRetentionAdapter(RetentionStoreKind.SensitiveBundle),
+                new UnreachableRetentionAdapter(RetentionStoreKind.AnalysisSdkDirectory)
+            ]);
+            inner.Catalog.RegisterAdapterCoverage(registry);
+            coordinatorRun = new RetentionCleanupCoordinator(inner.Catalog, registry, inner.Time)
+                .RunOneCycleAsync(CancellationToken.None, CancellationToken.None).AsTask();
+            await blockingAdapter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal("deleting", RetentionState());
+            RefreshProjection();
+        }
+
+        internal void RefreshProjection()
+        {
+            using var connection = Open(inner.Path);
+            using var transaction = connection.BeginTransaction();
+            inner.Participant.RefreshSessions(connection, transaction, [inner.SessionId], inner.Time.GetUtcNow());
+            transaction.Commit();
+        }
+
+        internal async Task AssertNodeContentStateAsync(LocalRepositorySessionDetailSnapshot snapshot, string expected)
+        {
+            routes ??= await DetailRouteHost.StartAsync(service);
+            using var connection = Open(inner.Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT node_id||'|'||part FROM local_workspace_node_content_refs WHERE source_item_id=$source;";
+            command.Parameters.AddWithValue("$source", inner.TargetEventId);
+            var binding = ((string)command.ExecuteScalar()!).Split('|');
+            using var response = await routes.Client.GetAsync($"/api/local-monitor/v1/sessions/{inner.SessionId}/nodes/{binding[0]}?workspace_revision={snapshot.WorkspaceRevision}");
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Contains($"\"{binding[1]}\":{{\"state\":\"{expected}\",\"available\":false}}", body, StringComparison.Ordinal);
+        }
+
+        internal async Task AssertStaleAsync(LocalRepositorySessionDetailSnapshot old)
+        {
+            routes ??= await DetailRouteHost.StartAsync(service);
+            await routes.AssertStaleAsync(inner.SessionId, old);
+        }
+
+        private string ItemId()
+        {
+            using var connection = Open(inner.Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT item_id FROM retention_items WHERE source_item_id=$source;";
+            command.Parameters.AddWithValue("$source", inner.TargetEventId);
+            return (string)command.ExecuteScalar()!;
+        }
+
+        private string RetentionState()
+        {
+            using var connection = Open(inner.Path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT state FROM retention_items WHERE source_item_id=$source;";
+            command.Parameters.AddWithValue("$source", inner.TargetEventId);
+            return (string)command.ExecuteScalar()!;
+        }
+
+        private static SqliteConnection Open(string path)
+        {
+            var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+            connection.Open();
+            return connection;
+        }
+
+        public void Dispose()
+        {
+            blockingAdapter?.Release.TrySetResult();
+            coordinatorRun?.GetAwaiter().GetResult();
+            routes?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            inner.Dispose();
+        }
+
+        private sealed class BlockingAdapter(IRetentionDeletionAdapter inner) : IRetentionDeletionAdapter
+        {
+            internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public RetentionStoreKind StoreKind => inner.StoreKind;
+            public async ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context)
+            {
+                Entered.TrySetResult();
+                await Release.Task;
+                return await inner.DeleteAsync(context);
+            }
+        }
+
+        private sealed class UnreachableRetentionAdapter(RetentionStoreKind kind) : IRetentionDeletionAdapter
+        {
+            public RetentionStoreKind StoreKind => kind;
+            public ValueTask<RetentionAdapterResult> DeleteAsync(RetentionDeleteContext context) =>
+                throw new Xunit.Sdk.XunitException($"Unexpected Retention adapter: {kind}");
+        }
+    }
+
     private sealed class SkillRevisionFixture : IDisposable
     {
         private readonly MonitorTempDirectory temp;
@@ -431,6 +654,8 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
 
     private sealed class DetailRouteHost(WebApplication app, HttpClient client) : IAsyncDisposable
     {
+        internal HttpClient Client => client;
+
         internal static async Task<DetailRouteHost> StartAsync(ILocalRepositorySessionDetailSnapshotService service)
         {
             var builder = WebApplication.CreateSlimBuilder();

@@ -100,12 +100,15 @@ public sealed class SessionEventContentRetentionAdapterTests
 
     internal sealed class Fixture : IDisposable
     {
-        private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, string sessionId, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
-            => (Path, Adapter, Context, SessionId, TargetEventId, SiblingEventId, SiblingContent, SiblingCapturedAt, SiblingExpiresAt, SessionSnapshot, RunSnapshot, EventSnapshot, NativeIdSnapshot, ProjectionSnapshot) = (path, adapter, context, sessionId, targetEventId, siblingEventId, siblingContent, siblingCapturedAt, siblingExpiresAt, sessionSnapshot, runSnapshot, eventSnapshot, nativeIdSnapshot, projectionSnapshot);
+        private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, RetentionCatalogStore catalog, MutableTimeProvider time, ILocalWorkspaceProjectionTransactionParticipant participant, string sessionId, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
+            => (Path, Adapter, Context, Catalog, Time, Participant, SessionId, TargetEventId, SiblingEventId, SiblingContent, SiblingCapturedAt, SiblingExpiresAt, SessionSnapshot, RunSnapshot, EventSnapshot, NativeIdSnapshot, ProjectionSnapshot) = (path, adapter, context, catalog, time, participant, sessionId, targetEventId, siblingEventId, siblingContent, siblingCapturedAt, siblingExpiresAt, sessionSnapshot, runSnapshot, eventSnapshot, nativeIdSnapshot, projectionSnapshot);
 
         internal string Path { get; }
         internal SessionEventContentRetentionAdapter Adapter { get; }
         internal RetentionDeleteContext Context { get; }
+        internal RetentionCatalogStore Catalog { get; }
+        internal MutableTimeProvider Time { get; }
+        internal ILocalWorkspaceProjectionTransactionParticipant Participant { get; }
         internal string SessionId { get; }
         internal string TargetEventId { get; }
         internal string SiblingEventId { get; }
@@ -117,6 +120,15 @@ public sealed class SessionEventContentRetentionAdapterTests
         internal string EventSnapshot { get; }
         internal string NativeIdSnapshot { get; }
         internal string ProjectionSnapshot { get; }
+
+        internal string RevisionStateRows() => Text("""
+            SELECT
+              (SELECT group_concat(item_id||'|'||state||'|'||revision||'|'||IFNULL(read_denied_at,'')||'|'||IFNULL(queued_at,'')||'|'||IFNULL(deletion_started_at,'')||'|'||attempt_count||'|'||IFNULL(error_code,''),';') FROM retention_items) || '#' ||
+              (SELECT group_concat(node_id||'|'||part||'|'||availability_state||'|'||revision_input||'|'||IFNULL(retention_revision,-1)||'|'||IFNULL(hex(retention_owner_token),''),';') FROM local_workspace_node_content_refs) || '#' ||
+              (SELECT COUNT(*) FROM session_event_content) || '#' ||
+              (SELECT COUNT(*) FROM local_workspace_content_tombstones) || '#' ||
+              (SELECT COUNT(*) FROM retention_tombstones);
+            """);
 
         internal long Count(string sql) => Convert.ToInt64(Scalar(sql));
         internal string Text(string sql) => (string)Scalar(sql)!;
@@ -132,7 +144,7 @@ public sealed class SessionEventContentRetentionAdapterTests
             transaction.Commit();
         }
 
-        internal static async Task<Fixture> CreateAsync(bool failAfterRefresh = false, bool refreshAfterQueue = false)
+        internal static async Task<Fixture> CreateAsync(bool failAfterRefresh = false, bool refreshAfterQueue = false, bool prepareDeletion = true)
         {
             var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"session-retention-adapter-{Guid.NewGuid():N}.db");
             var now = new DateTimeOffset(2026, 7, 19, 0, 0, 0, TimeSpan.Zero);
@@ -163,21 +175,29 @@ public sealed class SessionEventContentRetentionAdapterTests
             var target = batch.Content[0].EventId.ToString("D").ToLowerInvariant();
             var sibling = batch.Content[1].EventId.ToString("D").ToLowerInvariant();
             var item = Text(path, "SELECT item_id FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source;", ("$source", target));
-            Execute(path, "UPDATE retention_items SET state='deletion_queued',revision=1,read_denied_at=$now,queued_at=$now WHERE item_id=$item;", ("$item", item), ("$now", now.ToString("O")));
-            if (refreshAfterQueue)
+            if (prepareDeletion)
             {
-                using var connection = Open(path);
-                using var transaction = connection.BeginTransaction();
-                new LocalWorkspaceProjectionTransactionParticipant(authority).RefreshSessions(
-                    connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
-                transaction.Commit();
+                Execute(path, "UPDATE retention_items SET state='deletion_queued',revision=1,read_denied_at=$now,queued_at=$now WHERE item_id=$item;", ("$item", item), ("$now", now.ToString("O")));
+                if (refreshAfterQueue)
+                {
+                    using var connection = Open(path);
+                    using var transaction = connection.BeginTransaction();
+                    new LocalWorkspaceProjectionTransactionParticipant(authority).RefreshSessions(
+                        connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
+                    transaction.Commit();
+                }
             }
-            var claim = (await catalog.TryClaimDeletionAsync(new(item, 1, RetentionWorkKind.Queued), "session-adapter", now, CancellationToken.None)).Claim!;
-            var intent = await catalog.EnsureDeleteIntentAsync(claim.Fence, 0, now, CancellationToken.None);
-            Assert.Equal(RetentionIntentDisposition.Committed, intent.Disposition);
+            RetentionDeleteContext deleteContext = null!;
+            if (prepareDeletion)
+            {
+                var claim = (await catalog.TryClaimDeletionAsync(new(item, 1, RetentionWorkKind.Queued), "session-adapter", now, CancellationToken.None)).Claim!;
+                var intent = await catalog.EnsureDeleteIntentAsync(claim.Fence, 0, now, CancellationToken.None);
+                Assert.Equal(RetentionIntentDisposition.Committed, intent.Disposition);
+                deleteContext = new(claim.Fence.ItemId, claim.StoreInstanceId, claim.StoreKind, claim.Fence.ExpectedRevision, claim.Fence.LeaseOwner, claim.Fence.LeaseGeneration, claim.SourceIdentity, null, intent.IntentCursor, CancellationToken.None);
+            }
 
             Execute(path, "INSERT INTO session_projection_state(projector_key,projection_cursor,unsupported_event_version_count,updated_at) VALUES('preserved',7,0,$now);", ("$now", now.ToString("O")));
-            return new Fixture(path, new SessionEventContentRetentionAdapter(catalog, time, participant, gate), new RetentionDeleteContext(claim.Fence.ItemId, claim.StoreInstanceId, claim.StoreKind, claim.Fence.ExpectedRevision, claim.Fence.LeaseOwner, claim.Fence.LeaseGeneration, claim.SourceIdentity, null, intent.IntentCursor, CancellationToken.None), batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant(), target, sibling,
+            return new Fixture(path, new SessionEventContentRetentionAdapter(catalog, time, participant, gate), deleteContext, catalog, time, participant, batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant(), target, sibling,
                 Text(path, "SELECT content_json FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
                 Text(path, "SELECT captured_at FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
                 Text(path, "SELECT expires_at FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
