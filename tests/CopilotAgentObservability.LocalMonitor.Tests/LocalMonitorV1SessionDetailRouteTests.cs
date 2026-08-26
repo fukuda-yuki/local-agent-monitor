@@ -1,7 +1,10 @@
 using System.Net;
 using System.Text.Json;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
+using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
@@ -12,6 +15,96 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalMonitorV1SessionDetailRouteTests
 {
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
+
+    [Fact]
+    public async Task ProductionSummaryGetAndHeadMatchTheNonemptyGoldenExactly()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp);
+        using var host = await StartProductionDetailRouteAsync(temp);
+        var expected = File.ReadAllBytes(Path.Combine(
+            FindRepositoryRoot(), "tests", "CopilotAgentObservability.LocalMonitor.Tests", "TestData",
+            "LocalMonitorV1SessionDetail", "summary-full.json"));
+
+        using var get = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head,
+            $"/api/local-monitor/v1/sessions/{SessionId}/summary"));
+
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        var actual = await get.Content.ReadAsByteArrayAsync();
+        Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task ProductionNonrecordedSummaryGetAndHeadMatchTheGoldenExactly()
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicNonrecordedSession(temp);
+        using var host = await StartProductionDetailRouteAsync(temp);
+        var path = $"/api/local-monitor/v1/sessions/{SessionId}/summary";
+        using var get = await host.Client.GetAsync(path);
+        var actual = await get.Content.ReadAsByteArrayAsync();
+        var expected = File.ReadAllBytes(Path.Combine(FindRepositoryRoot(), "tests",
+            "CopilotAgentObservability.LocalMonitor.Tests", "TestData", "LocalMonitorV1SessionDetail",
+            "summary-nonrecorded-evidence.json"));
+
+        Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
+
+    [Theory]
+    [InlineData("timeline-page.json", "timeline")]
+    [InlineData("node-full.json", "root")]
+    [InlineData("node-nested.json", "child")]
+    public async Task ProductionDetailGetMatchesTheNonemptyGoldenExactly(string goldenName, string target)
+    {
+        using var temp = new MonitorTempDirectory();
+        SeedDeterministicSession(temp);
+        using var host = await StartProductionDetailRouteAsync(temp);
+        using var summaryResponse = await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var summary = JsonDocument.Parse(await summaryResponse.Content.ReadAsByteArrayAsync());
+        var revision = summary.RootElement.GetProperty("workspace_revision").GetString()!;
+        var execution = summary.RootElement.GetProperty("executions")[0];
+        var executionId = execution.GetProperty("execution_id").GetString()!;
+        var rootNodeId = execution.GetProperty("node_id").GetString()!;
+        var timelinePath = $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={revision}&execution_id={executionId}&limit=1";
+        using var timelineResponse = await host.Client.GetAsync(timelinePath);
+        var timelineBytes = await timelineResponse.Content.ReadAsByteArrayAsync();
+        using var timeline = JsonDocument.Parse(timelineBytes);
+        var childNodeId = timeline.RootElement.GetProperty("items")[0].GetProperty("node_id").GetString()!;
+        var path = target switch
+        {
+            "timeline" => timelinePath,
+            "root" => $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{rootNodeId}?workspace_revision={revision}",
+            _ => $"/api/local-monitor/v1/sessions/{SessionId}/nodes/{childNodeId}?workspace_revision={revision}",
+        };
+        using var get = target == "timeline" ? timelineResponse : await host.Client.GetAsync(path);
+        var actual = target == "timeline" ? timelineBytes : await get.Content.ReadAsByteArrayAsync();
+        var expected = File.ReadAllBytes(Path.Combine(FindRepositoryRoot(), "tests",
+            "CopilotAgentObservability.LocalMonitor.Tests", "TestData", "LocalMonitorV1SessionDetail", goldenName));
+
+        Assert.True(expected.AsSpan().SequenceEqual(actual), System.Text.Encoding.UTF8.GetString(actual));
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(expected.Length, get.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
+        using var head = await host.Client.SendAsync(new(HttpMethod.Head, path));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+        Assert.Equal(expected.Length, head.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", head.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], head.Headers.GetValues("Cache-Control"));
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+    }
 
     [Theory]
     [InlineData(false)]
@@ -245,6 +338,33 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
     }
 
+    private static async Task<RunningDetailRoute> StartProductionDetailRouteAsync(MonitorTempDirectory temp)
+    {
+        using (var connection = Open(temp))
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                SkillProjectionSchemaV1.Ensure(connection, transaction);
+                SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
+                LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+                LocalArchiveSchemaV1.Ensure(connection, transaction);
+                transaction.Commit();
+            }
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch, FixedSkillRegistryGenerationAuthority.Load());
+        }
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray());
+        await app.StartAsync();
+        return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
+    }
+
     private sealed class RunningDetailRoute(WebApplication app, HttpClient client) : IDisposable
     {
         internal HttpClient Client { get; } = client;
@@ -279,6 +399,71 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
         connection.Open();
         return connection;
+    }
+
+    private static void SeedDeterministicSession(MonitorTempDirectory temp)
+    {
+        var observed = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var sessionId = Guid.Parse(SessionId);
+        var runId = Guid.Parse("018f0000-0000-7000-8000-000000000003");
+        var eventId = Guid.Parse("018f0000-0000-7000-8000-000000000004");
+        var secondEventId = Guid.Parse("018f0000-0000-7000-8000-000000000005");
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        store.Write(new SessionWriteBatch(
+            new SessionDetail(
+                new ObservedSession(
+                    sessionId, ObservedSessionStatus.Completed, SessionCompleteness.Rich,
+                    Repository: null, Workspace: null, StartedAt: observed,
+                    EndedAt: observed.AddSeconds(1), LastSeenAt: observed.AddSeconds(1),
+                    SessionRawRetentionState.NotCaptured, CreatedAt: observed, UpdatedAt: observed.AddSeconds(1)),
+                [new SessionNativeId(sessionId, SessionSourceSurface.VisualStudioCode, "native-session-detail-golden", SessionBindingKind.Native, observed)],
+                [new ObservedSessionRun(
+                    runId, sessionId, SessionSourceSurface.VisualStudioCode, NativeRunId: "run-detail-golden",
+                    TraceId: "00000000000000000000000000000001", ParentRunId: null, Model: "gpt-5.6-sol",
+                    ObservedSessionStatus.Completed, StartedAt: observed, EndedAt: observed.AddSeconds(1),
+                    InputTokens: 10, OutputTokens: 5, TotalTokens: 15)],
+                [new ObservedSessionEvent(
+                    eventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
+                    TraceId: "00000000000000000000000000000001", Status: "completed",
+                    SourceAdapter: "github-copilot-vscode-otel", SourceEventId: "event-detail-golden",
+                    Type: "user.message", OccurredAt: observed, SessionContentState.NotCaptured,
+                    SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
+                    SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1"),
+                 new ObservedSessionEvent(
+                    secondEventId, sessionId, runId, SessionSourceSurface.VisualStudioCode, ParentEventId: null,
+                    TraceId: "00000000000000000000000000000001", Status: "completed",
+                    SourceAdapter: "github-copilot-vscode-otel", SourceEventId: "event-detail-golden-2",
+                    Type: "tool.completed", OccurredAt: observed.AddMilliseconds(500), SessionContentState.NotCaptured,
+                    SourceApplicationVersion: "1.0", AdapterVersion: "monitor-projection-v1",
+                    SchemaFingerprint: null, NormalizationVersion: "session-normalization-v1")]),
+            []));
+    }
+
+    private static void SeedDeterministicNonrecordedSession(MonitorTempDirectory temp)
+    {
+        var observed = new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero);
+        var sessionId = Guid.Parse(SessionId);
+        var store = new SqliteSessionStore(temp.DatabasePath, temp.RetentionContext, temp.TimeProvider);
+        store.CreateSchema();
+        store.Write(new SessionWriteBatch(
+            new SessionDetail(
+                new ObservedSession(
+                    sessionId, ObservedSessionStatus.Active, SessionCompleteness.Unbound,
+                    Repository: null, Workspace: null, StartedAt: null, EndedAt: null, LastSeenAt: observed,
+                    SessionRawRetentionState.NotCaptured, CreatedAt: observed, UpdatedAt: observed),
+                [new SessionNativeId(sessionId, SessionSourceSurface.VisualStudioCode,
+                    "native-nonrecorded-evidence", SessionBindingKind.Native, observed)],
+                [], []),
+            []));
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "CopilotAgentObservability.slnx")))
+            directory = directory.Parent;
+        return directory?.FullName ?? throw new InvalidOperationException("Repository root not found.");
     }
 
     private sealed class DirectReadTransaction(SqliteConnection connection, SqliteTransaction transaction) : ILocalRepositoryReadTransaction

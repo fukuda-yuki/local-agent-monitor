@@ -339,3 +339,20 @@ The sibling literal `query-grammar.json` freezes rejection classes and the
 canonical generated query order independently of the route implementation.
 Existing Repository/Session collection schemas, fixtures, cursors, and exact
 bytes are immutable regression inputs.
+
+The nonempty production fixture index is fixed as follows. `summary-full.json`
+is the deterministic Session/Run/Event projection example;
+`summary-nonrecorded-evidence.json` is the deterministic native-Session example
+whose model, version, timing interval, tokens, and execution evidence are not
+observed; `timeline-page.json` is the first one-item page over two exact Event
+children and carries the production HMAC cursor for key bytes `00..1f`;
+`node-full.json` is the production execution-root node including its exact
+children; and `node-nested.json` is the production Event node including its
+exact root-to-parent path. Their Session, execution, node, workspace revision,
+and cursor identities are computed by the production authorities and are not
+hand-authored placeholders. Normative source projection currently persists no
+retry/recovery edge for this source shape, so these production node fixtures
+keep those arrays empty; serializer unit coverage remains responsible for the
+otherwise-valid explicit retry/recovery shape in
+`node-related-serializer-only.json` until a source-backed authority can produce
+it. That fixture is not production-route evidence and is named accordingly.

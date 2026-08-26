@@ -125,21 +125,25 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertFixture("timeline-page.json", TimelineToken, AssertTimelineOrder);
         AssertFixture("node-full.json", NodeToken, AssertNodeOrder);
         AssertFixture("node-nested.json", NodeToken, AssertNodeOrder);
+        AssertFixture("node-related-serializer-only.json", NodeToken, AssertNodeOrder);
         using var nested = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-nested.json")));
         Assert.NotEmpty(nested.RootElement.GetProperty("parent_path").EnumerateArray());
-        Assert.All(nested.RootElement.GetProperty("related").EnumerateObject(), property => Assert.NotEmpty(property.Value.EnumerateArray()));
+        Assert.All(nested.RootElement.GetProperty("related").EnumerateObject(), property => Assert.Empty(property.Value.EnumerateArray()));
+        using var related = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-related-serializer-only.json")));
+        Assert.All(related.RootElement.GetProperty("related").EnumerateObject(), property => Assert.NotEmpty(property.Value.EnumerateArray()));
         using var evidence = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "summary-nonrecorded-evidence.json")));
-        foreach (var name in new[] { "source", "model", "version" })
+        foreach (var name in new[] { "model", "version" })
         {
             Assert.NotEqual("recorded", evidence.RootElement.GetProperty("session").GetProperty(name).GetProperty("state").GetString());
-            Assert.NotEmpty(evidence.RootElement.GetProperty("session").GetProperty(name).GetProperty("values").EnumerateArray());
+            Assert.Empty(evidence.RootElement.GetProperty("session").GetProperty(name).GetProperty("values").EnumerateArray());
         }
+        Assert.Equal("native-nonrecorded-evidence", evidence.RootElement.GetProperty("technical_references").GetProperty("native_session_ids")[0].GetString());
     }
 
     [Fact]
     public void LiteralGoldenResponsesContainNoJsonWhitespaceOutsideStrings()
     {
-        foreach (var name in new[] { "summary-empty.json", "summary-full.json", "summary-nonrecorded-evidence.json", "timeline-empty.json", "timeline-page.json", "node-full.json", "node-nested.json", "transport-contract.json", "query-grammar.json" })
+        foreach (var name in new[] { "summary-empty.json", "summary-full.json", "summary-nonrecorded-evidence.json", "timeline-empty.json", "timeline-page.json", "node-full.json", "node-nested.json", "node-related-serializer-only.json", "transport-contract.json", "query-grammar.json" })
         {
             AssertNoJsonWhitespaceOutsideStrings(File.ReadAllBytes(Path.Combine(FixtureRoot, name)));
         }
@@ -155,6 +159,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertSchemaValid("timeline-page.json", "session-timeline");
         AssertSchemaValid("node-full.json", "session-node");
         AssertSchemaValid("node-nested.json", "session-node");
+        AssertSchemaValid("node-related-serializer-only.json", "session-node");
     }
 
     [Fact]
@@ -167,10 +172,10 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
             root => root["session"]!["assignment"]!["repository_id"] = "not-a-uuid",
             root => root["session"]!["assignment"]!["candidate_repository_ids"] = new JsonArray(Enumerable.Range(0, 129).Select(index => JsonValue.Create($"018f0000-0000-7000-8000-{index:000000000000}")).ToArray()),
             root => root["session"]!["archive"]!["effectively_eligible"] = false,
-            root => { root["session"]!["instruction"]!["state"] = "expired"; root["session"]!["instruction"]!["label"] = null; },
+            root => root["session"]!["instruction"]!["state"] = "recorded",
             root => root["session"]!["tokens"]!["input"]!["state"] = "not_observed",
-            root => root["session"]!["activity"]!["skill"]!["state"] = "not_observed",
-            root => root["session"]!["timing"]!["started_at"] = null,
+            root => root["session"]!["activity"]!["skill"]!["state"] = "recorded",
+            root => { root["session"]!["timing"]!["state"] = "recorded"; root["session"]!["timing"]!["started_at"] = null; },
             root => root["executions"]![0]!["timing"]!["started_at"] = null,
             root => root["executions"]![0]!["timing"]!["ended_at"] = null,
             root => { root["executions"]![0]!["timing"]!["state"] = "missing"; });
@@ -178,24 +183,24 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertSchemaRejectsMutations("timeline-page.json", "session-timeline",
             root => root["items"]![0]!["name"]!["state"] = "not_observed",
             root => root["items"]![0]!["tokens"]!["input"]!["state"] = "recorded",
-            root => root["items"]![0]!["activity"]!["skill"]!["state"] = "not_observed",
+            root => root["items"]![0]!["activity"]!["skill"]!["state"] = "recorded",
             root => root["items"]![0]!["timing"]!["started_at"] = null,
             root => root["items"]![0]!["timing"]!["ended_at"] = null,
             root => { root["items"]![0]!["timing"]!["state"] = "invalid"; });
 
         AssertSchemaRejectsMutations("node-full.json", "session-node",
-            root => root["content"]!["instruction"]!["available"] = false,
+            root => root["content"]!["instruction"]!["available"] = true,
             root => root["content"]!["tool_input"]!["available"] = true,
             root => root["node"]!["technical_references"]!["trace_id"] = "not-a-trace",
-            root => root["node"]!["name"]!["state"] = "invalid",
-            root => root["node"]!["tokens"]!["input"]!["state"] = "recorded",
+            root => root["node"]!["name"]!["state"] = "recorded",
+            root => root["node"]!["tokens"]!["input"]!["state"] = "not_observed",
             root => { root["node"]!["timing"]!["state"] = "missing"; });
     }
 
     [Fact]
     public void TimelineCursorHasFrozen119ByteFrameAndLiteralFixtureBinding()
     {
-        const string Golden = "AbaGQRRmeBKbzLi7H9QHg8-BuOwBfG68DPCCZpFe661GAAjfAw2j83eAAAAAAAAAAABub2RlLTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAy4_ItzfbeUsqy3GVgSk-6q1x7eo3hEXJcKBHcmdugLm4";
+        const string Golden = "AfuEzJkJsG4UwJEhS4gSoWXoBco3Yp1ktuIeLpliMnnoAAjfAw2j83eAAAAAAAAAAAFub2RlLWE4YTc3M2Q2NjE0ZDUwMzBmNTA1ZmYxOTViNDUyZGQ2sNQxzSz5hydOvIUgXLq3Lb8OCL9CkdxLT-KUQYhrjU0";
         using var fixture = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "timeline-page.json")));
         Assert.Equal(Golden, fixture.RootElement.GetProperty("next_cursor").GetString());
         var bytes = DecodeBase64Url(Golden);
@@ -205,14 +210,14 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.Equal(1, bytes[0]);
         Assert.Equal(0, bytes[33]);
         Assert.Equal(new DateTimeOffset(2026, 8, 26, 1, 2, 3, TimeSpan.Zero).Ticks, BinaryPrimitives.ReadInt64BigEndian(bytes[34..42]));
-        Assert.Equal(0UL, BinaryPrimitives.ReadUInt64BigEndian(bytes[42..50]));
-        Assert.Equal("node-00000000000000000000000000000002", Encoding.ASCII.GetString(bytes, 50, 37));
+        Assert.Equal(1UL, BinaryPrimitives.ReadUInt64BigEndian(bytes[42..50]));
+        Assert.Equal("node-a8a773d6614d5030f505ff195b452dd6", Encoding.ASCII.GetString(bytes, 50, 37));
 
-        var key = new byte[32];
+        var key = Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray();
         var filterFrame = TimelineFilterFrame(
             "018f0000-0000-7000-8000-000000000001",
-            new string('1', 64),
-            "018f0000-0000-7000-8000-000000000003",
+            "334bb00f10ac3c7527db3cbfaed6f89c7a33a92a749ecad70c7708f3bb08d24a",
+            "9a5590c8-46e3-7069-af48-3844d2bf17a4",
             null,
             1);
         Assert.Equal(HMACSHA256.HashData(key, filterFrame), bytes[1..33]);
