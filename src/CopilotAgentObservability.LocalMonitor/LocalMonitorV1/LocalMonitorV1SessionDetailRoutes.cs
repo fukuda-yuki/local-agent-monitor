@@ -26,8 +26,19 @@ internal static class LocalMonitorV1SessionDetailRoutes
         if(!TryParse(context.Request.QueryString.Value??"",kind,out var query)){await Error(context,400,"invalid_request");return;}
         try
         {
-            var snapshot=await service.ReadDetailAsync(sessionId!,context.RequestAborted);
+            LocalMonitorV1TimelinePosition decoded=default!; var cursorValid=true;
+            if(kind==Kind.Timeline&&query.After is not null)
+                cursorValid=LocalMonitorV1TimelineCursor.TryDecode(query.After,key,new(sessionId!,query.Revision!,query.ExecutionId,query.ParentNodeId,query.Limit),out decoded);
+            var request=kind switch
+            {
+                Kind.Summary=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Summary,sessionId!),
+                Kind.Timeline=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Timeline,sessionId!,query.ExecutionId,query.ParentNodeId,
+                    cursorValid&&query.After is not null?new(decoded.TimeGroup,decoded.UtcTicks,decoded.SourceOrdinal,decoded.NodeId):null,query.Limit),
+                _=>new LocalRepositorySessionDetailRequest(LocalRepositorySessionDetailRequestKind.Node,sessionId!,NodeId:nodeId!)
+            };
+            var snapshot=await service.ReadDetailAsync(request,context.RequestAborted);
             if(query.Revision is not null&&!StringComparer.Ordinal.Equals(query.Revision,snapshot.WorkspaceRevision)){await Error(context,409,"workspace_snapshot_stale");return;}
+            if(!cursorValid){await Error(context,400,"invalid_cursor");return;}
             var bytes=kind switch{Kind.Summary=>LocalMonitorV1SessionDetailApplication.SerializeSummary(snapshot),Kind.Timeline=>LocalMonitorV1SessionDetailApplication.SerializeTimeline(snapshot,query.ExecutionId,query.ParentNodeId,query.Limit,query.After,key),_=>LocalMonitorV1SessionDetailApplication.SerializeNode(snapshot,nodeId!)};
             await Success(context,bytes);
         }

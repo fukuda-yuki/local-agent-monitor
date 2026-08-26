@@ -17,20 +17,28 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
 
     public ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
-        string sessionId,
+        LocalRepositorySessionDetailRequest request,
         CancellationToken cancellationToken) =>
         transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadAsync(connection, sqliteTransaction, sessionId, token), cancellationToken);
+            ReadAsync(connection, sqliteTransaction, request, token), cancellationToken);
 
     private async ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
-        SqliteConnection connection, SqliteTransaction transaction, string sessionId, CancellationToken token)
+        SqliteConnection connection, SqliteTransaction transaction, LocalRepositorySessionDetailRequest request, CancellationToken token)
     {
-        var executions = await ReadExecutions(connection, transaction, sessionId, token);
-        var nodes = await ReadNodes(connection, transaction, sessionId, token);
+        var sessionId = request.SessionId;
+        var nodes = await ReadNodes(connection, transaction, request, token);
+        var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
+        var executions = await ReadExecutions(connection, transaction, request, executionIds, token);
         var nodeIds = nodes.Select(static node => node.NodeId).ToArray();
-        var edges = await ReadEdges(connection, transaction, nodeIds, token);
-        var content = await ReadContent(connection, transaction, nodeIds, token);
-        var metadata = await ReadMetadata(connection, transaction, sessionId, token);
+        var edges = request.Kind == LocalRepositorySessionDetailRequestKind.Node
+            ? await ReadEdges(connection, transaction, [request.NodeId!], token)
+            : [];
+        var metadata = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+            ? await ReadMetadata(connection, transaction, sessionId, token)
+            : new Metadata([], [], null, null);
+        var content = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+            ? await ReadSummaryContent(connection, transaction, sessionId, token)
+            : await ReadContent(connection, transaction, nodeIds, token);
         var revision = await ReadCanonicalRevisionInput(connection, transaction, sessionId, token);
         var registryIdentity = ReadRegistryIdentity();
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
@@ -39,7 +47,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
 
     private string ReadRegistryIdentity()
     {
-        if (registryAuthority is null) return "registry-unavailable";
+        if (registryAuthority is null) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         var capture = registryAuthority.CaptureGeneration() ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         if (!registryAuthority.TryAcquireGenerationReadLease(capture, out var lease)) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         using (lease)
@@ -49,10 +57,13 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         }
     }
 
-    private async Task<LocalWorkspaceExecutionDetail[]> ReadExecutions(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    private async Task<LocalWorkspaceExecutionDetail[]> ReadExecutions(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, string[] executionIds, CancellationToken token)
     {
         statementObserver?.Invoke("detail-executions");
-        using var command = Command(c, t, """
+        var selection = request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+            ? "h.session_id=$session_id"
+            : "h.session_id=$session_id AND h.execution_id IN (SELECT CAST(value AS TEXT) FROM json_each($execution_ids))";
+        using var command = Command(c, t, $"""
             SELECT execution_id,session_id,source_kind,source_identity,source_ordinal,lifecycle,status,model,trace_id,
               time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
               skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
@@ -62,10 +73,11 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
                 THEN (SELECT MIN(e.source_application_version) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity) END
             FROM local_workspace_execution_headers h
             LEFT JOIN (SELECT session_id run_session_id,run_id,source_surface FROM session_runs) r ON r.run_session_id=h.session_id AND r.run_id=h.source_identity
-            WHERE h.session_id=$session_id
+            WHERE {selection}
             ORDER BY CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,
               CASE WHEN time_authority='recorded' THEN start_utc_ticks END DESC,source_ordinal,execution_id LIMIT 257;
-            """, sessionId);
+            """, request.SessionId);
+        command.Parameters.AddWithValue("$execution_ids", System.Text.Json.JsonSerializer.Serialize(executionIds));
         var rows = new List<LocalWorkspaceExecutionDetail>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
@@ -76,21 +88,51 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         return rows.ToArray();
     }
 
-    private async Task<LocalWorkspaceNodeDetail[]> ReadNodes(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    private async Task<LocalWorkspaceNodeDetail[]> ReadNodes(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
     {
         statementObserver?.Invoke("detail-nodes");
-        using var command = Command(c, t, """
+        var predicate = request.Kind switch
+        {
+            LocalRepositorySessionDetailRequestKind.Summary => "session_id=$session_id AND source_kind='execution_root'",
+            LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
+            LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (source_kind='execution_root' OR parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
+            LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND (node_id=$parent_node_id OR parent_node_id=$parent_node_id)",
+            _ => "session_id=$session_id AND (node_id=$node_id OR node_id IN (WITH RECURSIVE ancestors(node_id,depth) AS (SELECT parent_node_id,1 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id UNION ALL SELECT n.parent_node_id,a.depth+1 FROM local_workspace_nodes n JOIN ancestors a ON n.node_id=a.node_id WHERE a.node_id IS NOT NULL AND a.depth<=4097) SELECT node_id FROM ancestors WHERE node_id IS NOT NULL) OR parent_node_id=$node_id OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind IN ('retry','recovery')))"
+        };
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.After is not null)
+        {
+            var contextPredicate = request.ParentNodeId is not null ? "node_id=$parent_node_id OR " : request.ExecutionId is not null ? "source_kind='execution_root' OR " : "";
+            predicate += $" AND ({contextPredicate}(CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)>$after_group OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)>$after_ticks) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal>$after_ordinal) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal AND node_id>=$after_node_id COLLATE BINARY))";
+        }
+        var limit = request.Kind switch
+        {
+            LocalRepositorySessionDetailRequestKind.Summary => 257,
+            LocalRepositorySessionDetailRequestKind.Node => 4500,
+            _ => request.Limit + 2
+        };
+        using var command = Command(c, t, $"""
             SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
               skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
               token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,
               trace_id,span_id,event_id
-            FROM local_workspace_nodes WHERE session_id=$session_id ORDER BY execution_id,source_ordinal,node_id LIMIT 4097;
-            """, sessionId);
+            FROM local_workspace_nodes WHERE {predicate} ORDER BY execution_id,
+              CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,
+              CASE WHEN time_authority='recorded' THEN start_utc_ticks END,source_ordinal,node_id LIMIT {limit};
+            """, request.SessionId);
+        command.Parameters.AddWithValue("$execution_id", (object?)request.ExecutionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$parent_node_id", (object?)request.ParentNodeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$node_id", (object?)request.NodeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$after_group", request.After?.TimeGroup ?? 0);
+        command.Parameters.AddWithValue("$after_ticks", request.After?.UtcTicks ?? 0);
+        command.Parameters.AddWithValue("$after_ordinal", request.After is null ? 0L : checked((long)request.After.SourceOrdinal));
+        command.Parameters.AddWithValue("$after_node_id", (object?)request.After?.NodeId ?? DBNull.Value);
         var rows = new List<LocalWorkspaceNodeDetail>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
-            if (rows.Count == MaximumNodes) throw new LocalWorkspaceSessionDetailException("workspace_too_large");
+            if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary && rows.Count == MaximumExecutions
+                || request.Kind == LocalRepositorySessionDetailRequestKind.Node && rows.Count == MaximumNodes)
+                throw new LocalWorkspaceSessionDetailException("workspace_too_large");
             rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49)));
         }
         return rows.ToArray();
@@ -117,6 +159,24 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         while(await reader.ReadAsync(token))rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4)));return rows.ToArray();
     }
 
+    private async Task<LocalWorkspaceContentAvailability[]> ReadSummaryContent(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
+    {
+        statementObserver?.Invoke("detail-summary-content");
+        using var command = Command(c, t, """
+            SELECT c.node_id,c.part,c.availability_state,c.source_item_id,c.revision_input
+            FROM local_workspace_node_content_refs c
+            JOIN local_workspace_nodes n ON n.node_id=c.node_id
+            JOIN local_workspace_sessions s ON s.session_id=n.session_id
+            WHERE n.session_id=$session_id AND c.part='instruction' AND c.source_item_id=s.label_source_identity
+            ORDER BY c.node_id LIMIT 2;
+            """, sessionId);
+        var rows = new List<LocalWorkspaceContentAvailability>();
+        using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token)) rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4)));
+        if (rows.Count > 1) throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        return rows.ToArray();
+    }
+
     private static async Task<Metadata> ReadMetadata(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
     {
         var nativeIds = new List<string>();
@@ -141,6 +201,8 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             "SELECT * FROM session_native_ids WHERE session_id=$session_id ORDER BY source_surface,native_session_id",
             "SELECT * FROM session_runs WHERE session_id=$session_id ORDER BY run_id",
             "SELECT * FROM session_events WHERE session_id=$session_id ORDER BY event_id",
+            "SELECT m.* FROM monitor_spans m WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY m.raw_record_id,m.span_ordinal",
+            "SELECT f.* FROM local_workspace_span_facts f JOIN monitor_spans m ON m.raw_record_id=f.raw_record_id AND m.span_ordinal=f.span_ordinal WHERE EXISTS(SELECT 1 FROM session_runs r WHERE r.session_id=$session_id AND r.trace_id=m.trace_id) ORDER BY f.raw_record_id,f.span_ordinal",
             "SELECT * FROM local_workspace_sessions WHERE session_id=$session_id",
             "SELECT * FROM local_workspace_execution_headers WHERE session_id=$session_id ORDER BY execution_id LIMIT 257",
             "SELECT * FROM local_workspace_nodes WHERE session_id=$session_id ORDER BY node_id LIMIT 4097",

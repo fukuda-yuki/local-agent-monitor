@@ -1,5 +1,8 @@
 using System.Net;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -16,7 +19,7 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         await using var host=await MonitorTestHost.StartAsync(temp);
 
         _=await host.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>()
-            .ReadDetailAsync(session.ToString("D"),CancellationToken.None);
+            .ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary,session.ToString("D")),CancellationToken.None);
 
         using var response=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{session:D}/summary");
 
@@ -64,5 +67,37 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         using var temp=new MonitorTempDirectory();await using var host=await MonitorTestHost.StartAsync(temp);
         using var response=await host.Client.SendAsync(new(HttpMethod.Head,$"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision=bad"));
         Assert.Equal(HttpStatusCode.BadRequest,response.StatusCode);Assert.Equal(27,response.Content.Headers.ContentLength);Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task TimelinePassesTheClosedRequestShapeIntoTheSharedCoordinator()
+    {
+        var service = new CapturingDetailService();
+        var builder = WebApplication.CreateBuilder(); builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, new byte[32]);
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+
+        using var response = await client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={new string('1',64)}&execution_id=018f0000-0000-7000-8000-000000000003&parent_node_id=node-00000000000000000000000000000001&limit=17");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var request = Assert.IsType<LocalRepositorySessionDetailRequest>(service.Request);
+        Assert.Equal(LocalRepositorySessionDetailRequestKind.Timeline, request.Kind);
+        Assert.Equal(SessionId, request.SessionId);
+        Assert.Equal("018f0000-0000-7000-8000-000000000003", request.ExecutionId);
+        Assert.Equal("node-00000000000000000000000000000001", request.ParentNodeId);
+        Assert.Equal(17, request.Limit);
+        Assert.Null(request.After);
+    }
+
+    private sealed class CapturingDetailService : ILocalRepositorySessionDetailSnapshotService
+    {
+        internal LocalRepositorySessionDetailRequest? Request { get; private set; }
+        public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(LocalRepositorySessionDetailRequest request, CancellationToken cancellationToken)
+        {
+            Request = request;
+            throw new LocalWorkspaceSessionDetailException("session_not_found");
+        }
     }
 }

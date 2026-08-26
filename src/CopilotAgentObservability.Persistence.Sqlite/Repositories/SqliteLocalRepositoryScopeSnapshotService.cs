@@ -63,15 +63,18 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken) =>
-        (await ReadCoreAsync(request, includeDetail: false, cancellationToken).ConfigureAwait(false)).Scope;
+        (await ReadCoreAsync(request, detailRequest: null, cancellationToken).ConfigureAwait(false)).Scope;
 
     public async ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
-        string sessionId,
+        LocalRepositorySessionDetailRequest detailRequest,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(detailRequest);
+        var sessionId = detailRequest.SessionId;
         if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId))
             throw new ArgumentException("invalid_session_id", nameof(sessionId));
-        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), includeDetail: true, cancellationToken).ConfigureAwait(false);
+        ValidateDetailRequest(detailRequest);
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), detailRequest, cancellationToken).ConfigureAwait(false);
         if (result.Scope.Sessions.Count == 0 || result.Detail is null)
             throw new LocalWorkspaceSessionDetailException("session_not_found");
         var session = result.Scope.Sessions[0];
@@ -80,7 +83,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
 
     private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail)> ReadCoreAsync(
         LocalRepositoryScopeRequest request,
-        bool includeDetail,
+        LocalRepositorySessionDetailRequest? detailRequest,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
@@ -134,13 +137,13 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     cancellationToken);
 
                 LocalWorkspaceSessionDetailContribution? detail = null;
-                if (includeDetail && sessionRows.Length != 0)
+                if (detailRequest is not null && sessionRows.Length != 0)
                 {
                     detail = await capability.RunContributorAsync(
                         ReadPhase.Archive,
-                        token => detailContributor.ReadAsync(capability, request.TargetSessionId!, token),
+                        token => detailContributor.ReadAsync(capability, detailRequest, token),
                         cancellationToken).ConfigureAwait(false);
-                    ValidateDetail(request.TargetSessionId!, detail);
+                    ValidateDetail(request.TargetSessionId!, detailRequest, detail);
                 }
 
                 var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
@@ -204,17 +207,31 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             throw new ArgumentException("invalid_local_repository_scope", nameof(request));
     }
 
+    private static void ValidateDetailRequest(LocalRepositorySessionDetailRequest request)
+    {
+        if (!Enum.IsDefined(request.Kind) || request.Limit is < 1 or > 200)
+            throw new ArgumentException("invalid_detail_request", nameof(request));
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+            && (request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null || request.NodeId is not null)
+            || request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
+            && request.NodeId is not null
+            || request.Kind == LocalRepositorySessionDetailRequestKind.Node
+            && (request.NodeId is null || request.ExecutionId is not null || request.ParentNodeId is not null || request.After is not null))
+            throw new ArgumentException("invalid_detail_request", nameof(request));
+        if (request.ParentNodeId is not null && request.ExecutionId is null)
+            throw new ArgumentException("invalid_detail_request", nameof(request));
+        if (request.After is { SourceOrdinal: > long.MaxValue })
+            throw new ArgumentException("invalid_detail_request", nameof(request));
+    }
+
     private static string ComputeRevision(LocalRepositoryScopeSessionSnapshot session, LocalWorkspaceSessionDetailContribution detail)
     {
         using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-detail-revision\0v1\0"));
-        Append(session.SessionId); Append(session.AssignmentRevision); Append(session.ArchiveRevision); Append(session.Session);
+        Append(session.SessionId); Append(session.AssignmentRevision); Append(session.ArchiveRevision);
+        Append(session.AssignedRepositoryArchiveRevision ?? -1L); Append(session.Session);
         Append(detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
         Append(detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
-        foreach (var execution in detail.Executions) Append(execution);
-        foreach (var node in detail.Nodes) Append(node);
-        foreach (var edge in detail.Edges) Append(edge);
-        foreach (var content in detail.Content) Append(content);
         return Convert.ToHexStringLower(hash.GetHashAndReset());
         void Append(object value)
         {
@@ -225,7 +242,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         }
     }
 
-    private static void ValidateDetail(string sessionId, LocalWorkspaceSessionDetailContribution detail)
+    private static void ValidateDetail(string sessionId, LocalRepositorySessionDetailRequest request, LocalWorkspaceSessionDetailContribution detail)
     {
         if (detail is null || detail.Executions is null || detail.Nodes is null || detail.Edges is null || detail.Content is null)
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
@@ -233,54 +250,79 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         foreach (var execution in detail.Executions)
         {
             if (execution.SessionId != sessionId || !executions.TryAdd(execution.ExecutionId, execution)
+                || execution.ExecutionId != LocalWorkspaceProjectionStore.StableExecutionId(sessionId, execution.SourceKind, execution.SourceIdentity)
+                || execution.SourceOrdinal < 0 || string.IsNullOrWhiteSpace(execution.SourceKind) || string.IsNullOrWhiteSpace(execution.SourceIdentity)
                 || execution.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || execution.Status is not ("active" or "completed" or "failed" or "unknown")
-                || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds))
+                || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
+                || !ValidActivity(execution.Activity) || !ValidTokens(execution.Tokens))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         }
         var nodes = new Dictionary<string, LocalWorkspaceNodeDetail>(StringComparer.Ordinal);
         var roots = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unknownGroups = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var node in detail.Nodes)
         {
             if (node.SessionId != sessionId || !executions.ContainsKey(node.ExecutionId) || !nodes.TryAdd(node.NodeId, node)
+                || node.NodeId != LocalWorkspaceProjectionStore.StableNodeId(node.SourceKind, node.SourceIdentity)
+                || node.SourceOrdinal < 0 || string.IsNullOrWhiteSpace(node.SourceKind) || string.IsNullOrWhiteSpace(node.SourceIdentity)
                 || node.RelationshipAuthority is not ("exact" or "explicit" or "unknown")
                 || node.Kind is not ("execution" or "agent" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
                 || node.NameState is not ("recorded" or "not_observed" or "invalid")
                 || (node.NameState == "recorded") != (node.NameText is not null)
                 || node.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || node.Status is not ("active" or "completed" or "failed" or "unknown")
-                || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds))
+                || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds)
+                || !ValidActivity(node.Activity) || !ValidTokens(node.Tokens))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
             if (node.SourceKind == "execution_root") roots[node.ExecutionId] = roots.GetValueOrDefault(node.ExecutionId) + 1;
+            if (node.Kind == "unknown_relation_group") unknownGroups[node.ExecutionId] = unknownGroups.GetValueOrDefault(node.ExecutionId) + 1;
             if (node.SourceKind == "execution_root" && (node.Kind != "execution" || node.ParentNodeId is not null || node.RelationshipAuthority != "exact")
                 || node.Kind == "unknown_relation_group" && (node.ParentNodeId is not null || node.RelationshipAuthority != "unknown"))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         }
-        if (executions.Keys.Any(id => roots.GetValueOrDefault(id) != 1))
+        if (!(request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.ParentNodeId is not null)
+            && executions.Keys.Any(id => roots.GetValueOrDefault(id) != 1))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        if (unknownGroups.Values.Any(static count => count > 1))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         foreach (var node in detail.Nodes)
         {
             if (node.ParentNodeId is not null
-                && (!nodes.TryGetValue(node.ParentNodeId, out var parent) || parent.ExecutionId != node.ExecutionId))
+                && (!nodes.TryGetValue(node.ParentNodeId, out var parent) || parent.ExecutionId != node.ExecutionId)
+                && !(request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && node.NodeId == request.ParentNodeId))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
             var seen = new HashSet<string>(StringComparer.Ordinal) { node.NodeId };
             var current = node;
             while (current.ParentNodeId is not null)
             {
-                if (!seen.Add(current.ParentNodeId) || !nodes.TryGetValue(current.ParentNodeId, out current))
+                if (!seen.Add(current.ParentNodeId))
                     throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+                if (!nodes.TryGetValue(current.ParentNodeId, out current))
+                {
+                    if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && node.NodeId == request.ParentNodeId) break;
+                    throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+                }
             }
+            if (current!.ParentNodeId is null && current.SourceKind != "execution_root" && current.Kind != "unknown_relation_group")
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         }
         foreach (var edge in detail.Edges)
         {
             if (!nodes.TryGetValue(edge.NodeId, out var node) || !nodes.TryGetValue(edge.RelatedNodeId, out var related)
                 || node.ExecutionId != related.ExecutionId || edge.RelationKind is not ("parent" or "retry" or "recovery")
-                || edge.RelationshipAuthority is not ("exact" or "explicit"))
+                || edge.RelationshipAuthority is not ("exact" or "explicit") || edge.SourceOrdinal < 0
+                || edge.RelationKind == "parent" && node.ParentNodeId != edge.RelatedNodeId)
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+
+        if (!SortedUnique(detail.NativeSessionIds) || !SortedUnique(detail.Versions))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
         }
         var contentKeys = new HashSet<(string NodeId, string Part)>();
         foreach (var content in detail.Content)
-            if (!nodes.ContainsKey(content.NodeId)
+            if ((!nodes.ContainsKey(content.NodeId)
+                    && !(request.Kind == LocalRepositorySessionDetailRequestKind.Summary
+                        && content.Part == "instruction" && content.SourceItemId == detail.InstructionSourceIdentity))
                 || !contentKeys.Add((content.NodeId, content.Part))
                 || content.Part is not ("instruction" or "tool_input" or "tool_result" or "error_message" or "subagent_input" or "event_content")
                 || content.State is not ("available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid"))
@@ -292,6 +334,39 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             "missing" or "invalid" => start is null && end is null && duration is null,
             _ => false,
         };
+        static bool ValidActivity(LocalWorkspaceActivityFacts value) =>
+            ValidActivityFact(value.Skill, true) && ValidActivityFact(value.Tool, false) && ValidActivityFact(value.Subagent, false) && ValidActivityFact(value.Error, false) && ValidActivityFact(value.Retry, false);
+        static bool ValidActivityFact(LocalWorkspaceFact<long> value, bool skill) => value.State switch
+        {
+            "recorded" => value.Value is >= 0,
+            "not_observed" or "capture_gap" or "source_unsupported" => value.Value is null,
+            "certification_pending" or "projection_invalid" when skill => value.Value is null,
+            _ => false,
+        };
+        static bool ValidTokenFact(LocalWorkspaceFact<long> value) => value.State switch
+        {
+            "recorded" => value.Value is >= 0,
+            "not_observed" or "inconsistent" => value.Value is null,
+            _ => false,
+        };
+        static bool ValidTokens(LocalWorkspaceTokenFacts value) =>
+            value.AvailableExecutionCount >= 0 && value.TotalExecutionCount >= value.AvailableExecutionCount
+            && value.Authority is "none" or "session_run" or "llm_span" or "mixed"
+            && value.State is "recorded" or "not_observed" or "inconsistent"
+            && ValidTokenFact(value.Input) && ValidTokenFact(value.Output) && ValidTokenFact(value.Total)
+            && ValidTokenFact(value.Reasoning) && ValidTokenFact(value.CacheRead) && ValidTokenFact(value.CacheCreation)
+            && ValidTokenFact(value.NewInput) && ValidTokenFact(value.CacheReadRatioBasisPoints)
+            && (value.Total.Value is null || value.Input.Value is null || value.Output.Value is null
+                || value.Total.Value >= value.Input.Value + value.Output.Value)
+            && (value.CacheReadRatioBasisPoints.Value is null || value.CacheReadRatioBasisPoints.Value is >= 0 and <= 10_000);
+        static bool SortedUnique(IReadOnlyList<string>? values)
+        {
+            if (values is null) return false;
+            for (var index = 0; index < values.Count; index++)
+                if (string.IsNullOrWhiteSpace(values[index]) || index > 0 && StringComparer.Ordinal.Compare(values[index - 1], values[index]) >= 0)
+                    return false;
+            return true;
+        }
     }
 
     private static FrozenSession[] ValidateAndFreezeSessionRows(

@@ -45,7 +45,7 @@ internal interface ILocalRepositoryScopeSnapshotService
 internal interface ILocalRepositorySessionDetailSnapshotService
 {
     ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
-        string sessionId,
+        LocalRepositorySessionDetailRequest request,
         CancellationToken cancellationToken);
 }
 
@@ -53,9 +53,31 @@ internal interface ILocalWorkspaceSessionDetailSnapshotContributor
 {
     ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
         ILocalRepositoryReadTransaction transaction,
-        string sessionId,
+        LocalRepositorySessionDetailRequest request,
         CancellationToken cancellationToken);
 }
+
+internal enum LocalRepositorySessionDetailRequestKind
+{
+    Summary,
+    Timeline,
+    Node,
+}
+
+internal sealed record LocalRepositoryTimelinePosition(
+    byte TimeGroup,
+    long UtcTicks,
+    ulong SourceOrdinal,
+    string NodeId);
+
+internal sealed record LocalRepositorySessionDetailRequest(
+    LocalRepositorySessionDetailRequestKind Kind,
+    string SessionId,
+    string? ExecutionId = null,
+    string? ParentNodeId = null,
+    LocalRepositoryTimelinePosition? After = null,
+    int Limit = 100,
+    string? NodeId = null);
 
 internal interface ILocalRepositorySessionSnapshotRow
 {
