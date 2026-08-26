@@ -42,6 +42,46 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
     }
 
     [Fact]
+    public async Task ContributorWithInstalledSkillProjectionReadsTenThousandCandidatesInEightSetBasedStatements()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<10000)
+            INSERT INTO sessions
+            SELECT printf('0198f5b8-0c00-7000-8000-%012d',value),'completed','partial',NULL,NULL,NULL,NULL,
+                   '2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'
+            FROM n;
+            INSERT INTO schema_version(component,version) VALUES('skill_projection',1);
+            CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
+            CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
+            CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT PRIMARY KEY,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
+            CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
+            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
+            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
+            CREATE INDEX skill_projection_invocations_session ON skill_projection_invocations(session_id,generation_id);
+            CREATE INDEX skill_projection_generation_inputs_generation ON skill_projection_generation_inputs(generation_id,input_evidence_kind);
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        var statements = new List<string>();
+        var result = await new LocalWorkspaceSessionSnapshotContributor(statementObserver: statements.Add).ReadAsync(
+            new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+
+        Assert.Equal(10_000, result.Sessions.Count);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "skills", "skill-aggregates", "tokens"], statements);
+        Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
+
+        using var plan = connection.CreateCommand();
+        plan.CommandText = "EXPLAIN QUERY PLAN SELECT invocation.session_id,COUNT(*) FROM skill_projection_invocations invocation WHERE invocation.source_arm='otel_trace_span' AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) GROUP BY invocation.session_id;";
+        plan.Parameters.AddWithValue("$ids", "[\"0198f5b8-0c00-7000-8000-000000000001\"]");
+        using var reader = plan.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read()) details.Add(reader.GetString(3));
+        Assert.Contains(details, detail => detail.Contains("skill_projection_invocations_session", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void CandidateReadPlanUsesProjectionAndExactLabelJoinIndexesWithoutPerRowSubqueries()
     {
         using var connection=LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

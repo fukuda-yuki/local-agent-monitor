@@ -399,6 +399,31 @@ public sealed class SkillCurrentAuthorizationTests
         Assert.Null(prematureLease);
     }
 
+    [Fact]
+    public void RealProvidersKeepGenerationAuthorityInstanceScopedAcrossSequentialPublications()
+    {
+        var firstHost = new SkillInvocationV2RegistryProviderV1();
+        var secondHost = new SkillInvocationV2RegistryProviderV1();
+        var firstBefore = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(firstHost.CaptureGeneration());
+        var secondBefore = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(secondHost.CaptureGeneration());
+
+        firstHost.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+
+        Assert.False(firstHost.TryAcquireGenerationReadLease(firstBefore, out var firstStaleLease));
+        Assert.Null(firstStaleLease);
+        Assert.True(secondHost.TryAcquireGenerationReadLease(secondBefore, out var secondLease));
+        Assert.NotNull(secondLease);
+        Assert.True(secondHost.VerifyGenerationIdentity(secondBefore, secondLease!));
+        secondLease!.Dispose();
+
+        secondHost.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
+        var firstCurrent = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(firstHost.CaptureGeneration());
+        Assert.True(firstHost.TryAcquireGenerationReadLease(firstCurrent, out var firstCurrentLease));
+        Assert.NotNull(firstCurrentLease);
+        Assert.True(firstHost.VerifyGenerationIdentity(firstCurrent, firstCurrentLease!));
+        firstCurrentLease!.Dispose();
+    }
+
     private static FixedTimeProvider Time() => new(ValidationAt);
 
     private static SessionSkillInvocationWrite NewWrite(
