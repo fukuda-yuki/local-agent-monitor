@@ -23,7 +23,7 @@ public sealed class LocalRepositoryRouteTests
     private const string SessionId = "01900000-0000-7000-8000-0000000000a1";
 
     [Fact]
-    public async Task RawDefault_MapsExactlySixMethodTemplatePairs()
+    public async Task RawDefault_MapsExactlySevenMethodTemplatePairs()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
@@ -31,6 +31,7 @@ public sealed class LocalRepositoryRouteTests
         Assert.Equal(
             [
                 ("GET", "/api/local-monitor/v1/repositories"),
+                ("HEAD", "/api/local-monitor/v1/repositories"),
                 ("POST", "/api/local-monitor/v1/repositories"),
                 ("PATCH", "/api/local-monitor/v1/repositories/{repositoryId}"),
                 ("GET", "/api/local-monitor/v1/repositories/{repositoryId}/locators"),
@@ -91,7 +92,7 @@ public sealed class LocalRepositoryRouteTests
     }
 
     [Theory]
-    [InlineData("/api/local-monitor/v1/repositories", "GET,POST")]
+    [InlineData("/api/local-monitor/v1/repositories", "GET,HEAD,POST")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001", "PATCH")]
     [InlineData("/api/local-monitor/v1/repositories/01900000-0000-7000-8000-000000000001/locators", "GET")]
     [InlineData("/api/local-monitor/v1/session-repository-actions", "POST")]
@@ -110,7 +111,7 @@ public sealed class LocalRepositoryRouteTests
     }
 
     [Fact]
-    public async Task Head_SuppressesMethodNotAllowedBodyAndKeepsExactAllow()
+    public async Task Head_ExecutesRepositoryCollectionGetAndSuppressesItsBody()
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: QuietHost());
@@ -123,9 +124,11 @@ public sealed class LocalRepositoryRouteTests
             HttpMethod.Head,
             "/api/local-monitor/v1/sessions/01900000-0000-7000-8000-000000000001/repository-assignment"));
 
-        Assert.Equal(HttpStatusCode.MethodNotAllowed, postOnly.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, postOnly.StatusCode);
         Assert.Empty(await postOnly.Content.ReadAsByteArrayAsync());
-        Assert.Equal(["GET", "POST"], AllowedMethods(postOnly));
+        Assert.Equal("application/json; charset=utf-8", postOnly.Content.Headers.ContentType!.ToString());
+        Assert.Equal(272, postOnly.Content.Headers.ContentLength);
+        Assert.True(postOnly.Headers.CacheControl?.NoStore);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, getRoute.StatusCode);
         Assert.Empty(await getRoute.Content.ReadAsByteArrayAsync());
         Assert.Equal(["GET"], AllowedMethods(getRoute));

@@ -16,7 +16,7 @@ internal static class LocalMonitorV1CollectionRoutes
     {
         var cursorKey = testOverrides?.CursorKey.ToArray() ?? RandomNumberGenerator.GetBytes(32);
         var repositoryCursorKey = testOverrides?.RepositoryCursorKey?.ToArray() ?? RandomNumberGenerator.GetBytes(32);
-        app.MapGet(RepositoriesPath, async context =>
+        app.MapMethods(RepositoriesPath, [HttpMethods.Get, HttpMethods.Head], async context =>
         {
             if (MonitorHost.IsCrossSiteRequest(context)) { await Error(context, 403, "csrf_rejected"); return; }
             if (!LocalMonitorV1RepositoryRequestParser.TryParse(context.Request.QueryString.Value ?? "", out var request)) { await Error(context, 400, "invalid_request"); return; }
@@ -24,7 +24,7 @@ internal static class LocalMonitorV1CollectionRoutes
             try
             {
                 var snapshot = await service.ReadAsync(new(LocalRepositoryScopeKind.All, null), context.RequestAborted);
-                await Success(context, LocalMonitorV1CollectionApplication.SerializeRepositories(snapshot, request, repositoryCursorKey));
+                await Success(context, LocalMonitorV1CollectionApplication.SerializeRepositories(snapshot, request, repositoryCursorKey, testOverrides?.RepositoryCollectionRevision, testOverrides?.RepositoryItemRevision));
             }
             catch (LocalRepositoryScopeSnapshotException) { await Error(context, 503, "persistence_busy"); }
             catch (LocalMonitorV1CollectionException e) { await Error(context, e.Error == "workspace_too_large" ? 409 : 400, e.Error); }
@@ -87,4 +87,10 @@ internal static class LocalMonitorV1CollectionRoutes
     }
 }
 
-internal sealed record LocalMonitorV1CollectionTestOverrides(byte[] CursorKey, string? SessionCollectionRevision, string? SessionItemRevision, byte[]? RepositoryCursorKey = null);
+internal sealed record LocalMonitorV1CollectionTestOverrides(
+    byte[] CursorKey,
+    string? SessionCollectionRevision,
+    string? SessionItemRevision,
+    byte[]? RepositoryCursorKey = null,
+    string? RepositoryCollectionRevision = null,
+    string? RepositoryItemRevision = null);

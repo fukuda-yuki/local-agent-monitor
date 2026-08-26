@@ -77,7 +77,7 @@ internal static class LocalMonitorV1CollectionApplication
         });
     }
 
-    internal static byte[] SerializeRepositories(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1RepositoryRequest request, byte[] cursorKey)
+    internal static byte[] SerializeRepositories(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1RepositoryRequest request, byte[] cursorKey, string? collectionRevisionOverride = null, string? itemRevisionOverride = null)
     {
         var candidates = snapshot.Repositories.Where(r => request.ArchiveScope == "include_archived" || r.ArchiveState == LocalArchiveState.Active)
             .OrderBy(r => r.RepositoryId, StringComparer.Ordinal);
@@ -89,11 +89,11 @@ internal static class LocalMonitorV1CollectionApplication
                 .OrderBy(r => r.RepositoryId, StringComparer.Ordinal);
         }
         var page = candidates.Take(request.Limit + 1).ToArray(); var emitted = page.Take(request.Limit).ToArray();
-        var collectionRevision = snapshot.Repositories.Count == 0 && snapshot.Sessions.Count == 0
+        var collectionRevision = collectionRevisionOverride ?? (snapshot.Repositories.Count == 0 && snapshot.Sessions.Count == 0
             ? new string('0', 64)
-            : Hash("local-monitor-repository-collection\0v1\0", snapshot);
+            : Hash("local-monitor-repository-collection\0v1\0", snapshot));
         var assignedByRepository = snapshot.Sessions
-            .Where(session => session.RepositoryId is not null)
+            .Where(session => session.RepositoryId is not null && session.AssignmentState == LocalRepositoryScopeAssignmentState.Assigned)
             .GroupBy(session => session.RepositoryId!, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         return Write(writer =>
@@ -106,11 +106,17 @@ internal static class LocalMonitorV1CollectionApplication
                 writer.WriteStartObject(); writer.WriteString("repository_id", repository.RepositoryId); writer.WriteString("display_name", repository.DisplayName);
                 writer.WriteString("archive_state", Name(repository.ArchiveState)); writer.WriteNumber("archive_revision", repository.ArchiveRevision);
                 writer.WriteNumber("active_session_count", assigned.Count(s => s.IsEffectivelyEligible));
-                var last = assigned.Where(s => s.IsEffectivelyEligible).Select(s => (LocalWorkspaceProjectionRow)s.Session)
-                    .Where(p => p.LastSeenEpochMilliseconds is not null)
-                    .OrderByDescending(p => p.LastSeenEpochMilliseconds).FirstOrDefault();
-                if (last is null) writer.WriteNull("last_observed_at"); else writer.WriteString("last_observed_at", DateTimeOffset.FromUnixTimeMilliseconds(last.LastSeenEpochMilliseconds!.Value).ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-                writer.WriteNumber("assignment_conflict_count", repository.AssignmentConflictCount); writer.WriteString("repository_revision", Hash("local-monitor-repository-item\0v1\0", repository, assigned)); writer.WriteEndObject();
+                var last = assigned.Where(s => s.IsEffectivelyEligible)
+                    .Select(s => (LocalWorkspaceProjectionRow)s.Session)
+                    .Select(p => DateTimeOffset.TryParseExact(p.LastSeenAt, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant)
+                        ? (Valid: true, Instant: instant)
+                        : default)
+                    .Where(value => value.Valid)
+                    .OrderByDescending(value => value.Instant)
+                    .Select(value => (DateTimeOffset?)value.Instant)
+                    .FirstOrDefault();
+                if (last is null) writer.WriteNull("last_observed_at"); else writer.WriteString("last_observed_at", last.Value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteNumber("assignment_conflict_count", repository.AssignmentConflictCount); writer.WriteString("repository_revision", itemRevisionOverride ?? Hash("local-monitor-repository-item\0v1\0", repository, assigned)); writer.WriteEndObject();
             }
             writer.WriteEndArray(); writer.WriteNumber("all_session_count", snapshot.Sessions.Count(s => s.IsAllScopeMember));
             writer.WriteNumber("unassigned_active_session_count", snapshot.Sessions.Count(s => s.IsUnassignedScopeMember && s.IsEffectivelyEligible));
