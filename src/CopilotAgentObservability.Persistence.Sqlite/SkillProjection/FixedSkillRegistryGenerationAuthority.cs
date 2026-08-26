@@ -5,21 +5,36 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal sealed class FixedSkillRegistryGenerationAuthority : ISkillRegistryGenerationAuthority
 {
     private readonly IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries;
+    private readonly int revision;
+    private readonly string artifactFingerprint;
     private readonly Generation generation = new();
 
-    private FixedSkillRegistryGenerationAuthority(IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries) =>
-        this.entries = entries ?? throw new ArgumentNullException(nameof(entries));
+    private FixedSkillRegistryGenerationAuthority(SkillInvocationV2CompatibilityRegistryRevision revision)
+    {
+        ArgumentNullException.ThrowIfNull(revision);
+        entries = revision.Entries;
+        this.revision = revision.Revision;
+        artifactFingerprint = revision.ArtifactFingerprint;
+    }
 
-    internal static FixedSkillRegistryGenerationAuthority Load() =>
-        new(SkillInvocationV2ArtifactRegistry.Load().CurrentEntries);
+    internal static FixedSkillRegistryGenerationAuthority Load()
+    {
+        var registry = SkillInvocationV2ArtifactRegistry.Load();
+        return new(registry.History.Single(revision => revision.Revision == registry.CurrentRevision));
+    }
 
     internal static FixedSkillRegistryGenerationAuthority ForWriterVersion(string writerVersion)
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
         if (!registry.TryResolveWriterVersion(writerVersion, out var revision))
             throw new InvalidOperationException("Skill invocation v2 writer provenance is unavailable.");
-        return new(revision.Entries);
+        return new(revision);
     }
+
+    internal bool MatchesWriterVersion(string writerVersion) =>
+        SkillInvocationV2ArtifactRegistry.Load().TryResolveWriterVersion(writerVersion, out var candidate)
+        && candidate.Revision == revision
+        && string.Equals(candidate.ArtifactFingerprint, artifactFingerprint, StringComparison.Ordinal);
 
     public ISkillRegistryGenerationCapture CaptureGeneration() => generation;
 

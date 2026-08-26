@@ -56,6 +56,50 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
+    public void HistoricalR0001WriterArchiveInspectsStructurallyAndStagesWithCurrentR0002Authority()
+    {
+        using var fixture = new HistoricalBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("historical-r0001.zip");
+        var target = fixture.Path("historical-r0001-target.db");
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        var sourceBeforeInspection = File.ReadAllBytes(fixture.DatabasePath);
+        var archiveBeforeInspection = File.ReadAllBytes(archive);
+        var manifest = ReadManifest(archive);
+        var currentService = new SqliteRuntimeBackupService(fixture.Clock);
+        var inspected = currentService.Inspect(archive);
+        var preview = currentService.Preview(archive, target);
+        var restored = currentService.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.Equal("1.0.0", manifest.SourceApplicationVersion);
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        Assert.Equal(1, inspected.RowCounts!["skill_invocation_snapshots"]);
+        Assert.Equal(1, inspected.RowCounts["local_workspace_session_search_facts"]);
+        Assert.Equal(sourceBeforeInspection, File.ReadAllBytes(fixture.DatabasePath));
+        Assert.Equal(archiveBeforeInspection, File.ReadAllBytes(archive));
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(0L, Scalar(target, "SELECT COUNT(*) FROM local_workspace_session_search_facts WHERE kind='skill';"));
+        Assert.Equal(1L, Scalar(target, "SELECT COUNT(*) FROM skill_invocation_snapshots;"));
+        Assert.Equal(1L, Scalar(target, "SELECT COUNT(*) FROM skill_invocation_snapshot_receipts;"));
+        Assert.Equal(1L, Scalar(target, "SELECT COUNT(*) FROM session_events WHERE source_surface='copilot-sdk';"));
+        Assert.Equal(sourceBeforeInspection, File.ReadAllBytes(fixture.DatabasePath));
+        Assert.Equal(archiveBeforeInspection, File.ReadAllBytes(archive));
+    }
+
+    [Fact]
+    public void WriterProvenanceInjectionRejectsAuthorityFromAnotherRevision()
+    {
+        var gate = new LocalWorkspacePublicationGate();
+        var currentAuthority = FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+            SkillInvocationV2ArtifactRegistry.CurrentWriterVersion);
+
+        Assert.Throws<ArgumentException>(() =>
+            new SqliteRuntimeBackupService(new RecordingTimeProvider(PublicationAt), currentAuthority, gate, "1.0.0"));
+    }
+
+    [Fact]
     public void PublicationUsesOneCapturedInstantToExcludeFactAtExpiryEquality()
     {
         using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt);
@@ -421,6 +465,43 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         public void Dispose() => fixture.Dispose();
 
         private const string ValidRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v2\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"demo-skill\",\"path\":\"skills/demo/SKILL.md\",\"content\":\"synthetic body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
+    }
+
+    private sealed class HistoricalBackupFixture : IDisposable
+    {
+        private readonly LocalRepositoryCatalogFixture fixture = new();
+
+        internal HistoricalBackupFixture(DateTimeOffset publicationAt, DateTimeOffset expiresAt)
+        {
+            Clock = new RecordingTimeProvider(publicationAt);
+            var gate = new LocalWorkspacePublicationGate();
+            var authority = FixedSkillRegistryGenerationAuthority.ForWriterVersion("1.0.0");
+            Service = new SqliteRuntimeBackupService(Clock, authority, gate, "1.0.0");
+            Assert.True(Service.Initialize(DatabasePath).Success);
+            var participant = new LocalWorkspaceProjectionTransactionParticipant(authority);
+            var facts = SkillInvocationV2IngestRequestFactsV1.Derive(
+                SkillInvocationV2Parser.Parse(Encoding.UTF8.GetBytes(HistoricalRequest), new HistoricalRuntimeCapability()));
+            var ingested = SkillInvocationV2IngestTransactionV1.Execute(
+                DatabasePath, facts, authority, new RecordingTimeProvider(expiresAt.AddDays(-90)),
+                () => true, () => true, CancellationToken.None, gate, participant);
+            Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, ingested.Outcome);
+        }
+
+        internal string DatabasePath => fixture.DatabasePath;
+        internal RecordingTimeProvider Clock { get; }
+        internal SqliteRuntimeBackupService Service { get; }
+        internal string Path(string name) => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(DatabasePath)!, name);
+        public void Dispose() => fixture.Dispose();
+
+        private const string HistoricalRequest = "{\"schema_version\":2,\"source_adapter\":\"copilot-sdk-stream\",\"source_surface\":\"copilot-sdk\",\"native_session_id\":\"backup-sdk-session\",\"source_application_version\":\"1.0.65\",\"adapter_version\":\"copilot-sdk-dotnet-1.0.4+cao-skill-v2.1\",\"normalization_version\":\"github-copilot-sdk.skill-invoked.normalize.v1\",\"payload_schema\":\"github-copilot-sdk.skill-invoked.v1\",\"schema_fingerprint\":\"8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c\",\"events\":[{\"source_event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"source_parent_event_id\":null,\"type\":\"skill.invoked\",\"occurred_at\":\"2026-08-09T00:00:00.0000000+00:00\",\"run_native_id\":null,\"source_ephemeral\":false,\"trace_id\":null,\"span_id\":null,\"payload\":{\"name\":\"historical-skill\",\"path\":\"skills/historical/SKILL.md\",\"content\":\"synthetic historical body\",\"source\":\"project\",\"trigger\":\"user-invoked\"}}]}";
+    }
+
+    private sealed class HistoricalRuntimeCapability : ISkillInvocationV2RuntimeCapability
+    {
+        public CopilotAgentObservability.LocalMonitor.SkillRuntime.CertifiedSkillProducerIdentityV1 CertifiedIdentity { get; } =
+            new("1.0.65", 3, "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1",
+                "github-copilot-sdk.skill-invoked.normalize.v1", "github-copilot-sdk.skill-invoked.v1",
+                "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c", 1);
     }
 
     private sealed class ProductionRuntimeCapability : ISkillInvocationV2RuntimeCapability

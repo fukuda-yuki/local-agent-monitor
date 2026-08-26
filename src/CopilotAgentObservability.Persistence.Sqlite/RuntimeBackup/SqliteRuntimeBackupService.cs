@@ -74,19 +74,34 @@ public sealed class SqliteRuntimeBackupService
     private readonly Action<string>? checkpoint;
     private readonly Func<string, string> installedDoctorCheck;
     private readonly Func<string, bool> restoreFailureCleanup;
+    private readonly string archiveWriterVersion = SkillInvocationV2ArtifactRegistry.CurrentWriterVersion;
     private readonly ILocalWorkspacePublicationGate? publicationGate;
     private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
 
-    public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) : this(timeProvider, null, null, null) { }
+    public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) :
+        this(timeProvider, (Action<string>?)null, null, null) { }
 
     internal SqliteRuntimeBackupService(
         TimeProvider timeProvider,
         ISkillRegistryGenerationAuthority skillRegistryAuthority,
         ILocalWorkspacePublicationGate publicationGate)
-        : this(timeProvider, null, null, null)
+        : this(timeProvider, (Action<string>?)null, null, null)
     {
         this.skillRegistryAuthority = skillRegistryAuthority ?? throw new ArgumentNullException(nameof(skillRegistryAuthority));
         this.publicationGate = publicationGate ?? throw new ArgumentNullException(nameof(publicationGate));
+    }
+
+    internal SqliteRuntimeBackupService(
+        TimeProvider timeProvider,
+        FixedSkillRegistryGenerationAuthority skillRegistryAuthority,
+        ILocalWorkspacePublicationGate publicationGate,
+        string archiveWriterVersion)
+        : this(timeProvider, skillRegistryAuthority, publicationGate)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(archiveWriterVersion);
+        if (!skillRegistryAuthority.MatchesWriterVersion(archiveWriterVersion))
+            throw new ArgumentException("Writer provenance does not match the fixed registry authority.", nameof(archiveWriterVersion));
+        this.archiveWriterVersion = archiveWriterVersion;
     }
 
     internal SqliteRuntimeBackupService(TimeProvider? timeProvider, Action<string>? checkpoint) :
@@ -1157,7 +1172,7 @@ public sealed class SqliteRuntimeBackupService
         var rows = ReadRowCounts(snapshotPath);
         var cursors = ReadProjectionCursors(snapshotPath, immutableReadOnly: true);
         var retention = ReadRetentionSummary(snapshotPath, immutableReadOnly: true);
-        return new(createdAt, SkillInvocationV2ArtifactRegistry.CurrentWriterVersion,
+        return new(createdAt, archiveWriterVersion,
             RuntimeInformation.RuntimeIdentifier, databaseHash, length, sourceJournalMode, backupWindow, versions, rows, cursors, retention, external);
     }
 
