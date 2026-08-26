@@ -30,7 +30,7 @@ internal static class LocalMonitorV1RepositoryRequestParser
         var after = values.TryGetValue("after", out var cursor) ? cursor : null;
         var limit = 50;
         if (archiveScope is not ("active_only" or "include_archived")
-            || after is not null && !LocalMonitorV1Identity.TryParseUuidV7(after, out _)
+            || after is not null && !LocalMonitorV1RepositoryCursorCodec.IsCursorSyntax(after)
             || values.TryGetValue("limit", out var rawLimit)
                 && (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit)
                     || limit is < 1 or > 200
@@ -77,37 +77,45 @@ internal static class LocalMonitorV1CollectionApplication
         });
     }
 
-    internal static byte[] SerializeRepositories(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1RepositoryRequest request)
+    internal static byte[] SerializeRepositories(LocalRepositoryScopeSnapshot snapshot, LocalMonitorV1RepositoryRequest request, byte[] cursorKey)
     {
         var candidates = snapshot.Repositories.Where(r => request.ArchiveScope == "include_archived" || r.ArchiveState == LocalArchiveState.Active)
-            .OrderBy(r => r.DisplayName, StringComparer.Ordinal).ThenBy(r => r.RepositoryId, StringComparer.Ordinal);
+            .OrderBy(r => r.RepositoryId, StringComparer.Ordinal);
         if (request.After is not null)
         {
-            var anchor = snapshot.Repositories.SingleOrDefault(r => r.RepositoryId == request.After);
-            if (anchor is null) throw new LocalMonitorV1CollectionException("invalid_cursor");
-            candidates = candidates.Where(r => StringComparer.Ordinal.Compare(r.DisplayName, anchor.DisplayName) > 0
-                    || r.DisplayName == anchor.DisplayName && StringComparer.Ordinal.Compare(r.RepositoryId, anchor.RepositoryId) > 0)
-                .OrderBy(r => r.DisplayName, StringComparer.Ordinal).ThenBy(r => r.RepositoryId, StringComparer.Ordinal);
+            if (!LocalMonitorV1RepositoryCursorCodec.TryDecode(request.After, cursorKey, request, out var position))
+                throw new LocalMonitorV1CollectionException("invalid_cursor");
+            candidates = candidates.Where(r => StringComparer.Ordinal.Compare(r.RepositoryId, position) > 0)
+                .OrderBy(r => r.RepositoryId, StringComparer.Ordinal);
         }
         var page = candidates.Take(request.Limit + 1).ToArray(); var emitted = page.Take(request.Limit).ToArray();
+        var collectionRevision = snapshot.Repositories.Count == 0 && snapshot.Sessions.Count == 0
+            ? new string('0', 64)
+            : Hash("local-monitor-repository-collection\0v1\0", snapshot);
+        var assignedByRepository = snapshot.Sessions
+            .Where(session => session.RepositoryId is not null)
+            .GroupBy(session => session.RepositoryId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         return Write(writer =>
         {
-            writer.WriteStartObject(); writer.WriteString("schema_version", "local-monitor-repositories.response.v1"); writer.WriteString("workspace_revision", Hash("local-monitor-repository-collection\0v1\0", snapshot));
+            writer.WriteStartObject(); writer.WriteString("schema_version", "local-monitor-repositories.response.v1"); writer.WriteString("workspace_revision", collectionRevision);
             writer.WritePropertyName("repositories"); writer.WriteStartArray();
             foreach (var repository in emitted)
             {
-                var assigned = snapshot.Sessions.Where(s => s.RepositoryId == repository.RepositoryId).ToArray();
+                var assigned = assignedByRepository.GetValueOrDefault(repository.RepositoryId) ?? [];
                 writer.WriteStartObject(); writer.WriteString("repository_id", repository.RepositoryId); writer.WriteString("display_name", repository.DisplayName);
                 writer.WriteString("archive_state", Name(repository.ArchiveState)); writer.WriteNumber("archive_revision", repository.ArchiveRevision);
                 writer.WriteNumber("active_session_count", assigned.Count(s => s.IsEffectivelyEligible));
-                var last = assigned.Select(s => ((LocalWorkspaceProjectionRow)s.Session).LastSeenAt).Order(StringComparer.Ordinal).LastOrDefault();
-                if (last is null) writer.WriteNull("last_observed_at"); else writer.WriteString("last_observed_at", last);
+                var last = assigned.Where(s => s.IsEffectivelyEligible).Select(s => (LocalWorkspaceProjectionRow)s.Session)
+                    .Where(p => p.LastSeenEpochMilliseconds is not null)
+                    .OrderByDescending(p => p.LastSeenEpochMilliseconds).FirstOrDefault();
+                if (last is null) writer.WriteNull("last_observed_at"); else writer.WriteString("last_observed_at", DateTimeOffset.FromUnixTimeMilliseconds(last.LastSeenEpochMilliseconds!.Value).ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
                 writer.WriteNumber("assignment_conflict_count", repository.AssignmentConflictCount); writer.WriteString("repository_revision", Hash("local-monitor-repository-item\0v1\0", repository, assigned)); writer.WriteEndObject();
             }
             writer.WriteEndArray(); writer.WriteNumber("all_session_count", snapshot.Sessions.Count(s => s.IsAllScopeMember));
             writer.WriteNumber("unassigned_active_session_count", snapshot.Sessions.Count(s => s.IsUnassignedScopeMember && s.IsEffectivelyEligible));
             writer.WriteNumber("archived_repository_count", snapshot.Repositories.Count(r => r.ArchiveState == LocalArchiveState.Archived));
-            if (page.Length > emitted.Length) writer.WriteString("next_cursor", emitted[^1].RepositoryId); else writer.WriteNull("next_cursor"); writer.WriteEndObject();
+            if (page.Length > emitted.Length) writer.WriteString("next_cursor", LocalMonitorV1RepositoryCursorCodec.Encode(cursorKey, request, emitted[^1].RepositoryId)); else writer.WriteNull("next_cursor"); writer.WriteEndObject();
         });
     }
 
@@ -118,14 +126,14 @@ internal static class LocalMonitorV1CollectionApplication
     private static bool Matches(LocalRepositoryScopeSessionSnapshot row, LocalMonitorV1SessionSearchRequest request)
     {
         var p = (LocalWorkspaceProjectionRow)row.Session;
-        var startedAt = p.StartedAt is null ? (DateTimeOffset?)null : DateTimeOffset.ParseExact(p.StartedAt, "O", CultureInfo.InvariantCulture, DateTimeStyles.None);
-        return (request.From is null || startedAt is not null && startedAt.Value >= request.From.Value)
-            && (request.To is null || startedAt is not null && startedAt.Value < request.To.Value)
+        var acceptedAt = p.SortGroup == 0 ? DateTimeOffset.FromUnixTimeMilliseconds(p.SortEpochMilliseconds) : (DateTimeOffset?)null;
+        return (request.From is null || acceptedAt is not null && acceptedAt.Value >= request.From.Value)
+            && (request.To is null || acceptedAt is not null && acceptedAt.Value < request.To.Value)
             && (request.Sources.Count == 0 || p.Sources.Values.Any(request.Sources.Contains))
             && (request.Models.Count == 0 || p.Models.Values.Any(request.Models.Contains))
             && (request.Statuses.Count == 0 || request.Statuses.Contains(p.Status))
             && Fact(p.Activity.Skill, request.HasSkill) && Fact(p.Activity.Subagent, request.HasSubagent) && Fact(p.Activity.Error, request.HasError) && Fact(p.Activity.Retry, request.HasRetry)
-            && (request.QueryNormalized is null || p.LabelText?.Normalize(NormalizationForm.FormKC).ToLowerInvariant().Contains(request.QueryNormalized, StringComparison.Ordinal) == true);
+            && (request.QueryNormalized is null || p.SearchTexts.Any(text => text.Contains(request.QueryNormalized, StringComparison.Ordinal)));
     }
 
     private static bool Fact(LocalWorkspaceFact<long> fact, bool? wanted) => wanted is null

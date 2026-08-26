@@ -25,6 +25,36 @@ public sealed class LocalMonitorV1CollectionRouteTests
         Assert.Equal("{\"schema_version\":\"local-monitor-sessions.response.v1\",\"workspace_revision\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"items\":[],\"next_cursor\":null}", await response.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task RawDefaultRepositoryGetPublishesExactEmptyBytesAndSuccessHeaders()
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options());
+
+        using var response = await host.Client.GetAsync("/api/local-monitor/v1/repositories");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal("{\"schema_version\":\"local-monitor-repositories.response.v1\",\"workspace_revision\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"repositories\":[],\"all_session_count\":0,\"unassigned_active_session_count\":0,\"archived_repository_count\":0,\"next_cursor\":null}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RepositoryCursorDefectsUseInvalidCursorWithoutReadingSnapshot()
+    {
+        var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+        var firstRequest = new LocalMonitorV1RepositoryRequest("include_archived", null, 1);
+        var cursor = LocalMonitorV1RepositoryCursorCodec.Encode(key, firstRequest, "018f0000-0000-7000-8000-000000000101");
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new BusySnapshotService(), new(new byte[32], null, null, key)));
+
+        using var malformed = await host.Client.GetAsync("/api/local-monitor/v1/repositories?after=" + cursor[..50] + (cursor[50] == 'A' ? "B" : "A") + cursor[51..] + "&archive_scope=include_archived&limit=1");
+        using var mismatch = await host.Client.GetAsync("/api/local-monitor/v1/repositories?after=" + cursor + "&archive_scope=active_only&limit=1");
+
+        Assert.Equal("{\"error\":\"invalid_cursor\"}", await malformed.Content.ReadAsStringAsync());
+        Assert.Equal("{\"error\":\"invalid_cursor\"}", await mismatch.Content.ReadAsStringAsync());
+    }
+
     [Theory]
     [InlineData("GET")]
     [InlineData("HEAD")]
