@@ -118,6 +118,7 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         Assert.Equal(1, fixture.CountDetailSkillNodes("sdk"));
         Assert.Equal(1, fixture.CountDetailSkillNodes("pair"));
         Assert.Equal(0, fixture.CountDetailSkillNodes("pending"));
+        Assert.Equal(1, fixture.ExecutionSkillCount("sdk"));
         Assert.Equal(["event"], fixture.RawSkillEventKinds("sdk"));
     }
 
@@ -353,6 +354,14 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation' AND kind='skill';";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal int ExecutionSkillCount(string sessionKey)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT skill_activity_count FROM local_workspace_execution_headers WHERE session_id=$session;";
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }

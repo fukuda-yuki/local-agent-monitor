@@ -302,6 +302,11 @@ internal static class LocalWorkspaceProjectionStore
             INSERT INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal)
             SELECT node_id,parent_node_id,'parent',relationship_authority,source_ordinal FROM local_workspace_nodes
             WHERE source_kind='skill_invocation' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND relationship_authority IN ('exact','explicit');
+            UPDATE local_workspace_execution_headers AS h SET skill_activity_count=(SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id AND n.source_kind='skill_invocation')
+            WHERE h.skill_activity_state='recorded' AND h.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            UPDATE local_workspace_nodes AS n SET skill_activity_count=h.skill_activity_count
+            FROM local_workspace_execution_headers h WHERE n.source_kind='execution_root' AND n.execution_id=h.execution_id AND h.skill_activity_state='recorded'
+              AND n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, ("$ids", idsJson), ("$skills", canonicalSkillsJson));
 
         if (TableExists(connection, transaction, "session_event_content"))
