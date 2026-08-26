@@ -12,7 +12,7 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
     private readonly HashSet<GenerationLease> outstandingLeases = new();
     private Generation? currentGeneration;
 
-    internal event Action? CurrentGenerationChanged;
+    internal event Action<ISkillRegistryGenerationAuthority>? CurrentGenerationChanging;
 
     internal SkillInvocationV2RegistryProviderV1()
         : this(SkillInvocationV2ArtifactRegistry.Load())
@@ -97,10 +97,36 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
                 Monitor.Wait(syncRoot);
             }
 
+            CurrentGenerationChanging?.Invoke(new ProposedGenerationAuthority(incoming));
             currentGeneration = incoming;
         }
-        CurrentGenerationChanged?.Invoke();
     }
+
+    private sealed class ProposedGenerationAuthority(Generation generation) : ISkillRegistryGenerationAuthority
+    {
+        public ISkillRegistryGenerationCapture CaptureGeneration() => new GenerationCapture(generation);
+        public bool TryAcquireGenerationReadLease(ISkillRegistryGenerationCapture capture, [NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            if (capture is not GenerationCapture typed || !ReferenceEquals(typed.Generation, generation)) { lease = null; return false; }
+            lease = new ProposedGenerationLease(generation); return true;
+        }
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
+            capture is GenerationCapture typedCapture && lease is ProposedGenerationLease typedLease
+            && ReferenceEquals(typedCapture.Generation, generation) && ReferenceEquals(typedLease.Generation, generation);
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
+        {
+            if (lease is not ProposedGenerationLease typed || !ReferenceEquals(typed.Generation, generation)) return false;
+            ArgumentNullException.ThrowIfNull(tuple);
+            return generation.Registry.IsAccepted(new(tuple.SourceApplicationVersion, tuple.AdapterVersion, tuple.NormalizationVersion, tuple.PayloadSchema, tuple.SchemaFingerprint));
+        }
+    }
+
+    private sealed class ProposedGenerationLease(Generation generation) : ISkillRegistryGenerationLease
+    {
+        internal Generation Generation { get; } = generation;
+        public void Dispose() { }
+    }
+
 
     internal int OutstandingLeaseCount
     {

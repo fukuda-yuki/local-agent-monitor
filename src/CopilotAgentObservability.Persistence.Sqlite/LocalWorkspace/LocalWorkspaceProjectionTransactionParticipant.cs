@@ -17,11 +17,6 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
 
     private LocalWorkspaceProjectionTransactionParticipant() { }
 
-    private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
-
-    internal void ConfigureSkillRegistryAuthority(ISkillRegistryGenerationAuthority authority) =>
-        skillRegistryAuthority = authority ?? throw new ArgumentNullException(nameof(authority));
-
     public void RefreshSessions(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -29,7 +24,7 @@ internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWor
         DateTimeOffset now)
     {
         if (sessionIds.Count == 0 || !IsInstalled(connection, transaction)) return;
-        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now, skillRegistryAuthority);
+        LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, sessionIds, now);
     }
 
     private static bool IsInstalled(SqliteConnection connection, SqliteTransaction transaction)

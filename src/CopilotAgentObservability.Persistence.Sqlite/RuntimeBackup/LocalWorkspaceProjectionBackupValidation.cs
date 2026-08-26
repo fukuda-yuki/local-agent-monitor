@@ -5,7 +5,7 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 internal static class LocalWorkspaceProjectionBackupValidation
 {
-    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime = null)
+    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime = null, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         try
         {
@@ -87,7 +87,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
-            ValidateCanonicalProjection(connection, transaction, publicationTime);
+            ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
@@ -183,7 +183,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
             throw new InvalidOperationException();
     }
 
-    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime)
+    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
         var before = Snapshot(connection, transaction);
         if (publicationTime is null)
@@ -201,7 +201,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
         connection.BackupDatabase(replica);
         using (var replicaTransaction = replica.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value);
+            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();

@@ -479,7 +479,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var corrupt = Path.Combine(directory, $"authority-corrupt-{caseId}.zip");
         var probe = Path.Combine(directory, $"authority-probe-{caseId}.db");
         var service = new SqliteRuntimeBackupService(fixture.Clock);
-        Assert.True(service.CreateAndPublish(fixture.DatabasePath, valid).Success);
+        var created = service.CreateAndPublish(fixture.DatabasePath, valid);
+        Assert.True(created.Success, created.ErrorCode);
         RewriteArchiveDatabase(valid, corrupt, path => ApplyOwnerSemanticArchiveMutation(path, caseId));
         ExtractArchiveDatabase(corrupt, probe);
         AssertAcceptedMutationContradictionShape(caseId, probe);
@@ -535,7 +536,8 @@ public sealed class LocalRepositoryRuntimeBackupTests
         var previewTarget = Path.Combine(directory, $"success-preview-{archiveCase.Id}.db");
         var restoreTarget = Path.Combine(directory, $"success-restore-{archiveCase.Id}.db");
         var service = new SqliteRuntimeBackupService(fixture.Clock);
-        Assert.True(service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        var created = service.CreateAndPublish(fixture.DatabasePath, archive);
+        Assert.True(created.Success, created.ErrorCode);
         var archiveBefore = File.ReadAllBytes(archive);
 
         var inspection = service.Inspect(archive);

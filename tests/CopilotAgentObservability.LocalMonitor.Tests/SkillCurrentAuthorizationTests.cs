@@ -375,6 +375,30 @@ public sealed class SkillCurrentAuthorizationTests
         freshLease!.Dispose();
     }
 
+    [Fact]
+    public void RealProvider_FailedProposedGenerationRefreshLeavesCurrentGenerationUnchanged()
+    {
+        var provider = new SkillInvocationV2RegistryProviderV1();
+        var original = provider.CaptureGeneration();
+        Assert.NotNull(original);
+        ISkillRegistryGenerationCapture? proposed = null;
+        provider.CurrentGenerationChanging += authority =>
+        {
+            proposed = authority.CaptureGeneration();
+            throw new InvalidOperationException("projection_refresh_failed");
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load()));
+
+        Assert.Equal("projection_refresh_failed", exception.Message);
+        Assert.True(provider.TryAcquireGenerationReadLease(original!, out var originalLease));
+        originalLease!.Dispose();
+        Assert.NotNull(proposed);
+        Assert.False(provider.TryAcquireGenerationReadLease(proposed!, out var prematureLease));
+        Assert.Null(prematureLease);
+    }
+
     private static FixedTimeProvider Time() => new(ValidationAt);
 
     private static SessionSkillInvocationWrite NewWrite(

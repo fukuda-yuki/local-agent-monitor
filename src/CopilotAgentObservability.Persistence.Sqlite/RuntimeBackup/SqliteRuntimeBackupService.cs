@@ -75,6 +75,7 @@ public sealed class SqliteRuntimeBackupService
     private readonly Action<string>? checkpoint;
     private readonly Func<string, string> installedDoctorCheck;
     private readonly Func<string, bool> restoreFailureCleanup;
+    private ISkillRegistryGenerationAuthority? skillRegistryAuthority;
 
     public SqliteRuntimeBackupService(TimeProvider? timeProvider = null) : this(timeProvider, null, null) { }
 
@@ -94,6 +95,9 @@ public sealed class SqliteRuntimeBackupService
         this.installedDoctorCheck = installedDoctorCheck ?? DoctorCheck;
         this.restoreFailureCleanup = restoreFailureCleanup ?? RecoverInterruptedRestore;
     }
+
+    internal void ConfigureSkillRegistryAuthority(ISkillRegistryGenerationAuthority authority) =>
+        skillRegistryAuthority = authority ?? throw new ArgumentNullException(nameof(authority));
 
     public RuntimeBackupPreflightResult Initialize(string databasePath)
     {
@@ -316,14 +320,16 @@ public sealed class SqliteRuntimeBackupService
         if (PathEntryExists(output)) return CreateFailure(RuntimeBackupErrorCodes.OutputExists);
         var externalError = ValidateExternalState(database, scanRuntimeRoot: true, immutableDatabase: false);
         if (externalError is not null) return CreateFailure(externalError);
-        var sourcePreflight = PreflightForMigration(database);
+        var publicationTime = timeProvider.GetUtcNow();
+        RefreshProjectionForPublication(database, publicationTime);
+        var sourcePreflight = PreflightForMigration(database, immutableReadOnly: false, publicationTime);
         if (!sourcePreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
         try
         {
-            EnsureCurrentBackupTail(database);
+            EnsureCurrentBackupTail(database, publicationTime);
             checkpoint?.Invoke(CatalogAfterCreateTailCheckpoint);
-            if (!PreflightForMigration(database).Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
-            var result = CreateArchive(database, output, scanRuntimeRoot: true);
+            if (!PreflightForMigration(database, immutableReadOnly: false, publicationTime).Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
+            var result = CreateArchive(database, output, scanRuntimeRoot: true, publicationTime: publicationTime);
             if (!result.Success) return result;
             _ = TryAppendReceipt(database, "backup", result.ArchiveSha256!, "backup_succeeded", 0, false);
             return result;
@@ -332,6 +338,18 @@ public sealed class SqliteRuntimeBackupService
         catch (SqliteException) { return CreateFailure(RuntimeBackupErrorCodes.SnapshotStoreUnavailable); }
         catch (Exception exception) when (IsIo(exception)) { return CreateFailure(RuntimeBackupErrorCodes.PublishFailed); }
         catch (InvalidOperationException) { return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible); }
+    }
+
+    private void RefreshProjectionForPublication(string databasePath, DateTimeOffset publicationTime)
+    {
+        using var connection = Open(databasePath, SqliteOpenMode.ReadWrite);
+        using var transaction = connection.BeginTransaction(deferred: false);
+        using var installed = connection.CreateCommand();
+        installed.Transaction = transaction;
+        installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=3);";
+        if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime, skillRegistryAuthority);
+        transaction.Commit();
     }
 
     public RuntimeBackupInspectionResult Inspect(string bundlePath)
@@ -393,7 +411,7 @@ public sealed class SqliteRuntimeBackupService
             : new(false, RuntimeBackupErrorCodes.RestoreIncompatible);
     }
 
-    private RuntimeBackupPreflightResult PreflightForMigration(string databasePath, bool immutableReadOnly)
+    private RuntimeBackupPreflightResult PreflightForMigration(string databasePath, bool immutableReadOnly, DateTimeOffset? publicationTime = null)
     {
         if (!TryFullFile(databasePath, mustExist: true, out var database)) return new(false, RuntimeBackupErrorCodes.InvalidArguments);
         try
@@ -431,7 +449,7 @@ public sealed class SqliteRuntimeBackupService
                 || !HasValidSkillInvocationSnapshotParents(versions))
                 return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             if (!versions.ContainsKey("monitor")) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
-            if (!ValidateComponentShapes(database, versions, immutableReadOnly)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
+            if (!ValidateComponentShapes(database, versions, immutableReadOnly, publicationTime, publicationTime is null ? null : skillRegistryAuthority)) return new(false, RuntimeBackupErrorCodes.RestoreIncompatible, versions);
             var migrations = MigrationOrder.Where(component => SupportedComponents.TryGetValue(component, out var supported)
                     && (!versions.TryGetValue(component, out var current) || current < supported))
                 .Select(component => $"{component}:{(versions.TryGetValue(component, out var value) ? value : 0)}->{SupportedComponents[component]}").ToArray();
@@ -896,7 +914,8 @@ public sealed class SqliteRuntimeBackupService
         string databasePath,
         string outputPath,
         bool scanRuntimeRoot,
-        bool migrateSnapshotToCurrent = false)
+        bool migrateSnapshotToCurrent = false,
+        DateTimeOffset? publicationTime = null)
     {
         string? snapshot = null;
         string? partial = null;
@@ -923,7 +942,7 @@ public sealed class SqliteRuntimeBackupService
             checkpoint?.Invoke(RuntimeBackupCheckpoints.BeforeOnlineSnapshot);
             OnlineSnapshot(databasePath, snapshot);
             checkpoint?.Invoke(RuntimeBackupCheckpoints.AfterOnlineSnapshot);
-            var snapshotPreflight = PreflightForMigration(snapshot, immutableReadOnly: true);
+            var snapshotPreflight = PreflightForMigration(snapshot, immutableReadOnly: true, publicationTime);
             if (!snapshotPreflight.Success) return CreateFailure(RuntimeBackupErrorCodes.RestoreIncompatible);
             if (migrateSnapshotToCurrent)
             {
@@ -1302,7 +1321,9 @@ public sealed class SqliteRuntimeBackupService
     private static bool ValidateComponentShapes(
         string path,
         IReadOnlyDictionary<string, int> versions,
-        bool immutableReadOnly)
+        bool immutableReadOnly,
+        DateTimeOffset? publicationTime = null,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         using var connection = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly);
         if (!HasColumns(connection, "schema_version", "component", "version")) return false;
@@ -1339,7 +1360,7 @@ public sealed class SqliteRuntimeBackupService
                     if (versions["local_workspace_projection"] is 1 or 2)
                         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
                     else
-                        LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction);
+                        LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction, publicationTime, publicationTime is null ? null : skillRegistryAuthority);
                 }
             }
             catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)
@@ -2589,7 +2610,7 @@ public sealed class SqliteRuntimeBackupService
         if (reader.Read()) throw new InvalidOperationException("Runtime backup migration produced invalid foreign keys.");
     }
 
-    private void EnsureCurrentBackupTail(string path)
+    private void EnsureCurrentBackupTail(string path, DateTimeOffset? publicationTime = null)
     {
         Dictionary<string, int> versions;
         using (var read = Open(path, SqliteOpenMode.ReadOnly, immutableReadOnly: false))
@@ -2614,7 +2635,7 @@ public sealed class SqliteRuntimeBackupService
         using var transaction = connection.BeginTransaction(deferred: false);
         LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
         LocalArchiveSchemaV1.Ensure(connection, transaction);
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow());
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, publicationTime ?? timeProvider.GetUtcNow());
         // The child component installs only behind its declared parents. A current database that
         // predates Retention or Skill Projection has no parent graph to hang it on, and installing
         // it there would create the objects without a validatable owner.
