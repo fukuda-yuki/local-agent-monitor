@@ -586,15 +586,24 @@ internal sealed class SkillProjectionReadService
         if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction))
             return new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
 
-        var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds, acceptedAt);
+        if (registryAuthority is null && TableInstalled(connection, transaction, "skill_invocation_snapshots"))
+            return sessionIds.Distinct(StringComparer.Ordinal).ToDictionary(
+                static sessionId => sessionId,
+                static _ => new SkillProjectionCurrentInvocationProjection(null, "unavailable", []),
+                StringComparer.Ordinal);
+        var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
         var sdk = registryAuthority is null
             ? []
             : ReadCurrentSdkInvocationFacts(connection, transaction, sessionIds, registryAuthority, new FixedProjectionTimeProvider(acceptedAt));
         var result = new Dictionary<string, SkillProjectionCurrentInvocationProjection>(StringComparer.Ordinal);
+        var otelBySession = otel.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
+        var sdkBySession = sdk.GroupBy(static row => row.Fact.SessionId, StringComparer.Ordinal).ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
         foreach (var sessionId in sessionIds.Distinct(StringComparer.Ordinal))
         {
-            var sessionOtel = otel.Where(row => string.Equals(row.Fact.SessionId, sessionId, StringComparison.Ordinal)).ToArray();
-            var sessionSdk = sdk.Where(row => string.Equals(row.Fact.SessionId, sessionId, StringComparison.Ordinal)).ToArray();
+            var sessionOtel = otelBySession.GetValueOrDefault(sessionId, []);
+            var sessionSdk = sdkBySession.GetValueOrDefault(sessionId, []);
+            sessionOtel = sessionOtel.GroupBy(static row => (row.TraceId, row.SpanId)).Select(static group => group.First()).ToArray();
+            sessionSdk = sessionSdk.GroupBy(static row => (row.TraceId, row.SpanId)).Select(static group => group.First()).ToArray();
             if (sessionOtel.Length == 0 && sessionSdk.Length == 0) continue;
 
             if (sessionOtel.Length == 0)
@@ -636,31 +645,26 @@ internal sealed class SkillProjectionReadService
     }
 
     private static IReadOnlyList<InvocationFact> ReadCurrentOtelInvocationFacts(
-        SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset acceptedAt)
+        SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
-                   CASE WHEN item.state='retained_by_policy' THEN NULL ELSE item.expires_at END,invocation.trace_id,invocation.span_id
+                   invocation.trace_id,invocation.span_id
             FROM skill_projection_invocations invocation
             JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
             JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
             JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id AND revision.current_revision=generation.compatibility_revision
               AND revision.current_effective_state='resolved' AND revision.current_exact_version=invocation.source_application_version
-            JOIN raw_records raw ON raw.id=invocation.raw_record_id
-            JOIN retention_items item ON item.store_kind='raw_record' AND item.source_item_id=CAST(invocation.raw_record_id AS TEXT)
             WHERE invocation.source_arm='otel_trace_span' AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              AND item.state IN ('expiring','retained_by_policy') AND item.read_denied_at IS NULL AND item.deleted_at IS NULL AND item.error_code IS NULL
-              AND (item.state='retained_by_policy' OR item.expires_at COLLATE BINARY > $accepted_at COLLATE BINARY)
               AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input WHERE input.generation_id=generation.generation_id AND input.input_evidence_kind='deleted_before_digest_v10')
             ORDER BY invocation.session_id COLLATE BINARY,invocation.invocation_id;
             """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        command.Parameters.AddWithValue("$accepted_at", acceptedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
         using var reader = command.ExecuteReader();
         var result = new List<InvocationFact>();
-        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3)), reader.GetString(4), reader.GetString(5)));
+        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4)));
         return result;
     }
 

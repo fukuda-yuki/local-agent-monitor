@@ -1567,6 +1567,40 @@ public sealed class SkillProjectionGenerationTests
     }
 
     [Fact]
+    public void CurrentInvocationProjection_DeduplicatesExactOtelPairAndSurvivesRawExpiry()
+    {
+        using var database = new TestDatabase();
+        using var connection = Open(database.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE schema_version(component TEXT,version INTEGER);
+            INSERT INTO schema_version VALUES('skill_projection',1);
+            CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT PRIMARY KEY,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
+            CREATE TABLE skill_projection_generations(generation_id INTEGER PRIMARY KEY,compatibility_revision INTEGER,lifecycle TEXT);
+            CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
+            CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
+            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
+            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
+            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
+            INSERT INTO source_trace_compatibility_revisions VALUES('trace-1',7,'resolved','1.0.0');
+            INSERT INTO skill_projection_generations VALUES(1,7,'current');
+            INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
+            INSERT INTO skill_projection_invocations VALUES
+              (11,1,'otel_trace_span',41,3,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0'),
+              (12,1,'otel_trace_span',42,4,'trace-1','span-1','77777777-7777-7777-7777-777777777777','safe-skill','1.0.0');
+            """;
+        command.ExecuteNonQuery();
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        var result = SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction,
+            ["77777777-7777-7777-7777-777777777777"], DateTimeOffset.Parse("2026-08-26T00:00:00Z"), null);
+
+        var session = Assert.Single(result).Value;
+        Assert.Equal(1, session.InvocationCount);
+        Assert.Equal(["safe-skill"], session.SearchFacts.Select(static fact => fact.SkillName).Distinct());
+    }
+
+    [Fact]
     public void SdkClaimParticipant_InsertsUnderTheCallerTransactionAndRollsBackWithIt()
     {
         using var database = new TestDatabase();
