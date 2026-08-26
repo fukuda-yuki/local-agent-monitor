@@ -544,19 +544,19 @@ internal static class MonitorHost
             builder.Services.AddSingleton<ILocalRepositorySessionSnapshotContributor>(
                 new LocalWorkspaceSessionSnapshotContributor(timeProvider));
             builder.Services.AddSingleton<ILocalArchiveFactSnapshotContributor>(SqliteLocalArchiveFactSnapshotContributor.Instance);
-            builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
-                testOptions?.LocalRepositoryScopeSnapshotService
+            builder.Services.AddSingleton(services =>
+                testOptions?.LocalRepositoryScopeSnapshotService as SqliteLocalRepositoryScopeSnapshotService
                 ?? new SqliteLocalRepositoryScopeSnapshotService(
                     options.DatabasePath,
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
                     services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
-                    publicationGate: publicationGate));
+                    publicationGate: publicationGate,
+                    skillRegistryAuthority: skillRegistryAuthority));
+            builder.Services.AddSingleton<ILocalRepositoryScopeSnapshotService>(services =>
+                testOptions?.LocalRepositoryScopeSnapshotService
+                ?? services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             builder.Services.AddSingleton<ILocalRepositorySessionDetailSnapshotService>(services =>
-                new SqliteLocalRepositoryScopeSnapshotService(
-                    options.DatabasePath,
-                    services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
-                    services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
-                    publicationGate: publicationGate));
+                services.GetRequiredService<SqliteLocalRepositoryScopeSnapshotService>());
             if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
             {
                 builder.Services.AddHostedService(_ => localRepositoryHostedService);

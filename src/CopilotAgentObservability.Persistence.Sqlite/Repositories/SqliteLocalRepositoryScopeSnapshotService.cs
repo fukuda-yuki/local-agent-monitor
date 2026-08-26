@@ -37,7 +37,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         Action? finalReturnObserver = null,
         Func<SqliteConnection>? connectionFactory = null,
         Action<string, int>? catalogRowObserver = null,
-        ILocalWorkspacePublicationGate? publicationGate = null)
+        ILocalWorkspacePublicationGate? publicationGate = null,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentNullException.ThrowIfNull(sessionContributor);
@@ -47,7 +48,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         this.databasePath = Path.GetFullPath(databasePath);
         this.sessionContributor = sessionContributor;
         this.archiveContributor = archiveContributor;
-        this.detailContributor = detailContributor ?? new LocalWorkspaceSessionDetailSnapshotContributor();
+        this.detailContributor = detailContributor ?? new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: skillRegistryAuthority);
         this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
         this.compositionObserver = compositionObserver;
         this.capabilityEntryObserver = capabilityEntryObserver;
@@ -139,6 +140,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                         ReadPhase.Archive,
                         token => detailContributor.ReadAsync(capability, request.TargetSessionId!, token),
                         cancellationToken).ConfigureAwait(false);
+                    ValidateDetail(request.TargetSessionId!, detail);
                 }
 
                 var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
@@ -207,6 +209,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-detail-revision\0v1\0"));
         Append(session.SessionId); Append(session.AssignmentRevision); Append(session.ArchiveRevision); Append(session.Session);
+        Append(detail.CanonicalRevisionInput ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
+        Append(detail.SkillRegistryGenerationIdentity ?? throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable"));
         foreach (var execution in detail.Executions) Append(execution);
         foreach (var node in detail.Nodes) Append(node);
         foreach (var edge in detail.Edges) Append(edge);
@@ -219,6 +223,75 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
             hash.AppendData(length); hash.AppendData(bytes);
         }
+    }
+
+    private static void ValidateDetail(string sessionId, LocalWorkspaceSessionDetailContribution detail)
+    {
+        if (detail is null || detail.Executions is null || detail.Nodes is null || detail.Edges is null || detail.Content is null)
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        var executions = new Dictionary<string, LocalWorkspaceExecutionDetail>(StringComparer.Ordinal);
+        foreach (var execution in detail.Executions)
+        {
+            if (execution.SessionId != sessionId || !executions.TryAdd(execution.ExecutionId, execution)
+                || execution.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
+                || execution.Status is not ("active" or "completed" or "failed" or "unknown")
+                || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        }
+        var nodes = new Dictionary<string, LocalWorkspaceNodeDetail>(StringComparer.Ordinal);
+        var roots = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var node in detail.Nodes)
+        {
+            if (node.SessionId != sessionId || !executions.ContainsKey(node.ExecutionId) || !nodes.TryAdd(node.NodeId, node)
+                || node.RelationshipAuthority is not ("exact" or "explicit" or "unknown")
+                || node.Kind is not ("execution" or "agent" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
+                || node.NameState is not ("recorded" or "not_observed" or "invalid")
+                || (node.NameState == "recorded") != (node.NameText is not null)
+                || node.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
+                || node.Status is not ("active" or "completed" or "failed" or "unknown")
+                || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            if (node.SourceKind == "execution_root") roots[node.ExecutionId] = roots.GetValueOrDefault(node.ExecutionId) + 1;
+            if (node.SourceKind == "execution_root" && (node.Kind != "execution" || node.ParentNodeId is not null || node.RelationshipAuthority != "exact")
+                || node.Kind == "unknown_relation_group" && (node.ParentNodeId is not null || node.RelationshipAuthority != "unknown"))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        }
+        if (executions.Keys.Any(id => roots.GetValueOrDefault(id) != 1))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        foreach (var node in detail.Nodes)
+        {
+            if (node.ParentNodeId is not null
+                && (!nodes.TryGetValue(node.ParentNodeId, out var parent) || parent.ExecutionId != node.ExecutionId))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            var seen = new HashSet<string>(StringComparer.Ordinal) { node.NodeId };
+            var current = node;
+            while (current.ParentNodeId is not null)
+            {
+                if (!seen.Add(current.ParentNodeId) || !nodes.TryGetValue(current.ParentNodeId, out current))
+                    throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+            }
+        }
+        foreach (var edge in detail.Edges)
+        {
+            if (!nodes.TryGetValue(edge.NodeId, out var node) || !nodes.TryGetValue(edge.RelatedNodeId, out var related)
+                || node.ExecutionId != related.ExecutionId || edge.RelationKind is not ("parent" or "retry" or "recovery")
+                || edge.RelationshipAuthority is not ("exact" or "explicit"))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        }
+        var contentKeys = new HashSet<(string NodeId, string Part)>();
+        foreach (var content in detail.Content)
+            if (!nodes.ContainsKey(content.NodeId)
+                || !contentKeys.Add((content.NodeId, content.Part))
+                || content.Part is not ("instruction" or "tool_input" or "tool_result" or "error_message" or "subagent_input" or "event_content")
+                || content.State is not ("available" or "not_captured" or "expired" or "deleted" or "read_denied" or "oversized" or "invalid"))
+                throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+
+        static bool ValidTime(string authority, long? start, long? end, long? duration) => authority switch
+        {
+            "recorded" => start is not null && ((end is null && duration is null) || (end >= start && duration == (end - start) / 10_000)),
+            "missing" or "invalid" => start is null && end is null && duration is null,
+            _ => false,
+        };
     }
 
     private static FrozenSession[] ValidateAndFreezeSessionRows(
@@ -591,7 +664,8 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 ArchiveState: sessionArchiveFact.State,
                 ArchiveRevision: sessionArchiveFact.Revision,
                 IsEffectivelyEligible: isEffectivelyEligible,
-                ArchiveExclusionReason: exclusionReason));
+                ArchiveExclusionReason: exclusionReason,
+                AssignedRepositoryArchiveRevision: repositoryId is null ? null : archive.Repositories[repositoryId].Revision));
         }
 
         var repositories = new LocalRepositoryCatalogSnapshot[catalog.Repositories.Count];

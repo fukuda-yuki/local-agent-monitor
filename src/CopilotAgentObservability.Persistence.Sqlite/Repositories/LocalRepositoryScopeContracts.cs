@@ -144,7 +144,8 @@ internal sealed record LocalRepositoryScopeSessionSnapshot(
     LocalArchiveState ArchiveState,
     long ArchiveRevision,
     bool IsEffectivelyEligible,
-    string? ArchiveExclusionReason);
+    string? ArchiveExclusionReason,
+    long? AssignedRepositoryArchiveRevision = null);
 
 internal sealed record LocalRepositoryScopeSnapshot(
     LocalRepositoryScopeRequest Request,

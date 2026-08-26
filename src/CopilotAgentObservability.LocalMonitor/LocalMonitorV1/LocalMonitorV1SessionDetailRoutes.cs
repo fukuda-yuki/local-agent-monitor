@@ -31,9 +31,10 @@ internal static class LocalMonitorV1SessionDetailRoutes
             var bytes=kind switch{Kind.Summary=>LocalMonitorV1SessionDetailApplication.SerializeSummary(snapshot),Kind.Timeline=>LocalMonitorV1SessionDetailApplication.SerializeTimeline(snapshot,query.ExecutionId,query.ParentNodeId,query.Limit,query.After,key),_=>LocalMonitorV1SessionDetailApplication.SerializeNode(snapshot,nodeId!)};
             await Success(context,bytes);
         }
-        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error=="session_not_found"?404:409,e.Error);}
+        catch(LocalWorkspaceSessionDetailException e){await Error(context,e.Error switch{"session_not_found"=>404,"local_monitor_ui_unavailable"=>503,_=>409},e.Error);}
         catch(LocalRepositoryScopeSnapshotException){await Error(context,503,"persistence_busy");}
-        catch(LocalMonitorV1SessionDetailException e){var status=e.Error switch{"execution_not_found" or "node_not_found"=>404,"invalid_cursor"=>400,_=>409};await Error(context,status,e.Error);}
+        catch(InvalidOperationException){await Error(context,503,"local_monitor_ui_unavailable");}
+        catch(LocalMonitorV1SessionDetailException e){var status=e.Error switch{"execution_not_found" or "node_not_found"=>404,"invalid_cursor"=>400,"local_monitor_ui_unavailable"=>503,_=>409};await Error(context,status,e.Error);}
     }
 
     private static bool TryParse(string raw,Kind kind,out Query query)

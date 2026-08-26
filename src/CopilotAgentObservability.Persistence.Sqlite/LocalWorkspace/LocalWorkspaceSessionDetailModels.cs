@@ -4,13 +4,20 @@ internal sealed record LocalWorkspaceSessionDetailContribution(
     IReadOnlyList<LocalWorkspaceExecutionDetail> Executions,
     IReadOnlyList<LocalWorkspaceNodeDetail> Nodes,
     IReadOnlyList<LocalWorkspaceNodeEdgeDetail> Edges,
-    IReadOnlyList<LocalWorkspaceContentAvailability> Content);
+    IReadOnlyList<LocalWorkspaceContentAvailability> Content,
+    IReadOnlyList<string>? NativeSessionIds = null,
+    IReadOnlyList<string>? Versions = null,
+    string? InstructionSourceIdentity = null,
+    long? InstructionAdditionalCount = null,
+    string? CanonicalRevisionInput = null,
+    string? SkillRegistryGenerationIdentity = null);
 
 internal sealed record LocalWorkspaceExecutionDetail(
     string ExecutionId, string SessionId, string SourceKind, string SourceIdentity, long SourceOrdinal,
     string Lifecycle, string Status, string? Model, string? TraceId,
     string TimeAuthority, long? StartUtcTicks, long? EndUtcTicks, long? DurationMilliseconds,
-    LocalWorkspaceActivityFacts Activity, LocalWorkspaceTokenFacts Tokens);
+    LocalWorkspaceActivityFacts Activity, LocalWorkspaceTokenFacts Tokens,
+    string? SourceSurface = null, string? Version = null);
 
 internal sealed record LocalWorkspaceNodeDetail(
     string NodeId, string SessionId, string ExecutionId, string SourceKind, string SourceIdentity, long SourceOrdinal,
@@ -22,4 +29,4 @@ internal sealed record LocalWorkspaceNodeDetail(
 internal sealed record LocalWorkspaceNodeEdgeDetail(
     string NodeId, string RelatedNodeId, string RelationKind, string RelationshipAuthority, long SourceOrdinal);
 
-internal sealed record LocalWorkspaceContentAvailability(string NodeId, string Part, string State);
+internal sealed record LocalWorkspaceContentAvailability(string NodeId, string Part, string State, string? SourceItemId = null, string? RevisionInput = null);

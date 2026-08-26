@@ -39,7 +39,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
         {
             statementObserver?.Invoke("sessions");
             command.Transaction = transaction;
-            command.CommandText = retentionInstalled ? """
+            command.CommandText = retentionInstalled ? (targetSessionId is null ? """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
                        CASE WHEN p.label_state='recorded' AND CASE WHEN c.event_id IS NOT NULL
                          AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
@@ -55,7 +55,36 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id
                 LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
-                WHERE ($target_session_id IS NULL OR p.session_id=$target_session_id)
+                WHERE 1=1
+                ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
+                """ : """
+                SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
+                       CASE WHEN p.label_state='recorded' AND CASE WHEN c.event_id IS NOT NULL
+                         AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                         AND i.expires_at=c.expires_at COLLATE BINARY
+                         AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN 1 ELSE 0 END=0 THEN 'expired' ELSE p.label_state END,
+                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL
+                         AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                         AND i.expires_at=c.expires_at COLLATE BINARY
+                         AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at COLLATE BINARY > $now COLLATE BINARY)) THEN p.label_text END,
+                       p.status,p.completeness,p.source_state,p.model_state,
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                FROM local_workspace_sessions p
+                LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
+                LEFT JOIN session_event_content c ON c.event_id=e.event_id
+                LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
+                WHERE p.session_id=$target_session_id
+                ORDER BY p.session_id COLLATE BINARY LIMIT 2;
+                """) : (targetSessionId is null ? """
+                SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
+                       CASE WHEN p.label_state='recorded' AND (c.event_id IS NULL OR c.expires_at COLLATE BINARY <= $now COLLATE BINARY) THEN 'expired' ELSE p.label_state END,
+                       CASE WHEN p.label_state='recorded' AND c.event_id IS NOT NULL AND c.expires_at COLLATE BINARY > $now COLLATE BINARY THEN p.label_text END,
+                       p.status,p.completeness,p.source_state,p.model_state,
+                       timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed
+                FROM local_workspace_sessions p
+                LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
+                LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
+                WHERE 1=1
                 ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
                 """ : """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
@@ -66,9 +95,9 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
-                WHERE ($target_session_id IS NULL OR p.session_id=$target_session_id)
-                ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
-                """;
+                WHERE p.session_id=$target_session_id
+                ORDER BY p.session_id COLLATE BINARY LIMIT 2;
+                """);
             command.Parameters.AddWithValue("$now", now);
             command.Parameters.AddWithValue("$target_session_id", (object?)targetSessionId ?? DBNull.Value);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);

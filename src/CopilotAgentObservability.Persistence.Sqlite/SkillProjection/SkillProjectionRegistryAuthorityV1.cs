@@ -53,6 +53,9 @@ internal interface ISkillRegistryGenerationAuthority
     // generation. Returns false on any mismatch.
     bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease);
 
+    string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
+        capture.GetType().FullName ?? "skill-registry-generation";
+
     // Whether the exact producer tuple is accepted by the generation behind the lease.
     bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple);
 }

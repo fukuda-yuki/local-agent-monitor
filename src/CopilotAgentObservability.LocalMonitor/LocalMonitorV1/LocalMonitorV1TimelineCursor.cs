@@ -92,7 +92,7 @@ internal static class LocalMonitorV1TimelineCursor
     private static void Validate(LocalMonitorV1TimelinePosition position)
     {
         if (position.TimeGroup > 2
-            || (position.TimeGroup == 0) != (position.UtcTicks != 0)
+            || (position.TimeGroup != 0 && position.UtcTicks != 0)
             || position.NodeId.Length != 37
             || !position.NodeId.StartsWith("node-", StringComparison.Ordinal)
             || position.NodeId[5..].Any(static c => !Uri.IsHexDigit(c) || char.IsUpper(c)))

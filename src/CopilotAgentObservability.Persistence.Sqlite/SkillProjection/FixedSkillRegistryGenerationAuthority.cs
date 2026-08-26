@@ -57,6 +57,12 @@ internal sealed class FixedSkillRegistryGenerationAuthority : ISkillRegistryGene
         ISkillRegistryGenerationLease lease) =>
         ReferenceEquals(capture, generation) && ReferenceEquals(lease, generation);
 
+    public string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease)
+    {
+        if (!VerifyGenerationIdentity(capture, lease)) throw new InvalidOperationException("skill_registry_generation_not_current");
+        return $"{revision}:{artifactFingerprint}";
+    }
+
     public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
     {
         ArgumentNullException.ThrowIfNull(tuple);

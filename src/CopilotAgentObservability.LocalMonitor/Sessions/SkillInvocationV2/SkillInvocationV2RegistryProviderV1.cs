@@ -77,6 +77,13 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
         }
     }
 
+    public string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease)
+    {
+        if (capture is not GenerationCapture typedCapture || lease is not GenerationLease typedLease
+            || !VerifyGenerationIdentity(capture, lease)) throw new InvalidOperationException("skill_registry_generation_not_current");
+        return typedCapture.Generation.Identity.ToString("D");
+    }
+
     public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
     {
         if (lease is not GenerationLease typedLease)
@@ -130,6 +137,11 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
         public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) =>
             capture is GenerationCapture typedCapture && lease is ProposedGenerationLease typedLease
             && ReferenceEquals(typedCapture.Generation, generation) && ReferenceEquals(typedLease.Generation, generation);
+        public string GetCanonicalGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease)
+        {
+            if (!VerifyGenerationIdentity(capture, lease)) throw new InvalidOperationException("skill_registry_generation_not_current");
+            return generation.Identity.ToString("D");
+        }
         public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
         {
             if (lease is not ProposedGenerationLease typed || !ReferenceEquals(typed.Generation, generation)) return false;
