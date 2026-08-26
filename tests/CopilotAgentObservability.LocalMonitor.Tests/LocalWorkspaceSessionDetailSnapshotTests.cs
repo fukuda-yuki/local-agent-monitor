@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.Persistence.Sqlite;
 using Microsoft.Data.Sqlite;
@@ -8,6 +9,20 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalWorkspaceSessionDetailSnapshotTests
 {
+    [Theory]
+    [InlineData("Summary")]
+    [InlineData("Timeline")]
+    [InlineData("Node")]
+    public async Task DetailCommandsAndFullScanWorkAreIndependentOfUnrelatedSessionCardinality(string kindName)
+    {
+        var one = await ObserveDetailRead(kindName, 1);
+        var tenThousand = await ObserveDetailRead(kindName, 10_000);
+
+        Assert.Equal(one.Sql, tenThousand.Sql);
+        Assert.Equal(one.FullScanSteps, tenThousand.FullScanSteps);
+        Assert.NotEmpty(one.Sql);
+    }
+
     [Fact]
     public async Task NodeReadRejectsAProjectionWithFourThousandNinetySevenTotalNodes()
     {
@@ -164,6 +179,100 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
             command.ExecuteNonQuery();
         }
         transaction.Commit();
+    }
+
+    private static async Task<ObservedRead> ObserveDetailRead(string kindName, int sessionCount)
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            """);
+        using (var retentionTransaction = connection.BeginTransaction())
+        {
+            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retentionTransaction);
+            retentionTransaction.Commit();
+        }
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        using (var transaction = connection.BeginTransaction())
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO sessions VALUES($id,'active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00');";
+            var id = command.Parameters.Add("$id", SqliteType.Text);
+            for (var index = 1; index < sessionCount; index++)
+            {
+                id.Value = $"01990000-0000-7000-8000-{index:D12}";
+                command.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE skill_projection_invocations(generation_id TEXT,invocation_id TEXT,session_id TEXT);
+            CREATE TABLE skill_projection_sdk_claims(claim_id TEXT,session_id TEXT);
+            CREATE TABLE skill_invocation_snapshots(snapshot_id TEXT,session_id TEXT);
+            CREATE TABLE skill_invocation_snapshot_receipts(snapshot_id TEXT);
+            CREATE TABLE skill_projection_trace_heads(trace_id TEXT);
+            """);
+        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE session_id='018f0000-0000-7000-8000-000000000001';").Single();
+        var kind = Enum.Parse<LocalRepositorySessionDetailRequestKind>(kindName);
+        var request = new LocalRepositorySessionDetailRequest(kind, SessionId,
+            NodeId: kind == LocalRepositorySessionDetailRequestKind.Node ? rootId : null);
+        using var readTransaction = connection.BeginTransaction();
+        using var observer = new NativeDetailObserver(connection);
+        await new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: FixedSkillRegistryGenerationAuthority.Load())
+            .ReadAsync(new DirectReadTransaction(connection, readTransaction), request, CancellationToken.None);
+        return new(observer.Sql.ToArray(), observer.FullScanSteps.ToArray());
+    }
+
+    private sealed record ObservedRead(IReadOnlyList<string> Sql, IReadOnlyList<int> FullScanSteps);
+
+    private sealed class NativeDetailObserver : IDisposable
+    {
+        private const uint Statement = 0x01;
+        private const uint Profile = 0x02;
+        private const int FullScanStep = 1;
+        private readonly IntPtr database;
+        private readonly TraceCallback callback;
+        private readonly HashSet<IntPtr> topLevel = [];
+        internal List<string> Sql { get; } = [];
+        internal List<int> FullScanSteps { get; } = [];
+
+        internal NativeDetailObserver(SqliteConnection connection)
+        {
+            database = connection.Handle.DangerousGetHandle();
+            callback = Observe;
+            Assert.Equal(0, sqlite3_trace_v2(database, Statement | Profile, callback, IntPtr.Zero));
+        }
+
+        private int Observe(uint kind, IntPtr context, IntPtr statement, IntPtr detail)
+        {
+            if (kind == Statement)
+            {
+                var sql = Marshal.PtrToStringUTF8(detail) ?? string.Empty;
+                if (!sql.TrimStart().StartsWith("-- ", StringComparison.Ordinal))
+                {
+                    topLevel.Add(statement);
+                    Sql.Add(string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
+                }
+            }
+            else if (kind == Profile && topLevel.Remove(statement))
+                FullScanSteps.Add(sqlite3_stmt_status(statement, FullScanStep, 0));
+            return 0;
+        }
+
+        public void Dispose()
+        {
+            sqlite3_trace_v2(database, 0, null, IntPtr.Zero);
+            GC.KeepAlive(callback);
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int TraceCallback(uint kind, IntPtr context, IntPtr statement, IntPtr detail);
+        [DllImport("e_sqlite3", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_trace_v2(IntPtr database, uint mask, TraceCallback? callback, IntPtr context);
+        [DllImport("e_sqlite3", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_stmt_status(IntPtr statement, int operation, int resetFlag);
     }
 
     private sealed class DirectReadTransaction(SqliteConnection connection, SqliteTransaction transaction) : ILocalRepositoryReadTransaction

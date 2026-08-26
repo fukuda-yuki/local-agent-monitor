@@ -358,6 +358,9 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             && ValidTokenFact(value.NewInput) && ValidTokenFact(value.CacheReadRatioBasisPoints)
             && (value.Total.Value is null || value.Input.Value is null || value.Output.Value is null
                 || value.Total.Value >= value.Input.Value + value.Output.Value)
+            && (value.CacheRead.Value is null || value.Input.Value is not null && value.CacheRead.Value <= value.Input.Value)
+            && (value.NewInput.Value is null || value.Input.Value is not null && value.CacheRead.Value is not null
+                && value.NewInput.Value == value.Input.Value - value.CacheRead.Value)
             && (value.CacheReadRatioBasisPoints.Value is null || value.CacheReadRatioBasisPoints.Value is >= 0 and <= 10_000);
         static bool SortedUnique(IReadOnlyList<string>? values)
         {
@@ -368,6 +371,11 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
             return true;
         }
     }
+
+    internal static void ValidateDetailForTest(
+        string sessionId,
+        LocalRepositorySessionDetailRequest request,
+        LocalWorkspaceSessionDetailContribution detail) => ValidateDetail(sessionId, request, detail);
 
     private static FrozenSession[] ValidateAndFreezeSessionRows(
         LocalRepositorySessionContribution contribution,
