@@ -132,9 +132,11 @@ internal static class LocalMonitorV1CollectionApplication
     private static bool Matches(LocalRepositoryScopeSessionSnapshot row, LocalMonitorV1SessionSearchRequest request)
     {
         var p = (LocalWorkspaceProjectionRow)row.Session;
-        var acceptedAt = p.SortGroup == 0 ? DateTimeOffset.FromUnixTimeMilliseconds(p.SortEpochMilliseconds) : (DateTimeOffset?)null;
-        return (request.From is null || acceptedAt is not null && acceptedAt.Value >= request.From.Value)
-            && (request.To is null || acceptedAt is not null && acceptedAt.Value < request.To.Value)
+        var acceptedEpochMilliseconds = p.SortGroup == 0 ? p.SortEpochMilliseconds : (long?)null;
+        var fromEpochMilliseconds = request.From?.ToUnixTimeMilliseconds();
+        var toEpochMilliseconds = request.To?.ToUnixTimeMilliseconds();
+        return (fromEpochMilliseconds is null || acceptedEpochMilliseconds is not null && acceptedEpochMilliseconds.Value >= fromEpochMilliseconds.Value)
+            && (toEpochMilliseconds is null || acceptedEpochMilliseconds is not null && acceptedEpochMilliseconds.Value < toEpochMilliseconds.Value)
             && (request.Sources.Count == 0 || p.Sources.Values.Any(request.Sources.Contains))
             && (request.Models.Count == 0 || p.Models.Values.Any(request.Models.Contains))
             && (request.Statuses.Count == 0 || request.Statuses.Contains(p.Status))

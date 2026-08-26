@@ -41,6 +41,29 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Fact]
+    public void BackfillAcceptsOnlyExplicitOffsetInstantsAndFallsThroughInvalidCandidates()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000011','active','partial',NULL,NULL,'malformed',NULL,'2026-08-24T09:00:00.0000000+09:00','not_captured','2026-08-24T01:00:00.0000000+00:00','2026-08-24T09:00:00.0000000+09:00');
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000012','active','partial',NULL,NULL,'2026-08-24T00:00:00',NULL,'2026-08-23T20:00:00.0000000-04:00','not_captured','malformed','2026-08-23T20:00:00.0000000-04:00');
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000013','active','partial',NULL,NULL,' 2026-08-24T00:00:00.0000000+00:00 ',NULL,'2026-08-24','not_captured','2026-08-24T00:00:00','2026-08-24');
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000014','active','partial',NULL,NULL,'2026-08-24T14:00:00.1234567+14:00',NULL,'2026-08-24T00:00:00.1234567+00:00','not_captured','2026-08-24T00:00:01.0000000+00:00','2026-08-24T00:00:00.1234567+00:00');
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(
+            ["0:1787533200000", "0:1787529600000", "1:0", "0:1787529600123"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT sort_group||':'||sort_epoch_ms FROM local_workspace_sessions ORDER BY session_id;"));
+        Assert.Equal(
+            ["2026-08-24T00:00:00.1234567+00:00"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT started_at FROM local_workspace_sessions WHERE session_id='0198f5b8-0c00-7000-8000-000000000014';"));
+    }
+
+    [Fact]
     public void BackfillUsesTwoStartedAtGroupsAndPersistsAllClosedSourceTokens()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();

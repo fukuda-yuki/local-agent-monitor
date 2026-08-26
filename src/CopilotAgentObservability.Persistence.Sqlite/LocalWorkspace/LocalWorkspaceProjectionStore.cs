@@ -1,12 +1,17 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalWorkspaceProjectionStore
 {
+    private static readonly Regex ExplicitOffsetInstant = new(
+        "^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,7}))?(?<offset>Z|[+-][0-9]{2}:[0-9]{2})$",
+        RegexOptions.CultureInvariant);
+
     internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {
         var ids = ReadSessionIds(connection, transaction);
@@ -205,8 +210,24 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string?, string?>("local_workspace_search", static value => value is null ? null : Search(value), isDeterministic: true);
     }
 
-    private static bool TryInstant(string? value, out DateTimeOffset instant) =>
-        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out instant);
+    private static bool TryInstant(string? value, out DateTimeOffset instant)
+    {
+        instant = default;
+        if (value is null) return false;
+        var match = ExplicitOffsetInstant.Match(value);
+        if (!match.Success) return false;
+        var fraction = match.Groups["fraction"].Value;
+        var utc = match.Groups["offset"].Value == "Z";
+        var format = "yyyy-MM-dd'T'HH:mm:ss"
+            + (fraction.Length == 0 ? string.Empty : "." + new string('f', fraction.Length))
+            + (utc ? "'Z'" : "zzz");
+        return DateTimeOffset.TryParseExact(
+            value,
+            format,
+            CultureInfo.InvariantCulture,
+            utc ? DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal : DateTimeStyles.None,
+            out instant);
+    }
 
     private static bool TryReadInstruction(string type, string json, out string text)
     {

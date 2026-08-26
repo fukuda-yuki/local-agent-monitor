@@ -43,6 +43,32 @@ public sealed class LocalMonitorV1CollectionApplicationTests
     }
 
     [Fact]
+    public void DateWindowQuantizesSubMillisecondBoundsToAcceptedEpochAcrossCursorPages()
+    {
+        var sessions = new[]
+        {
+            Session(1) with { Session = Projection(1, 0, -2, ["label"]) },
+            Session(2) with { Session = Projection(2, 0, -1, ["label"]) },
+            Session(3) with { Session = Projection(3, 0, 0, ["label"]) },
+            Session(4) with { Session = Projection(4, 0, 1, ["label"]) }
+        };
+        var request = Parse("{\"schema_version\":\"local-monitor-session-search.request.v1\",\"scope\":\"all\",\"repository_id\":null,\"archive_scope\":\"active_only\",\"from\":\"1969-12-31T23:59:59.9985000+00:00\",\"to\":\"1970-01-01T00:00:00.0019000+00:00\",\"source\":[],\"model\":[],\"status\":[],\"has_skill\":null,\"has_subagent\":null,\"has_error\":null,\"has_retry\":null,\"q\":null,\"cursor\":null,\"limit\":2}");
+        var snapshot = new LocalRepositoryScopeSnapshot(new(LocalRepositoryScopeKind.All, null), [], sessions);
+        var key = new byte[32];
+
+        using var first = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request, key));
+        var cursor = first.RootElement.GetProperty("next_cursor").GetString();
+        using var second = JsonDocument.Parse(LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request with { Cursor = cursor }, key));
+        var ids = first.RootElement.GetProperty("items").EnumerateArray()
+            .Concat(second.RootElement.GetProperty("items").EnumerateArray())
+            .Select(item => item.GetProperty("session_id").GetString()!)
+            .ToArray();
+
+        Assert.Equal([sessions[2].SessionId, sessions[1].SessionId, sessions[0].SessionId], ids);
+        Assert.Equal(ids.Length, ids.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
     public void ValidAndInvalidTimesCrossCursorWithoutDropsOrDuplicates()
     {
         var sessions = new[] { Session(1,status:"active",startedAt:"2026-01-02T00:00:00.0000000+00:00"), Session(2,status:"completed",startedAt:"2026-01-01T00:00:00.0000000+00:00"), Session(3,status:"active",startedAt:null), Session(4,status:"completed",startedAt:null) };
