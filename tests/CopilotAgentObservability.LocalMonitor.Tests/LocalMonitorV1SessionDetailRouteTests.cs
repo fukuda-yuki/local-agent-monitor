@@ -1,10 +1,32 @@
 using System.Net;
+using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalMonitorV1SessionDetailRouteTests
 {
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
+
+    [Fact]
+    public async Task SummaryReadsASeededSessionThroughTheProductionCoordinator()
+    {
+        using var temp=new MonitorTempDirectory();
+        var session=AlertCenterRouteTests.SeedPersistedTraceAndSession(temp,"00000000000000000000000000000001",authoritativeToolStatus:true);
+        await using var host=await MonitorTestHost.StartAsync(temp);
+
+        _=await host.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>()
+            .ReadDetailAsync(session.ToString("D"),CancellationToken.None);
+
+        using var response=await host.Client.GetAsync($"/api/local-monitor/v1/sessions/{session:D}/summary");
+
+        Assert.Equal(HttpStatusCode.OK,response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8",response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"],response.Headers.GetValues("Cache-Control"));
+        var bytes=await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes.Length,response.Content.Headers.ContentLength);
+        Assert.Contains("\"schema_version\":\"local-monitor-session-summary.response.v1\"",System.Text.Encoding.UTF8.GetString(bytes),StringComparison.Ordinal);
+    }
 
     [Theory]
     [InlineData("PUT")]
