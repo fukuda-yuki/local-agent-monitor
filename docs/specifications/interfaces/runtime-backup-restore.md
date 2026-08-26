@@ -447,6 +447,21 @@ snapshot backup adds no body/path copy, raw column, ZIP member, sanitized
 carrier, or empty sanitized marker. OTel-only `not_captured` observations have
 no snapshot row to back up.
 
+Runtime backup uses three deliberately distinct Workspace validation contexts.
+Live publication (`create`, including online publication) loads the canonical
+embedded #154 registry history, acquires the host/private publication gate, and
+refreshes with that immutable current-generation authority before validating or
+copying the database. Archive `inspect` is structural only: it proves the exact
+v3 objects, normalized facts, source identities, and Retention graph/lifetimes,
+but does not reinterpret a historical SDK tuple against the executable's current
+registry or claim that the tuple is currently authorized. Preview and restore
+staging load the same canonical registry implementation used by Local Monitor
+and rerun v1/v2-to-v3 or current-v3 Workspace projection with one fixed authority
+before comparison or atomic swap. A missing, incomplete, or invalid registry
+history is `restore_incompatible` before the first database mutation; it is never
+treated as an empty generation. Revoked SDK claims remain stored but cannot
+produce a current Workspace fact.
+
 The canonical component DDL artifact is exact UTF-8 without BOM, LF only, one
 final LF, 9,213 bytes, and SHA-256
 `502f787c28b13363826aeccde96979ed22dc89c8ee137593922b106528935d7c`.

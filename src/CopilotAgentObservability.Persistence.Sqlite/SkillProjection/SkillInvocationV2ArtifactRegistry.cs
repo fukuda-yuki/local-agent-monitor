@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
+namespace CopilotAgentObservability.Persistence.Sqlite;
 
 public enum SkillInvocationV2CompatibilityDisposition
 {
@@ -29,10 +29,10 @@ public sealed record SkillInvocationV2CompatibilityRegistryRevision(
 
 public sealed class SkillInvocationV2ArtifactRegistry
 {
-    private const string SchemaResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
-    private const string SidecarResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
-    private const string RegistryR0001ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0001.json";
-    private const string RegistryR0002ResourceName = "CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.Artifacts.compatibility-registry-r0002.json";
+    private const string SchemaResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.json";
+    private const string SidecarResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.github-copilot-sdk.skill-invoked.v1.schema.sha256";
+    private const string RegistryR0001ResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.compatibility-registry-r0001.json";
+    private const string RegistryR0002ResourceName = "CopilotAgentObservability.Persistence.Sqlite.SkillProjection.Artifacts.compatibility-registry-r0002.json";
     private const string SchemaFingerprintValue = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
     private const string RegistryR0001Fingerprint = "3ae5d255647edad6e23f077c3e9042be50d593211cd9a90d6c9f7210c53bfdda";
     private const string RegistryR0002Fingerprint = "e3da4e7334f4e1645de315820181d2752f71ddb9aeba4355a659d185165daaf6";

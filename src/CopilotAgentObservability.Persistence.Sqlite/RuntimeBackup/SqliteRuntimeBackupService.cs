@@ -105,6 +105,8 @@ public sealed class SqliteRuntimeBackupService
         this.checkpoint = checkpoint;
         this.installedDoctorCheck = installedDoctorCheck ?? DoctorCheck;
         this.restoreFailureCleanup = restoreFailureCleanup ?? RecoverInterruptedRestore;
+        skillRegistryAuthority = FixedSkillRegistryGenerationAuthority.Load();
+        publicationGate = new LocalWorkspacePublicationGate();
     }
 
     internal void ConfigureSkillRegistryAuthority(ISkillRegistryGenerationAuthority authority) =>
@@ -2499,6 +2501,8 @@ public sealed class SqliteRuntimeBackupService
         IReadOnlyDictionary<string, int> versions,
         bool restorableSafetyCopy)
     {
+        var authority = skillRegistryAuthority
+            ?? throw new InvalidOperationException("Skill registry authority is unavailable for restore staging.");
         if (HasCompleteCurrentVector(versions))
         {
             _ = ValidateInstalledDatabase(path, immutableReadOnly: false);
@@ -2512,6 +2516,11 @@ public sealed class SqliteRuntimeBackupService
                         connection,
                         transaction);
                     SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
+                    LocalWorkspaceProjectionStore.Refresh(
+                        connection,
+                        transaction,
+                        timeProvider.GetUtcNow(),
+                        authority);
                     EnsureForeignKeysValid(connection, transaction);
                     transaction.Commit();
                 }
@@ -2544,7 +2553,7 @@ public sealed class SqliteRuntimeBackupService
                     retention.InitializeForWrite(connection, transaction);
                 SkillProjectionSchemaV1.NormalizeRestoredLeases(connection, transaction);
                 SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
-                LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow(), skillRegistryAuthority);
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, timeProvider.GetUtcNow(), authority);
                 EnsureDoctorSchema(connection, transaction);
                 SqliteFirstTraceNavigationStore.EnsureSchema(connection, transaction);
                 HistoricalInstructionAnalysisSchemaV1.Ensure(connection, transaction);

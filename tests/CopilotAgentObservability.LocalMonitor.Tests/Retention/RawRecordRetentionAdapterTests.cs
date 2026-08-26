@@ -92,6 +92,23 @@ public sealed class RawRecordRetentionAdapterTests
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item;"));
     }
 
+    [Fact]
+    public async Task RawAdapter_RemovesToolAndOtelSkillFactsInOwningDeletionTransaction()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.AddWorkspaceFactsForTargetRawRecord();
+        var participant = new RemovingWorkspaceFactsParticipant();
+
+        var result = await new RawRecordRetentionAdapter(
+            fixture.Catalog,
+            participant: participant).DeleteAsync(fixture.Context);
+
+        Assert.Same(RetentionAdapterResult.Deleted, result);
+        Assert.Equal(new[] { "skill", "tool" }, participant.RemovedKinds);
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM local_workspace_session_search_facts;"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM raw_records WHERE id=$target;"));
+    }
+
     private static int CountRows(SqliteCommand command)
     {
         using var reader = command.ExecuteReader();
@@ -165,6 +182,15 @@ public sealed class RawRecordRetentionAdapterTests
             Snapshot("SELECT * FROM monitor_traces WHERE trace_id='target-trace';"),
             Snapshot("SELECT * FROM monitor_spans WHERE raw_record_id=$target;")
         ];
+
+        internal void AddWorkspaceFactsForTargetRawRecord()
+        {
+            Execute(Path,
+                "CREATE TABLE session_events(session_id TEXT NOT NULL,source_adapter TEXT NOT NULL,source_event_id TEXT NOT NULL);" +
+                "CREATE TABLE local_workspace_session_search_facts(session_id TEXT NOT NULL,kind TEXT NOT NULL);" +
+                "INSERT INTO session_events(session_id,source_adapter,source_event_id) VALUES('session-1','otel-exact','target-trace/span-1');" +
+                "INSERT INTO local_workspace_session_search_facts(session_id,kind) VALUES('session-1','skill'),('session-1','tool');");
+        }
 
         internal long Scalar(string sql) => Convert.ToInt64(ScalarValue(sql));
         internal string Text(string sql) => (string)ScalarValue(sql)!;
@@ -245,6 +271,33 @@ public sealed class RawRecordRetentionAdapterTests
         {
             SqliteConnection.ClearAllPools();
             foreach (var file in new[] { Path, Path + "-wal", Path + "-shm" }) if (File.Exists(file)) File.Delete(file);
+        }
+    }
+
+    private sealed class RemovingWorkspaceFactsParticipant : ILocalWorkspaceProjectionTransactionParticipant
+    {
+        internal string[] RemovedKinds { get; private set; } = [];
+
+        public void RefreshSessions(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            IReadOnlyCollection<string> sessionIds,
+            DateTimeOffset now)
+        {
+            using var read = connection.CreateCommand();
+            read.Transaction = transaction;
+            read.CommandText = "SELECT kind FROM local_workspace_session_search_facts WHERE session_id='session-1' ORDER BY kind;";
+            using (var reader = read.ExecuteReader())
+            {
+                var kinds = new List<string>();
+                while (reader.Read()) kinds.Add(reader.GetString(0));
+                RemovedKinds = kinds.ToArray();
+            }
+
+            using var delete = connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM local_workspace_session_search_facts WHERE session_id='session-1';";
+            delete.ExecuteNonQuery();
         }
     }
 }

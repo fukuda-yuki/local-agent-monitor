@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Ingestion;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
@@ -21,7 +22,13 @@ internal static class SessionVersion13TestFixture
         string identity)
     {
         var eventClock = new FixtureTimeProvider(capturedAt);
-        var store = new SqliteSessionStore(databasePath, retentionContext, eventClock);
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
+        var store = new SqliteSessionStore(
+            databasePath,
+            retentionContext,
+            eventClock,
+            new LocalWorkspacePublicationGate(),
+            new LocalWorkspaceProjectionTransactionParticipant(authority));
         store.CreateSchema();
         using (var payload = JsonDocument.Parse("{\"reason\":\"error\"}"))
         {
@@ -211,8 +218,13 @@ internal static class SessionVersion13TestFixture
             retentionContext,
             workerClock,
             RawTelemetryStoreConnectionOptions.MonitorWriter);
+        var authority = FixedSkillRegistryGenerationAuthority.Load();
         var worker = new SkillProjectionWorker(
-            new SqliteSkillProjectionStore(databasePath, rawStore),
+            new SqliteSkillProjectionStore(
+                databasePath,
+                rawStore,
+                publicationGate: new LocalWorkspacePublicationGate(),
+                workspaceParticipant: new LocalWorkspaceProjectionTransactionParticipant(authority)),
             timeProvider: workerClock);
         for (var attempt = 0; attempt < 8 && !HasSessionBoundSkillProjection(databasePath, sessionId); attempt++)
         {
