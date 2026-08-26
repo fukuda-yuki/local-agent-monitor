@@ -115,11 +115,6 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 if (byId.TryGetValue(reader.GetString(0), out var row)) row.Activity[reader.GetString(1)] = new(reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetInt64(3));
         }
-        var skillAggregates = SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, byId.Keys.ToArray(), statementObserver);
-        foreach (var row in rows)
-            row.Activity["skill"] = skillAggregates.TryGetValue(row.SessionId, out var aggregate)
-                ? new("recorded", aggregate.InvocationCount)
-                : new("not_observed", null);
         using (var command = connection.CreateCommand())
         {
             statementObserver?.Invoke("tokens");

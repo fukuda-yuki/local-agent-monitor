@@ -164,11 +164,20 @@ internal static class LocalWorkspaceProjectionStore
                 FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                 """, idsJson);
         var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
-        foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds, now))
-            InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
-        if (skillRegistryAuthority is not null)
-            foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
-                InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
+        var skillProjection = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, sessionIds, now, skillRegistryAuthority);
+        foreach (var pair in skillProjection)
+        {
+            using var activity = connection.CreateCommand();
+            activity.Transaction = transaction;
+            activity.CommandText = "UPDATE local_workspace_session_activity SET state=$state,count=$count WHERE session_id=$session AND kind='skill';";
+            activity.Parameters.AddWithValue("$state", pair.Value.State == "current" ? "recorded" : pair.Value.State);
+            activity.Parameters.AddWithValue("$count", (object?)pair.Value.InvocationCount ?? DBNull.Value);
+            activity.Parameters.AddWithValue("$session", pair.Key);
+            activity.ExecuteNonQuery();
+            foreach (var fact in pair.Value.SearchFacts)
+                InsertSkillSearchFact(connection, transaction, fact.SessionId, fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
+        }
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)

@@ -37,7 +37,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
-        Assert.Equal(["sessions", "sources", "models", "search", "activity", "skills", "tokens"], statements);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
     }
 
@@ -56,7 +56,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             CREATE TABLE skill_projection_trace_heads(trace_id TEXT PRIMARY KEY,current_generation_id INTEGER);
             CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT PRIMARY KEY,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
             CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
+            CREATE TABLE skill_projection_invocations(invocation_id INTEGER PRIMARY KEY,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,span_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
             CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
             CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             CREATE INDEX skill_projection_invocations_session ON skill_projection_invocations(session_id,generation_id);
@@ -69,7 +69,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
-        Assert.Equal(["sessions", "sources", "models", "search", "activity", "skills", "skill-aggregates", "tokens"], statements);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "tokens"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
 
         using var plan = connection.CreateCommand();
