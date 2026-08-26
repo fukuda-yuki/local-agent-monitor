@@ -85,8 +85,8 @@ public sealed class LocalMonitorV1RepositoryCollectionSpecificationTests
         Assert.Contains("`after` | Optional singleton", transport, StringComparison.Ordinal);
         Assert.Contains("`limit` | Optional singleton", transport, StringComparison.Ordinal);
         Assert.Contains("Host guard;", transport, StringComparison.Ordinal);
-        Assert.Contains("exact route and GET/HEAD method dispatch;", transport, StringComparison.Ordinal);
-        Assert.Contains("GET, HEAD", transport, StringComparison.Ordinal);
+        Assert.Contains("exact route and method dispatch, including the shared-path Repository catalog POST contract;", transport, StringComparison.Ordinal);
+        Assert.Contains("integrated `Allow: GET, HEAD, POST`", transport, StringComparison.Ordinal);
         Assert.Contains("raw-default only", transport, StringComparison.Ordinal);
         Assert.Contains("local-monitor-v1-repository-collection.md", transport, StringComparison.Ordinal);
     }

@@ -39,6 +39,64 @@ public sealed class LocalMonitorV1CollectionRouteTests
         Assert.Equal("{\"schema_version\":\"local-monitor-repositories.response.v1\",\"workspace_revision\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"repositories\":[],\"all_session_count\":0,\"unassigned_active_session_count\":0,\"archived_repository_count\":0,\"next_cursor\":null}", await response.Content.ReadAsStringAsync());
     }
 
+    [Theory]
+    [InlineData("PUT")]
+    [InlineData("PATCH")]
+    [InlineData("DELETE")]
+    [InlineData("OPTIONS")]
+    public async Task RepositoryWrongMethodsWinBeforeOriginQueryAndCursorProcessing(string method)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new BusySnapshotService()));
+        using var request = new HttpRequestMessage(new HttpMethod(method), "/api/local-monitor/v1/repositories?unknown=secret&after=not-a-cursor");
+        request.Headers.TryAddWithoutValidation("Origin", "https://evil.example");
+
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal(["GET", "HEAD", "POST"], response.Content.Headers.Allow);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.Equal(30, response.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal("{\"error\":\"method_not_allowed\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("short")]
+    [InlineData("padded=")]
+    [InlineData("illegal%2Fcharacter")]
+    [InlineData("illegal+character")]
+    [InlineData("018f0000-0000-7000-8000-000000000101")]
+    public async Task RepositoryMalformedCursorValuesAreInvalidCursorWithoutReadingSnapshot(string cursor)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new BusySnapshotService()));
+
+        using var response = await host.Client.GetAsync("/api/local-monitor/v1/repositories?after=" + cursor);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType!.ToString());
+        Assert.Equal(26, response.Content.Headers.ContentLength);
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+        Assert.Equal("{\"error\":\"invalid_cursor\"}", await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("unknown=value")]
+    [InlineData("after=first&after=second")]
+    public async Task RepositoryUnknownOrDuplicateQueryComponentsRemainInvalidRequest(string query)
+    {
+        using var temp = new MonitorTempDirectory();
+        await using var host = await MonitorTestHost.StartAsync(temp, testOptions: Options(new BusySnapshotService()));
+
+        using var response = await host.Client.GetAsync("/api/local-monitor/v1/repositories?" + query);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(27, response.Content.Headers.ContentLength);
+        Assert.Equal("{\"error\":\"invalid_request\"}", await response.Content.ReadAsStringAsync());
+    }
+
     [Fact]
     public async Task RepositoryCursorDefectsUseInvalidCursorWithoutReadingSnapshot()
     {

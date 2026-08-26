@@ -20,17 +20,17 @@ internal static class LocalMonitorV1RepositoryRequestParser
             foreach (var part in raw.Split('&', StringSplitOptions.None))
             {
                 var separator = part.IndexOf('=');
-                if (separator <= 0 || separator == part.Length - 1 || part.IndexOf('=', separator + 1) >= 0) return false;
+                if (separator <= 0) return false;
                 var name = part[..separator]; var value = part[(separator + 1)..];
                 if (name is not ("archive_scope" or "after" or "limit") || !values.TryAdd(name, value)
-                    || name.IndexOfAny(['%', '+', ';']) >= 0 || value.IndexOfAny(['%', '+', ';']) >= 0) return false;
+                    || name.IndexOfAny(['%', '+', ';']) >= 0
+                    || name != "after" && (value.Length == 0 || part.IndexOf('=', separator + 1) >= 0 || value.IndexOfAny(['%', '+', ';']) >= 0)) return false;
             }
         }
         var archiveScope = values.TryGetValue("archive_scope", out var archive) ? archive : "active_only";
         var after = values.TryGetValue("after", out var cursor) ? cursor : null;
         var limit = 50;
         if (archiveScope is not ("active_only" or "include_archived")
-            || after is not null && !LocalMonitorV1RepositoryCursorCodec.IsCursorSyntax(after)
             || values.TryGetValue("limit", out var rawLimit)
                 && (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit)
                     || limit is < 1 or > 200

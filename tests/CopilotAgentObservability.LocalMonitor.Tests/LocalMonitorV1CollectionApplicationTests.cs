@@ -12,10 +12,16 @@ public sealed class LocalMonitorV1CollectionApplicationTests
     {
         Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse("?unknown=x", out _));
         Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse("?limit=1&limit=2", out _));
+        Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse("?after=first&after=second", out _));
         Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse("?archive_scope=", out _));
         Assert.True(LocalMonitorV1RepositoryRequestParser.TryParse("", out var request));
         Assert.Equal("active_only", request!.ArchiveScope);
         Assert.Equal(50, request.Limit);
+        foreach (var cursor in new[] { "", "short", "padded=", "illegal%2Fcharacter", "illegal+character", "018f0000-0000-7000-8000-000000000101" })
+        {
+            Assert.True(LocalMonitorV1RepositoryRequestParser.TryParse("?after=" + cursor, out var malformedCursorRequest));
+            Assert.Equal(cursor, malformedCursorRequest!.After);
+        }
         foreach (var query in new[] { "?%6cimit=1", "?limit=%31", "?limit=+1", "?limit=1;archive_scope=active_only", "?LIMIT=1", "?limit=%", "?archive_scope=ACTIVE_ONLY" })
             Assert.False(LocalMonitorV1RepositoryRequestParser.TryParse(query, out _));
     }

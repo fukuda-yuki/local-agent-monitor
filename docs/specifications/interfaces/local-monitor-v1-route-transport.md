@@ -391,12 +391,14 @@ and no response has `Access-Control-Allow-*`. GET and HEAD require no CSRF or
 idempotency header and consume no request body.
 
 The query is closed to the generated order `archive_scope, after, limit`.
-Input key order is nonsemantic. Unknown or empty keys, empty values, duplicate
-singletons, malformed percent escapes, percent-encoded values, raw `+`,
-whitespace, semicolon separators, or a component without exactly one `=` are
-`400 invalid_request`. A trailing `?` with no component is equivalent to no
-query. Names and values are ordinal case-sensitive and are never trimmed or
-repaired.
+Input key order is nonsemantic. Unknown or empty keys, duplicate singletons,
+or malformed structure outside the value of exactly one `after` component are
+`400 invalid_request`. Once the grammar identifies exactly one `after`
+component, every value is passed unchanged to cursor validation: empty,
+short, padded, percent-bearing, raw `+`, whitespace, semicolon-bearing,
+multi-`=` and other malformed or noncanonical values are `400 invalid_cursor`.
+A trailing `?` with no component is equivalent to no query. Names and
+non-cursor values are ordinal case-sensitive and are never trimmed or repaired.
 
 | Query | Exact contract |
 | --- | --- |
@@ -409,9 +411,9 @@ does not repair the cursor or restart at page one. The first applicable failure
 wins in this exact order:
 
 1. Host guard;
-2. exact route and GET/HEAD method dispatch;
+2. exact route and method dispatch, including the shared-path Repository catalog POST contract;
 3. same-origin guard;
-4. closed query syntax, names, duplicates, and non-cursor values;
+4. closed query structure, names, duplicates, and non-cursor parameter values;
 5. cursor syntax, canonical encoding, version, UUIDv7 position, tag, process
    key, and exact archive-scope/effective-limit binding;
 6. one coherent #156/#161 scope snapshot and bounded #134 serialization.
@@ -424,10 +426,13 @@ owned solely by
 [`local-monitor-v1-repository-collection.md`](local-monitor-v1-repository-collection.md).
 
 HEAD follows the winning GET status, content type, no-store header, and exact
-representation `Content-Length`, but emits zero entity bytes. Any method other
-than GET or HEAD returns exact `405 {"error":"method_not_allowed"}` before
-query validation, with `Allow: GET, HEAD`; no `OPTIONS` request becomes a CORS
-preflight response.
+representation `Content-Length`, but emits zero entity bytes. The shared path
+also retains the separately owned Repository catalog POST create contract.
+PUT, PATCH, DELETE, OPTIONS, and every other method that is neither GET, HEAD,
+nor the registered POST return exact `405 {"error":"method_not_allowed"}`
+before query validation, with integrated `Allow: GET, HEAD, POST`; no `OPTIONS`
+request becomes a CORS preflight response. The collection read surface itself
+contributes exactly GET and HEAD to that integrated method set.
 
 Every nonempty response is compact strict UTF-8 JSON without BOM, indentation,
 trailing whitespace, or newline. Errors and status are closed to:
@@ -436,12 +441,12 @@ trailing whitespace, or newline. Errors and status are closed to:
 | --- | --- |
 | Non-loopback/invalid Host | `400 {"error":"invalid_host"}` |
 | Cross-site/origin rejection | `403 {"error":"csrf_rejected"}` |
-| Invalid query grammar or non-cursor value | `400 {"error":"invalid_request"}` |
+| Invalid query structure, unknown/duplicate parameter, or invalid non-cursor value | `400 {"error":"invalid_request"}` |
 | Malformed, noncanonical, tampered, restarted, or filter-mismatched cursor | `400 {"error":"invalid_cursor"}` |
 | Complete success entity exceeds the exact 8,388,608 UTF-8 entity-byte ceiling owned by the Repository success contract | `409 {"error":"workspace_too_large"}` |
 | SQLite remains busy after the accepted bounded policy | `503 {"error":"persistence_busy"}` |
 | Raw-default composition unavailable | `503 {"error":"local_monitor_ui_unavailable"}` |
-| Method other than GET/HEAD | `405 {"error":"method_not_allowed"}` |
+| Method other than GET/HEAD or the separately owned Repository catalog POST | `405 {"error":"method_not_allowed"}` |
 
 Every error has `Cache-Control: no-store` and nonempty JSON has the exact JSON
 content type above. Error bodies never echo the raw target, query value,
