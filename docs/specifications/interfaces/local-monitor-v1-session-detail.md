@@ -116,7 +116,10 @@ facts reuse the exact Session collection object graphs and property order.
 for recorded, additional count is a nonnegative integer only when it is
 authoritatively known, and content availability is true only when an exact raw
 reference is currently Retention-admissible. `timing` is exactly
-`{state,started_at,ended_at,last_seen_at,duration_ms}`. `capture` is exactly
+`{state,started_at,ended_at,last_seen_at,duration_ms}`. When Session timing is
+`recorded`, `started_at` and `last_seen_at` are non-null. An active recorded
+Session has both `ended_at` and `duration_ms` null; a completed recorded Session
+has both non-null and duration is at least zero. `capture` is exactly
 `{state,notes}` with state `complete|partial|not_observed|invalid` and an
 ordinal-sorted distinct closed note array.
 

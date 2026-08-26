@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -63,6 +64,9 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.True(summaryDefs.GetProperty("instruction").TryGetProperty("allOf", out _));
         Assert.True(summaryDefs.GetProperty("countFact").TryGetProperty("allOf", out _));
         Assert.True(summaryDefs.GetProperty("sourceFact").TryGetProperty("allOf", out _));
+        Assert.True(summaryDefs.GetProperty("tokenComponent").TryGetProperty("allOf", out _));
+        Assert.True(summaryDefs.GetProperty("ratioComponent").TryGetProperty("allOf", out _));
+        Assert.True(summaryDefs.GetProperty("sessionTiming").TryGetProperty("oneOf", out _));
         Assert.True(summaryDefs.GetProperty("executionTiming").TryGetProperty("oneOf", out _));
         Assert.Equal(256, summary.RootElement.GetProperty("properties").GetProperty("executions").GetProperty("maxItems").GetInt32());
         Assert.Equal(4096, summaryDefs.GetProperty("execution").GetProperty("properties").GetProperty("child_count").GetProperty("maximum").GetInt32());
@@ -83,6 +87,8 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertEnum(timelineDefs.GetProperty("item").GetProperty("properties").GetProperty("status"), "active", "completed", "failed", "unknown");
         AssertEnum(timelineDefs.GetProperty("contentPart"), ContentParts.Cast<object?>().ToArray());
         Assert.True(timelineDefs.GetProperty("timing").TryGetProperty("oneOf", out _));
+        Assert.True(timelineDefs.GetProperty("tokenComponent").TryGetProperty("allOf", out _));
+        Assert.True(timelineDefs.GetProperty("ratioComponent").TryGetProperty("allOf", out _));
         AssertTypes(timeline.RootElement.GetProperty("properties").GetProperty("execution_id"), "$ref", "null");
         AssertTypes(timeline.RootElement.GetProperty("properties").GetProperty("parent_node_id"), "$ref", "null");
         AssertTypes(timeline.RootElement.GetProperty("properties").GetProperty("next_cursor"), "string", "null");
@@ -98,6 +104,8 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertEnum(nodeDefs.GetProperty("contentState").GetProperty("properties").GetProperty("state"), "available", "not_captured", "expired", "deleted", "read_denied", "oversized", "invalid");
         Assert.True(nodeDefs.GetProperty("contentState").TryGetProperty("allOf", out _));
         Assert.True(nodeDefs.GetProperty("timing").TryGetProperty("oneOf", out _));
+        Assert.True(nodeDefs.GetProperty("tokenComponent").TryGetProperty("allOf", out _));
+        Assert.True(nodeDefs.GetProperty("ratioComponent").TryGetProperty("allOf", out _));
         AssertTypes(nodeDefs.GetProperty("technicalReferences").GetProperty("properties").GetProperty("trace_id"), "string", "null");
         foreach (var field in new[] { "source_kind", "source_identity", "span_id", "event_id" })
         {
@@ -112,6 +120,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     {
         AssertFixture("summary-empty.json", SummaryToken, AssertSummaryOrder);
         AssertFixture("summary-full.json", SummaryToken, AssertSummaryOrder);
+        AssertFixture("summary-nonrecorded-evidence.json", SummaryToken, AssertSummaryOrder);
         AssertFixture("timeline-empty.json", TimelineToken, AssertTimelineOrder);
         AssertFixture("timeline-page.json", TimelineToken, AssertTimelineOrder);
         AssertFixture("node-full.json", NodeToken, AssertNodeOrder);
@@ -119,12 +128,18 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         using var nested = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "node-nested.json")));
         Assert.NotEmpty(nested.RootElement.GetProperty("parent_path").EnumerateArray());
         Assert.All(nested.RootElement.GetProperty("related").EnumerateObject(), property => Assert.NotEmpty(property.Value.EnumerateArray()));
+        using var evidence = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, "summary-nonrecorded-evidence.json")));
+        foreach (var name in new[] { "source", "model", "version" })
+        {
+            Assert.NotEqual("recorded", evidence.RootElement.GetProperty("session").GetProperty(name).GetProperty("state").GetString());
+            Assert.NotEmpty(evidence.RootElement.GetProperty("session").GetProperty(name).GetProperty("values").EnumerateArray());
+        }
     }
 
     [Fact]
     public void LiteralGoldenResponsesContainNoJsonWhitespaceOutsideStrings()
     {
-        foreach (var name in new[] { "summary-empty.json", "summary-full.json", "timeline-empty.json", "timeline-page.json", "node-full.json", "node-nested.json", "transport-contract.json", "query-grammar.json" })
+        foreach (var name in new[] { "summary-empty.json", "summary-full.json", "summary-nonrecorded-evidence.json", "timeline-empty.json", "timeline-page.json", "node-full.json", "node-nested.json", "transport-contract.json", "query-grammar.json" })
         {
             AssertNoJsonWhitespaceOutsideStrings(File.ReadAllBytes(Path.Combine(FixtureRoot, name)));
         }
@@ -135,10 +150,46 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
     {
         AssertSchemaValid("summary-empty.json", "session-summary");
         AssertSchemaValid("summary-full.json", "session-summary");
+        AssertSchemaValid("summary-nonrecorded-evidence.json", "session-summary");
         AssertSchemaValid("timeline-empty.json", "session-timeline");
         AssertSchemaValid("timeline-page.json", "session-timeline");
         AssertSchemaValid("node-full.json", "session-node");
         AssertSchemaValid("node-nested.json", "session-node");
+    }
+
+    [Fact]
+    public void SchemasRejectLiteralStateInvariantMutants()
+    {
+        AssertSchemaRejectsMutations("summary-full.json", "session-summary",
+            root => root["session"]!["source"]!["values"] = new JsonArray(),
+            root => root["session"]!["model"]!["values"] = new JsonArray(),
+            root => root["session"]!["version"]!["values"] = new JsonArray(),
+            root => root["session"]!["assignment"]!["repository_id"] = "not-a-uuid",
+            root => root["session"]!["assignment"]!["candidate_repository_ids"] = new JsonArray(Enumerable.Range(0, 129).Select(index => JsonValue.Create($"018f0000-0000-7000-8000-{index:000000000000}")).ToArray()),
+            root => root["session"]!["archive"]!["effectively_eligible"] = false,
+            root => { root["session"]!["instruction"]!["state"] = "expired"; root["session"]!["instruction"]!["label"] = null; },
+            root => root["session"]!["tokens"]!["input"]!["state"] = "not_observed",
+            root => root["session"]!["activity"]!["skill"]!["state"] = "not_observed",
+            root => root["session"]!["timing"]!["started_at"] = null,
+            root => root["executions"]![0]!["timing"]!["started_at"] = null,
+            root => root["executions"]![0]!["timing"]!["ended_at"] = null,
+            root => { root["executions"]![0]!["timing"]!["state"] = "missing"; });
+
+        AssertSchemaRejectsMutations("timeline-page.json", "session-timeline",
+            root => root["items"]![0]!["name"]!["state"] = "not_observed",
+            root => root["items"]![0]!["tokens"]!["input"]!["state"] = "recorded",
+            root => root["items"]![0]!["activity"]!["skill"]!["state"] = "not_observed",
+            root => root["items"]![0]!["timing"]!["started_at"] = null,
+            root => root["items"]![0]!["timing"]!["ended_at"] = null,
+            root => { root["items"]![0]!["timing"]!["state"] = "invalid"; });
+
+        AssertSchemaRejectsMutations("node-full.json", "session-node",
+            root => root["content"]!["instruction"]!["available"] = false,
+            root => root["content"]!["tool_input"]!["available"] = true,
+            root => root["node"]!["technical_references"]!["trace_id"] = "not-a-trace",
+            root => root["node"]!["name"]!["state"] = "invalid",
+            root => root["node"]!["tokens"]!["input"]!["state"] = "recorded",
+            root => { root["node"]!["timing"]!["state"] = "missing"; });
     }
 
     [Fact]
@@ -169,11 +220,14 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.Equal(HMACSHA256.HashData(key, tagFrame), bytes[87..119]);
 
         Assert.NotEqual(bytes[1..33], HMACSHA256.HashData(key, TimelineFilterFrame("018f0000-0000-7000-8000-000000000001", new string('2', 64), "018f0000-0000-7000-8000-000000000003", null, 1)));
+        Assert.NotEqual(bytes[1..33], HMACSHA256.HashData(key, TimelineFilterFrame("018f0000-0000-7000-8000-000000000002", new string('1', 64), "018f0000-0000-7000-8000-000000000003", null, 1)));
         Assert.NotEqual(bytes[1..33], HMACSHA256.HashData(key, TimelineFilterFrame("018f0000-0000-7000-8000-000000000001", new string('1', 64), "018f0000-0000-7000-8000-000000000004", null, 1)));
         Assert.NotEqual(bytes[1..33], HMACSHA256.HashData(key, TimelineFilterFrame("018f0000-0000-7000-8000-000000000001", new string('1', 64), "018f0000-0000-7000-8000-000000000003", "node-00000000000000000000000000000001", 1)));
         Assert.NotEqual(bytes[1..33], HMACSHA256.HashData(key, TimelineFilterFrame("018f0000-0000-7000-8000-000000000001", new string('1', 64), "018f0000-0000-7000-8000-000000000003", null, 2)));
         Assert.Equal(new[] { 0, 1, 2 }, new[] { RecordedTimeGroup, MissingTimeGroup, InvalidTimeGroup });
+        Assert.True(CompareCursorOrder((0, 1L, 0UL, "node-00000000000000000000000000000009"), (0, 2L, 0UL, "node-00000000000000000000000000000000")) < 0);
         Assert.True(CompareCursorOrder((0, 1L, 0UL, "node-00000000000000000000000000000001"), (0, 1L, 1UL, "node-00000000000000000000000000000000")) < 0);
+        Assert.True(CompareCursorOrder((0, 1L, 1UL, "node-00000000000000000000000000000001"), (0, 1L, 1UL, "node-00000000000000000000000000000002")) < 0);
         Assert.True(CompareCursorOrder((0, 1L, 1UL, "node-00000000000000000000000000000001"), (1, 0L, 0UL, "node-00000000000000000000000000000000")) < 0);
     }
 
@@ -185,11 +239,24 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertProperties(root, "schema_version", "routes", "query_fields", "error_precedence", "errors", "success_headers", "error_headers", "forbidden_headers", "json_max_bytes", "raw_max_bytes", "content_parts");
         Assert.Equal("local-monitor-session-detail.transport.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal(4, root.GetProperty("routes").GetArrayLength());
+        var expectedRoutes = new Dictionary<string, (string Path, string MediaType, string SchemaToken)>(StringComparer.Ordinal)
+        {
+            ["summary"] = ("/api/local-monitor/v1/sessions/{sessionId}/summary", "application/json; charset=utf-8", SummaryToken),
+            ["timeline"] = ("/api/local-monitor/v1/sessions/{sessionId}/timeline", "application/json; charset=utf-8", TimelineToken),
+            ["node"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}", "application/json; charset=utf-8", NodeToken),
+            ["content"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content", "text/plain; charset=utf-8", ContentToken),
+        };
         Assert.All(root.GetProperty("routes").EnumerateArray(), route =>
         {
-            AssertProperties(route, "name", "path", "query_order", "methods", "method_not_allowed_status");
+            AssertProperties(route, "name", "path", "query_order", "methods", "success_status", "success_media_type", "schema_token", "method_not_allowed_status", "required_headers");
+            var expected = expectedRoutes[route.GetProperty("name").GetString()!];
+            Assert.Equal(expected.Path, route.GetProperty("path").GetString());
             Assert.Equal(new[] { "GET", "HEAD" }, route.GetProperty("methods").EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal(200, route.GetProperty("success_status").GetInt32());
+            Assert.Equal(expected.MediaType, route.GetProperty("success_media_type").GetString());
+            Assert.Equal(expected.SchemaToken, route.GetProperty("schema_token").GetString());
             Assert.Equal(405, route.GetProperty("method_not_allowed_status").GetInt32());
+            Assert.Equal(new[] { "Cache-Control", "Content-Type", "Content-Length" }, route.GetProperty("required_headers").EnumerateArray().Select(value => value.GetString()));
         });
         var routes = root.GetProperty("routes").EnumerateArray().ToDictionary(route => route.GetProperty("name").GetString()!, StringComparer.Ordinal);
         Assert.Empty(routes["summary"].GetProperty("query_order").EnumerateArray());
@@ -205,7 +272,7 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.Equal(200, queries["limit"].GetProperty("maximum").GetInt32());
         Assert.Equal(100, queries["limit"].GetProperty("default").GetInt32());
         Assert.Equal(ContentParts, queries["part"].GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
-        Assert.Equal(new[] { "method", "path_identifier", "closed_query", "session", "workspace_revision", "execution_or_node_membership", "cursor", "retention_lease" }, root.GetProperty("error_precedence").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(new[] { "host", "method", "path_identifier", "closed_query", "session", "workspace_revision", "execution_or_node_membership", "cursor", "retention_lease" }, root.GetProperty("error_precedence").EnumerateArray().Select(value => value.GetString()));
 
         var expectedErrors = new (int Status, string Code, string Bytes)[]
         {
@@ -442,6 +509,33 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.True(ValidateWithPowerShellJsonSchema(
             Path.Combine(FixtureRoot, fixtureName), SchemaPath(schemaName)), fixtureName);
 
+    private static void AssertSchemaRejectsMutations(string fixtureName, string schemaName, params Action<JsonNode>[] mutations)
+    {
+        var temporaryFiles = new List<(string Path, int Index)>();
+        try
+        {
+            for (var index = 0; index < mutations.Length; index++)
+            {
+                var root = JsonNode.Parse(File.ReadAllBytes(Path.Combine(FixtureRoot, fixtureName)))!;
+                mutations[index](root);
+                var path = Path.Combine(Path.GetTempPath(), "local-monitor-detail-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(path, root.ToJsonString(), new UTF8Encoding(false));
+                temporaryFiles.Add((path, index));
+            }
+            foreach (var (path, index) in temporaryFiles)
+            {
+                Assert.False(ValidateWithPowerShellJsonSchema(path, SchemaPath(schemaName)), $"{fixtureName} mutation {index}");
+            }
+        }
+        finally
+        {
+            foreach (var (path, _) in temporaryFiles)
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
     private static bool ValidateWithPowerShellJsonSchema(string instancePath, string schemaPath)
     {
         using var process = Process.Start(new ProcessStartInfo
@@ -449,9 +543,9 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
             FileName = "pwsh",
             ArgumentList =
             {
-                "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-CommandWithArgs",
                 "$instance = Get-Content -Raw -LiteralPath $args[0]; " +
-                "if ($instance | Test-Json -SchemaFile $args[1]) { exit 0 } else { exit 1 }",
+                "if ($instance | Test-Json -SchemaFile $args[1] -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
                 instancePath, schemaPath,
             },
             UseShellExecute = false,

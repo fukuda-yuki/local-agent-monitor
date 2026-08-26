@@ -24,16 +24,18 @@
       "properties": {"state": {"$ref": "#/$defs/factState"}, "count": {"$ref": "#/$defs/nullableCount"}},
       "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"count": {"type": "integer", "minimum": 0}}}, "else": {"properties": {"count": {"type": "null"}}}}]
     },
-    "sourceFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 5, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
-    "modelFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
-    "versionFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
+    "sourceFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 5, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}}]},
+    "modelFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}}]},
+    "versionFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}}]},
     "tokenComponent": {
       "type": "object", "additionalProperties": false, "required": ["state", "value"],
-      "properties": {"state": {"$ref": "#/$defs/factState"}, "value": {"$ref": "#/$defs/nullableCount"}}
+      "properties": {"state": {"$ref": "#/$defs/factState"}, "value": {"$ref": "#/$defs/nullableCount"}},
+      "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"value": {"type": "integer", "minimum": 0}}}, "else": {"properties": {"value": {"type": "null"}}}}]
     },
     "ratioComponent": {
       "type": "object", "additionalProperties": false, "required": ["state", "value"],
-      "properties": {"state": {"$ref": "#/$defs/factState"}, "value": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000}}
+      "properties": {"state": {"$ref": "#/$defs/factState"}, "value": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000}},
+      "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"value": {"type": "integer", "minimum": 0, "maximum": 10000}}}, "else": {"properties": {"value": {"type": "null"}}}}]
     },
     "tokens": {
       "type": "object", "additionalProperties": false,
@@ -73,7 +75,8 @@
     },
     "sessionTiming": {
       "type": "object", "additionalProperties": false, "required": ["state", "started_at", "ended_at", "last_seen_at", "duration_ms"],
-      "properties": {"state": {"$ref": "#/$defs/factState"}, "started_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "ended_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "last_seen_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "duration_ms": {"$ref": "#/$defs/nullableCount"}}
+      "properties": {"state": {"$ref": "#/$defs/factState"}, "started_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "ended_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "last_seen_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "duration_ms": {"$ref": "#/$defs/nullableCount"}},
+      "oneOf": [{"properties": {"state": {"const": "recorded"}, "started_at": {"$ref": "#/$defs/instant"}, "last_seen_at": {"$ref": "#/$defs/instant"}}, "required": ["state", "started_at", "last_seen_at"], "oneOf": [{"properties": {"ended_at": {"type": "null"}, "duration_ms": {"type": "null"}}}, {"properties": {"ended_at": {"$ref": "#/$defs/instant"}, "duration_ms": {"type": "integer", "minimum": 0}}}]}, {"not": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}}]
     },
     "executionTiming": {
       "type": "object", "additionalProperties": false, "required": ["state", "started_at", "ended_at", "duration_ms"],
