@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.Health;
 using CopilotAgentObservability.LocalMonitor.Projection;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -400,7 +401,7 @@ public sealed class MonitorSkillProjectionTests
             "/api/monitor/trace-list",
         ];
         var withoutSkills = await CaptureResponses(host.Client, paths);
-        await RunSkillProjectionAsync(temp.DatabasePath, temp.TimeProvider);
+        await RunSkillProjectionAsync(host.Services, temp.TimeProvider);
         var withSkills = await CaptureResponses(host.Client, paths);
 
         Assert.Equal(withSkills.Length, withoutSkills.Length);
@@ -460,7 +461,7 @@ public sealed class MonitorSkillProjectionTests
                     temp.DatabasePath,
                     RawTelemetryStoreConnectionOptions.MonitorWriter));
             await worker.RunProjectionPassAsync();
-            await RunSkillProjectionAsync(temp.DatabasePath, temp.TimeProvider);
+            await RunSkillProjectionAsync(host.Services, temp.TimeProvider);
             return temp;
         }
         catch
@@ -471,17 +472,11 @@ public sealed class MonitorSkillProjectionTests
     }
 
     private static async Task RunSkillProjectionAsync(
-        string databasePath,
+        IServiceProvider services,
         TimeProvider timeProvider)
     {
-        var retentionContext = RetentionCatalogContext.AdoptExistingCatalogV1(databasePath);
-        var rawStore = new RawTelemetryStore(
-            databasePath,
-            retentionContext,
-            timeProvider,
-            connectionOptions: RawTelemetryStoreConnectionOptions.MonitorWriter);
         var worker = new SkillProjectionWorker(
-            new SqliteSkillProjectionStore(databasePath, rawStore),
+            services.GetRequiredService<SqliteSkillProjectionStore>(),
             timeProvider: timeProvider);
         var now = timeProvider.GetUtcNow();
         for (var attempt = 0; attempt < 20; attempt++)

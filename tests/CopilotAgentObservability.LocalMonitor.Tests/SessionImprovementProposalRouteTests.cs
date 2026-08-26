@@ -7,6 +7,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -17,7 +18,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-1");
+        var session = await CreateTerminalSessionAsync(host, "proposal-1");
 
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session)));
 
@@ -36,7 +37,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-2");
+        var session = await CreateTerminalSessionAsync(host, "proposal-2");
         var proposalId = await CreateCandidateAsync(host.Client, session);
 
         using var response = await host.Client.SendAsync(StatusRequest(proposalId, status));
@@ -49,15 +50,15 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "pending-authorization-1");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "pending-authorization-2");
+        var first = await CreateTerminalSessionAsync(host, "pending-authorization-1");
+        var second = await CreateTerminalSessionAsync(host, "pending-authorization-2");
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
         using (var promoted = await host.Client.SendAsync(StatusRequest(proposalId, "recommended")))
         {
             Assert.Equal(HttpStatusCode.OK, promoted.StatusCode);
         }
 
-        var store = new SqliteSessionStore(temp.DatabasePath);
+        var store = host.Services.GetRequiredService<ISessionStore>();
         Assert.True(store.TryAuthorizeProposalApply(
             new ProposalApplyPendingOperation(Guid.CreateVersion7(), Guid.CreateVersion7(), proposalId, Guid.CreateVersion7(), 1, "apply", DateTimeOffset.UnixEpoch),
             proposalRevision: 2));
@@ -74,7 +75,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-3");
+        var session = await CreateTerminalSessionAsync(host, "proposal-3");
         const string marker = "SECRET_PROPOSAL_MARKER password";
 
         using var crossSite = ProposalRequest(ValidCandidate(session));
@@ -97,7 +98,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-4");
+        var session = await CreateTerminalSessionAsync(host, "proposal-4");
         _ = await CreateCandidateAsync(host.Client, session);
 
         using var response = await host.Client.GetAsync($"/api/session-workspace/improvement-proposals?session_id={session.SessionId}");
@@ -115,8 +116,8 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-5a");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-5b");
+        var first = await CreateTerminalSessionAsync(host, "proposal-5a");
+        var second = await CreateTerminalSessionAsync(host, "proposal-5b");
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
 
         using var response = await host.Client.SendAsync(StatusRequest(proposalId, "recommended"));
@@ -135,8 +136,8 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-verified-a");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-verified-b");
+        var first = await CreateTerminalSessionAsync(host, "proposal-verified-a");
+        var second = await CreateTerminalSessionAsync(host, "proposal-verified-b");
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
         MarkProposalVerified(temp.DatabasePath, proposalId);
 
@@ -155,7 +156,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-6");
+        var session = await CreateTerminalSessionAsync(host, "proposal-6");
         var missing = Guid.CreateVersion7().ToString("D");
 
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session).Replace(session.EventId, missing, StringComparison.Ordinal)));
@@ -169,8 +170,8 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var claimed = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-out-of-scope-claimed");
-        var other = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-out-of-scope-other");
+        var claimed = await CreateTerminalSessionAsync(host, "proposal-out-of-scope-claimed");
+        var other = await CreateTerminalSessionAsync(host, "proposal-out-of-scope-other");
 
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(claimed)
             .Replace(claimed.EventId, other.EventId, StringComparison.Ordinal)));
@@ -191,7 +192,8 @@ public sealed class SessionImprovementProposalRouteTests
             Execute(temp.DatabasePath, "UPDATE sessions SET completeness='rich' WHERE session_id=(SELECT session_id FROM sessions ORDER BY created_at DESC LIMIT 1);");
         });
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { SessionStore = store });
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-late-ineligible");
+        ConfigureProjectionAuthority(store, host.Services);
+        var session = await CreateTerminalSessionAsync(host, "proposal-late-ineligible");
 
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session)));
 
@@ -222,8 +224,9 @@ public sealed class SessionImprovementProposalRouteTests
             Execute(temp.DatabasePath, "DELETE FROM session_event_content WHERE event_id=$event; DELETE FROM session_events WHERE event_id=$event;", ("$event", referencedEventId));
         });
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { SessionStore = store });
-        var source = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-relation-source");
-        var other = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-relation-other");
+        ConfigureProjectionAuthority(store, host.Services);
+        var source = await CreateTerminalSessionAsync(host, "proposal-relation-source");
+        var other = await CreateTerminalSessionAsync(host, "proposal-relation-other");
         referencedEventId = source.EventId;
         otherSessionId = other.SessionId;
 
@@ -261,8 +264,8 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-7a");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-7b");
+        var first = await CreateTerminalSessionAsync(host, "proposal-7a");
+        var second = await CreateTerminalSessionAsync(host, "proposal-7b");
         var promotedId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
         Assert.Equal(HttpStatusCode.OK, (await host.Client.SendAsync(StatusRequest(promotedId, "recommended"))).StatusCode);
         var competingId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
@@ -285,8 +288,9 @@ public sealed class SessionImprovementProposalRouteTests
             Execute(temp.DatabasePath, "DELETE FROM session_native_ids WHERE session_id=$session;", ("$session", invalidatedSessionId));
         });
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { SessionStore = store });
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-late-promotion-a");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-late-promotion-b");
+        ConfigureProjectionAuthority(store, host.Services);
+        var first = await CreateTerminalSessionAsync(host, "proposal-late-promotion-a");
+        var second = await CreateTerminalSessionAsync(host, "proposal-late-promotion-b");
         invalidatedSessionId = second.SessionId;
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
         var before = ProposalSnapshot(temp.DatabasePath, proposalId);
@@ -306,8 +310,9 @@ public sealed class SessionImprovementProposalRouteTests
         Guid proposalId;
         await using (var setupHost = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { SessionStore = inner }))
         {
-            var first = await CreateTerminalSessionAsync(temp.DatabasePath, setupHost.Client, "proposal-response-snapshot-a");
-            var second = await CreateTerminalSessionAsync(temp.DatabasePath, setupHost.Client, "proposal-response-snapshot-b");
+            ConfigureProjectionAuthority(inner, setupHost.Services);
+            var first = await CreateTerminalSessionAsync(setupHost, "proposal-response-snapshot-a");
+            var second = await CreateTerminalSessionAsync(setupHost, "proposal-response-snapshot-b");
             proposalId = await CreateCandidateAsync(setupHost.Client, ValidCandidate(first, second));
         }
 
@@ -316,6 +321,7 @@ public sealed class SessionImprovementProposalRouteTests
         proxy.Target = inner;
         proxy.SecondUpdatedAt = temp.TimeProvider.GetUtcNow().AddMinutes(1);
         await using var host = await MonitorTestHost.StartAsync(temp, testOptions: new MonitorHostTestOptions { SessionStore = store });
+        ConfigureProjectionAuthority(inner, host.Services);
 
         using var response = await host.Client.SendAsync(StatusRequest(proposalId, "recommended"));
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -334,8 +340,8 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-missing-promotion-a");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-missing-promotion-b");
+        var first = await CreateTerminalSessionAsync(host, "proposal-missing-promotion-a");
+        var second = await CreateTerminalSessionAsync(host, "proposal-missing-promotion-b");
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
         var before = ProposalSnapshot(temp.DatabasePath, proposalId);
         Execute(temp.DatabasePath, "DELETE FROM session_event_content WHERE event_id=$event; DELETE FROM session_events WHERE event_id=$event;", ("$event", second.EventId));
@@ -358,7 +364,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-unsafe");
+        var session = await CreateTerminalSessionAsync(host, "proposal-unsafe");
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session).Replace("\"test-helper\"", JsonSerializer.Serialize(unsafeValue), StringComparison.Ordinal)));
 
         await AssertFixedError(response, HttpStatusCode.BadRequest, "unsafe_proposal_content");
@@ -373,7 +379,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-source");
+        var session = await CreateTerminalSessionAsync(host, "proposal-source");
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session).Replace("\"test-helper\"", JsonSerializer.Serialize(unsafeValue), StringComparison.Ordinal)));
 
         await AssertFixedError(response, HttpStatusCode.BadRequest, "unsafe_proposal_content");
@@ -387,7 +393,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-natural-language");
+        var session = await CreateTerminalSessionAsync(host, "proposal-natural-language");
         using var response = await host.Client.SendAsync(ProposalRequest(ValidCandidate(session).Replace("\"test-helper\"", JsonSerializer.Serialize(value), StringComparison.Ordinal)));
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
@@ -398,7 +404,7 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var session = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-media");
+        var session = await CreateTerminalSessionAsync(host, "proposal-media");
         var proposalId = await CreateCandidateAsync(host.Client, session);
         using var postWrongType = Request(HttpMethod.Post, "/api/session-workspace/improvement-proposals", ValidCandidate(session), "text/plain");
         using var putWrongType = Request(HttpMethod.Put, $"/api/session-workspace/improvement-proposals/{proposalId:D}/status", "{\"status\":\"candidate\"}", "text/plain");
@@ -416,13 +422,13 @@ public sealed class SessionImprovementProposalRouteTests
     {
         using var temp = new MonitorTempDirectory();
         await using var host = await MonitorTestHost.StartAsync(temp);
-        var first = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-old-1");
-        var second = await CreateTerminalSessionAsync(temp.DatabasePath, host.Client, "proposal-old-2");
+        var first = await CreateTerminalSessionAsync(host, "proposal-old-1");
+        var second = await CreateTerminalSessionAsync(host, "proposal-old-2");
         var proposalId = await CreateCandidateAsync(host.Client, ValidCandidate(first, second));
 
         for (var index = 0; index < 201; index++)
         {
-            await IngestTerminalSessionAsync(temp.DatabasePath, host.Client, $"proposal-later-{index}");
+            await IngestTerminalSessionAsync(host, $"proposal-later-{index}");
         }
 
         using var response = await host.Client.SendAsync(StatusRequest(proposalId, "recommended"));
@@ -443,16 +449,16 @@ public sealed class SessionImprovementProposalRouteTests
         return body.RootElement.GetProperty("proposal_id").GetGuid();
     }
 
-    private static async Task<TerminalSession> CreateTerminalSessionAsync(string databasePath, HttpClient client, string suffix)
+    private static async Task<TerminalSession> CreateTerminalSessionAsync(RunningMonitorHost host, string suffix)
     {
-        await IngestTerminalSessionAsync(databasePath, client, suffix);
-        using var sessions = await client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
+        await IngestTerminalSessionAsync(host, suffix);
+        using var sessions = await host.Client.GetFromJsonAsync<JsonDocument>("/api/session-workspace/sessions");
         var sessionId = sessions!.RootElement.GetProperty("items").EnumerateArray().First().GetProperty("session_id").GetString()!;
-        using var detail = await client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
+        using var detail = await host.Client.GetFromJsonAsync<JsonDocument>($"/api/session-workspace/sessions/{sessionId}");
         return new(sessionId, detail!.RootElement.GetProperty("events")[0].GetProperty("event_id").GetString()!);
     }
 
-    private static async Task IngestTerminalSessionAsync(string databasePath, HttpClient client, string suffix)
+    private static async Task IngestTerminalSessionAsync(RunningMonitorHost host, string suffix)
     {
         using var ingest = new HttpRequestMessage(HttpMethod.Post, "/api/session-ingest/v1/events")
         {
@@ -470,10 +476,10 @@ public sealed class SessionImprovementProposalRouteTests
                 "application/json"),
         };
         ingest.Headers.Add("X-CAO-Session-Event-Version", "1");
-        using var ingestResponse = await client.SendAsync(ingest);
+        using var ingestResponse = await host.Client.SendAsync(ingest);
         Assert.True(ingestResponse.StatusCode == HttpStatusCode.NoContent, await ingestResponse.Content.ReadAsStringAsync());
 
-        var store = new SqliteSessionStore(databasePath);
+        var store = host.Services.GetRequiredService<ISessionStore>();
         var sessionId = store.Resolve(SessionSourceSurface.HookUnknown, suffix)!.SessionId;
         var detail = store.GetDetail(sessionId)!;
         var exactEvent = new ObservedSessionEvent(
@@ -498,6 +504,16 @@ public sealed class SessionImprovementProposalRouteTests
         };
         ingest.Headers.Add("X-CAO-Session-Event-Version", "1");
         Assert.Equal(HttpStatusCode.NoContent, (await client.SendAsync(ingest)).StatusCode);
+    }
+
+    private static void ConfigureProjectionAuthority(SqliteSessionStore store, IServiceProvider services)
+    {
+        typeof(SqliteSessionStore)
+            .GetField("publicationGate", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(store, services.GetRequiredService<ILocalWorkspacePublicationGate>());
+        typeof(SqliteSessionStore)
+            .GetField("workspaceParticipant", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(store, services.GetRequiredService<ILocalWorkspaceProjectionTransactionParticipant>());
     }
 
     private static HttpRequestMessage ProposalRequest(string body) => Request(HttpMethod.Post, "/api/session-workspace/improvement-proposals", body);
