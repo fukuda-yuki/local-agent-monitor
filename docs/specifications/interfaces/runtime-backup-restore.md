@@ -437,7 +437,8 @@ and [Skill Projection](../layers/skill-projection.md).
 
 `skill_invocation_snapshot:1` is likewise independent, is not a Retention kind,
 and is registered immediately after `skill_projection:1` and before the future
-`local_workspace_projection:2`. Its complete contract is owned by
+`local_workspace_projection:3`. Restore staging accepts only exact v2 for its atomic
+v2-to-v3 migration; runtime readers accept only v3. Its complete contract is owned by
 [Skill Invocation Snapshot](skill-invocation-snapshot.md). It owns invocation
 index/metadata and equality receipts only. Session Event content remains the
 sole raw owner and carries the historical payload document exactly once;

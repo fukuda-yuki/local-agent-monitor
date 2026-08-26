@@ -3,6 +3,23 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalWorkspaceProjectionBackfillTests
 {
     [Fact]
+    public void BackfillUsesFirstValidStartedCreatedLastSeenInstantAndCanonicalUtc()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,'malformed',NULL,'2026-08-24T03:00:00.0000000+03:00','not_captured','2026-08-23T20:00:00.0000000-04:00','2026-08-24T03:00:00.0000000+03:00');
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000002','active','partial',NULL,NULL,NULL,NULL,'malformed','not_captured','also-malformed','malformed');
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(
+            ["0:1787529600000:2026-08-24T00:00:00.0000000+00:00:1787529600000", "1:0:null:null"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT sort_group||':'||sort_epoch_ms||':'||COALESCE(last_seen_at,'null')||':'||COALESCE(last_seen_epoch_ms,'null') FROM local_workspace_sessions ORDER BY session_id;"));
+    }
+
+    [Fact]
     public void BackfillUsesTwoStartedAtGroupsAndPersistsAllClosedSourceTokens()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
@@ -17,7 +34,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
               ('0198f5b8-0c01-7000-8000-000000000005','0198f5b8-0c00-7000-8000-000000000001','claude-code','completed');
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
-        Assert.Equal(["0:0:2026-08-24T00:02:00.0000000+00:00", "1:1:2026-08-24T00:03:00.0000000+00:00"], LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT sort_group||':'||(sort_epoch_ms=0)||':'||last_seen_at FROM local_workspace_sessions ORDER BY session_id;"));
+        Assert.Equal(["0:0:2026-08-24T00:02:00.0000000+00:00", "0:0:2026-08-24T00:03:00.0000000+00:00"], LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT sort_group||':'||(sort_epoch_ms=0)||':'||last_seen_at FROM local_workspace_sessions ORDER BY session_id;"));
         Assert.Equal(["claude-code","copilot-cli","copilot-sdk","hook-unknown","vscode"], LocalWorkspaceProjectionSchemaTests.Strings(connection,"SELECT source FROM local_workspace_session_sources ORDER BY source;"));
     }
 
@@ -80,7 +97,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000002','application/json','{"value":"  ＨＥＬＬＯ\r\nWorld\u2028Next  "}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
-        Assert.Equal(["ＨＥＬＬＯ World Next|hello world next"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT label_text||'|'||label_search_text FROM local_workspace_sessions;"));
+        Assert.Equal(["ＨＥＬＬＯ World Next|hello world next"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT p.label_text||'|'||f.normalized_text FROM local_workspace_sessions p JOIN local_workspace_session_search_facts f ON f.session_id=p.session_id AND f.kind='label';"));
 
         using (var transaction = connection.BeginTransaction())
         {
@@ -92,7 +109,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             transaction.Commit();
         }
         Assert.Equal(["not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT label_state FROM local_workspace_sessions;"));
-        Assert.Equal(["1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(label_text IS NULL AND label_search_text IS NULL AS TEXT) FROM local_workspace_sessions;"));
+        Assert.Equal(["1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT CAST(label_text IS NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_session_search_facts) AS TEXT) FROM local_workspace_sessions;"));
     }
 
     [Fact]

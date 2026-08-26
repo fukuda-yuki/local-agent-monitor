@@ -475,6 +475,15 @@ internal sealed class SqliteSkillProjectionStore
             ("$generation_id", lease.GenerationId),
             ("$updated_at", Timestamp(transactionAt)),
             ("$trace_id", lease.TraceId));
+        using var affectedCommand = connection.CreateCommand();
+        affectedCommand.Transaction = transaction;
+        affectedCommand.CommandText = "SELECT DISTINCT session_id FROM skill_projection_invocations WHERE generation_id=$generation_id AND session_id IS NOT NULL ORDER BY session_id;";
+        affectedCommand.Parameters.AddWithValue("$generation_id", lease.GenerationId);
+        var affectedSessions = new List<string>();
+        using (var affectedReader = affectedCommand.ExecuteReader())
+            while (affectedReader.Read()) affectedSessions.Add(affectedReader.GetString(0));
+        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+            connection, transaction, affectedSessions, transactionAt);
         checkpoint?.Reached(SkillProjectionCheckpoint.BeforePublishCommitClaim);
         if (!publications.TryClaimCommittedHandles(out var publicationClaim))
         {

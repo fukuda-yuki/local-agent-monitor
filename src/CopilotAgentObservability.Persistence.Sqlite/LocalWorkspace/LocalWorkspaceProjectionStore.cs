@@ -16,22 +16,24 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
     {
+        RegisterProjectionFunctions(connection);
         var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
         ExecuteWithIds(connection, transaction, """
             DELETE FROM local_workspace_token_observations WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_activity WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_models WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_session_sources WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_session_search_facts WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             DELETE FROM local_workspace_sessions WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-            INSERT INTO local_workspace_sessions(session_id,sort_group,sort_epoch_ms,label_state,label_text,label_search_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,last_seen_at,duration_ms,capture_notes,revision_seed)
-            SELECT s.session_id,CASE WHEN s.started_at IS NULL THEN 1 ELSE 0 END,
-                   CASE WHEN s.started_at IS NULL THEN 0 ELSE MAX(0,CAST((julianday(s.started_at)-2440587.5)*86400000 AS INTEGER)) END,
+            INSERT INTO local_workspace_sessions(session_id,sort_group,sort_epoch_ms,label_state,label_text,label_source_identity,label_expires_at,status,completeness,source_state,model_state,timing_state,started_at,ended_at,last_seen_at,last_seen_epoch_ms,duration_ms,capture_notes,revision_seed)
+            SELECT s.session_id,CASE WHEN COALESCE(local_workspace_epoch(s.started_at),local_workspace_epoch(s.created_at),local_workspace_epoch(s.last_seen_at)) IS NULL THEN 1 ELSE 0 END,
+                   COALESCE(local_workspace_epoch(s.started_at),local_workspace_epoch(s.created_at),local_workspace_epoch(s.last_seen_at),0),
                    CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'expired' WHEN 'not_captured' THEN 'not_captured' ELSE 'not_observed' END,
-                   NULL,NULL,NULL,NULL,s.status,s.completeness,'not_observed','not_observed',
-                   CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN 'recorded' WHEN s.started_at IS NULL AND s.ended_at IS NULL THEN 'not_observed' ELSE 'inconsistent' END,
-                   s.started_at,s.ended_at,s.last_seen_at,CASE WHEN s.started_at IS NOT NULL AND s.ended_at IS NOT NULL AND julianday(s.ended_at)>=julianday(s.started_at) THEN MAX(0,CAST((julianday(s.ended_at)-julianday(s.started_at))*86400000 AS INTEGER)) END,
+                   NULL,NULL,NULL,s.status,s.completeness,'not_observed','not_observed',
+                   CASE WHEN local_workspace_epoch(s.started_at) IS NOT NULL AND local_workspace_epoch(s.ended_at)>=local_workspace_epoch(s.started_at) THEN 'recorded' WHEN local_workspace_epoch(s.started_at) IS NULL AND local_workspace_epoch(s.ended_at) IS NULL THEN 'not_observed' ELSE 'inconsistent' END,
+                   local_workspace_canonical(s.started_at),local_workspace_canonical(s.ended_at),local_workspace_canonical(s.last_seen_at),local_workspace_epoch(s.last_seen_at),CASE WHEN local_workspace_epoch(s.started_at) IS NOT NULL AND local_workspace_epoch(s.ended_at)>=local_workspace_epoch(s.started_at) THEN local_workspace_epoch(s.ended_at)-local_workspace_epoch(s.started_at) END,
                    CASE s.raw_retention_state WHEN 'expired_pending_deletion' THEN 'raw_content_expired' WHEN 'not_captured' THEN 'raw_content_not_captured' ELSE '' END,
-                   s.status||'|'||s.completeness||'|'||COALESCE(s.started_at,'')||'|'||COALESCE(s.ended_at,'')||'|'||s.last_seen_at
+                   s.status||'|'||s.completeness||'|'||COALESCE(local_workspace_canonical(s.started_at),'')||'|'||COALESCE(local_workspace_canonical(s.ended_at),'')||'|'||COALESCE(local_workspace_canonical(s.last_seen_at),'')
             FROM sessions s WHERE s.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             INSERT INTO local_workspace_session_sources
               WITH values_by_session AS (
@@ -81,6 +83,7 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson);
         }
         ApplyLabels(connection, transaction, idsJson, now);
+        ApplySearchFacts(connection, transaction, idsJson, now);
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
@@ -101,12 +104,55 @@ internal static class LocalWorkspaceProjectionStore
                 AND local_workspace_future(c.expires_at,$now)=1),
             ranked AS (SELECT *,row_number() OVER(PARTITION BY session_id ORDER BY occurred_at COLLATE BINARY,event_id COLLATE BINARY) ordinal FROM candidates WHERE label_text IS NOT NULL)
             UPDATE local_workspace_sessions AS p SET
-              label_state='recorded',label_text=r.label_text,label_search_text=local_workspace_search(r.label_text),
+              label_state='recorded',label_text=r.label_text,
               label_source_identity=r.event_id,label_expires_at=r.expires_at,
               revision_seed=p.revision_seed||'|'||r.event_id||'|'||r.expires_at
             FROM ranked r WHERE r.ordinal=1 AND r.session_id=p.session_id;
             """, idsJson, Canonical(now));
     }
+
+    private static void ApplySearchFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
+    {
+        ExecuteWithIds(connection, transaction, """
+            INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+            SELECT session_id,'label',label_source_identity,local_workspace_search(label_text),label_expires_at
+            FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            """, idsJson);
+        if (TableExists(connection, transaction, "skill_projection_sdk_claims"))
+            ExecuteWithIds(connection, transaction, """
+                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT session_id,'skill',claim_id,local_workspace_search(skill_name),NULL FROM skill_projection_sdk_claims
+                WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
+        if (TableExists(connection, transaction, "skill_projection_invocations"))
+            ExecuteWithIds(connection, transaction, """
+                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT i.session_id,'skill',CAST(i.invocation_id AS TEXT),local_workspace_search(i.skill_name),NULL
+                FROM skill_projection_invocations i JOIN skill_projection_trace_heads h ON h.current_generation_id=i.generation_id
+                WHERE i.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson);
+        if (TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
+            ExecuteWithIds(connection, transaction, """
+                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
+                SELECT e.session_id,'tool',CAST(m.raw_record_id AS TEXT)||':'||CAST(m.span_ordinal AS TEXT),local_workspace_search(m.tool_name),i.expires_at
+                FROM session_events e JOIN monitor_spans m ON e.source_adapter='otel-exact' AND e.source_event_id=m.trace_id||'/'||m.span_id
+                JOIN retention_items i ON i.store_kind='raw_record' AND i.source_item_id=CAST(m.raw_record_id AS TEXT)
+                WHERE m.tool_name IS NOT NULL AND length(m.tool_name)>0 AND i.state IN ('expiring','retained_by_policy')
+                  AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL
+                  AND (i.state='retained_by_policy' OR i.expires_at COLLATE BINARY > $now COLLATE BINARY)
+                  AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+                """, idsJson, Canonical(now));
+    }
+
+    private static void RegisterProjectionFunctions(SqliteConnection connection)
+    {
+        connection.CreateFunction<string?, long?>("local_workspace_epoch", static value => TryInstant(value, out var instant) ? instant.ToUnixTimeMilliseconds() : null, isDeterministic: true);
+        connection.CreateFunction<string?, string?>("local_workspace_canonical", static value => TryInstant(value, out var instant) ? Canonical(instant) : null, isDeterministic: true);
+        connection.CreateFunction<string?, string?>("local_workspace_search", static value => value is null ? null : Search(value), isDeterministic: true);
+    }
+
+    private static bool TryInstant(string? value, out DateTimeOffset instant) =>
+        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out instant);
 
     private static bool TryReadInstruction(string type, string json, out string text)
     {

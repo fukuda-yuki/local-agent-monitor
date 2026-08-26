@@ -39,7 +39,23 @@ internal sealed record LocalWorkspaceProjectionRow(
     string TimingState,
     string? StartedAt,
     string? EndedAt,
-    string LastSeenAt,
+    string? LastSeenAt,
+    long? LastSeenEpochMilliseconds,
     long? DurationMilliseconds,
     IReadOnlyList<string> CaptureNotes,
-    string RevisionSeed) : ILocalRepositorySessionSnapshotRow;
+    IReadOnlyList<string> SearchTexts,
+    string RevisionSeed) : ILocalRepositorySessionSnapshotRow
+{
+    internal LocalWorkspaceProjectionRow(
+        string sessionId, long sortGroup, long sortEpochMilliseconds, string labelState, string? labelText,
+        string status, string completeness, LocalWorkspaceSetFact sources, LocalWorkspaceSetFact models,
+        LocalWorkspaceActivityFacts activity, LocalWorkspaceTokenFacts tokens, string timingState,
+        string? startedAt, string? endedAt, string? lastSeenAt, long? durationMilliseconds,
+        IReadOnlyList<string> captureNotes, string revisionSeed)
+        : this(sessionId, sortGroup, sortEpochMilliseconds, labelState, labelText, status, completeness, sources, models,
+            activity, tokens, timingState, startedAt, endedAt, lastSeenAt,
+            DateTimeOffset.TryParse(lastSeenAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed) ? parsed.ToUnixTimeMilliseconds() : null,
+            durationMilliseconds, captureNotes,
+            labelText is null ? Array.Empty<string>() : [labelText.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant()], revisionSeed)
+    { }
+}

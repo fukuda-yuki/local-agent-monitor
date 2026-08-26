@@ -46,6 +46,8 @@ internal static class SkillProjectionSdkClaimParticipant
         if (collisions.Count == 0)
         {
             Insert(connection, transaction, claim, createdAt);
+            LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+                connection, transaction, [claim.SessionId], claim.CreatedAt);
             return SkillProjectionSdkClaimWriteOutcome.Inserted;
         }
         if (collisions.Count == 1 && IsIdentical(collisions[0], claim, createdAt))

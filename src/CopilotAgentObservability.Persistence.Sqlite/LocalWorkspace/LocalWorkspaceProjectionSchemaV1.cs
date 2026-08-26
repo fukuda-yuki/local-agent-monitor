@@ -7,11 +7,11 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 internal static class LocalWorkspaceProjectionSchemaV1
 {
     internal const string ComponentName = "local_workspace_projection";
-    internal const int Version = 2;
+    internal const int Version = 3;
     internal static readonly string[] TableNames =
     [
         "local_workspace_sessions", "local_workspace_session_sources",
-        "local_workspace_session_models", "local_workspace_session_activity",
+        "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_activity",
         "local_workspace_token_observations", "local_workspace_span_facts", "local_workspace_projection_state",
     ];
 
@@ -21,10 +21,9 @@ internal static class LocalWorkspaceProjectionSchemaV1
             CREATE TABLE local_workspace_sessions (
                 session_id TEXT PRIMARY KEY,
                 sort_group INTEGER NOT NULL CHECK(sort_group IN (0,1)),
-                sort_epoch_ms INTEGER NOT NULL CHECK(sort_epoch_ms >= 0),
+                sort_epoch_ms INTEGER NOT NULL,
                 label_state TEXT NOT NULL,
                 label_text TEXT NULL,
-                label_search_text TEXT NULL,
                 label_source_identity TEXT NULL,
                 label_expires_at TEXT NULL,
                 status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
@@ -34,15 +33,30 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 timing_state TEXT NOT NULL,
                 started_at TEXT NULL,
                 ended_at TEXT NULL,
-                last_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NULL,
+                last_seen_epoch_ms INTEGER NULL,
                 duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms >= 0),
                 capture_notes TEXT NOT NULL,
                 revision_seed TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
-                CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_search_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_search_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL)),
-                CHECK((started_at IS NULL AND sort_group=1 AND sort_epoch_ms=0) OR (started_at IS NOT NULL AND sort_group=0))
+                CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL)),
+                CHECK((sort_group=1 AND sort_epoch_ms=0) OR sort_group=0),
+                CHECK((last_seen_at IS NULL)=(last_seen_epoch_ms IS NULL))
             );
             """),
+        new("table", "local_workspace_session_search_facts", "local_workspace_session_search_facts", """
+            CREATE TABLE local_workspace_session_search_facts (
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('label','skill','tool')),
+                source_identity TEXT NOT NULL,
+                normalized_text TEXT NOT NULL CHECK(length(normalized_text)>0),
+                expires_at TEXT NULL,
+                PRIMARY KEY(session_id,kind,source_identity,normalized_text),
+                FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE
+            );
+            """),
+        new("index", "local_workspace_search_facts_by_text", "local_workspace_session_search_facts", "CREATE INDEX local_workspace_search_facts_by_text ON local_workspace_session_search_facts(normalized_text,session_id);"),
+        new("index", "local_workspace_search_facts_by_session", "local_workspace_session_search_facts", "CREATE INDEX local_workspace_search_facts_by_session ON local_workspace_session_search_facts(session_id,kind);"),
         new("table", "local_workspace_session_sources", "local_workspace_session_sources", """
             CREATE TABLE local_workspace_session_sources (
                 session_id TEXT NOT NULL,
@@ -107,9 +121,38 @@ internal static class LocalWorkspaceProjectionSchemaV1
 
     internal static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ExpectedObjects { get; } =
         SqliteOwnedSchemaAuthority.Compile(Definitions);
-    private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V1ExpectedObjects { get; } =
-        SqliteOwnedSchemaAuthority.Compile(Definitions.Where(static definition => definition.Name != "local_workspace_span_facts").ToArray());
+    private static readonly SqliteOwnedSchemaDefinition V2Sessions = new("table", "local_workspace_sessions", "local_workspace_sessions", """
+        CREATE TABLE local_workspace_sessions (
+            session_id TEXT PRIMARY KEY,
+            sort_group INTEGER NOT NULL CHECK(sort_group IN (0,1)),
+            sort_epoch_ms INTEGER NOT NULL CHECK(sort_epoch_ms >= 0),
+            label_state TEXT NOT NULL,
+            label_text TEXT NULL,
+            label_search_text TEXT NULL,
+            label_source_identity TEXT NULL,
+            label_expires_at TEXT NULL,
+            status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
+            completeness TEXT NOT NULL CHECK(completeness IN ('unbound','partial','rich','full')),
+            source_state TEXT NOT NULL CHECK(source_state IN ('recorded','not_observed','projection_invalid')),
+            model_state TEXT NOT NULL CHECK(model_state IN ('recorded','not_observed','projection_invalid')),
+            timing_state TEXT NOT NULL,
+            started_at TEXT NULL,
+            ended_at TEXT NULL,
+            last_seen_at TEXT NOT NULL,
+            duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms >= 0),
+            capture_notes TEXT NOT NULL,
+            revision_seed TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+            CHECK((label_state='recorded' AND label_text IS NOT NULL AND label_search_text IS NOT NULL AND label_source_identity IS NOT NULL AND label_expires_at IS NOT NULL) OR (label_state<>'recorded' AND label_text IS NULL AND label_search_text IS NULL AND label_source_identity IS NULL AND label_expires_at IS NULL)),
+            CHECK((started_at IS NULL AND sort_group=1 AND sort_epoch_ms=0) OR (started_at IS NOT NULL AND sort_group=0))
+        );
+        """);
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V2Definitions =
+        [V2Sessions, .. Definitions.Where(static definition => definition.Name is not ("local_workspace_sessions" or "local_workspace_session_search_facts" or "local_workspace_search_facts_by_text" or "local_workspace_search_facts_by_session"))];
+    private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V2ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(V2Definitions);
+    private static readonly string[] V2TableNames = V2Definitions.Where(static definition => definition.Type == "table").Select(static definition => definition.Name).ToArray();
     internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
+    internal static IEnumerable<string> ExactV2SchemaSql => V2Definitions.Select(static definition => definition.Sql);
 
     internal static void Ensure(SqliteConnection connection, DateTimeOffset now)
     {
@@ -126,12 +169,13 @@ internal static class LocalWorkspaceProjectionSchemaV1
             throw new InvalidOperationException("local_workspace_projection_component_dependency_invalid");
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
-        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects))
+        if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects))
         {
-            Execute(connection, transaction, Definitions.Single(static definition => definition.Name == "local_workspace_span_facts").Sql);
-            Execute(connection, transaction, "UPDATE schema_version SET version=2 WHERE component='local_workspace_projection' AND version=1;");
+            foreach (var table in V2TableNames.Reverse()) Execute(connection, transaction, $"DROP TABLE {table};");
+            foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
             BackfillSpanFacts(connection, transaction);
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
+            Execute(connection, transaction, "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection' AND version=2;");
             Validate(connection, transaction);
             return;
         }
@@ -142,7 +186,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
             return;
         }
         foreach (var definition in Definitions) Execute(connection, transaction, definition.Sql);
-        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',2);");
+        Execute(connection, transaction, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',3);");
         BackfillSpanFacts(connection, transaction);
         LocalWorkspaceProjectionStore.Refresh(connection, transaction, now);
         Validate(connection, transaction);
@@ -152,17 +196,18 @@ internal static class LocalWorkspaceProjectionSchemaV1
     {
         if (ReadVersion(connection, transaction) != Version
             || !SqliteOwnedSchemaAuthority.Equal(ReadOwnedObjects(connection, transaction), ExpectedObjects))
-            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 2.");
+            throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 3.");
     }
 
-    internal static void ValidateCurrentOrExactV1(SqliteConnection connection, SqliteTransaction? transaction)
+    internal static void ValidateCurrentOrExactV2(SqliteConnection connection, SqliteTransaction? transaction)
     {
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
         if (version == Version && SqliteOwnedSchemaAuthority.Equal(owned, ExpectedObjects)) return;
-        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects)) return;
+        if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects)) return;
         throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema.");
     }
+
 
     private static IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> ReadOwnedObjects(SqliteConnection connection, SqliteTransaction? transaction) =>
         SqliteOwnedSchemaAuthority.Read(connection, transaction, static (name, table) =>

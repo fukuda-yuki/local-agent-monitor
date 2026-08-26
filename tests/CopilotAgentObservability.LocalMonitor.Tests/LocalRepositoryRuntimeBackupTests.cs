@@ -99,6 +99,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         + "DROP TABLE IF EXISTS local_workspace_session_activity;"
                         + "DROP TABLE IF EXISTS local_workspace_token_observations;"
                         + "DROP TABLE IF EXISTS local_workspace_span_facts;"
+                        + "DROP TABLE IF EXISTS local_workspace_session_search_facts;"
                         + "DROP TABLE IF EXISTS local_workspace_projection_state;"
                         + "DROP TABLE IF EXISTS local_workspace_sessions;";
                     removeArchive.ExecuteNonQuery();
@@ -134,7 +135,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
         Assert.Equal(expected, ReadCatalogSnapshot(target));
         using var migrated = Open(target);
         Assert.Equal(14L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='session';"));
-        Assert.Equal(2L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(3L, ScalarLong(target, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.True(SqliteSessionStore.IsCurrentSchemaValid(migrated, null));
         Assert.Equal(0L, ScalarLong(target, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
         Assert.Equal("session_events", StringJoin(target, "SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('session_repository_observation_contexts') WHERE \"from\"='session_event_id';"));

@@ -37,7 +37,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             new TestReadTransaction(connection), new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
 
         Assert.Equal(10_000, result.Sessions.Count);
-        Assert.Equal(["sessions", "sources", "models", "activity", "skills", "tokens"], statements);
+        Assert.Equal(["sessions", "sources", "models", "search", "activity", "skills", "tokens"], statements);
         Assert.All(result.Sessions, row => Assert.Equal("not_observed", ((LocalWorkspaceProjectionRow)row).Activity.Skill.State));
     }
 

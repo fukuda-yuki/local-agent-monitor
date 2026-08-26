@@ -76,16 +76,17 @@ public sealed class RuntimeBackupRestoreTests
         var backup = service.CreateAndPublish(source, bundle);
         Assert.True(backup.Success, backup.ErrorCode);
         using (var connection = temp.Open(source))
-            temp.Execute(connection, "DELETE FROM local_workspace_token_observations; DELETE FROM local_workspace_span_facts; DELETE FROM local_workspace_session_activity; DELETE FROM local_workspace_session_models; DELETE FROM local_workspace_session_sources; DELETE FROM local_workspace_sessions; DELETE FROM local_workspace_projection_state; DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+            temp.Execute(connection, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
 
         var restored = service.Restore(bundle, source, new RuntimeRestoreOptions());
 
         Assert.True(restored.Success, restored.ErrorCode);
         Assert.Equal(expected, temp.SnapshotOwnedRows(source, "local_workspace_"));
         using var verification = temp.Open(source);
-        Assert.Equal(7, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
-        Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.True(temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM {table};") > 0));
-        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(8, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.Equal(1L,
+            temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='{table}';")));
+        Assert.Equal(3L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         using var validation = verification.BeginTransaction(deferred: true);
         LocalWorkspaceProjectionBackupValidation.Validate(verification, validation);
     }
@@ -520,7 +521,7 @@ public sealed class RuntimeBackupRestoreTests
     }
 
     [Fact]
-    public void Monitor_startup_defers_exact_workspace_v1_migration_until_completion()
+    public void Monitor_startup_defers_exact_workspace_v2_migration_until_completion()
     {
         using var temp = new RestoreTemp();
         using (var database = temp.Open(temp.Source))
@@ -533,7 +534,9 @@ public sealed class RuntimeBackupRestoreTests
         using (var database = temp.Open(temp.Source))
         {
             LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
-            temp.Execute(database, "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection';");
+            temp.Execute(database, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+            foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV2SchemaSql) temp.Execute(database, sql);
+            temp.Execute(database, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',2);");
         }
         var service = new SqliteRuntimeBackupService(temp.Clock);
 
@@ -543,16 +546,16 @@ public sealed class RuntimeBackupRestoreTests
         using var lease = Assert.IsType<RuntimeBackupMonitorLease>(initialization.Lease);
         using (var database = temp.Open(temp.Source))
         {
-            Assert.Equal(1L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
-            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+            Assert.Equal(2L, temp.Scalar<long>(database, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+            Assert.Equal(0L, temp.Scalar<long>(database, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_session_search_facts';"));
         }
 
         var completed = service.CompleteMonitorInitialization(lease);
 
         Assert.True(completed.Success, completed.ErrorCode);
         using var verification = temp.Open(temp.Source);
-        Assert.Equal(2L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
-        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_span_facts';"));
+        Assert.Equal(3L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(1L, temp.Scalar<long>(verification, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_workspace_session_search_facts';"));
     }
 
     [Theory]
@@ -576,7 +579,7 @@ public sealed class RuntimeBackupRestoreTests
             temp.Execute(database, kind switch
             {
                 "missing_stamp" => "DELETE FROM schema_version WHERE component='local_workspace_projection';",
-                "future_version" => "UPDATE schema_version SET version=3 WHERE component='local_workspace_projection';",
+                "future_version" => "UPDATE schema_version SET version=4 WHERE component='local_workspace_projection';",
                 "v1_drift" => "DROP TABLE local_workspace_span_facts; UPDATE schema_version SET version=1 WHERE component='local_workspace_projection'; ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
                 "v2_drift" => "ALTER TABLE local_workspace_sessions ADD COLUMN drift TEXT;",
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
@@ -3148,6 +3151,7 @@ public sealed class RuntimeBackupRestoreTests
                     + "DROP TABLE IF EXISTS local_workspace_session_models;"
                     + "DROP TABLE IF EXISTS local_workspace_session_activity;"
                     + "DROP TABLE IF EXISTS local_workspace_token_observations;DROP TABLE IF EXISTS local_workspace_span_facts;"
+                    + "DROP TABLE IF EXISTS local_workspace_session_search_facts;"
                     + "DROP TABLE IF EXISTS local_workspace_projection_state;"
                     + "DROP TABLE IF EXISTS local_workspace_sessions;");
                 SessionVersion13TestFixture.DowngradeSessionEvents(connection);

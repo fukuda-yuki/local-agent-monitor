@@ -18,10 +18,8 @@ internal static class LocalWorkspaceProjectionBackupValidation
                   LEFT JOIN sessions s ON s.session_id=p.session_id
                   WHERE s.session_id IS NULL
                      OR length(p.revision_seed)=0
-                     OR p.last_seen_at<>s.last_seen_at COLLATE BINARY
-                     OR p.sort_group<>CASE WHEN s.started_at IS NULL THEN 1 ELSE 0 END
-                     OR s.started_at IS NULL AND p.sort_epoch_ms<>0
-                     OR s.started_at IS NOT NULL AND p.sort_epoch_ms<>MAX(0,CAST((julianday(s.started_at)-2440587.5)*86400000 AS INTEGER))
+                     OR (p.sort_group=1 AND p.sort_epoch_ms<>0)
+                     OR (p.last_seen_at IS NULL)<>(p.last_seen_epoch_ms IS NULL)
                      OR (SELECT COUNT(*) FROM local_workspace_session_sources x WHERE x.session_id=p.session_id)>5
                      OR (SELECT COUNT(*) FROM local_workspace_session_models x WHERE x.session_id=p.session_id)>16
                      OR EXISTS(SELECT 1 FROM local_workspace_session_sources x WHERE x.session_id=p.session_id AND x.source NOT IN ('copilot-sdk','copilot-cli','vscode','hook-unknown','claude-code'))
@@ -59,6 +57,24 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
+            command.CommandText = "SELECT last_seen_at,last_seen_epoch_ms FROM local_workspace_sessions WHERE last_seen_at IS NOT NULL;";
+            using (var timing = command.ExecuteReader())
+            {
+                while (timing.Read())
+                {
+                    if (!DateTimeOffset.TryParseExact(timing.GetString(0), "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant)
+                        || instant.Offset != TimeSpan.Zero || instant.ToUnixTimeMilliseconds() != timing.GetInt64(1))
+                        throw new InvalidOperationException();
+                }
+            }
+            command.CommandText = "SELECT normalized_text FROM local_workspace_session_search_facts;";
+            using (var facts = command.ExecuteReader())
+                while (facts.Read())
+                {
+                    var value = facts.GetString(0);
+                    if (value.Length == 0 || !string.Equals(value, value.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), StringComparison.Ordinal))
+                        throw new InvalidOperationException();
+                }
             command.CommandText = "SELECT capture_notes FROM local_workspace_sessions;";
             using (var notes = command.ExecuteReader())
             {
