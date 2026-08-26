@@ -2,11 +2,55 @@ using System.Text;
 using System.Text.Json;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.Persistence.Sqlite;
+using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalWorkspaceSessionDetailSnapshotTests
 {
+    [Fact]
+    public async Task NodeReadRejectsAProjectionWithFourThousandNinetySevenTotalNodes()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Single();
+        CloneUnrelatedNodes(connection, 4096);
+        using var transaction = connection.BeginTransaction();
+        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
+            registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await contributor.ReadAsync(new DirectReadTransaction(connection, transaction),
+                new(LocalRepositorySessionDetailRequestKind.Node, SessionId, NodeId: rootId), CancellationToken.None));
+
+        Assert.Equal("workspace_too_large", error.Error);
+    }
+
+    [Fact]
+    public async Task NodeReadRejectsAnAncestryCycleAsUnavailableInsteadOfTooLarge()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes;").Single();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE local_workspace_nodes SET parent_node_id=node_id WHERE node_id=$node_id;";
+            command.Parameters.AddWithValue("$node_id", rootId);
+            command.ExecuteNonQuery();
+        }
+        using var transaction = connection.BeginTransaction();
+        var contributor = new LocalWorkspaceSessionDetailSnapshotContributor(
+            registryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+
+        var error = await Assert.ThrowsAsync<LocalWorkspaceSessionDetailException>(async () =>
+            await contributor.ReadAsync(new DirectReadTransaction(connection, transaction),
+                new(LocalRepositorySessionDetailRequestKind.Node, SessionId, NodeId: rootId), CancellationToken.None));
+
+        Assert.Equal("local_monitor_ui_unavailable", error.Error);
+    }
+
     [Fact]
     public void RecordedTimelineCursorPermitsTheFullSignedTickDomainIncludingZero()
     {
@@ -83,4 +127,48 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
 
     private const string SessionId = "018f0000-0000-7000-8000-000000000001";
     private const string ExecutionId = "018f0000-0000-7000-8000-000000000003";
+
+    private static void CloneUnrelatedNodes(SqliteConnection connection, int count)
+    {
+        var columns = new List<string>();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA table_info(local_workspace_nodes);";
+            using var reader = pragma.ExecuteReader();
+            while (reader.Read()) columns.Add(reader.GetString(1));
+        }
+        var expressions = columns.Select(static column => column switch
+        {
+            "node_id" => "$node_id",
+            "source_kind" => "'session_event'",
+            "source_identity" => "$source_identity",
+            "source_ordinal" => "$source_ordinal",
+            "parent_node_id" => "NULL",
+            "relationship_authority" => "'unknown'",
+            "kind" => "'event'",
+            _ => column,
+        });
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO local_workspace_nodes({string.Join(',', columns)}) SELECT {string.Join(',', expressions)} FROM local_workspace_nodes WHERE source_kind='execution_root';";
+        var nodeId = command.Parameters.Add("$node_id", Microsoft.Data.Sqlite.SqliteType.Text);
+        var sourceIdentity = command.Parameters.Add("$source_identity", Microsoft.Data.Sqlite.SqliteType.Text);
+        var sourceOrdinal = command.Parameters.Add("$source_ordinal", Microsoft.Data.Sqlite.SqliteType.Integer);
+        for (var index = 0; index < count; index++)
+        {
+            var identity = $"unrelated-{index:D4}";
+            nodeId.Value = LocalWorkspaceProjectionStore.StableNodeId("session_event", identity);
+            sourceIdentity.Value = identity;
+            sourceOrdinal.Value = index + 1;
+            command.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    private sealed class DirectReadTransaction(SqliteConnection connection, SqliteTransaction transaction) : ILocalRepositoryReadTransaction
+    {
+        public ValueTask<T> ReadAsync<T>(Func<SqliteConnection, SqliteTransaction, CancellationToken, ValueTask<T>> read,
+            CancellationToken cancellationToken) => read(connection, transaction, cancellationToken);
+    }
 }

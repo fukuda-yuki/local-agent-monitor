@@ -26,6 +26,9 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         SqliteConnection connection, SqliteTransaction transaction, LocalRepositorySessionDetailRequest request, CancellationToken token)
     {
         var sessionId = request.SessionId;
+        await ValidateBounds(connection, transaction, sessionId, token);
+        if (request.Kind == LocalRepositorySessionDetailRequestKind.Node)
+            await ValidateNodeAncestry(connection, transaction, request, token);
         var nodes = await ReadNodes(connection, transaction, request, token);
         var executionIds = nodes.Select(static node => node.ExecutionId).Distinct(StringComparer.Ordinal).ToArray();
         var executions = await ReadExecutions(connection, transaction, request, executionIds, token);
@@ -43,6 +46,53 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var registryIdentity = ReadRegistryIdentity();
         return new(Array.AsReadOnly(executions), Array.AsReadOnly(nodes), Array.AsReadOnly(edges), Array.AsReadOnly(content),
             metadata.NativeSessionIds, metadata.Versions, metadata.InstructionSourceIdentity, metadata.InstructionAdditionalCount, revision, registryIdentity);
+    }
+
+    private static async Task ValidateNodeAncestry(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        LocalRepositorySessionDetailRequest request,
+        CancellationToken token)
+    {
+        using var command = Command(connection, transaction, """
+            WITH RECURSIVE ancestry(node_id,parent_node_id,execution_id,depth,path,cycle,cross_scope) AS (
+              SELECT node_id,parent_node_id,execution_id,0,char(0)||node_id||char(0),0,0
+              FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id
+              UNION ALL
+              SELECT parent.node_id,parent.parent_node_id,parent.execution_id,ancestry.depth+1,
+                ancestry.path||parent.node_id||char(0),
+                instr(ancestry.path,char(0)||parent.node_id||char(0))>0,
+                ancestry.cross_scope OR parent.session_id<>$session_id OR parent.execution_id<>ancestry.execution_id
+              FROM ancestry JOIN local_workspace_nodes parent ON parent.node_id=ancestry.parent_node_id
+              WHERE ancestry.parent_node_id IS NOT NULL AND ancestry.depth<4097 AND ancestry.cycle=0
+            )
+            SELECT COALESCE(MAX(depth),0),COALESCE(MAX(cycle),0),COALESCE(MAX(cross_scope),0) FROM ancestry;
+            """, request.SessionId);
+        command.Parameters.AddWithValue("$node_id", request.NodeId!);
+        using var reader = await command.ExecuteReaderAsync(token);
+        if (!await reader.ReadAsync(token)
+            || reader.GetInt64(0) >= 4097
+            || reader.GetInt64(1) != 0
+            || reader.GetInt64(2) != 0)
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+    }
+
+    private static async Task ValidateBounds(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        CancellationToken token)
+    {
+        using var command = Command(connection, transaction, """
+            SELECT
+              EXISTS(SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id LIMIT 1 OFFSET 256),
+              EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
+            """, sessionId);
+        using var reader = await command.ExecuteReaderAsync(token);
+        if (!await reader.ReadAsync(token)
+            || reader.GetInt64(0) != 0
+            || reader.GetInt64(1) != 0)
+            throw new LocalWorkspaceSessionDetailException("workspace_too_large");
     }
 
     private string ReadRegistryIdentity()

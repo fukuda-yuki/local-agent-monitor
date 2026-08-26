@@ -314,10 +314,10 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || edge.RelationshipAuthority is not ("exact" or "explicit") || edge.SourceOrdinal < 0
                 || edge.RelationKind == "parent" && node.ParentNodeId != edge.RelatedNodeId)
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        }
 
         if (!SortedUnique(detail.NativeSessionIds) || !SortedUnique(detail.Versions))
             throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
-        }
         var contentKeys = new HashSet<(string NodeId, string Part)>();
         foreach (var content in detail.Content)
             if ((!nodes.ContainsKey(content.NodeId)
