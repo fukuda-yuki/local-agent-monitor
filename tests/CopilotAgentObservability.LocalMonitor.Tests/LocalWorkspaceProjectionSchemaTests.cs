@@ -137,6 +137,30 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void ExactSourceExecutionIdentityIsInvariantAcrossSessions()
+    {
+        var first = LocalWorkspaceProjectionStore.StableExecutionId("session-a", "session_run", "run-1");
+        var second = LocalWorkspaceProjectionStore.StableExecutionId("session-b", "session_run", "run-1");
+
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public void CrossExecutionParentUsesOneDeterministicUnknownRelationGroup()
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown'); INSERT INTO session_runs VALUES('run-b','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown'); INSERT INTO session_events VALUES('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,NULL,NULL,'synthetic','source-a','event','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL); INSERT INTO session_events VALUES('event-b','0198f5b8-0c00-7000-8000-000000000001','run-b','copilot-sdk','event-a',NULL,NULL,'synthetic','source-b','event','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,'explicit_link',NULL,NULL);");
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(["unknown_relation_group"], Strings(connection, "SELECT kind FROM local_workspace_nodes WHERE source_kind='unknown_relation_group';"));
+        Assert.Equal(["unknown"], Strings(connection, "SELECT relationship_authority FROM local_workspace_nodes WHERE source_identity='event-b';"));
+        Assert.Equal(
+            Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE source_kind='unknown_relation_group';"),
+            Strings(connection, "SELECT parent_node_id FROM local_workspace_nodes WHERE source_identity='event-b';"));
+    }
+
+    [Fact]
     public void EnsureRejectsMalformedOwnedSchemaWithoutCommittingPartialInstall()
     {
         using var connection = OpenSessionDatabase();

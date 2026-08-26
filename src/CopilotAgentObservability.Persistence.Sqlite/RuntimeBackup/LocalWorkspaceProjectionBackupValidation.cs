@@ -261,10 +261,11 @@ internal static class LocalWorkspaceProjectionBackupValidation
         }
         using (var replicaTransaction = replica.BeginTransaction())
         {
-            if (skillRegistryAuthority is null)
-                LocalWorkspaceProjectionStore.RefreshStructural(replica, replicaTransaction, publicationTime.Value);
-            else
-                LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
+            LocalWorkspaceProjectionStore.Refresh(
+                replica,
+                replicaTransaction,
+                publicationTime.Value,
+                skillRegistryAuthority ?? FixedSkillRegistryGenerationAuthority.Load());
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();

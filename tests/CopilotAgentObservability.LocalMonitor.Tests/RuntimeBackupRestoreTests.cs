@@ -86,7 +86,11 @@ public sealed class RuntimeBackupRestoreTests
             temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='{table}';")));
         Assert.Equal(4L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
         using var validation = verification.BeginTransaction(deferred: true);
-        LocalWorkspaceProjectionBackupValidation.Validate(verification, validation);
+        LocalWorkspaceProjectionBackupValidation.Validate(
+            verification,
+            validation,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                SkillInvocationV2ArtifactRegistry.CurrentWriterVersion));
     }
 
     [Fact]

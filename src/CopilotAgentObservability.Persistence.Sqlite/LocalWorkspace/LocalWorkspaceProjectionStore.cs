@@ -118,7 +118,12 @@ internal static class LocalWorkspaceProjectionStore
     {
         var ids = sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var idsJson = JsonSerializer.Serialize(ids);
-        ExecuteWithIds(connection, transaction, "DELETE FROM local_workspace_execution_headers WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));", idsJson);
+        ExecuteWithIds(connection, transaction, """
+            DELETE FROM local_workspace_node_content_refs WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+            DELETE FROM local_workspace_node_edges WHERE node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))) OR related_node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)));
+            DELETE FROM local_workspace_nodes WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            DELETE FROM local_workspace_execution_headers WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
+            """, idsJson);
 
         var executions = new List<(string SessionId, string RunId, string? Model, string Status, string? StartedAt)>();
         using (var command = connection.CreateCommand())
@@ -172,12 +177,32 @@ internal static class LocalWorkspaceProjectionStore
                     ("$kind", NodeKind(item.Type)), ("$name", item.Type), ("$status", item.Status), ("$time", authority), ("$ticks", ticks));
             }
         }
+        var eventsById = events.ToDictionary(static item => item.EventId, StringComparer.Ordinal);
+        foreach (var group in events.GroupBy(static item => (item.SessionId, item.RunId)))
+        {
+            if (!group.Any(item => item.ParentId is not null
+                    && (!eventsById.TryGetValue(item.ParentId, out var parent) || parent.RunId != item.RunId)))
+                continue;
+            var executionId = StableExecutionId(group.Key.SessionId, "session_run", group.Key.RunId);
+            var node = StableNodeId("unknown_relation_group", group.Key.RunId);
+            Execute(connection, transaction, "INSERT INTO local_workspace_nodes VALUES($node,$session,$execution,'unknown_relation_group',$source,$ordinal,NULL,'unknown','unknown_relation_group','not_observed',NULL,NULL,NULL,'missing',NULL,'not_observed','not_observed');",
+                ("$node", node), ("$session", group.Key.SessionId), ("$execution", executionId), ("$source", group.Key.RunId), ("$ordinal", group.LongCount() + 1));
+        }
         foreach (var item in events)
         {
             var node = StableNodeId("session_event", item.EventId);
-            var parent = item.ParentId is null ? StableNodeId("execution_root", item.RunId) : StableNodeId("session_event", item.ParentId);
-            var relation = item.ParentId is not null && item.MatchKind == "explicit_link" ? "explicit" : "exact";
-            Execute(connection, transaction, "UPDATE local_workspace_nodes SET parent_node_id=$parent,relationship_authority=$authority WHERE node_id=$node AND EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=$parent AND p.execution_id=local_workspace_nodes.execution_id); INSERT INTO local_workspace_node_edges SELECT $node,$parent,'parent',$authority,source_ordinal FROM local_workspace_nodes WHERE node_id=$node AND parent_node_id=$parent;",
+            var parentIsSameExecution = item.ParentId is not null
+                && eventsById.TryGetValue(item.ParentId, out var parentEvent)
+                && parentEvent.RunId == item.RunId;
+            var parent = item.ParentId is null
+                ? StableNodeId("execution_root", item.RunId)
+                : parentIsSameExecution
+                    ? StableNodeId("session_event", item.ParentId)
+                    : StableNodeId("unknown_relation_group", item.RunId);
+            var relation = item.ParentId is null || parentIsSameExecution
+                ? item.ParentId is not null && item.MatchKind == "explicit_link" ? "explicit" : "exact"
+                : "unknown";
+            Execute(connection, transaction, "UPDATE local_workspace_nodes SET parent_node_id=$parent,relationship_authority=$authority WHERE node_id=$node AND EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=$parent AND p.execution_id=local_workspace_nodes.execution_id); INSERT INTO local_workspace_node_edges SELECT $node,$parent,'parent',$authority,source_ordinal FROM local_workspace_nodes WHERE node_id=$node AND parent_node_id=$parent AND $authority IN ('exact','explicit');",
                 ("$node", node), ("$parent", parent), ("$authority", relation));
             if (TableExists(connection, transaction, "session_event_content"))
                 Execute(connection, transaction, TableExists(connection, transaction, "retention_items")
@@ -189,7 +214,8 @@ internal static class LocalWorkspaceProjectionStore
 
     internal static string StableExecutionId(string sessionId, string sourceKind, string sourceIdentity)
     {
-        var bytes = Hash("local-workspace-execution-id\0v1\0", sessionId, sourceKind, sourceIdentity);
+        _ = sessionId;
+        var bytes = Hash("local-workspace-execution-id\0v1\0", sourceKind, sourceIdentity);
         bytes[6] = (byte)((bytes[6] & 0x0f) | 0x70);
         bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
         return new Guid(bytes.AsSpan(0, 16), bigEndian: true).ToString("D", CultureInfo.InvariantCulture);
