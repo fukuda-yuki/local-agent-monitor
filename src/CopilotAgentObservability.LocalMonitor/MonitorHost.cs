@@ -229,6 +229,15 @@ internal static class MonitorHost
             timeProvider: timeProvider);
         builder.Services.AddSingleton(skillProjectionStore);
         var skillRegistryAuthority = new SkillInvocationV2RegistryProviderV1();
+        LocalWorkspaceProjectionTransactionParticipant.Instance.ConfigureSkillRegistryAuthority(skillRegistryAuthority);
+        skillRegistryAuthority.CurrentGenerationChanged += () =>
+        {
+            using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={options.DatabasePath};Pooling=False");
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(), skillRegistryAuthority);
+            transaction.Commit();
+        };
         builder.Services.AddSingleton(skillRegistryAuthority);
 
         // The runtime admission exists on every raw-default host, but no generation is admitted

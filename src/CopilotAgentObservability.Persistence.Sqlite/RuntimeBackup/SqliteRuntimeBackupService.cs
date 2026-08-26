@@ -210,7 +210,7 @@ public sealed class SqliteRuntimeBackupService
             transaction.Commit();
             return;
         }
-        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV2(connection, transaction);
+        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, transaction);
         if (version is long current && current == LocalWorkspaceProjectionSchemaV1.Version)
             LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow());
         transaction.Commit();
@@ -1336,8 +1336,8 @@ public sealed class SqliteRuntimeBackupService
                     SkillInvocationSnapshotBackupValidation.Validate(connection, componentTransaction);
                 if (versions.ContainsKey("local_workspace_projection"))
                 {
-                    if (versions["local_workspace_projection"] == 2)
-                        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactV2(connection, componentTransaction);
+                    if (versions["local_workspace_projection"] is 1 or 2)
+                        LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
                     else
                         LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction);
                 }

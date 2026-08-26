@@ -151,7 +151,11 @@ internal static class LocalWorkspaceProjectionSchemaV1
         [V2Sessions, .. Definitions.Where(static definition => definition.Name is not ("local_workspace_sessions" or "local_workspace_session_search_facts" or "local_workspace_search_facts_by_text" or "local_workspace_search_facts_by_session"))];
     private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V2ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(V2Definitions);
     private static readonly string[] V2TableNames = V2Definitions.Where(static definition => definition.Type == "table").Select(static definition => definition.Name).ToArray();
+    private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V1Definitions =
+        V2Definitions.Where(static definition => definition.Name != "local_workspace_span_facts").ToArray();
+    private static readonly IReadOnlyDictionary<(string Type, string Name), SqliteOwnedSchemaObject> V1ExpectedObjects = SqliteOwnedSchemaAuthority.Compile(V1Definitions);
     internal static IEnumerable<SqliteOwnedSchemaObject> OwnedObjects => ExpectedObjects.Values;
+    internal static IEnumerable<string> ExactV1SchemaSql => V1Definitions.Select(static definition => definition.Sql);
     internal static IEnumerable<string> ExactV2SchemaSql => V2Definitions.Select(static definition => definition.Sql);
 
     internal static void Ensure(SqliteConnection connection, DateTimeOffset now)
@@ -169,6 +173,14 @@ internal static class LocalWorkspaceProjectionSchemaV1
             throw new InvalidOperationException("local_workspace_projection_component_dependency_invalid");
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
+        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects))
+        {
+            Execute(connection, transaction, V2Definitions.Single(static definition => definition.Name == "local_workspace_span_facts").Sql);
+            Execute(connection, transaction, "UPDATE schema_version SET version=2 WHERE component='local_workspace_projection' AND version=1;");
+            BackfillSpanFacts(connection, transaction);
+            version = 2;
+            owned = ReadOwnedObjects(connection, transaction);
+        }
         if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects))
         {
             foreach (var table in V2TableNames.Reverse()) Execute(connection, transaction, $"DROP TABLE {table};");
@@ -199,12 +211,13 @@ internal static class LocalWorkspaceProjectionSchemaV1
             throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema version 3.");
     }
 
-    internal static void ValidateCurrentOrExactV2(SqliteConnection connection, SqliteTransaction? transaction)
+    internal static void ValidateCurrentOrExactLegacy(SqliteConnection connection, SqliteTransaction? transaction)
     {
         var version = ReadVersion(connection, transaction);
         var owned = ReadOwnedObjects(connection, transaction);
         if (version == Version && SqliteOwnedSchemaAuthority.Equal(owned, ExpectedObjects)) return;
         if (version == 2 && SqliteOwnedSchemaAuthority.Equal(owned, V2ExpectedObjects)) return;
+        if (version == 1 && SqliteOwnedSchemaAuthority.Equal(owned, V1ExpectedObjects)) return;
         throw new InvalidOperationException("Unsupported incomplete local_workspace_projection schema.");
     }
 

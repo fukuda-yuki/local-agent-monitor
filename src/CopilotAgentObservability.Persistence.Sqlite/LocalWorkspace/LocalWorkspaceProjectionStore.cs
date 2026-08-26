@@ -7,14 +7,14 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalWorkspaceProjectionStore
 {
-    internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
+    internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         var ids = ReadSessionIds(connection, transaction);
-        RefreshSessions(connection, transaction, ids, now);
+        RefreshSessions(connection, transaction, ids, now, skillRegistryAuthority);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
     }
 
-    internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
+    internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
     {
         RegisterProjectionFunctions(connection);
         var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
@@ -83,7 +83,7 @@ internal static class LocalWorkspaceProjectionStore
                 """, idsJson);
         }
         ApplyLabels(connection, transaction, idsJson, now);
-        ApplySearchFacts(connection, transaction, idsJson, now);
+        ApplySearchFacts(connection, transaction, idsJson, now, skillRegistryAuthority);
         using var state = connection.CreateCommand(); state.Transaction = transaction;
         state.CommandText = "INSERT INTO local_workspace_projection_state(projector_key,session_frontier,refreshed_at) VALUES('local-workspace-projection-v1',(SELECT MAX(updated_at) FROM sessions),$now) ON CONFLICT(projector_key) DO UPDATE SET session_frontier=excluded.session_frontier,refreshed_at=excluded.refreshed_at;";
         state.Parameters.AddWithValue("$now", Canonical(now)); state.ExecuteNonQuery();
@@ -111,26 +111,18 @@ internal static class LocalWorkspaceProjectionStore
             """, idsJson, Canonical(now));
     }
 
-    private static void ApplySearchFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
+    private static void ApplySearchFacts(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
         ExecuteWithIds(connection, transaction, """
             INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
             SELECT session_id,'label',label_source_identity,local_workspace_search(label_text),label_expires_at
             FROM local_workspace_sessions WHERE label_state='recorded' AND session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
             """, idsJson);
-        if (TableExists(connection, transaction, "skill_projection_sdk_claims"))
-            ExecuteWithIds(connection, transaction, """
-                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
-                SELECT session_id,'skill',claim_id,local_workspace_search(skill_name),NULL FROM skill_projection_sdk_claims
-                WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-                """, idsJson);
-        if (TableExists(connection, transaction, "skill_projection_invocations"))
-            ExecuteWithIds(connection, transaction, """
-                INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
-                SELECT i.session_id,'skill',CAST(i.invocation_id AS TEXT),local_workspace_search(i.skill_name),NULL
-                FROM skill_projection_invocations i JOIN skill_projection_trace_heads h ON h.current_generation_id=i.generation_id
-                WHERE i.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
-                """, idsJson);
+        var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
+        foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds))
+            InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName);
+        foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
+            InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName);
         if (TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)
@@ -142,6 +134,22 @@ internal static class LocalWorkspaceProjectionStore
                   AND (i.state='retained_by_policy' OR i.expires_at COLLATE BINARY > $now COLLATE BINARY)
                   AND e.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                 """, idsJson, Canonical(now));
+    }
+
+    private static void InsertSkillSearchFact(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionId,
+        string sourceIdentity,
+        string skillName)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at) VALUES($session,'skill',$source,local_workspace_search($name),NULL);";
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$source", sourceIdentity);
+        command.Parameters.AddWithValue("$name", skillName);
+        command.ExecuteNonQuery();
     }
 
     private static void RegisterProjectionFunctions(SqliteConnection connection)
@@ -175,6 +183,11 @@ internal static class LocalWorkspaceProjectionStore
     }
 
     private static string Search(string value) => value.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+
+    private sealed class ProjectionTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
     internal static string CanonicalizeCaptureNotes(IEnumerable<string> values)
     {
         var allowed = new HashSet<string>(["raw_content_not_captured", "raw_content_expired", "source_unsupported", "capture_gap", "certification_pending", "projection_invalid", "token_inconsistent", "cache_inconsistent"], StringComparer.Ordinal);

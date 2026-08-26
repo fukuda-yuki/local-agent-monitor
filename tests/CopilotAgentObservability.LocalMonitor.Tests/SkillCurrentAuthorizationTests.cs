@@ -44,6 +44,61 @@ public sealed class SkillCurrentAuthorizationTests
     }
 
     [Fact]
+    public void WorkspaceSearchFactUsesCurrentValidSdkAuthorization()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-current");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Equal(["demo-skill"], SearchFacts(database));
+        Assert.Equal(0, authority.OutstandingLeaseCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsRevokedSdkAuthorization()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-revoked");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]) { TupleAccepted = _ => false };
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+        Assert.Equal(0, authority.OutstandingLeaseCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsInvalidSdkSnapshotGraph()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-invalid", state: "malformed", reason: "duplicate_property");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [true]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+        Assert.Equal(0, authority.LeaseAttemptCount);
+    }
+
+    [Fact]
+    public void WorkspaceSearchFactRejectsUnavailableSdkGeneration()
+    {
+        using var database = new TestDatabase();
+        var write = NewWrite("native-search-stale");
+        Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, Commit(database, write));
+        var authority = new ScriptedRegistryGenerationAuthority(leaseGrants: [], captureAvailable: [false]);
+
+        RefreshWorkspace(database, authority);
+
+        Assert.Empty(SearchFacts(database));
+    }
+
+    [Fact]
     public void OnePreLeaseChurn_RecapturesOnce_ThenAcquires()
     {
         using var database = new TestDatabase();
@@ -373,6 +428,26 @@ public sealed class SkillCurrentAuthorizationTests
     private sealed class FixedTimeProvider(DateTimeOffset instant) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => instant;
+    }
+
+    private static void RefreshWorkspace(TestDatabase database, ISkillRegistryGenerationAuthority authority)
+    {
+        using var connection = database.Open();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ValidationAt);
+        using var transaction = connection.BeginTransaction();
+        LocalWorkspaceProjectionStore.Refresh(connection, transaction, ValidationAt, authority);
+        transaction.Commit();
+    }
+
+    private static string[] SearchFacts(TestDatabase database)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill' ORDER BY normalized_text COLLATE BINARY;";
+        using var reader = command.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result.ToArray();
     }
 
     private sealed class ScriptedRegistryGenerationAuthority : ISkillRegistryGenerationAuthority

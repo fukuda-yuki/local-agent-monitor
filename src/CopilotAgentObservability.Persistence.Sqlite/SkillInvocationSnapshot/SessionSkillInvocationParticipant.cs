@@ -111,6 +111,8 @@ internal static class SessionSkillInvocationParticipant
 
         InsertSnapshot(connection, transaction, write, sessionId, isAvailable ? runId : null, claimId, contentItemId, payloadSha256, documentSha256);
         InsertReceipt(connection, transaction, write, payloadSha256, documentSha256);
+        LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+            connection, transaction, [sessionId], write.WriteAt);
 
         insertedIdentity = new(Guid.Parse(sessionId), write.SnapshotId);
 

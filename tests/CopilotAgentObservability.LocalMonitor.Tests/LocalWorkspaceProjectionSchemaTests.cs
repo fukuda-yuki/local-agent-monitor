@@ -42,6 +42,32 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void EnsureComposesExactV1ThroughV2ToV3AtomicallyAndReruns()
+    {
+        using var connection = OpenSessionDatabase();
+        foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV1SchemaSql) Execute(connection, sql);
+        Execute(connection, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',1);");
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, transaction, DateTimeOffset.UnixEpoch);
+            Assert.Equal(["3"], Strings(transaction, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+            transaction.Rollback();
+        }
+
+        Assert.Equal(["1"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Empty(Strings(connection, "SELECT name FROM sqlite_schema WHERE name IN ('local_workspace_span_facts','local_workspace_session_search_facts');"));
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(["3"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+        Assert.Equal(
+            ["local_workspace_session_search_facts", "local_workspace_span_facts"],
+            Strings(connection, "SELECT name FROM sqlite_schema WHERE name IN ('local_workspace_span_facts','local_workspace_session_search_facts') ORDER BY name;"));
+    }
+
+    [Fact]
     public void EnsureRejectsDriftedCurrentShape()
     {
         using var connection = OpenSessionDatabase();
@@ -86,6 +112,17 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     internal static string[] Strings(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result.ToArray();
+    }
+
+    private static string[] Strings(SqliteTransaction transaction, string sql)
+    {
+        using var command = transaction.Connection!.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = sql;
         using var reader = command.ExecuteReader();
         var result = new List<string>();

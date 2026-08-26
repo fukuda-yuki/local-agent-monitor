@@ -12,6 +12,8 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
     private readonly HashSet<GenerationLease> outstandingLeases = new();
     private Generation? currentGeneration;
 
+    internal event Action? CurrentGenerationChanged;
+
     internal SkillInvocationV2RegistryProviderV1()
         : this(SkillInvocationV2ArtifactRegistry.Load())
     {
@@ -97,6 +99,7 @@ internal sealed class SkillInvocationV2RegistryProviderV1 : ISkillRegistryGenera
 
             currentGeneration = incoming;
         }
+        CurrentGenerationChanged?.Invoke();
     }
 
     internal int OutstandingLeaseCount

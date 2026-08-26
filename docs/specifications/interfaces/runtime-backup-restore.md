@@ -437,7 +437,8 @@ and [Skill Projection](../layers/skill-projection.md).
 
 `skill_invocation_snapshot:1` is likewise independent, is not a Retention kind,
 and is registered immediately after `skill_projection:1` and before the future
-`local_workspace_projection:3`. Restore staging accepts only exact v2 for its atomic
+`local_workspace_projection:3`. Restore staging accepts exact v1 through its supported
+v1-to-v2 step and exact v2 through the direct v2-to-v3 step for their atomic
 v2-to-v3 migration; runtime readers accept only v3. Its complete contract is owned by
 [Skill Invocation Snapshot](skill-invocation-snapshot.md). It owns invocation
 index/metadata and equality receipts only. Session Event content remains the
