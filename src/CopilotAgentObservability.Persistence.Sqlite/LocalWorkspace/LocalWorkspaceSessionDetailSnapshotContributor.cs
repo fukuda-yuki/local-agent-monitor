@@ -97,7 +97,13 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
             LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (source_kind='execution_root' OR parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
             LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND (node_id=$parent_node_id OR parent_node_id=$parent_node_id)",
-            _ => "session_id=$session_id AND (node_id=$node_id OR node_id IN (WITH RECURSIVE ancestors(node_id,depth) AS (SELECT parent_node_id,1 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id UNION ALL SELECT n.parent_node_id,a.depth+1 FROM local_workspace_nodes n JOIN ancestors a ON n.node_id=a.node_id WHERE a.node_id IS NOT NULL AND a.depth<=4097) SELECT node_id FROM ancestors WHERE node_id IS NOT NULL) OR parent_node_id=$node_id OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind IN ('retry','recovery')))"
+            _ => """
+                session_id=$session_id AND (node_id=$node_id
+                OR node_id IN (WITH RECURSIVE ancestors(node_id,depth) AS (SELECT parent_node_id,1 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id UNION ALL SELECT n.parent_node_id,a.depth+1 FROM local_workspace_nodes n JOIN ancestors a ON n.node_id=a.node_id WHERE a.node_id IS NOT NULL AND a.depth<=4097) SELECT node_id FROM ancestors WHERE node_id IS NOT NULL)
+                OR node_id IN (SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id=$node_id ORDER BY CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,CASE WHEN time_authority='recorded' THEN start_utc_ticks END,source_ordinal,node_id LIMIT 201)
+                OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind='retry' ORDER BY source_ordinal,related_node_id LIMIT 201)
+                OR node_id IN (SELECT related_node_id FROM local_workspace_node_edges WHERE node_id=$node_id AND relation_kind='recovery' ORDER BY source_ordinal,related_node_id LIMIT 201))
+                """
         };
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.After is not null)
         {
@@ -107,7 +113,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         var limit = request.Kind switch
         {
             LocalRepositorySessionDetailRequestKind.Summary => 257,
-            LocalRepositorySessionDetailRequestKind.Node => 4500,
+            LocalRepositorySessionDetailRequestKind.Node => 4097,
             _ => request.Limit + 2
         };
         using var command = Command(c, t, $"""
@@ -143,7 +149,14 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         if (ids.Length == 0) return [];
         statementObserver?.Invoke("detail-edges");
         using var command = c.CreateCommand(); command.Transaction=t;
-        command.CommandText="SELECT node_id,related_node_id,relation_kind,relationship_authority,source_ordinal FROM local_workspace_node_edges WHERE node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY node_id,relation_kind,source_ordinal,related_node_id;";
+        command.CommandText="""
+            SELECT node_id,related_node_id,relation_kind,relationship_authority,source_ordinal FROM (
+              SELECT node_id,related_node_id,relation_kind,relationship_authority,source_ordinal,
+                ROW_NUMBER() OVER (PARTITION BY node_id,relation_kind ORDER BY source_ordinal,related_node_id) ordinal
+              FROM local_workspace_node_edges
+              WHERE node_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) AND relation_kind IN ('retry','recovery')
+            ) WHERE ordinal<=201 ORDER BY node_id,relation_kind,source_ordinal,related_node_id;
+            """;
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(ids));
         var rows=new List<LocalWorkspaceNodeEdgeDetail>(); using var reader=await command.ExecuteReaderAsync(token);
         while(await reader.ReadAsync(token)) rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetInt64(4)));
