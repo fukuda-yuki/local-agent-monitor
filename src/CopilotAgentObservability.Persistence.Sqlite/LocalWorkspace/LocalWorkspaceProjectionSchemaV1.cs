@@ -469,7 +469,10 @@ internal static class LocalWorkspaceProjectionSchemaV1
                        OR i.store_instance_id<>c.retention_store_instance_id OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
                      LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     LEFT JOIN local_workspace_content_tombstones x ON x.source_item_id=c.source_item_id AND x.part=c.part
                      WHERE c.availability_state='deleted' AND (c.retention_owner_token IS NOT NULL OR i.item_id IS NULL
+                       OR x.source_item_id IS NULL OR x.locator_kind<>c.locator_kind OR NOT (x.json_pointer IS c.json_pointer)
+                       OR NOT (x.selected_utf8_bytes IS c.selected_utf8_bytes)
                        OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
                      JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id JOIN session_event_content s ON s.event_id=e.event_id
@@ -486,7 +489,8 @@ internal static class LocalWorkspaceProjectionSchemaV1
                      WHERE e.event_id IS NULL OR i.item_id IS NULL OR i.revision<>x.retention_revision
                        OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id))
                        OR c.node_id IS NULL OR c.availability_state<>'deleted' OR c.locator_kind<>x.locator_kind
-                       OR NOT (c.json_pointer IS x.json_pointer) OR c.retention_owner_token IS NOT NULL)
+                       OR NOT (c.json_pointer IS x.json_pointer) OR NOT (c.selected_utf8_bytes IS x.selected_utf8_bytes)
+                       OR c.retention_owner_token IS NOT NULL)
               """
             : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs WHERE availability_state='available')";
         using var command = connection.CreateCommand();

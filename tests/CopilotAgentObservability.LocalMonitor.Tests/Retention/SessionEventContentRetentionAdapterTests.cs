@@ -11,8 +11,8 @@ public sealed class SessionEventContentRetentionAdapterTests
     [Fact]
     public async Task SessionAdapter_DeletesOnlyExactContentAtomically()
     {
-        using var fixture = await Fixture.CreateAsync();
-        Assert.Equal("instruction|json_pointer|/prompt|available", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        using var fixture = await Fixture.CreateAsync(refreshAfterQueue: true);
+        Assert.Equal("instruction|json_pointer|/prompt|read_denied", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
         var result = await fixture.Adapter.DeleteAsync(fixture.Context);
 
         Assert.Same(RetentionAdapterResult.Deleted, result);
@@ -67,6 +67,36 @@ public sealed class SessionEventContentRetentionAdapterTests
         Assert.Equal(0L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
     }
 
+    [Theory]
+    [InlineData("expired")]
+    [InlineData("oversized")]
+    public async Task SessionAdapter_PreservesExactSemanticBindingFromTrustedPreTerminalStates(string availabilityState)
+    {
+        using var fixture = await Fixture.CreateAsync(refreshAfterQueue: true);
+        fixture.Execute("UPDATE local_workspace_node_content_refs SET availability_state=$state WHERE source_item_id=$target;", ("$state", availabilityState));
+
+        Assert.Same(RetentionAdapterResult.Deleted, await fixture.Adapter.DeleteAsync(fixture.Context));
+        Assert.Equal("instruction|json_pointer|/prompt|6|deleted", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||selected_utf8_bytes||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal("instruction|json_pointer|/prompt|6", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||selected_utf8_bytes FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
+    }
+
+    [Theory]
+    [InlineData("invalid")]
+    [InlineData("not_captured")]
+    public async Task SessionAdapter_DoesNotPromoteUntrustedPreTerminalRowsIntoExactTombstones(string availabilityState)
+    {
+        using var fixture = await Fixture.CreateAsync(refreshAfterQueue: true);
+        fixture.Execute("UPDATE local_workspace_node_content_refs SET availability_state=$state WHERE source_item_id=$target;", ("$state", availabilityState));
+
+        Assert.Same(RetentionAdapterResult.Deleted, await fixture.Adapter.DeleteAsync(fixture.Context));
+        Assert.Equal(0L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
+        Assert.Equal("not_captured", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+
+        fixture.RefreshProjection(DateTimeOffset.Parse("2026-07-20T00:00:00Z"));
+        Assert.Equal("not_captured", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal(0L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, string sessionId, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
@@ -89,8 +119,17 @@ public sealed class SessionEventContentRetentionAdapterTests
 
         internal long Count(string sql) => Convert.ToInt64(Scalar(sql));
         internal string Text(string sql) => (string)Scalar(sql)!;
+        internal void Execute(string sql, params (string Name, object Value)[] values) => Execute(Path, sql, [("$target", TargetEventId), .. values]);
+        internal void RefreshProjection(DateTimeOffset now)
+        {
+            using var connection = Open(Path);
+            using var transaction = connection.BeginTransaction();
+            new LocalWorkspaceProjectionTransactionParticipant(FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                SkillInvocationV2ArtifactRegistry.CurrentWriterVersion)).RefreshSessions(connection, transaction, [SessionId], now);
+            transaction.Commit();
+        }
 
-        internal static async Task<Fixture> CreateAsync(bool failAfterRefresh = false)
+        internal static async Task<Fixture> CreateAsync(bool failAfterRefresh = false, bool refreshAfterQueue = false)
         {
             var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"session-retention-adapter-{Guid.NewGuid():N}.db");
             var now = new DateTimeOffset(2026, 7, 19, 0, 0, 0, TimeSpan.Zero);
@@ -114,6 +153,13 @@ public sealed class SessionEventContentRetentionAdapterTests
             var sibling = batch.Content[1].EventId.ToString("D").ToLowerInvariant();
             var item = Text(path, "SELECT item_id FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source;", ("$source", target));
             Execute(path, "UPDATE retention_items SET state='deletion_queued',revision=1,read_denied_at=$now,queued_at=$now WHERE item_id=$item;", ("$item", item), ("$now", now.ToString("O")));
+            if (refreshAfterQueue)
+            {
+                using var connection = Open(path);
+                using var transaction = connection.BeginTransaction();
+                participant.RefreshSessions(connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
+                transaction.Commit();
+            }
             var claim = (await catalog.TryClaimDeletionAsync(new(item, 1, RetentionWorkKind.Queued), "session-adapter", now, CancellationToken.None)).Claim!;
             var intent = await catalog.EnsureDeleteIntentAsync(claim.Fence, 0, now, CancellationToken.None);
             Assert.Equal(RetentionIntentDisposition.Committed, intent.Disposition);

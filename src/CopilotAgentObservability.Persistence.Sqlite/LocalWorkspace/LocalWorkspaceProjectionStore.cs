@@ -24,7 +24,8 @@ internal static class LocalWorkspaceProjectionStore
             SELECT c.source_item_id,c.part,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,$at,i.item_id,i.revision
             FROM local_workspace_node_content_refs c
             JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=c.source_item_id
-            WHERE c.source_item_id=$source AND c.availability_state='available'
+            WHERE c.source_item_id=$source
+              AND c.availability_state IN ('available','expired','read_denied','oversized')
             ON CONFLICT(source_item_id) DO UPDATE SET
               deleted_at=excluded.deleted_at,retention_item_id=excluded.retention_item_id,retention_revision=excluded.retention_revision;
             UPDATE local_workspace_node_content_refs SET
@@ -33,7 +34,8 @@ internal static class LocalWorkspaceProjectionStore
               retention_store_instance_id=NULL,source_captured_at=NULL,source_expires_at=NULL,
               retention_revision=(SELECT revision FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
               retention_ownership_receipt=NULL,retention_owner_token=NULL,availability_state='deleted'
-            WHERE source_item_id=$source;
+            WHERE source_item_id=$source
+              AND EXISTS(SELECT 1 FROM local_workspace_content_tombstones t WHERE t.source_item_id=$source);
             """;
         command.Parameters.AddWithValue("$source", sourceItemId);
         command.Parameters.AddWithValue("$at", Canonical(completedAt));
@@ -383,7 +385,7 @@ internal static class LocalWorkspaceProjectionStore
                       AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt)=1
                       AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
                       AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)<=1048576 THEN c.retention_owner_token END,
-                    CASE WHEN i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id) THEN 'deleted' WHEN i.read_denied_at IS NOT NULL THEN 'read_denied'
+                    CASE WHEN t.source_item_id IS NOT NULL AND (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id)) THEN 'deleted' WHEN c.event_id IS NOT NULL AND i.read_denied_at IS NOT NULL THEN 'read_denied'
                          WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
                          WHEN e.content_state='available' AND c.event_id IS NOT NULL AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)>1048576 THEN 'oversized'
                          WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured'

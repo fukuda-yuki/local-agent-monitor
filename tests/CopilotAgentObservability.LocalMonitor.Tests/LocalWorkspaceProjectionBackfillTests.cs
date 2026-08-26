@@ -50,10 +50,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     [InlineData("owner_token", "invalid")]
     [InlineData("missing_item", "invalid")]
     [InlineData("missing_source", "not_captured")]
-    [InlineData("deleted", "deleted")]
+    [InlineData("deleted", "invalid")]
     [InlineData("read_denied", "read_denied")]
     [InlineData("error", "invalid")]
-    [InlineData("tombstone", "deleted")]
+    [InlineData("tombstone", "invalid")]
     public void RawRetentionBindingDriftFailsClosedAndClearsCapability(string mutation, string expectedState)
     {
         using var connection = OpenRawRetentionFixture(32);
@@ -85,7 +85,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
     }
 
     [Fact]
-    public void CommittedDeletionSurvivesPhysicalContentRemovalAsExactTombstoneFact()
+    public void RetentionOnlyDeletionCannotInferExactSemanticPartAfterPhysicalContentRemoval()
     {
         using var connection = OpenRawRetentionFixture(32);
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
@@ -101,7 +101,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             transaction.Commit();
         }
 
-        Assert.Equal(["event_content:deleted:1:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+        Assert.Equal(["event_content:not_captured:1:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT part||':'||availability_state||':'||(retention_owner_token IS NULL)||':'||(retention_item_id IS NOT NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
     }
 
