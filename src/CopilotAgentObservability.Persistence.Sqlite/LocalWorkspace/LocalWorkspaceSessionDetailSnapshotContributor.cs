@@ -4,6 +4,11 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWorkspaceSessionDetailSnapshotContributor
 {
+    internal const string BoundsSql = """
+        SELECT
+          EXISTS(SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id LIMIT 1 OFFSET 256),
+          EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
+        """;
     private const int MaximumExecutions = 256;
     private const int MaximumNodes = 4096;
     private readonly Action<string>? statementObserver;
@@ -83,11 +88,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         string sessionId,
         CancellationToken token)
     {
-        using var command = Command(connection, transaction, """
-            SELECT
-              EXISTS(SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id LIMIT 1 OFFSET 256),
-              EXISTS(SELECT 1 FROM local_workspace_nodes WHERE session_id=$session_id LIMIT 1 OFFSET 4096);
-            """, sessionId);
+        using var command = Command(connection, transaction, BoundsSql, sessionId);
         using var reader = await command.ExecuteReaderAsync(token);
         if (!await reader.ReadAsync(token)
             || reader.GetInt64(0) != 0

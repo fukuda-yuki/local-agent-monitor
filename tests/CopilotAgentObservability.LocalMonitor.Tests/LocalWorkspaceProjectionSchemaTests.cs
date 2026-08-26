@@ -270,6 +270,26 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void DetailLimitPlusOneBoundsUseExactSessionIndexesWithoutFullTableScans()
+    {
+        using var connection = OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+        using var command = connection.CreateCommand();
+        command.CommandText = $"EXPLAIN QUERY PLAN {LocalWorkspaceSessionDetailSnapshotContributor.BoundsSql}";
+        command.Parameters.AddWithValue("$session_id", "018f0000-0000-7000-8000-000000000001");
+        using var reader = command.ExecuteReader();
+        var plan = new List<string>();
+        while (reader.Read()) plan.Add(reader.GetString(3));
+
+        Assert.Contains(plan, detail => detail.Contains("SEARCH local_workspace_execution_headers USING COVERING INDEX", StringComparison.Ordinal)
+            && detail.Contains("session_id=?", StringComparison.Ordinal));
+        Assert.Contains(plan, detail => detail.Contains("SEARCH local_workspace_nodes USING COVERING INDEX", StringComparison.Ordinal)
+            && detail.Contains("session_id=?", StringComparison.Ordinal));
+        Assert.DoesNotContain(plan, detail => detail.StartsWith("SCAN local_workspace_execution_headers", StringComparison.Ordinal)
+            || detail.StartsWith("SCAN local_workspace_nodes", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ExactParentProofDoesNotUseSessionMatchKind()
     {
         using var connection = OpenSessionDatabase();
