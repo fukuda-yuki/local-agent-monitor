@@ -25,7 +25,8 @@ public sealed record SkillInvocationV2CompatibilityRegistryEntry(
 
 public sealed record SkillInvocationV2CompatibilityRegistryRevision(
     int Revision,
-    IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries);
+    IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> Entries,
+    string ArtifactFingerprint);
 
 public sealed class SkillInvocationV2ArtifactRegistry
 {
@@ -65,7 +66,31 @@ public sealed class SkillInvocationV2ArtifactRegistry
 
     public IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision> History => history;
 
+    public static string CurrentWriterVersion { get; } =
+        typeof(SkillInvocationV2ArtifactRegistry).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? throw InvalidArtifact();
+
     public static SkillInvocationV2ArtifactRegistry Load() => Current.Value;
+
+    public bool TryResolveWriterVersion(
+        string writerVersion,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SkillInvocationV2CompatibilityRegistryRevision? revision)
+    {
+        var expected = writerVersion switch
+        {
+            "1.0.0" => (Revision: 1, Fingerprint: RegistryR0001Fingerprint),
+            _ when string.Equals(writerVersion, CurrentWriterVersion, StringComparison.Ordinal) =>
+                (Revision: CurrentRevision, Fingerprint: RegistryR0002Fingerprint),
+            _ => default
+        };
+        revision = expected.Revision == 0
+            ? null
+            : history.SingleOrDefault(item =>
+                item.Revision == expected.Revision
+                && string.Equals(item.ArtifactFingerprint, expected.Fingerprint, StringComparison.Ordinal));
+        return revision is not null;
+    }
 
     public bool IsAccepted(SkillInvocationV2CompatibilityTuple tuple)
     {
@@ -135,8 +160,8 @@ public sealed class SkillInvocationV2ArtifactRegistry
 
         var history = new[]
         {
-            new SkillInvocationV2CompatibilityRegistryRevision(1, Array.AsReadOnly(r0001Entries.ToArray())),
-            new SkillInvocationV2CompatibilityRegistryRevision(2, Array.AsReadOnly(r0002Entries.ToArray()))
+            new SkillInvocationV2CompatibilityRegistryRevision(1, Array.AsReadOnly(r0001Entries.ToArray()), RegistryR0001Fingerprint),
+            new SkillInvocationV2CompatibilityRegistryRevision(2, Array.AsReadOnly(r0002Entries.ToArray()), RegistryR0002Fingerprint)
         };
         return new SkillInvocationV2ArtifactRegistry(2, history, r0002Entries);
     }

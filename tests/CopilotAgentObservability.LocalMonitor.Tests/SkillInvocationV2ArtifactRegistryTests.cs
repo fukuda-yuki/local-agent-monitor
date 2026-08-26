@@ -37,6 +37,23 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     }
 
     [Fact]
+    public void WriterProvenance_ResolvesOnlyTheExactEmbeddedWriterMapping()
+    {
+        var registry = SkillInvocationV2ArtifactRegistry.Load();
+
+        Assert.True(registry.TryResolveWriterVersion(
+            SkillInvocationV2ArtifactRegistry.CurrentWriterVersion,
+            out var revision));
+        Assert.Equal(2, revision.Revision);
+        Assert.Equal("e3da4e7334f4e1645de315820181d2752f71ddb9aeba4355a659d185165daaf6", revision.ArtifactFingerprint);
+        Assert.True(registry.TryResolveWriterVersion("1.0.0", out var legacy));
+        Assert.Equal(1, legacy.Revision);
+        Assert.Equal(RegistryFingerprint, legacy.ArtifactFingerprint);
+        Assert.False(registry.TryResolveWriterVersion("unknown", out _));
+        Assert.False(registry.TryResolveWriterVersion("1.0.0-unmapped", out _));
+    }
+
+    [Fact]
     public void RawPayloadEvidence_DefensivelyOwnsPayloadAndDigestBuffers()
     {
         var sourcePayload = Encoding.UTF8.GetBytes("{\"name\":\"skill\"}");

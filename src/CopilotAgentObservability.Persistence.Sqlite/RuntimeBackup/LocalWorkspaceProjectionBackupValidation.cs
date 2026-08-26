@@ -93,8 +93,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 }
             }
             ValidateSdkFactGraph(connection, transaction, publicationTime);
-            if (skillRegistryAuthority is not null || !HasSdkClaims(connection, transaction))
-                ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
+            ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
@@ -146,16 +145,6 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 factsReader.IsDBNull(3) ? null : factsReader.GetString(3));
             if (!expected.Contains(actual)) throw new InvalidOperationException();
         }
-    }
-
-    private static bool HasSdkClaims(SqliteConnection connection, SqliteTransaction transaction)
-    {
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='skill_projection_sdk_claims');";
-        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return false;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM skill_projection_sdk_claims);";
-        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static void ValidateSpanFacts(SqliteConnection connection, SqliteTransaction transaction)

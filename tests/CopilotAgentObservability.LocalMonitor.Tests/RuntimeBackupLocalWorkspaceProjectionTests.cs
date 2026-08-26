@@ -5,6 +5,7 @@ using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
+using System.IO.Compression;
 using System.Reflection;
 using System.Text;
 
@@ -44,6 +45,21 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.True(created.Success, created.ErrorCode);
         Assert.Equal(0L, Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM local_workspace_session_search_facts WHERE kind='skill';"));
         Assert.Equal(PublicationAt, fixture.Clock.FirstObservedInstant);
+    }
+
+    [Fact]
+    public void StructuralInspectionRejectsUnmappedManifestWriterVersion()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("mapped-writer.zip");
+        var unmapped = fixture.Path("unmapped-writer.zip");
+        Assert.True(fixture.Service.CreateAndPublish(fixture.DatabasePath, archive).Success);
+        RewriteWriterVersion(archive, unmapped, "unmapped-writer");
+
+        var result = fixture.Service.Inspect(unmapped);
+
+        Assert.False(result.Success);
+        Assert.Equal(RuntimeBackupErrorCodes.RestoreIncompatible, result.ErrorCode);
     }
 
     [Fact]
@@ -127,7 +143,30 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         using var transaction = connection.BeginTransaction(deferred: true);
 
         Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
-            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+            LocalWorkspaceProjectionBackupValidation.Validate(
+                connection,
+                transaction,
+                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                    SkillInvocationV2ArtifactRegistry.CurrentWriterVersion))).Message);
+    }
+
+    [Theory]
+    [InlineData("DELETE FROM local_workspace_session_search_facts WHERE source_identity LIKE 'sdk:%';")]
+    [InlineData("INSERT INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at) SELECT session_id,'skill','otel:fabricated','fabricated',NULL FROM local_workspace_sessions LIMIT 1;")]
+    [InlineData("DELETE FROM local_workspace_sessions;")]
+    public void StructuralInspectionRejectsMissingOrFabricatedWorkspaceRows(string mutation)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        Execute(fixture.DatabasePath, mutation);
+        using var connection = Open(fixture.DatabasePath);
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(
+                connection,
+                transaction,
+                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                    SkillInvocationV2ArtifactRegistry.CurrentWriterVersion))).Message);
     }
 
     [Fact]
@@ -291,6 +330,38 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         var values = new List<string>();
         while (reader.Read()) values.Add(reader.GetString(0));
         return values.ToArray();
+    }
+
+    private static void RewriteWriterVersion(string source, string output, string writerVersion)
+    {
+        byte[] manifest;
+        byte[] database;
+        using (var archive = ZipFile.OpenRead(source))
+        {
+            manifest = Read(archive.GetEntry("manifest.json")!);
+            database = Read(archive.GetEntry("database.sqlite")!);
+        }
+        var parsed = RuntimeBackupJson.ParseManifest(manifest);
+        using var target = ZipFile.Open(output, ZipArchiveMode.Create);
+        Write(target, "manifest.json", RuntimeBackupJson.WriteManifest(parsed with { SourceApplicationVersion = writerVersion }));
+        Write(target, "database.sqlite", database);
+    }
+
+    private static byte[] Read(ZipArchiveEntry entry)
+    {
+        using var source = entry.Open();
+        using var memory = new MemoryStream();
+        source.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    private static void Write(ZipArchive archive, string name, byte[] bytes)
+    {
+        var entry = archive.CreateEntry(name, CompressionLevel.NoCompression);
+        entry.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        entry.ExternalAttributes = 0;
+        using var stream = entry.Open();
+        stream.Write(bytes);
     }
 
     private sealed class ConfiguredBackupFixture : IDisposable

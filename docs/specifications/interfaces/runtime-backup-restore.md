@@ -185,6 +185,31 @@ The sole `files` row is
 The manifest does not contain its own checksum. The command/result separately
 returns the SHA-256 of the complete ZIP.
 
+For a current `local_workspace_projection:3` archive,
+`source_application_version` is also the immutable writer-provenance key for
+offline structural validation. The embedded Skill invocation registry owns a
+closed exact mapping from each supported writer version to one embedded
+registry revision and that registry artifact's exact SHA-256 fingerprint. The
+mapping admits legacy writer `1.0.0` at registry r0001 and the exact current
+Persistence.Sqlite assembly informational version at r0002. Each resolved
+revision and fingerprint must exactly match the complete validated embedded
+registry history. Unknown, unmapped, ambiguous, missing, or
+fingerprint-mismatched provenance is `restore_incompatible`; validation never
+uses a wildcard, the current registry pointer, the producer tuple's application
+version, or an empty authority fallback.
+
+Structural Workspace validation uses the manifest-resolved fixed historical
+authority and the archived projection state's exact `refreshed_at` to refresh
+an in-memory canonical replica. Every refresh-derived row in every owned
+Workspace table must match the archive exactly with ordinal, type-aware
+equality. This includes Session, source, model, activity, token, label, Tool,
+SDK Skill, OTel Skill, search, and projection-state rows, so missing expected
+rows and fabricated rows both fail. The independent exact raw/Retention
+reconstruction remains authoritative for `local_workspace_span_facts`.
+Restore may subsequently refresh staging with the current fixed authority,
+including removal of a historically valid tuple that is now revoked;
+inspection itself never replays current disposition.
+
 `snapshot` records `method=sqlite_online_backup`, the source journal mode,
 `integrity_check=ok`, `foreign_key_check=ok`, and one opaque snapshot ID derived
 from the database checksum. `component_versions` records every row from the
