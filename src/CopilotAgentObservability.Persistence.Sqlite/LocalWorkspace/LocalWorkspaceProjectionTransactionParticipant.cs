@@ -11,12 +11,26 @@ internal interface ILocalWorkspaceProjectionTransactionParticipant
         DateTimeOffset now);
 }
 
+internal sealed class UnconfiguredLocalWorkspaceProjectionTransactionParticipant : ILocalWorkspaceProjectionTransactionParticipant
+{
+    internal static UnconfiguredLocalWorkspaceProjectionTransactionParticipant Instance { get; } = new();
+
+    private UnconfiguredLocalWorkspaceProjectionTransactionParticipant() { }
+
+    public void RefreshSessions(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        DateTimeOffset now)
+    {
+        if (sessionIds.Count != 0)
+            throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
+    }
+}
+
 internal sealed class LocalWorkspaceProjectionTransactionParticipant : ILocalWorkspaceProjectionTransactionParticipant
 {
-    internal static LocalWorkspaceProjectionTransactionParticipant Instance { get; } = new();
-    private readonly ISkillRegistryGenerationAuthority? skillRegistryAuthority;
-
-    private LocalWorkspaceProjectionTransactionParticipant() { }
+    private readonly ISkillRegistryGenerationAuthority skillRegistryAuthority;
 
     internal LocalWorkspaceProjectionTransactionParticipant(ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {

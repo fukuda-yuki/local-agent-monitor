@@ -40,7 +40,7 @@ internal sealed class SqliteIngestionCommitStore : IIngestionCommitStore
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.writeFailureInjector = writeFailureInjector;
         this.publicationGate = publicationGate;
-        this.workspaceParticipant = workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.workspaceParticipant = workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
     }
 
     public CommittedIngestionIds Commit(ValidatedIngestionBatch batch)

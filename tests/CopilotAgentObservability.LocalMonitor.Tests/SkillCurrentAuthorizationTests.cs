@@ -500,7 +500,10 @@ public sealed class SkillCurrentAuthorizationTests
     {
         using var connection = database.Open();
         using var transaction = connection.BeginTransaction();
-        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write);
+        var participant = new LocalWorkspaceProjectionTransactionParticipant(
+            new ScriptedRegistryGenerationAuthority(Enumerable.Repeat(true, 64)));
+        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+            connection, transaction, write, participant, out _);
         transaction.Commit();
         return outcome;
     }

@@ -995,9 +995,28 @@ public sealed class SkillInvocationSnapshotReplayValidatorTests
     {
         using var connection = database.Open();
         using var transaction = connection.BeginTransaction();
-        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(connection, transaction, write);
+        var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+            connection,
+            transaction,
+            write,
+            new LocalWorkspaceProjectionTransactionParticipant(new StructuralRegistryAuthority()),
+            out _);
         transaction.Commit();
         return outcome;
+    }
+
+    private sealed class StructuralRegistryAuthority : ISkillRegistryGenerationAuthority
+    {
+        public ISkillRegistryGenerationCapture? CaptureGeneration() => null;
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            lease = null;
+            return false;
+        }
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => false;
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
     }
 
     private static string FormatTimestamp(DateTimeOffset value) =>

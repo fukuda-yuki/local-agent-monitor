@@ -165,7 +165,7 @@ internal static class SkillProjectionGenerationParticipant
             ("$trace_id", traceId),
             ("$desired_generation_id", resolved || inputUnavailable ? generationId : DBNull.Value),
             ("$updated_at", now));
-        (workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance).RefreshSessions(
+        (workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance).RefreshSessions(
             connection, transaction, invalidatedSessions, changedAt);
         return new(compatibilityRevision, generationId, frontierDigest);
     }

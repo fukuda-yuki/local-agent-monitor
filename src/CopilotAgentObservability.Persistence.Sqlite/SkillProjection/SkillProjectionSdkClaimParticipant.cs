@@ -36,7 +36,7 @@ internal static class SkillProjectionSdkClaimParticipant
         SqliteConnection connection,
         SqliteTransaction transaction,
         SkillProjectionSdkClaimWrite claim)
-        => InsertOrVerify(connection, transaction, claim, LocalWorkspaceProjectionTransactionParticipant.Instance);
+        => InsertOrVerify(connection, transaction, claim, UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance);
 
     internal static SkillProjectionSdkClaimWriteOutcome InsertOrVerify(
         SqliteConnection connection,

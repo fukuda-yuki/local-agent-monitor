@@ -71,7 +71,7 @@ internal static class SessionSkillInvocationParticipant
         SqliteTransaction transaction,
         SessionSkillInvocationWrite write,
         out SessionSkillInvocationInsertedIdentity? insertedIdentity)
-        => InsertOrVerify(connection, transaction, write, LocalWorkspaceProjectionTransactionParticipant.Instance, out insertedIdentity);
+        => InsertOrVerify(connection, transaction, write, UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance, out insertedIdentity);
 
     internal static SessionSkillInvocationWriteOutcome InsertOrVerify(
         SqliteConnection connection,

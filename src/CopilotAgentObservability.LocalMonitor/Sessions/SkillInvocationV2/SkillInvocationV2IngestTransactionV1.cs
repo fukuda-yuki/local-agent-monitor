@@ -123,7 +123,7 @@ internal static class SkillInvocationV2IngestTransactionV1
                 trySealReplaySuccess,
                 trySealCommit,
                 workToken,
-                workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance);
+                workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance);
         }
         // Busy classification is deliberately limited to this component's own storage operations:
         // persistence_busy exclusively represents a SQLite read/write lock or commit-busy result.

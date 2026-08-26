@@ -15,7 +15,7 @@ internal sealed class SessionEventContentRetentionAdapter : IRetentionDeletionAd
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.timeProvider = timeProvider ?? TimeProvider.System;
-        this.participant = participant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.participant = participant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
         this.publicationGate = publicationGate;
     }
 

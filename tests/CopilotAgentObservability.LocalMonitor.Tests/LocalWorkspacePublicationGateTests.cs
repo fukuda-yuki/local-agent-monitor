@@ -5,6 +5,16 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class LocalWorkspacePublicationGateTests
 {
     [Fact]
+    public void AuthorityAwareParticipantHasNoProcessGlobalDefault()
+    {
+        Assert.Null(typeof(LocalWorkspaceProjectionTransactionParticipant).GetProperty(
+            "Instance",
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic));
+    }
+
+    [Fact]
     public async Task Lease_can_be_released_from_a_different_thread_and_serializes_read_and_write()
     {
         var gate = new LocalWorkspacePublicationGate();

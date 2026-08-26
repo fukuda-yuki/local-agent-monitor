@@ -2,6 +2,8 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class LocalWorkspaceProjectionBackfillTests
 {
+    private static readonly LocalWorkspaceProjectionTransactionParticipant StructuralParticipant =
+        new(new StructuralRegistryAuthority());
     [Fact]
     public void BackfillUsesFirstValidStartedCreatedLastSeenInstantAndCanonicalUtc()
     {
@@ -105,7 +107,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             delete.Transaction = transaction;
             delete.CommandText = "DELETE FROM session_event_content;";
             delete.ExecuteNonQuery();
-            LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
             transaction.Commit();
         }
         Assert.Equal(["not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT label_state FROM local_workspace_sessions;"));
@@ -125,7 +127,7 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
         LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO local_workspace_span_facts VALUES(1,0,2,181);");
-        using (var transaction = connection.BeginTransaction()) { LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
+        using (var transaction = connection.BeginTransaction()) { StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
 
         Assert.Equal(["llm_span:1", "session_run:0"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT authority||':'||authority_rank FROM local_workspace_token_observations ORDER BY authority;"));
         Assert.Equal(["10"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "WITH ranked AS (SELECT input_tokens,row_number() OVER(PARTITION BY execution_id ORDER BY authority_rank) n FROM local_workspace_token_observations) SELECT CAST(input_tokens AS TEXT) FROM ranked WHERE n=1;"));
@@ -147,7 +149,21 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             """);
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
         LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO local_workspace_span_facts VALUES(1,0,2,NULL);");
-        using (var transaction = connection.BeginTransaction()) { LocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
+        using (var transaction = connection.BeginTransaction()) { StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
         Assert.Equal([$"{expected}:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT state||':'||(count IS NULL) FROM local_workspace_session_activity WHERE kind='retry';"));
+    }
+
+    private sealed class StructuralRegistryAuthority : ISkillRegistryGenerationAuthority
+    {
+        public ISkillRegistryGenerationCapture? CaptureGeneration() => null;
+        public bool TryAcquireGenerationReadLease(
+            ISkillRegistryGenerationCapture capture,
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
+        {
+            lease = null;
+            return false;
+        }
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => false;
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
     }
 }

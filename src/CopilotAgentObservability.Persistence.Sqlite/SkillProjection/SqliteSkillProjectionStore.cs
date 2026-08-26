@@ -92,7 +92,7 @@ internal sealed class SqliteSkillProjectionStore
         this.publicationScopeAcquiredForTesting = publicationScopeAcquiredForTesting;
         this.publicationScopeReleasedForTesting = publicationScopeReleasedForTesting;
         this.publicationGate = publicationGate;
-        this.workspaceParticipant = workspaceParticipant ?? LocalWorkspaceProjectionTransactionParticipant.Instance;
+        this.workspaceParticipant = workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
     }
 
     internal SkillProjectionQueueLease? ClaimNext(DateTimeOffset claimedAt)

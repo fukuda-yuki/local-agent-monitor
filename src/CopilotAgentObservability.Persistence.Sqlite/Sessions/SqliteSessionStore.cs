@@ -35,7 +35,7 @@ public sealed class SqliteSessionStore : ISessionStore, IClassifiedSessionStore,
     private readonly SQLitePCL.strdelegate_trace? statementObserver;
     private readonly RetentionCatalogContext? retentionContext;
     private readonly ILocalWorkspacePublicationGate? publicationGate;
-    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant = LocalWorkspaceProjectionTransactionParticipant.Instance;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant = UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
     private readonly int busyTimeoutMilliseconds = 5000;
 
     public SqliteSessionStore(string databasePath, TimeProvider? timeProvider = null)
