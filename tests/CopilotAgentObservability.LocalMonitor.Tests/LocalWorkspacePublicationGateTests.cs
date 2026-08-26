@@ -1,4 +1,5 @@
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -33,5 +34,24 @@ public sealed class LocalWorkspacePublicationGateTests
         await Task.Run(async () => await readLease.DisposeAsync());
         await writer.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(writeEntered.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task FailedRegistryPublicationReleasesBarrierWithoutDeadlockAndKeepsOldGeneration()
+    {
+        var gate = new LocalWorkspacePublicationGate();
+        var provider = new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), gate);
+        var original = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(provider.CaptureGeneration());
+        provider.CurrentGenerationChanging += _ => throw new InvalidOperationException("projection_refresh_failed");
+
+        var publication = Task.Run(() => Assert.Throws<InvalidOperationException>(() =>
+            provider.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load())));
+        var exception = await publication.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var collectionLease = await gate.AcquireReadAsync(CancellationToken.None)
+            .AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("projection_refresh_failed", exception.Message);
+        Assert.True(provider.TryAcquireGenerationReadLease(original, out var originalLease));
+        originalLease!.Dispose();
     }
 }

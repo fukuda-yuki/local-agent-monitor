@@ -321,10 +321,16 @@ internal sealed class SkillProjectionReadService
     private SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(
         SkillRegistryProducerTuple tuple,
         string skillName,
+        string? skillSource) =>
+        AcquireGenerationAuthorization(registryAuthority, tuple, skillName, skillSource);
+
+    private static SkillProjectionCurrentSdkClaimAuthorizationResult AcquireGenerationAuthorization(
+        ISkillRegistryGenerationAuthority? registryAuthority,
+        SkillRegistryProducerTuple tuple,
+        string skillName,
         string? skillSource)
     {
-        var authority = registryAuthority;
-        if (authority is null)
+        if (registryAuthority is null)
             return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
         ISkillRegistryGenerationCapture? capture = null;
@@ -334,11 +340,11 @@ internal sealed class SkillProjectionReadService
         // pre-lease churn or a lease-acquisition failure lands in sanitized unavailability.
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            capture = authority.CaptureGeneration();
+            capture = registryAuthority.CaptureGeneration();
             if (capture is null)
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
-            if (authority.TryAcquireGenerationReadLease(capture, out lease))
+            if (registryAuthority.TryAcquireGenerationReadLease(capture, out lease))
                 break;
 
             lease = null;
@@ -349,12 +355,12 @@ internal sealed class SkillProjectionReadService
 
         try
         {
-            if (!authority.VerifyGenerationIdentity(capture, lease))
+            if (!registryAuthority.VerifyGenerationIdentity(capture, lease))
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.Unavailable;
 
             // Within a mechanically valid generation a revoked tuple (with a valid accepted
             // predecessor) or an absent tuple never yields a capability.
-            if (!authority.IsProducerTupleAccepted(lease, tuple))
+            if (!registryAuthority.IsProducerTupleAccepted(lease, tuple))
                 return SkillProjectionCurrentSdkClaimAuthorizationResult.NotCurrent;
 
             var authorization = new SkillProjectionCurrentSdkClaimAuthorization(skillName, skillSource, lease);
@@ -628,15 +634,20 @@ internal sealed class SkillProjectionReadService
                 identities.Add((sessionId, snapshotId));
         reader.Close();
 
-        var service = new SkillProjectionReadService(connection.DataSource, registryAuthority);
         var result = new List<SkillProjectionCurrentSearchFact>();
         foreach (var identity in identities)
         {
             var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
-            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found || metadata.Facts is not { IsAvailable: true, ClaimId: not null } facts) continue;
+            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
+                || metadata.Facts is not
+                {
+                    IsAvailable: true,
+                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
+                    ClaimId: not null,
+                } facts) continue;
             var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
             if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
-            using var authorization = service.AcquireGenerationAuthorization(
+            using var authorization = AcquireGenerationAuthorization(registryAuthority,
                 new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint),
                 claim.SkillName, claim.SkillSource).Authorization;
             if (authorization is not null)

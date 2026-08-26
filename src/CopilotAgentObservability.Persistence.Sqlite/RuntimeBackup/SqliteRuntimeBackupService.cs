@@ -1367,6 +1367,15 @@ public sealed class SqliteRuntimeBackupService
                 && (!versions.TryGetValue("session", out var localRepositorySessionVersion)
                     || !IsCurrentOrLegacySessionParent(localRepositorySessionVersion)))
                 return false;
+            using var canonicalReplica = versions.TryGetValue("local_workspace_projection", out var workspaceVersion)
+                && workspaceVersion == SupportedComponents["local_workspace_projection"]
+                ? new SqliteConnection("Data Source=:memory:")
+                : null;
+            if (canonicalReplica is not null)
+            {
+                canonicalReplica.Open();
+                connection.BackupDatabase(canonicalReplica);
+            }
             using var componentTransaction = connection.BeginTransaction(deferred: true);
             try
             {
@@ -1390,7 +1399,12 @@ public sealed class SqliteRuntimeBackupService
                     if (versions["local_workspace_projection"] is 1 or 2)
                         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, componentTransaction);
                     else
-                        LocalWorkspaceProjectionBackupValidation.Validate(connection, componentTransaction, publicationTime, publicationTime is null ? null : skillRegistryAuthority);
+                        LocalWorkspaceProjectionBackupValidation.Validate(
+                            connection,
+                            componentTransaction,
+                            publicationTime,
+                            publicationTime is null ? null : skillRegistryAuthority,
+                            canonicalReplica);
                 }
             }
             catch (Exception exception) when (exception is SqliteException or InvalidOperationException or InvalidCastException or FormatException or OverflowException)

@@ -5,7 +5,12 @@ namespace CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup;
 
 internal static class LocalWorkspaceProjectionBackupValidation
 {
-    internal static void Validate(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime = null, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
+    internal static void Validate(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime = null,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority = null,
+        SqliteConnection? canonicalReplica = null)
     {
         try
         {
@@ -87,13 +92,24 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
-            ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority);
+            if (skillRegistryAuthority is not null || !HasSdkClaims(connection, transaction))
+                ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
             ValidateSpanFacts(connection, transaction);
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             throw new InvalidOperationException("local_workspace_projection_backup_invalid", exception);
         }
+    }
+
+    private static bool HasSdkClaims(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='skill_projection_sdk_claims');";
+        if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 0) return false;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM skill_projection_sdk_claims);";
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
     private static void ValidateSpanFacts(SqliteConnection connection, SqliteTransaction transaction)
@@ -183,7 +199,12 @@ internal static class LocalWorkspaceProjectionBackupValidation
             throw new InvalidOperationException();
     }
 
-    private static void ValidateCanonicalProjection(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset? publicationTime, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
+    private static void ValidateCanonicalProjection(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority,
+        SqliteConnection? canonicalReplica)
     {
         var before = Snapshot(connection, transaction);
         if (publicationTime is null)
@@ -196,9 +217,13 @@ internal static class LocalWorkspaceProjectionBackupValidation
                 throw new InvalidOperationException();
             publicationTime = projectorNow;
         }
-        using var replica = new SqliteConnection("Data Source=:memory:");
-        replica.Open();
-        connection.BackupDatabase(replica);
+        using var ownedReplica = canonicalReplica is null ? new SqliteConnection("Data Source=:memory:") : null;
+        var replica = canonicalReplica ?? ownedReplica!;
+        if (replica.State != System.Data.ConnectionState.Open)
+        {
+            replica.Open();
+            connection.BackupDatabase(replica);
+        }
         using (var replicaTransaction = replica.BeginTransaction())
         {
             LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
