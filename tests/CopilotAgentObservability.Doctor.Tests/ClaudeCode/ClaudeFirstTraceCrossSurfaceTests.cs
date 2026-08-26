@@ -300,7 +300,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             await monitor.DrainAsync();
             await monitor.PostOtlpAsync(Payload(TraceContinuityTraceId, sessionId: null));
             await monitor.ProjectOnlyAsync();
-            AddTraceContinuityHookContext(databasePath, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
+            AddTraceContinuityHookContext(monitor.SessionStore, time, TraceContinuityTraceId, "SYNTHETIC_TRACE_ONLY_SESSION");
             CreateObserver(databasePath, time).RunOnce();
 
             using var continuityStatus = RunFirstTrace(
@@ -853,12 +853,11 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
     // fixture must not pre-materialize span events the enricher will later re-derive; the
     // hook trace-context event alone ties the trace to the session for this scenario.
     private static void AddTraceContinuityHookContext(
-        string databasePath,
+        ISessionStore store,
         TimeProvider time,
         string traceId,
         string nativeSessionId)
     {
-        var store = new SqliteSessionStore(databasePath, time);
         var detail = store.ListMostRecent(20)
             .Select(summary => store.GetDetail(summary.SessionId))
             .OfType<SessionDetail>()
@@ -941,7 +940,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             SessionEventWriterWorker sessionWorker,
             ProjectionWorker projectionWorker,
             SqliteSessionOtelEnricher enricher,
-            TimeProvider timeProvider)
+            TimeProvider timeProvider,
+            ISessionStore sessionStore)
         {
             this.app = app;
             Client = client;
@@ -951,11 +951,14 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             this.projectionWorker = projectionWorker;
             this.enricher = enricher;
             this.timeProvider = timeProvider;
+            SessionStore = sessionStore;
         }
 
         public HttpClient Client { get; }
 
         public string Origin { get; }
+
+        public ISessionStore SessionStore { get; }
 
         public static async Task<RunningMonitor> StartAsync(
             string databasePath,
@@ -967,7 +970,6 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                 databasePath,
                 RawTelemetryStoreConnectionOptions.MonitorWriter);
             var retentionContext = RetentionCatalogContext.InitializeNewOwnedDatabase(databasePath, time);
-            var sessionStore = new SqliteSessionStore(databasePath, retentionContext, time);
             var health = new MonitorHealthState();
             health.SetProjectionWorkerRunning(true);
             health.SetProjectionStatus(0, null);
@@ -987,7 +989,6 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     Health = health,
                     StartWriter = false,
                     StartProjectionWorker = false,
-                    SessionStore = sessionStore,
                     SessionEventQueue = sessionQueue,
                     StartSessionWriter = false,
                     StartSessionOtelEnrichment = false,
@@ -997,6 +998,7 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
             try
             {
                 await app.StartAsync();
+                var sessionStore = app.Services.GetRequiredService<ISessionStore>();
                 var origin = GetSingleBoundAddress(app);
                 var ingestionWorker = new IngestionWriterWorker(
                     queue,
@@ -1034,7 +1036,8 @@ public sealed class ClaudeFirstTraceCrossSurfaceTests
                     sessionWorker,
                     projectionWorker,
                     enricher,
-                    time);
+                    time,
+                    sessionStore);
             }
             catch
             {
