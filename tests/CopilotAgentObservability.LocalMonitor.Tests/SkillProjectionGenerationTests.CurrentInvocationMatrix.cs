@@ -282,17 +282,22 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
 {
     private static readonly DateTimeOffset WrittenAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset ReadAt = WrittenAt.AddHours(1);
-    private static readonly string Fingerprint = new('a', 64);
-    private readonly string directory = Path.Combine(Path.GetTempPath(), $"skill-current-matrix-{Guid.NewGuid():N}");
+    private const string Fingerprint = "8fac48d8a878cbc9a4ebf59aae78e242b3375f4b82abed7c7a0e45d7a6ff7a5c";
+    private readonly string directory;
+    private readonly bool ownsDirectory;
     private readonly Dictionary<string, string> sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SessionSkillInvocationWrite> latestWrites = new(StringComparer.Ordinal);
     private readonly MatrixRegistryAuthority authority;
     private long otelOrdinal;
 
-    internal CurrentInvocationProjectionFixture(bool registryAvailable = true)
+    internal CurrentInvocationProjectionFixture(bool registryAvailable = true, string? databasePath = null)
     {
+        directory = databasePath is null
+            ? Path.Combine(Path.GetTempPath(), $"skill-current-matrix-{Guid.NewGuid():N}")
+            : Path.GetDirectoryName(databasePath)!;
+        ownsDirectory = databasePath is null;
         Directory.CreateDirectory(directory);
-        DatabasePath = Path.Combine(directory, "monitor.sqlite");
+        DatabasePath = databasePath ?? Path.Combine(directory, "monitor.sqlite");
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
         MonitorSchemaMigrator.ApplyBaseSchema(connection, transaction);
@@ -307,10 +312,11 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         LocalRepositoryCatalogSchemaV1.Ensure(install, installTransaction);
         LocalArchiveSchemaV1.Ensure(install, installTransaction);
         installTransaction.Commit();
+        LocalWorkspaceProjectionSchemaV1.Ensure(install, WrittenAt);
         authority = new MatrixRegistryAuthority(registryAvailable);
     }
 
-    private string DatabasePath { get; }
+    internal string DatabasePath { get; }
 
     internal void SeedSdkOnly(
         string sessionKey,
@@ -438,7 +444,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     internal (int BeforeRows, int AfterRows, bool OldPointerStillCurrent) PublishActualRegistryGeneration(string sessionKey, bool injectFailure)
     {
         var tuple = new SkillInvocationV2CompatibilityTuple(
-            "1.0.65", "adapter-version-1", "normalization-1",
+            "1.0.65", "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", "github-copilot-sdk.skill-invoked.normalize.v2",
             "github-copilot-sdk.skill-invoked.v1", Fingerprint);
         var rejected = Registry([]);
         var accepted = Registry([new(tuple, SkillInvocationV2CompatibilityDisposition.Accepted)]);
@@ -666,7 +672,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         var available = state == "available";
         return new(
             "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), sourceParentEventId, sessionKey, sessionKey + "-run", false,
-            WrittenAt, sourceVersion, "adapter-version-1", "normalization-1", "github-copilot-sdk.skill-invoked.v1",
+            WrittenAt, sourceVersion, "copilot-sdk-dotnet-1.0.4+cao-skill-v2.1", "github-copilot-sdk.skill-invoked.normalize.v2", "github-copilot-sdk.skill-invoked.v1",
             Fingerprint, "{\"skill\":\"demo\"}"u8.ToArray(), state, reason, available ? name : null,
             available ? "project" : null, available ? "user-invoked" : null, available ? new string('b', 64) : null,
             available ? 7 : null, available ? new string('c', 64) : null, available ? 12 : null,
@@ -805,7 +811,8 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        Directory.Delete(directory, recursive: true);
+        if (ownsDirectory)
+            Directory.Delete(directory, recursive: true);
     }
 
     private sealed class MatrixRegistryAuthority(bool available) : ISkillRegistryGenerationAuthority

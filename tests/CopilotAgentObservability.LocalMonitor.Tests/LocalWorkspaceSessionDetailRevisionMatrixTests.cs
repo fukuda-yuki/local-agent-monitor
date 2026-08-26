@@ -5,6 +5,7 @@ using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
+using CopilotAgentObservability.LocalMonitor.Tests.Retention;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -110,6 +111,65 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     }
 
     [Theory]
+    [InlineData("otel")]
+    [InlineData("sdk")]
+    [InlineData("exact_pair")]
+    public async Task CurrentValidSkillPublicationChangesCanonicalFactsRevisionAndFencesOldSnapshot(string arm)
+    {
+        using var fixture = await SkillRevisionFixture.CreateAsync(arm);
+        var before = await fixture.ReadSummaryAsync();
+        var beforeSession = Assert.IsType<LocalWorkspaceProjectionRow>(before.Session.Session);
+        Assert.Equal("recorded", beforeSession.Activity.Skill.State);
+        Assert.Equal(1, beforeSession.Activity.Skill.Value);
+        var beforeTimeline = await fixture.ReadTimelineAsync(before.Detail.Nodes[0].ExecutionId);
+        Assert.Single(beforeTimeline.Detail.Nodes, node => node.SourceKind == "skill_invocation" && node.NameText == "skill-before");
+
+        fixture.PublishAdditionalCurrentInvocation(arm);
+        var after = await fixture.ReadSummaryAsync();
+        var afterSession = Assert.IsType<LocalWorkspaceProjectionRow>(after.Session.Session);
+
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.Equal("recorded", afterSession.Activity.Skill.State);
+        Assert.Equal(2, afterSession.Activity.Skill.Value);
+        var afterTimeline = await fixture.ReadTimelineAsync(after.Detail.Nodes[0].ExecutionId);
+        Assert.Contains(afterTimeline.Detail.Nodes, node => node.SourceKind == "skill_invocation" && node.NameText == "skill-after");
+    }
+
+    [Fact]
+    public async Task RetentionPhysicalDeletionPublishesTombstoneContentFactsAndChangesCoordinatorRevision()
+    {
+        using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(refreshAfterQueue: true);
+        var service = DetailService(fixture.Path);
+        var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        var beforeTimeline = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Timeline, fixture.SessionId, ExecutionId: before.Detail.Nodes[0].ExecutionId), CancellationToken.None);
+        Assert.Contains(beforeTimeline.Detail.Content, item => item.SourceItemId == fixture.TargetEventId && item.State == "read_denied");
+
+        Assert.Same(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.Deleted,
+            await fixture.Adapter.DeleteAsync(fixture.Context));
+        var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        var afterTimeline = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Timeline, fixture.SessionId, ExecutionId: after.Detail.Nodes[0].ExecutionId), CancellationToken.None);
+
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.Contains(afterTimeline.Detail.Content, item => item.SourceItemId == fixture.TargetEventId && item.State == "deleted");
+        Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item;"));
+    }
+
+    [Fact]
+    public async Task RetentionDeletionRollbackKeepsCoordinatorRevisionAndContentAvailabilityStable()
+    {
+        using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(failAfterRefresh: true, refreshAfterQueue: true);
+        var service = DetailService(fixture.Path);
+        var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+
+        Assert.NotSame(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.Deleted,
+            await fixture.Adapter.DeleteAsync(fixture.Context));
+        var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+
+        Assert.Equal(before.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.Equal(before.Detail.Content, after.Detail.Content);
+    }
+
+    [Theory]
     [InlineData("timeline")]
     [InlineData("node")]
     public async Task ProductionRoutesFenceStaleRevisionBeforeChildMembershipWithoutMixingValues(string route)
@@ -193,6 +253,13 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     private static string Revision(LocalRepositorySessionDetailSnapshot snapshot) =>
         SqliteLocalRepositoryScopeSnapshotService.ComputeRevisionForTest(snapshot.Session, snapshot.Detail);
 
+    private static ILocalRepositorySessionDetailSnapshotService DetailService(string databasePath) =>
+        new SqliteLocalRepositoryScopeSnapshotService(
+            databasePath,
+            new LocalWorkspaceSessionSnapshotContributor(),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+
     private static LocalRepositorySessionDetailSnapshot Snapshot(string? label = null)
     {
         var none = new LocalWorkspaceFact<long>("not_observed", null);
@@ -265,5 +332,63 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         private static SqliteConnection Open(string path){var c=new SqliteConnection($"Data Source={path};Pooling=False");c.Open();return c;}
         private static string OperationKey(char value)=>"lrc1_"+new string(value,42)+"A";
         public void Dispose(){host.DisposeAsync().AsTask().GetAwaiter().GetResult();temp.Dispose();}
+    }
+
+    private sealed class SkillRevisionFixture : IDisposable
+    {
+        private readonly MonitorTempDirectory temp;
+        private readonly CurrentInvocationProjectionFixture projection;
+        private readonly ILocalRepositorySessionDetailSnapshotService service;
+        private readonly string sessionKey = "revision-skill";
+
+        private SkillRevisionFixture(MonitorTempDirectory temp, CurrentInvocationProjectionFixture projection)
+        {
+            this.temp = temp;
+            this.projection = projection;
+            service = new SqliteLocalRepositoryScopeSnapshotService(
+                temp.DatabasePath,
+                new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+                SqliteLocalArchiveFactSnapshotContributor.Instance,
+                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        }
+
+        internal static async Task<SkillRevisionFixture> CreateAsync(string arm)
+        {
+            var temp = new MonitorTempDirectory();
+            var projection = new CurrentInvocationProjectionFixture(databasePath: temp.DatabasePath);
+            Seed(projection, arm, "skill-before", "1", "2");
+            projection.RefreshWorkspaceProjection("revision-skill");
+            await Task.CompletedTask;
+            return new(temp, projection);
+        }
+
+        internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadSummaryAsync() =>
+            service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, projection.SessionId(sessionKey)), CancellationToken.None);
+
+        internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadTimelineAsync(string executionId) =>
+            service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Timeline, projection.SessionId(sessionKey), ExecutionId: executionId), CancellationToken.None);
+
+        internal void PublishAdditionalCurrentInvocation(string arm)
+        {
+            Seed(projection, arm, "skill-after", "3", "4");
+            projection.RefreshWorkspaceProjection(sessionKey);
+        }
+
+        private static void Seed(CurrentInvocationProjectionFixture projection, string arm, string name, string trace, string span)
+        {
+            switch (arm)
+            {
+                case "otel": projection.SeedOtelOnly("revision-skill", name, trace, span); break;
+                case "sdk": projection.SeedSdkOnly("revision-skill", name); break;
+                case "exact_pair": projection.SeedExactPair("revision-skill", name, trace, span, 1); break;
+                default: throw new ArgumentOutOfRangeException(nameof(arm));
+            }
+        }
+
+        public void Dispose()
+        {
+            projection.Dispose();
+            temp.Dispose();
+        }
     }
 }

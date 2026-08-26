@@ -1,6 +1,7 @@
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
+using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
 using CopilotAgentObservability.Telemetry.Sessions;
 using Microsoft.Data.Sqlite;
 
@@ -97,7 +98,7 @@ public sealed class SessionEventContentRetentionAdapterTests
         Assert.Equal(0L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
     }
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, string sessionId, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
             => (Path, Adapter, Context, SessionId, TargetEventId, SiblingEventId, SiblingContent, SiblingCapturedAt, SiblingExpiresAt, SessionSnapshot, RunSnapshot, EventSnapshot, NativeIdSnapshot, ProjectionSnapshot) = (path, adapter, context, sessionId, targetEventId, siblingEventId, siblingContent, siblingCapturedAt, siblingExpiresAt, sessionSnapshot, runSnapshot, eventSnapshot, nativeIdSnapshot, projectionSnapshot);
@@ -143,7 +144,15 @@ public sealed class SessionEventContentRetentionAdapterTests
             var authority = FixedSkillRegistryGenerationAuthority.ForWriterVersion(
                 SkillInvocationV2ArtifactRegistry.CurrentWriterVersion);
             using (var connection = Open(path))
+            {
+                using var transaction = connection.BeginTransaction();
+                LocalRepositoryCatalogSchemaV1.Ensure(connection, transaction);
+                LocalArchiveSchemaV1.Ensure(connection, transaction);
+                SkillProjectionSchemaV1.Ensure(connection, transaction);
+                SkillInvocationSnapshotSchemaV1.Ensure(connection, transaction);
+                transaction.Commit();
                 LocalWorkspaceProjectionSchemaV1.Ensure(connection, now, authority);
+            }
             ILocalWorkspaceProjectionTransactionParticipant participant =
                 new LocalWorkspaceProjectionTransactionParticipant(authority);
             if (failAfterRefresh) participant = new ThrowAfterRefreshParticipant(participant);
@@ -157,7 +166,8 @@ public sealed class SessionEventContentRetentionAdapterTests
             {
                 using var connection = Open(path);
                 using var transaction = connection.BeginTransaction();
-                participant.RefreshSessions(connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
+                new LocalWorkspaceProjectionTransactionParticipant(authority).RefreshSessions(
+                    connection, transaction, [batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant()], now);
                 transaction.Commit();
             }
             var claim = (await catalog.TryClaimDeletionAsync(new(item, 1, RetentionWorkKind.Queued), "session-adapter", now, CancellationToken.None)).Claim!;
