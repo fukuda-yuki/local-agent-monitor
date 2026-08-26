@@ -113,6 +113,31 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Contains("\"source\":\"copilot-sdk\"", text, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SummaryTimelineAndNodeUsePersistedExactChildCountsWhenChildrenAreNotLoaded()
+    {
+        var snapshot = Snapshot();
+        var root = snapshot.Detail.Nodes.Single(static node => node.SourceKind == "execution_root");
+        var group = snapshot.Detail.Nodes.Single(static node => node.Kind == "unknown_relation_group");
+        var exact = snapshot with
+        {
+            Detail = snapshot.Detail with
+            {
+                Executions = [snapshot.Detail.Executions.Single() with { ChildCount = 301 }],
+                Nodes = [root with { ChildCount = 301 }, group with { ChildCount = 300 }],
+            },
+        };
+
+        using var summary = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeSummary(exact));
+        using var timeline = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeTimeline(
+            exact, ExecutionId, null, 100, null, new byte[32]));
+        using var node = JsonDocument.Parse(LocalMonitorV1SessionDetailApplication.SerializeNode(exact, group.NodeId));
+
+        Assert.Equal(301, summary.RootElement.GetProperty("executions")[0].GetProperty("child_count").GetInt32());
+        Assert.Equal(300, timeline.RootElement.GetProperty("items")[0].GetProperty("child_count").GetInt32());
+        Assert.Equal(300, node.RootElement.GetProperty("node").GetProperty("child_count").GetInt32());
+    }
+
     private static LocalRepositorySessionDetailSnapshot Snapshot()
     {
         var none = new LocalWorkspaceFact<long>("not_observed", null);
@@ -125,9 +150,9 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         var scope = new LocalRepositoryScopeSessionSnapshot(SessionId, row, 0, LocalRepositoryScopeAssignmentState.Unassigned,
             LocalRepositoryScopeAssignmentAuthority.None, null, [], true, true, true, LocalArchiveState.Active, 0, true, null);
         var execution = new LocalWorkspaceExecutionDetail(ExecutionId, SessionId, "session_run", "run-1", 0, "completed", "completed", "model", null,
-            "recorded", 638917344000000000, 638917344010000000, 1000, activity, tokens, "copilot-sdk", "1.0");
+            "recorded", 638917344000000000, 638917344010000000, 1000, activity, tokens, "copilot-sdk", "1.0", 1);
         var root = Node("node-00000000000000000000000000000001", "execution_root", "execution", null, 0, activity, tokens);
-        var group = Node("node-00000000000000000000000000000002", "unknown_relation_group", "unknown_relation_group", null, 1, activity, tokens);
+        var group = Node("node-00000000000000000000000000000002", "unknown_relation_group", "unknown_relation_group", null, 1, activity, tokens) with { ChildCount = 1 };
         var child = Node("node-00000000000000000000000000000003", "session_event", "event", group.NodeId, 2, activity, tokens);
         var detail = new LocalWorkspaceSessionDetailContribution([execution], [root, group, child], [],
             [new(root.NodeId, "instruction", "available", "instruction-event", "revision")], ["native-session"], ["1.0"], "instruction-event", 0, "canonical");

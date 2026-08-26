@@ -258,6 +258,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || execution.SourceOrdinal < 0 || execution.SourceKind != "session_run" || string.IsNullOrWhiteSpace(execution.SourceIdentity)
                 || execution.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || execution.Status is not ("active" or "completed" or "failed" or "unknown")
+                || execution.ChildCount is < 0 or > 4096
                 || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
                 || !ValidActivity(execution.Activity) || !ValidTokens(execution.Tokens))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
@@ -276,6 +277,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                 || (node.NameState == "recorded") != (node.NameText is not null)
                 || node.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || node.Status is not ("active" or "completed" or "failed" or "unknown")
+                || node.ChildCount is < 0 or > 4096
                 || !ValidTime(node.TimeAuthority, node.StartUtcTicks, node.EndUtcTicks, node.DurationMilliseconds)
                 || !ValidActivity(node.Activity) || !ValidTokens(node.Tokens))
                 throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");

@@ -17,14 +17,14 @@ internal sealed record LocalWorkspaceExecutionDetail(
     string Lifecycle, string Status, string? Model, string? TraceId,
     string TimeAuthority, long? StartUtcTicks, long? EndUtcTicks, long? DurationMilliseconds,
     LocalWorkspaceActivityFacts Activity, LocalWorkspaceTokenFacts Tokens,
-    string? SourceSurface = null, string? Version = null);
+    string? SourceSurface = null, string? Version = null, long ChildCount = 0);
 
 internal sealed record LocalWorkspaceNodeDetail(
     string NodeId, string SessionId, string ExecutionId, string SourceKind, string SourceIdentity, long SourceOrdinal,
     string? ParentNodeId, string RelationshipAuthority, string Kind, string NameState, string? NameText,
     string Lifecycle, string Status, string TimeAuthority, long? StartUtcTicks, long? EndUtcTicks, long? DurationMilliseconds,
     LocalWorkspaceActivityFacts Activity, LocalWorkspaceTokenFacts Tokens,
-    string? TraceId, string? SpanId, string? EventId);
+    string? TraceId, string? SpanId, string? EventId, long ChildCount = 0);
 
 internal sealed record LocalWorkspaceNodeEdgeDetail(
     string NodeId, string RelatedNodeId, string RelationKind, string RelationshipAuthority, long SourceOrdinal);

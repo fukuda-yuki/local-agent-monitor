@@ -121,9 +121,18 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
               token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,
               r.source_surface,
               CASE WHEN (SELECT COUNT(DISTINCT e.source_application_version) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity AND e.source_application_version IS NOT NULL)=1
-                THEN (SELECT MIN(e.source_application_version) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity) END
+                THEN (SELECT MIN(e.source_application_version) FROM session_events e WHERE e.session_id=h.session_id AND e.run_id=h.source_identity) END,
+              COALESCE(children.child_count,0)
             FROM local_workspace_execution_headers h
             LEFT JOIN (SELECT session_id run_session_id,run_id,source_surface FROM session_runs) r ON r.run_session_id=h.session_id AND r.run_id=h.source_identity
+            LEFT JOIN (
+              SELECT root.execution_id execution_child_id,COUNT(child.node_id) child_count
+              FROM local_workspace_nodes root
+              LEFT JOIN local_workspace_nodes child ON child.session_id=root.session_id AND child.execution_id=root.execution_id
+                AND (child.parent_node_id=root.node_id OR child.kind='unknown_relation_group' AND child.parent_node_id IS NULL)
+              WHERE root.session_id=$session_id AND root.source_kind='execution_root'
+              GROUP BY root.execution_id
+            ) children ON children.execution_child_id=h.execution_id
             WHERE {selection}
             ORDER BY CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,
               CASE WHEN time_authority='recorded' THEN start_utc_ticks END DESC,source_ordinal,execution_id LIMIT 257;
@@ -134,7 +143,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         while (await reader.ReadAsync(token))
         {
             if (rows.Count == MaximumExecutions) throw new LocalWorkspaceSessionDetailException("workspace_too_large");
-            rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetInt64(4),reader.GetString(5),reader.GetString(6),S(reader,7),S(reader,8),reader.GetString(9),L(reader,10),L(reader,11),L(reader,12),Activity(reader,13),Tokens(reader,23),S(reader,43),S(reader,44)));
+            rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetInt64(4),reader.GetString(5),reader.GetString(6),S(reader,7),S(reader,8),reader.GetString(9),L(reader,10),L(reader,11),L(reader,12),Activity(reader,13),Tokens(reader,23),S(reader,43),S(reader,44),reader.GetInt64(45)));
         }
         return rows.ToArray();
     }
@@ -142,12 +151,15 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private async Task<LocalWorkspaceNodeDetail[]> ReadNodes(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
     {
         statementObserver?.Invoke("detail-nodes");
+        var context = request.Kind == LocalRepositorySessionDetailRequestKind.Timeline
+            ? await ReadTimelineContext(c, t, request, token)
+            : [];
         var predicate = request.Kind switch
         {
             LocalRepositorySessionDetailRequestKind.Summary => "session_id=$session_id AND source_kind='execution_root'",
             LocalRepositorySessionDetailRequestKind.Timeline when request.ExecutionId is null => "session_id=$session_id AND source_kind='execution_root'",
-            LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (source_kind='execution_root' OR parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
-            LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND (node_id=$parent_node_id OR parent_node_id=$parent_node_id)",
+            LocalRepositorySessionDetailRequestKind.Timeline when request.ParentNodeId is null => "session_id=$session_id AND execution_id=$execution_id AND (parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR (kind='unknown_relation_group' AND parent_node_id IS NULL))",
+            LocalRepositorySessionDetailRequestKind.Timeline => "session_id=$session_id AND execution_id=$execution_id AND parent_node_id=$parent_node_id",
             _ => """
                 session_id=$session_id AND (node_id=$node_id
                 OR node_id IN (WITH RECURSIVE ancestors(node_id,depth) AS (SELECT parent_node_id,1 FROM local_workspace_nodes WHERE session_id=$session_id AND node_id=$node_id UNION ALL SELECT n.parent_node_id,a.depth+1 FROM local_workspace_nodes n JOIN ancestors a ON n.node_id=a.node_id WHERE a.node_id IS NOT NULL AND a.depth<=4097) SELECT node_id FROM ancestors WHERE node_id IS NOT NULL)
@@ -158,21 +170,23 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         };
         if (request.Kind == LocalRepositorySessionDetailRequestKind.Timeline && request.After is not null)
         {
-            var contextPredicate = request.ParentNodeId is not null ? "node_id=$parent_node_id OR " : request.ExecutionId is not null ? "source_kind='execution_root' OR " : "";
-            predicate += $" AND ({contextPredicate}(CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)>$after_group OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)>$after_ticks) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal>$after_ordinal) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal AND node_id>=$after_node_id COLLATE BINARY))";
+            predicate += " AND ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)>$after_group OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)>$after_ticks) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal>$after_ordinal) OR ((CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal AND node_id>$after_node_id COLLATE BINARY))";
         }
         var limit = request.Kind switch
         {
             LocalRepositorySessionDetailRequestKind.Summary => 257,
             LocalRepositorySessionDetailRequestKind.Node => 4097,
-            _ => request.Limit + 2
+            _ => request.Limit + 1
         };
         using var command = Command(c, t, $"""
             SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
               skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
               token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,
-              trace_id,span_id,event_id
-            FROM local_workspace_nodes WHERE {predicate} ORDER BY execution_id,
+              trace_id,span_id,event_id,COALESCE(children.child_count,0)
+            FROM local_workspace_nodes
+            LEFT JOIN (SELECT parent_node_id child_parent_id,COUNT(*) child_count FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id IS NOT NULL GROUP BY parent_node_id) children
+              ON children.child_parent_id=local_workspace_nodes.node_id
+            WHERE {predicate} ORDER BY execution_id,
               CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END,
               CASE WHEN time_authority='recorded' THEN start_utc_ticks END,source_ordinal,node_id LIMIT {limit};
             """, request.SessionId);
@@ -183,16 +197,68 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
         command.Parameters.AddWithValue("$after_ticks", request.After?.UtcTicks ?? 0);
         command.Parameters.AddWithValue("$after_ordinal", request.After is null ? 0L : checked((long)request.After.SourceOrdinal));
         command.Parameters.AddWithValue("$after_node_id", (object?)request.After?.NodeId ?? DBNull.Value);
-        var rows = new List<LocalWorkspaceNodeDetail>();
+        var rows = new List<LocalWorkspaceNodeDetail>(context);
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
             if (request.Kind == LocalRepositorySessionDetailRequestKind.Summary && rows.Count == MaximumExecutions
                 || request.Kind == LocalRepositorySessionDetailRequestKind.Node && rows.Count == MaximumNodes)
                 throw new LocalWorkspaceSessionDetailException("workspace_too_large");
-            rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49)));
+            rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49),reader.GetInt64(50)));
         }
         return rows.ToArray();
+    }
+
+    private static async Task<LocalWorkspaceNodeDetail[]> ReadTimelineContext(
+        SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
+    {
+        var predicates = new List<string>();
+        if (request.ExecutionId is not null)
+            predicates.Add("source_kind='execution_root' AND execution_id=$execution_id");
+        if (request.ParentNodeId is not null)
+            predicates.Add("node_id=$parent_node_id AND execution_id=$execution_id");
+        if (request.After is not null)
+        {
+            var membership = request.ExecutionId is null
+                ? "source_kind='execution_root'"
+                : request.ParentNodeId is null
+                    ? "(parent_node_id=(SELECT node_id FROM local_workspace_nodes WHERE session_id=$session_id AND execution_id=$execution_id AND source_kind='execution_root') OR kind='unknown_relation_group' AND parent_node_id IS NULL)"
+                    : "parent_node_id=$parent_node_id";
+            predicates.Add($"node_id=$after_node_id AND {membership} AND (CASE time_authority WHEN 'recorded' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END)=$after_group AND (CASE WHEN time_authority='recorded' THEN start_utc_ticks ELSE 0 END)=$after_ticks AND source_ordinal=$after_ordinal");
+        }
+        if (predicates.Count == 0) return [];
+        using var command = Command(c, t, $"""
+            SELECT node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,end_utc_ticks,duration_ms,
+              skill_activity_state,skill_activity_count,tool_activity_state,tool_activity_count,subagent_activity_state,subagent_activity_count,error_activity_state,error_activity_count,retry_activity_state,retry_activity_count,
+              token_authority,token_state,available_execution_count,total_execution_count,input_token_state,input_tokens,output_token_state,output_tokens,total_token_state,total_tokens,reasoning_token_state,reasoning_tokens,cache_read_token_state,cache_read_tokens,cache_creation_token_state,cache_creation_tokens,new_input_token_state,new_input_tokens,cache_read_ratio_state,cache_read_ratio_basis_points,
+              trace_id,span_id,event_id,COALESCE(children.child_count,0)
+            FROM local_workspace_nodes
+            LEFT JOIN (SELECT parent_node_id child_parent_id,COUNT(*) child_count FROM local_workspace_nodes WHERE session_id=$session_id AND parent_node_id IS NOT NULL GROUP BY parent_node_id) children
+              ON children.child_parent_id=local_workspace_nodes.node_id
+            WHERE session_id=$session_id AND ({string.Join(" OR ", predicates)})
+            ORDER BY node_id LIMIT 4;
+            """, request.SessionId);
+        command.Parameters.AddWithValue("$execution_id", (object?)request.ExecutionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$parent_node_id", (object?)request.ParentNodeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$after_group", request.After?.TimeGroup ?? 0);
+        command.Parameters.AddWithValue("$after_ticks", request.After?.UtcTicks ?? 0);
+        command.Parameters.AddWithValue("$after_ordinal", request.After is null ? 0L : checked((long)request.After.SourceOrdinal));
+        command.Parameters.AddWithValue("$after_node_id", (object?)request.After?.NodeId ?? DBNull.Value);
+        var rows = new List<LocalWorkspaceNodeDetail>();
+        using var reader = await command.ExecuteReaderAsync(token);
+        while (await reader.ReadAsync(token))
+            rows.Add(new(reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.GetInt64(5),S(reader,6),reader.GetString(7),reader.GetString(8),reader.GetString(9),S(reader,10),reader.GetString(11),reader.GetString(12),reader.GetString(13),L(reader,14),L(reader,15),L(reader,16),Activity(reader,17),Tokens(reader,27),S(reader,47),S(reader,48),S(reader,49),reader.GetInt64(50)));
+        if (request.ExecutionId is not null && rows.Count(static row => row.SourceKind == "execution_root") != 1
+            && await ExecutionExists(c, t, request, token))
+            throw new LocalWorkspaceSessionDetailException("local_monitor_ui_unavailable");
+        return rows.DistinctBy(static row => row.NodeId, StringComparer.Ordinal).ToArray();
+    }
+
+    private static async Task<bool> ExecutionExists(SqliteConnection c, SqliteTransaction t, LocalRepositorySessionDetailRequest request, CancellationToken token)
+    {
+        using var command = Command(c, t, "SELECT 1 FROM local_workspace_execution_headers WHERE session_id=$session_id AND execution_id=$execution_id LIMIT 1;", request.SessionId);
+        command.Parameters.AddWithValue("$execution_id", request.ExecutionId!);
+        return await command.ExecuteScalarAsync(token) is not null;
     }
 
     private async Task<LocalWorkspaceNodeEdgeDetail[]> ReadEdges(SqliteConnection c, SqliteTransaction t, string[] ids, CancellationToken token)
@@ -244,7 +310,7 @@ internal sealed class LocalWorkspaceSessionDetailSnapshotContributor : ILocalWor
     private static async Task<Metadata> ReadMetadata(SqliteConnection c, SqliteTransaction t, string sessionId, CancellationToken token)
     {
         var nativeIds = new List<string>();
-        using (var command = Command(c,t,"SELECT native_session_id FROM session_native_ids WHERE session_id=$session_id ORDER BY native_session_id COLLATE BINARY;",sessionId))
+        using (var command = Command(c,t,"SELECT DISTINCT native_session_id FROM session_native_ids WHERE session_id=$session_id ORDER BY native_session_id COLLATE BINARY;",sessionId))
         using (var reader = await command.ExecuteReaderAsync(token)) while(await reader.ReadAsync(token)) nativeIds.Add(reader.GetString(0));
         var versions = new List<string>();
         using (var command = Command(c,t,"SELECT value FROM (SELECT source_application_version value FROM session_events WHERE session_id=$session_id UNION SELECT adapter_version FROM session_events WHERE session_id=$session_id UNION SELECT normalization_version FROM session_events WHERE session_id=$session_id) WHERE value IS NOT NULL AND trim(value)<>'' ORDER BY value COLLATE BINARY;",sessionId))

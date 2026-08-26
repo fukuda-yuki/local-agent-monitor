@@ -197,9 +197,9 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
         var scope = new LocalRepositoryScopeSessionSnapshot(SessionId, row, 0, LocalRepositoryScopeAssignmentState.Unassigned,
             LocalRepositoryScopeAssignmentAuthority.None, null, [], true, true, true, LocalArchiveState.Active, 0, true, null);
         var execution = new LocalWorkspaceExecutionDetail(ExecutionId, SessionId, "session_run", "run-1", 0, "completed", "completed", null, null,
-            "missing", null, null, null, activity, tokens, null, null);
+            "missing", null, null, null, activity, tokens, null, null, children.Count);
         var root = new LocalWorkspaceNodeDetail(RootNodeId, SessionId, ExecutionId, "execution_root", "run-1", 0, null, "exact", "execution",
-            "not_observed", null, "completed", "completed", "missing", null, null, null, activity, tokens, null, null, null);
+            "not_observed", null, "completed", "completed", "missing", null, null, null, activity, tokens, null, null, null, children.Count);
         var detail = new LocalWorkspaceSessionDetailContribution([execution], [root, .. children], [], [], [], [], null, null, "canonical", "registry");
         return new(scope, detail, new string('1', 64));
     }
