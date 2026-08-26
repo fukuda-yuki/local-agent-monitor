@@ -254,6 +254,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         Assert.Equal(["llm_span:1", "session_run:0"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT authority||':'||authority_rank FROM local_workspace_token_observations ORDER BY authority;"));
         Assert.Equal(["10"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "WITH ranked AS (SELECT input_tokens,row_number() OVER(PARTITION BY execution_id ORDER BY authority_rank) n FROM local_workspace_token_observations) SELECT CAST(input_tokens AS TEXT) FROM ranked WHERE n=1;"));
         Assert.Equal(["recorded:2"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT state||':'||count FROM local_workspace_session_activity WHERE kind='retry';"));
+        Assert.Equal(["recorded:10:1:not_observed:not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT token_state||':'||input_tokens||':'||activity_count||':'||retry_relation_state||':'||recovery_relation_state FROM local_workspace_nodes WHERE source_kind='execution_root';"));
+        Assert.Equal(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT trace_id||':'||span_id FROM local_workspace_nodes WHERE source_kind='session_event';"));
     }
 
     [Theory]

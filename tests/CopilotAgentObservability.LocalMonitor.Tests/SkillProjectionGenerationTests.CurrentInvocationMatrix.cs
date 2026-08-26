@@ -122,6 +122,16 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
     }
 
     [Fact]
+    public void PersistedSqliteMatrix_SdkSourceParentIsExplicitOnlyWithinExactExecution()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkWithExplicitParent("sdk-parent", "sdk-skill");
+        fixture.RefreshWorkspace();
+
+        Assert.Equal(["explicit"], fixture.SkillRelationshipAuthorities("sdk-parent"));
+    }
+
+    [Fact]
     public async Task PersistedSqliteMatrix_ProductionCollectionQOnlyIncludesAdmittedAndExcludesPending()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
@@ -216,6 +226,31 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         Commit(write);
         sessions[sessionKey] = ResolveSession(sessionKey);
         latestWrites[sessionKey] = write;
+    }
+
+    internal void SeedSdkWithExplicitParent(string sessionKey, string skillName)
+    {
+        var parentSourceId = Guid.NewGuid().ToString("D");
+        var write = NewWrite(sessionKey, skillName, "1.0.65", "available", "none", expired: false, parentSourceId);
+        Commit(write);
+        sessions[sessionKey] = ResolveSession(sessionKey);
+        latestWrites[sessionKey] = write;
+
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO session_events(
+                event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,
+                occurred_at,content_state)
+            SELECT $event_id,s.session_id,s.run_id,'copilot-sdk','copilot-sdk-stream',$source_event_id,'event',
+                   $at,'not_captured'
+            FROM skill_invocation_snapshots s WHERE s.snapshot_id=$snapshot_id;
+            """;
+        command.Parameters.AddWithValue("$event_id", Guid.CreateVersion7().ToString("D"));
+        command.Parameters.AddWithValue("$source_event_id", parentSourceId);
+        command.Parameters.AddWithValue("$snapshot_id", write.SnapshotId.ToString("D"));
+        command.Parameters.AddWithValue("$at", WrittenAt.ToString("O"));
+        Assert.Equal(1, command.ExecuteNonQuery());
     }
 
     internal void SeedExactPair(string sessionKey, string skillName, string traceSeed, string spanSeed, int duplicateObservations)
@@ -315,6 +350,16 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
     }
 
+    internal string[] SkillRelationshipAuthorities(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT relationship_authority FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation' ORDER BY node_id;";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using var reader = command.ExecuteReader();
+        var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
+    }
+
     internal void AssertSdkAuthorized(string sessionKey)
     {
         var write = latestWrites[sessionKey];
@@ -345,11 +390,11 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         foreach (var key in keys) Assert.False(results.ContainsKey(sessions[key]), key);
     }
 
-    private SessionSkillInvocationWrite NewWrite(string sessionKey, string name, string sourceVersion, string state, string reason, bool expired)
+    private SessionSkillInvocationWrite NewWrite(string sessionKey, string name, string sourceVersion, string state, string reason, bool expired, string? sourceParentEventId = null)
     {
         var available = state == "available";
         return new(
-            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), null, sessionKey, sessionKey + "-run", false,
+            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), sourceParentEventId, sessionKey, sessionKey + "-run", false,
             WrittenAt, sourceVersion, "adapter-version-1", "normalization-1", "github-copilot-sdk.skill-invoked.v1",
             Fingerprint, "{\"skill\":\"demo\"}"u8.ToArray(), state, reason, available ? name : null,
             available ? "project" : null, available ? "user-invoked" : null, available ? new string('b', 64) : null,
