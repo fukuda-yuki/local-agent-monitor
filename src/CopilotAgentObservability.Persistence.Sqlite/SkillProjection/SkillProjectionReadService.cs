@@ -15,25 +15,6 @@ internal sealed record SkillProjectionInvocationClaim(
     string? InvocationTrigger,
     string SourceApplicationVersion);
 
-internal sealed record SkillProjectionSdkClaim(
-    string ClaimId,
-    string SessionId,
-    string EventId,
-    string SourceEventId,
-    string SourceAdapter,
-    string SourceSurface,
-    string SourceApplicationVersion,
-    string AdapterVersion,
-    string NormalizationVersion,
-    string PayloadSchema,
-    string SchemaFingerprint,
-    string PayloadSha256,
-    string? ProducerTraceId,
-    string? ProducerSpanId,
-    string SkillName,
-    string? SkillSource,
-    string? InvocationTrigger);
-
 internal sealed record SkillProjectionInventoryClaim(
     long GenerationId,
     string SourceArm,
@@ -45,20 +26,41 @@ internal sealed record SkillProjectionInventoryClaim(
     bool NamesTruncated,
     string SourceApplicationVersion);
 
-internal sealed record SkillProjectionSessionInvocationAggregate(
-    int? InvocationCount,
-    string? State);
-
 internal sealed record SkillProjectionCurrentSearchFact(
     string SessionId,
     string SourceIdentity,
     string SkillName,
     string? ExpiresAt = null);
 
+internal sealed record SkillProjectionCanonicalInvocation(
+    string CanonicalIdentity,
+    string SessionId,
+    string? ProducerTraceId,
+    string? ProducerSpanId,
+    string? OtelSourceIdentity,
+    string? OtelSkillName,
+    string? SdkSourceIdentity,
+    string? SdkSkillName,
+    string? SdkExpiresAt)
+{
+    internal IEnumerable<SkillProjectionCurrentSearchFact> ProjectSearchFacts()
+    {
+        if (OtelSourceIdentity is not null && OtelSkillName is not null)
+            yield return new(SessionId, OtelSourceIdentity, OtelSkillName);
+        if (SdkSourceIdentity is not null && SdkSkillName is not null)
+            yield return new(SessionId, SdkSourceIdentity, SdkSkillName, SdkExpiresAt);
+    }
+}
+
 internal sealed record SkillProjectionCurrentInvocationProjection(
-    int? InvocationCount,
     string State,
-    IReadOnlyList<SkillProjectionCurrentSearchFact> SearchFacts);
+    IReadOnlyList<SkillProjectionCanonicalInvocation> Invocations)
+{
+    internal int? InvocationCount => State == "current" ? Invocations.Count : null;
+
+    internal IReadOnlyList<SkillProjectionCurrentSearchFact> SearchFacts =>
+        State == "current" ? Invocations.SelectMany(static invocation => invocation.ProjectSearchFacts()).ToArray() : [];
+}
 
 internal sealed class SkillProjectionReadService
 {
@@ -225,12 +227,6 @@ internal sealed class SkillProjectionReadService
                     accumulator.SourceApplicationVersion);
             })
             .ToArray();
-    }
-
-    internal IReadOnlyList<SkillProjectionSdkClaim> ListCurrentSdkClaims(string sessionId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        return [];
     }
 
     // #154 current authorization: proves the complete available snapshot/claim equality and the
@@ -500,79 +496,6 @@ internal sealed class SkillProjectionReadService
         left is null && right is null ||
         left is not null && right is not null && string.Equals(left, right, StringComparison.Ordinal);
 
-    internal SkillProjectionSessionInvocationAggregate GetSessionInvocationAggregate(
-        string sessionId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        var otelPairs = ListCurrentOtelPairs(sessionId);
-        var sdkClaims = ListCurrentSdkClaims(sessionId);
-        if (otelPairs.Count == 0 && sdkClaims.Count == 0)
-            return new(null, null);
-        if (otelPairs.Count == 0)
-            return new(sdkClaims.Count, "current");
-        if (sdkClaims.Count == 0)
-            return new(otelPairs.Count, "current");
-
-        var remainingOtel = otelPairs
-            .GroupBy(static pair => pair)
-            .ToDictionary(static group => group.Key, static group => group.Count());
-        var matched = 0;
-        foreach (var claim in sdkClaims)
-        {
-            if (claim.ProducerTraceId is null || claim.ProducerSpanId is null)
-                continue;
-            var pair = (claim.ProducerTraceId, claim.ProducerSpanId);
-            if (!remainingOtel.TryGetValue(pair, out var available) || available == 0)
-                continue;
-            remainingOtel[pair] = available - 1;
-            matched++;
-        }
-        return matched == otelPairs.Count && matched == sdkClaims.Count
-            ? new(matched, "current")
-            : new(null, "certification_pending");
-    }
-
-    internal static IReadOnlyDictionary<string, SkillProjectionSessionInvocationAggregate> ReadSessionInvocationAggregates(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds,
-        Action<string>? commandObserver = null)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(sessionIds);
-        if (sessionIds.Count == 0) return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
-        using (var exists = connection.CreateCommand())
-        {
-            exists.Transaction = transaction;
-            exists.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='skill_projection' AND version=1);";
-            commandObserver?.Invoke("skills");
-            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
-                return new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
-        }
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT invocation.session_id,COUNT(*)
-            FROM skill_projection_invocations invocation
-            JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id AND generation.lifecycle='current'
-            JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id AND head.current_generation_id=invocation.generation_id
-            JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id
-              AND revision.current_revision=generation.compatibility_revision
-              AND revision.current_effective_state='resolved'
-              AND revision.current_exact_version=invocation.source_application_version
-            WHERE invocation.source_arm='otel_trace_span' AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input WHERE input.generation_id=generation.generation_id AND input.input_evidence_kind='deleted_before_digest_v10')
-            GROUP BY invocation.session_id ORDER BY invocation.session_id COLLATE BINARY;
-            """;
-        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        commandObserver?.Invoke("skill-aggregates");
-        using var reader = command.ExecuteReader();
-        var result = new Dictionary<string, SkillProjectionSessionInvocationAggregate>(StringComparer.Ordinal);
-        while (reader.Read()) result.Add(reader.GetString(0), new(reader.GetInt32(1), "current"));
-        return result;
-    }
-
     internal static IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> ReadCurrentInvocationProjection(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -589,7 +512,7 @@ internal sealed class SkillProjectionReadService
         if (registryAuthority is null && TableInstalled(connection, transaction, "skill_invocation_snapshots"))
             return sessionIds.Distinct(StringComparer.Ordinal).ToDictionary(
                 static sessionId => sessionId,
-                static _ => new SkillProjectionCurrentInvocationProjection(null, "unavailable", []),
+                static _ => new SkillProjectionCurrentInvocationProjection("unavailable", []),
                 StringComparer.Ordinal);
         var otel = ReadCurrentOtelInvocationFacts(connection, transaction, sessionIds);
         IReadOnlySet<string> unavailableSdkSessions = new HashSet<string>(StringComparer.Ordinal);
@@ -604,7 +527,7 @@ internal sealed class SkillProjectionReadService
         {
             if (unavailableSdkSessions.Contains(sessionId))
             {
-                result[sessionId] = new(null, "unavailable", []);
+                result[sessionId] = new("unavailable", []);
                 continue;
             }
             var sessionOtel = otelBySession.GetValueOrDefault(sessionId, []);
@@ -615,18 +538,18 @@ internal sealed class SkillProjectionReadService
 
             if (sessionOtel.Length == 0)
             {
-                result[sessionId] = new(sessionSdk.Length, "current", sessionSdk.Select(static row => row.Fact).ToArray());
+                result[sessionId] = new("current", sessionSdk.Select(ToSdkOnlyCanonical).ToArray());
                 continue;
             }
             if (sessionSdk.Length == 0)
             {
-                result[sessionId] = new(sessionOtel.Length, "current", sessionOtel.Select(static row => row.Fact).ToArray());
+                result[sessionId] = new("current", sessionOtel.Select(ToOtelOnlyCanonical).ToArray());
                 continue;
             }
 
             var remaining = sessionOtel.GroupBy(static row => (row.TraceId, row.SpanId))
                 .ToDictionary(static group => group.Key, static group => new Queue<InvocationFact>(group));
-            var admitted = new List<SkillProjectionCurrentSearchFact>();
+            var admitted = new List<SkillProjectionCanonicalInvocation>();
             var matched = 0;
             foreach (var sdkRow in sessionSdk)
             {
@@ -634,18 +557,50 @@ internal sealed class SkillProjectionReadService
                     !remaining.TryGetValue((sdkRow.TraceId, sdkRow.SpanId), out var candidates) || candidates.Count == 0)
                     continue;
                 var otelRow = candidates.Dequeue();
-                admitted.Add(otelRow.Fact);
-                admitted.Add(sdkRow.Fact);
+                admitted.Add(ToExactPairCanonical(otelRow, sdkRow));
                 matched++;
             }
             result[sessionId] = matched == sessionOtel.Length && matched == sessionSdk.Length
-                ? new(matched, "current", admitted.DistinctBy(static fact => (fact.SourceIdentity, fact.SkillName)).ToArray())
-                : new(null, "certification_pending", []);
+                ? new("current", admitted)
+                : new("certification_pending", []);
         }
         return result;
     }
 
     private sealed record InvocationFact(SkillProjectionCurrentSearchFact Fact, string? TraceId, string? SpanId);
+
+    private static SkillProjectionCanonicalInvocation ToOtelOnlyCanonical(InvocationFact row) => new(
+        row.Fact.SourceIdentity,
+        row.Fact.SessionId,
+        row.TraceId,
+        row.SpanId,
+        row.Fact.SourceIdentity,
+        row.Fact.SkillName,
+        null,
+        null,
+        null);
+
+    private static SkillProjectionCanonicalInvocation ToSdkOnlyCanonical(InvocationFact row) => new(
+        row.Fact.SourceIdentity,
+        row.Fact.SessionId,
+        row.TraceId,
+        row.SpanId,
+        null,
+        null,
+        row.Fact.SourceIdentity,
+        row.Fact.SkillName,
+        row.Fact.ExpiresAt);
+
+    private static SkillProjectionCanonicalInvocation ToExactPairCanonical(InvocationFact otel, InvocationFact sdk) => new(
+        "producer:" + otel.TraceId + ":" + otel.SpanId,
+        otel.Fact.SessionId,
+        otel.TraceId,
+        otel.SpanId,
+        otel.Fact.SourceIdentity,
+        otel.Fact.SkillName,
+        sdk.Fact.SourceIdentity,
+        sdk.Fact.SkillName,
+        sdk.Fact.ExpiresAt);
 
     private static InvocationFact[] DeduplicateExactProducerPairs(IEnumerable<InvocationFact> facts) =>
         facts.GroupBy(static row =>
@@ -719,101 +674,7 @@ internal sealed class SkillProjectionReadService
         return result;
     }
 
-    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadCurrentOtelSearchFacts(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds,
-        DateTimeOffset acceptedAt)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-        ArgumentNullException.ThrowIfNull(transaction);
-        ArgumentNullException.ThrowIfNull(sessionIds);
-        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)) return [];
-
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT invocation.session_id,CAST(invocation.raw_record_id AS TEXT)||':'||CAST(invocation.span_ordinal AS TEXT),invocation.skill_name,
-                   CASE WHEN item.state='retained_by_policy' THEN NULL ELSE item.expires_at END
-            FROM skill_projection_invocations invocation
-            JOIN skill_projection_generations generation ON generation.generation_id=invocation.generation_id
-            JOIN skill_projection_trace_heads head ON head.trace_id=invocation.trace_id
-              AND head.current_generation_id=invocation.generation_id
-            JOIN source_trace_compatibility_revisions revision ON revision.trace_id=invocation.trace_id
-              AND revision.current_revision=generation.compatibility_revision
-              AND revision.current_effective_state='resolved'
-              AND revision.current_exact_version=invocation.source_application_version
-            JOIN raw_records raw ON raw.id=invocation.raw_record_id
-            JOIN retention_items item ON item.store_kind='raw_record'
-              AND item.source_item_id=CAST(invocation.raw_record_id AS TEXT)
-            WHERE invocation.source_arm='otel_trace_span'
-              AND invocation.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))
-              AND generation.lifecycle='current'
-              AND item.state IN ('expiring','retained_by_policy')
-              AND item.read_denied_at IS NULL AND item.deleted_at IS NULL AND item.error_code IS NULL
-              AND (item.state='retained_by_policy' OR item.expires_at COLLATE BINARY > $accepted_at COLLATE BINARY)
-              AND NOT EXISTS(SELECT 1 FROM skill_projection_generation_inputs input
-                WHERE input.generation_id=generation.generation_id
-                  AND input.input_evidence_kind='deleted_before_digest_v10')
-            ORDER BY invocation.session_id COLLATE BINARY,invocation.invocation_id;
-            """;
-        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        command.Parameters.AddWithValue("$accepted_at", acceptedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-        using var reader = command.ExecuteReader();
-        var result = new List<SkillProjectionCurrentSearchFact>();
-        while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3)));
-        return result;
-    }
-
-    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadCurrentSdkSearchFacts(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        IReadOnlyCollection<string> sessionIds,
-        ISkillRegistryGenerationAuthority registryAuthority,
-        TimeProvider timeProvider)
-    {
-        ArgumentNullException.ThrowIfNull(registryAuthority);
-        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
-            || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
-
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
-        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
-        using var reader = command.ExecuteReader();
-        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
-        while (reader.Read())
-            if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId))
-                identities.Add((sessionId, snapshotId));
-        reader.Close();
-
-        var result = new List<SkillProjectionCurrentSearchFact>();
-        foreach (var identity in identities)
-        {
-            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
-            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
-                || metadata.Facts is not
-                {
-                    IsAvailable: true,
-                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
-                    ClaimId: not null,
-                } facts) continue;
-            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
-            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
-            using var authorization = AcquireGenerationAuthorization(registryAuthority,
-                new(claim.SourceApplicationVersion, claim.AdapterVersion, claim.NormalizationVersion, claim.PayloadSchema, claim.SchemaFingerprint),
-                claim.SkillName, claim.SkillSource).Authorization;
-            if (authorization is not null)
-                result.Add(new(
-                    identity.SessionId.ToString("D"),
-                    facts.ClaimId.Value.ToString("D"),
-                    authorization.SkillName,
-                    facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
-        }
-        return result;
-    }
-
-    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadStructurallyValidSdkSearchFacts(
+    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadStructurallyValidSdkFactsForBackupValidation(
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
@@ -870,51 +731,6 @@ internal sealed class SkillProjectionReadService
         command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
         command.Parameters.AddWithValue("$name", name);
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
-    }
-
-    private IReadOnlyList<(string TraceId, string SpanId)> ListCurrentOtelPairs(
-        string sessionId)
-    {
-        using var connection = new SqliteConnection(
-            new SqliteConnectionStringBuilder
-            {
-                DataSource = databasePath,
-                Pooling = false,
-                Mode = SqliteOpenMode.ReadOnly,
-            }.ToString());
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT invocation.trace_id,invocation.span_id
-            FROM skill_projection_invocations AS invocation
-            JOIN skill_projection_generations AS generation
-              ON generation.generation_id=invocation.generation_id
-            JOIN skill_projection_trace_heads AS head
-              ON head.trace_id=invocation.trace_id
-             AND head.current_generation_id=invocation.generation_id
-            JOIN source_trace_compatibility_revisions AS revision
-              ON revision.trace_id=invocation.trace_id
-             AND revision.current_revision=generation.compatibility_revision
-            WHERE invocation.session_id=$session_id
-              AND invocation.source_arm='otel_trace_span'
-              AND generation.lifecycle='current'
-              AND NOT EXISTS(
-                    SELECT 1
-                    FROM skill_projection_generation_inputs AS input
-                    WHERE input.generation_id=generation.generation_id
-                      AND input.input_evidence_kind='deleted_before_digest_v10'
-              )
-              AND revision.current_effective_state='resolved'
-              AND revision.current_exact_version=invocation.source_application_version
-            ORDER BY invocation.invocation_id;
-            """;
-        command.Parameters.AddWithValue("$session_id", sessionId);
-        using var reader = command.ExecuteReader();
-        var rows = new List<(string TraceId, string SpanId)>();
-        while (reader.Read())
-            rows.Add((reader.GetString(0), reader.GetString(1)));
-        return rows;
     }
 
     private sealed class InventoryAccumulator(

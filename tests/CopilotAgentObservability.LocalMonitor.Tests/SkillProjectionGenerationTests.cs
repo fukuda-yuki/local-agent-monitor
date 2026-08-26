@@ -1492,11 +1492,10 @@ public sealed class SkillProjectionGenerationTests
 
         using var validation = Open(database.Path);
         SkillProjectionSchemaV1.Validate(validation, transaction: null);
-        Assert.Empty(
-            new SkillProjectionReadService(database.Path)
-                .ListCurrentSdkClaims(sessionId));
         using var transaction = validation.BeginTransaction(deferred: true);
-        Assert.Empty(SkillProjectionReadService.ReadSessionInvocationAggregates(validation, transaction, [sessionId]));
+        var projection = SkillProjectionReadService.ReadCurrentInvocationProjection(
+            validation, transaction, [sessionId], ObservedAt, registryAuthority: null);
+        Assert.Empty(projection);
     }
 
     [Fact]
@@ -1520,13 +1519,9 @@ public sealed class SkillProjectionGenerationTests
         command.Parameters.AddWithValue("$at", ObservedAt.ToString("O"));
         command.ExecuteNonQuery();
 
-        var aggregate = new SkillProjectionReadService(database.Path)
-            .GetSessionInvocationAggregate(sessionId);
-
-        Assert.Null(aggregate.InvocationCount);
-        Assert.Null(aggregate.State);
         using var transaction = connection.BeginTransaction(deferred: true);
-        Assert.Empty(SkillProjectionReadService.ReadSessionInvocationAggregates(connection, transaction, [sessionId]));
+        Assert.Empty(SkillProjectionReadService.ReadCurrentInvocationProjection(
+            connection, transaction, [sessionId], ObservedAt, registryAuthority: null));
     }
 
     [Fact]

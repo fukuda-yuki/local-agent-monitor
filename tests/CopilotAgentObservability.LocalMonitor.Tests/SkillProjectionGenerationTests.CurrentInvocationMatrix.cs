@@ -2,8 +2,11 @@ using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
+using System.Text;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -27,7 +30,18 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         fixture.AssertCurrent(results, "otel-only", 1, "otel-skill");
         fixture.AssertCurrent(results, "sdk-one", 1, "sdk-skill");
         fixture.AssertCurrent(results, "sdk-two", 1, "sdk-skill");
+        var otelOnly = Assert.Single(results[fixture.SessionId("otel-only")].Invocations);
+        Assert.NotNull(otelOnly.OtelSourceIdentity);
+        Assert.Null(otelOnly.SdkSourceIdentity);
+        var sdkOnly = Assert.Single(results[fixture.SessionId("sdk-one")].Invocations);
+        Assert.Null(sdkOnly.OtelSourceIdentity);
+        Assert.NotNull(sdkOnly.SdkSourceIdentity);
         fixture.AssertCurrent(results, "exact-pair", 1, "paired-skill");
+        var exact = Assert.Single(results[fixture.SessionId("exact-pair")].Invocations);
+        Assert.NotNull(exact.OtelSourceIdentity);
+        Assert.NotNull(exact.SdkSourceIdentity);
+        Assert.Equal("bb".PadRight(32, 'b'), exact.ProducerTraceId);
+        Assert.Equal("02".PadRight(16, '0'), exact.ProducerSpanId);
         fixture.AssertPending(results, "mismatch");
         fixture.AssertAbsent(results, "stale", "invalid", "expired");
     }
@@ -43,6 +57,12 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 
         Assert.Equal("current", session.State);
         Assert.Equal(2, session.InvocationCount);
+        Assert.Equal(2, session.Invocations.Count);
+        Assert.All(session.Invocations, invocation =>
+        {
+            Assert.Null(invocation.OtelSourceIdentity);
+            Assert.NotNull(invocation.SdkSourceIdentity);
+        });
         Assert.Equal(["first-skill", "second-skill"], session.SearchFacts.Select(static fact => fact.SkillName).Order());
     }
 
@@ -72,6 +92,28 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 
         fixture.AssertWorkspaceSkill("admitted", "recorded", 1, ["needle-skill"]);
         fixture.AssertWorkspaceSkill("pending", "certification_pending", null, []);
+    }
+
+    [Fact]
+    public async Task PersistedSqliteMatrix_ProductionCollectionQHasSkillAndSerializedSummaryShareAuthority()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("admitted", "Needle-Skill");
+        fixture.SeedMismatchedPair("pending", "Needle-Skill", "11", "12", "13", "14");
+
+        using var filtered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: "needle-skill", hasSkill: true));
+        var admitted = Assert.Single(filtered.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(fixture.SessionId("admitted"), admitted.GetProperty("session_id").GetString());
+        var admittedSkill = admitted.GetProperty("summary").GetProperty("skill");
+        Assert.Equal("recorded", admittedSkill.GetProperty("state").GetString());
+        Assert.Equal(1, admittedSkill.GetProperty("count").GetInt32());
+
+        using var unfiltered = JsonDocument.Parse(await fixture.SerializeCollectionAsync(q: null, hasSkill: null));
+        var pending = Assert.Single(unfiltered.RootElement.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("session_id").GetString() == fixture.SessionId("pending"));
+        var pendingSkill = pending.GetProperty("summary").GetProperty("skill");
+        Assert.Equal("certification_pending", pendingSkill.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.Null, pendingSkill.GetProperty("count").ValueKind);
     }
 }
 
@@ -158,6 +200,8 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
 
     internal SkillProjectionCurrentInvocationProjection Read(string sessionKey) => ReadAll()[sessions[sessionKey]];
 
+    internal string SessionId(string sessionKey) => sessions[sessionKey];
+
     internal void RefreshWorkspace()
     {
         using var connection = Open();
@@ -165,6 +209,20 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         using var transaction = connection.BeginTransaction();
         LocalWorkspaceProjectionStore.Refresh(connection, transaction, ReadAt, authority);
         transaction.Commit();
+    }
+
+    internal async Task<byte[]> SerializeCollectionAsync(string? q, bool? hasSkill)
+    {
+        RefreshWorkspace();
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(
+                DatabasePath,
+                new LocalWorkspaceSessionSnapshotContributor(new FixedTimeProvider(ReadAt)),
+                SqliteLocalArchiveFactSnapshotContributor.Instance)
+            .ReadAsync(new(LocalRepositoryScopeKind.All, null), CancellationToken.None);
+        var requestJson = $$"""{"schema_version":"local-monitor-session-search.request.v1","scope":"all","repository_id":null,"archive_scope":"active_only","from":null,"to":null,"source":[],"model":[],"status":[],"has_skill":{{(hasSkill is null ? "null" : hasSkill.Value ? "true" : "false")}},"has_subagent":null,"has_error":null,"has_retry":null,"q":{{(q is null ? "null" : JsonSerializer.Serialize(q))}},"cursor":null,"limit":null}""";
+        Assert.Equal(LocalMonitorV1SessionSearchParseStatus.Success,
+            LocalMonitorV1SessionSearchRequestParser.Parse(Encoding.UTF8.GetBytes(requestJson), out var request));
+        return LocalMonitorV1CollectionApplication.SerializeSessions(snapshot, request!, new byte[32]);
     }
 
     internal void AssertWorkspaceSkill(string sessionKey, string state, int? count, string[] searchFacts)

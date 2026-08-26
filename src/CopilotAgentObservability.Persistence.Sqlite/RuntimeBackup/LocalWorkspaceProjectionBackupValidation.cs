@@ -123,7 +123,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
         while (idsReader.Read()) sessionIds.Add(idsReader.GetString(0));
         idsReader.Close();
 
-        var expected = SkillProjectionReadService.ReadStructurallyValidSdkSearchFacts(
+        var expected = SkillProjectionReadService.ReadStructurallyValidSdkFactsForBackupValidation(
                 connection, transaction, sessionIds, new StructuralValidationTimeProvider(instant))
             .Select(static fact => (fact.SessionId, SourceIdentity: "sdk:" + fact.SourceIdentity,
                 NormalizedText: fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), fact.ExpiresAt))

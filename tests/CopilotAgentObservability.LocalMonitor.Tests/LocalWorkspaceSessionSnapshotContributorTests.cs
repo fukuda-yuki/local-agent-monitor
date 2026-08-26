@@ -176,61 +176,6 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
     }
 
     [Fact]
-    public void OtelCurrentSkillSearchFactRequiresReadableRetainedRawAtAcceptedInstant()
-    {
-        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
-            INSERT INTO schema_version(component,version) VALUES('skill_projection',1);
-            CREATE TABLE skill_projection_generations(generation_id INTEGER,compatibility_revision INTEGER,lifecycle TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT,current_generation_id INTEGER);
-            CREATE TABLE source_trace_compatibility_revisions(trace_id TEXT,current_revision INTEGER,current_effective_state TEXT,current_exact_version TEXT);
-            CREATE TABLE skill_projection_generation_inputs(generation_id INTEGER,input_evidence_kind TEXT);
-            CREATE TABLE skill_projection_invocations(invocation_id INTEGER,generation_id INTEGER,source_arm TEXT,raw_record_id INTEGER,span_ordinal INTEGER,trace_id TEXT,session_id TEXT,skill_name TEXT,source_application_version TEXT);
-            CREATE TABLE raw_records(id INTEGER PRIMARY KEY);
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
-            INSERT INTO skill_projection_generations VALUES(1,7,'current');
-            INSERT INTO skill_projection_trace_heads VALUES('trace-1',1);
-            INSERT INTO source_trace_compatibility_revisions VALUES('trace-1',7,'resolved','1.0.0');
-            INSERT INTO skill_projection_invocations VALUES(11,1,'otel_trace_span',41,3,'trace-1','0198f5b8-0c00-7000-8000-000000000001','retained-skill','1.0.0');
-            INSERT INTO raw_records VALUES(41);
-            INSERT INTO retention_items VALUES('raw_record','41','expiring',NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00');
-            """);
-        using var transaction = connection.BeginTransaction();
-
-        var beforeExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
-        var atExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-26T00:00:00Z"));
-        using (var pin = connection.CreateCommand())
-        {
-            pin.Transaction = transaction;
-            pin.CommandText = "UPDATE retention_items SET state='retained_by_policy';";
-            pin.ExecuteNonQuery();
-        }
-        var pinnedAfterExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
-        using (var unpin = connection.CreateCommand())
-        {
-            unpin.Transaction = transaction;
-            unpin.CommandText = "UPDATE retention_items SET state='expiring';";
-            unpin.ExecuteNonQuery();
-        }
-        var unpinnedAfterExpiry = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-27T00:00:00Z"));
-        using (var delete = connection.CreateCommand())
-        {
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM raw_records WHERE id=41;";
-            delete.ExecuteNonQuery();
-        }
-        var afterDelete = SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
-
-        Assert.Equal("2026-08-26T00:00:00.0000000+00:00", Assert.Single(beforeExpiry).ExpiresAt);
-        Assert.Equal("41:3", Assert.Single(beforeExpiry).SourceIdentity);
-        Assert.Empty(atExpiry);
-        Assert.Null(Assert.Single(pinnedAfterExpiry).ExpiresAt);
-        Assert.Empty(unpinnedAfterExpiry);
-        Assert.Empty(afterDelete);
-    }
-
-    [Fact]
     public async Task ContributorDoesNotExposePartialTokenSumsAndFailsOverflowClosed()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
