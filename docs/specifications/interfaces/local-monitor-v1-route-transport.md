@@ -615,6 +615,11 @@ bytes: invalid Host wins with 400; otherwise method dispatch wins with 405. No
 
 ## 11. Human response and recovery matrix
 
+The exact machine response graphs, headers, bytes, bounds, cursor binding and
+error precedence for the four #134 Session-detail APIs are owned by
+[`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md).
+This document continues to own the shared identifier and human-route grammar.
+
 For raw-default human requests, Host validation runs first. Raw-path template
 classification then distinguishes a primary template from the near paths in
 section 3. For an exactly shaped primary template, a method other than GET or

@@ -221,6 +221,12 @@ Langfuse は標準 full profile の個別 trace viewer として使う。
   Workspace-read response contract and serializes the endpoint.
   It does not widen `/api/monitor/*`,
   `/api/session-workspace/*` v1 or SSE.
+  The remaining #134 detail backend reuses that same host-scoped publication
+  lease and SQLite read transaction for Session summary, timeline, node and
+  content reads. `local_workspace_projection:4` is the sole execution/node
+  authority; follow-up reads require the Summary revision and raw content adds
+  the existing Retention access lease without adding another catalog, archive,
+  Skill or publication reader.
 - AI-independent observation/investigation/Compare remains complete without an
   LLM. Optional GitHub Copilot SDK execution crosses an explicit bounded
   provider-egress boundary and never receives SQLite or arbitrary SQL access.

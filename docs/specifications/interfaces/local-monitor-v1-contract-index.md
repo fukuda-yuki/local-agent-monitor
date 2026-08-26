@@ -21,6 +21,7 @@ This index identifies the single authority for every Local Monitor v1 behavior. 
 | Repository Session Compare | #165 plus the identity/expiry amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #166 |
 | Session collection success response | [`local-monitor-v1-session-collection.md`](local-monitor-v1-session-collection.md), composing #133 semantics and [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) request/transport/cursor rules | #134 |
 | Other Repository/Session Workspace reads | #133 semantic requirements and the execution/node amendment in [`local-monitor-v1-route-transport.md`](local-monitor-v1-route-transport.md) | #134 |
+| Session summary/timeline/node/content exact response and coherent snapshot | [`local-monitor-v1-session-detail.md`](local-monitor-v1-session-detail.md) | #134 |
 | Japanese sentence-level copy | #169 | #169 and UI owners |
 | Cross-cutting validation | #147 | #147 |
 | User documentation | accepted canonical docs | #148 |
