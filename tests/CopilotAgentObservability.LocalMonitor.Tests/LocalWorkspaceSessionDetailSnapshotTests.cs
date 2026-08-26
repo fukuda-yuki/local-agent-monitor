@@ -21,6 +21,12 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
         Assert.Equal(one.Sql, tenThousand.Sql);
         Assert.Equal(one.FullScanSteps, tenThousand.FullScanSteps);
         Assert.NotEmpty(one.Sql);
+        Assert.Equal(1, one.PublicationLeaseCount);
+        Assert.Equal(1, one.ConnectionCount);
+        Assert.Equal(1, one.ReadTransactionCount);
+        Assert.Equal(one.PublicationLeaseCount, tenThousand.PublicationLeaseCount);
+        Assert.Equal(one.ConnectionCount, tenThousand.ConnectionCount);
+        Assert.Equal(one.ReadTransactionCount, tenThousand.ReadTransactionCount);
     }
 
     [Fact]
@@ -208,49 +214,86 @@ public sealed class LocalWorkspaceSessionDetailSnapshotTests
 
     private static async Task<ObservedRead> ObserveDetailRead(string kindName, int sessionCount)
     {
-        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,tool_name TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
-            """);
-        using (var retentionTransaction = connection.BeginTransaction())
+        using var temp = new MonitorTempDirectory();
+        var targetSession = AlertCenterRouteTests.SeedPersistedTraceAndSession(
+            temp, "00000000000000000000000000000001", authoritativeToolStatus: true);
+        await using var host = await MonitorTestHost.StartAsync(temp);
+        using var connection = new SqliteConnection($"Data Source={temp.DatabasePath};Pooling=False");
+        connection.Open();
+        var sessionColumns = new List<string>();
+        using (var pragma = connection.CreateCommand())
         {
-            CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, retentionTransaction);
-            retentionTransaction.Commit();
+            pragma.CommandText = "PRAGMA table_info(sessions);";
+            using var reader = pragma.ExecuteReader();
+            while (reader.Read()) sessionColumns.Add(reader.GetString(1));
         }
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO sessions VALUES('018f0000-0000-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-1','018f0000-0000-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
         using (var transaction = connection.BeginTransaction())
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = "INSERT INTO sessions VALUES($id,'active','partial',NULL,NULL,NULL,NULL,'2026-08-26T00:00:00.0000000+00:00','not_captured','2026-08-26T00:00:00.0000000+00:00','2026-08-26T00:00:00.0000000+00:00');";
+            command.CommandText = $"INSERT INTO sessions({string.Join(',', sessionColumns)}) SELECT $id,{string.Join(',', sessionColumns.Skip(1))} FROM sessions WHERE session_id=$target;";
             var id = command.Parameters.Add("$id", SqliteType.Text);
+            command.Parameters.AddWithValue("$target", targetSession.ToString("D"));
             for (var index = 1; index < sessionCount; index++)
             {
                 id.Value = $"01990000-0000-7000-8000-{index:D12}";
                 command.ExecuteNonQuery();
             }
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.UnixEpoch,
+                FixedSkillRegistryGenerationAuthority.Load());
             transaction.Commit();
         }
-        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
-        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
-            CREATE TABLE skill_projection_invocations(generation_id TEXT,invocation_id TEXT,session_id TEXT);
-            CREATE TABLE skill_projection_sdk_claims(claim_id TEXT,session_id TEXT);
-            CREATE TABLE skill_invocation_snapshots(snapshot_id TEXT,session_id TEXT);
-            CREATE TABLE skill_invocation_snapshot_receipts(snapshot_id TEXT);
-            CREATE TABLE skill_projection_trace_heads(trace_id TEXT);
-            """);
-        var rootId = LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT node_id FROM local_workspace_nodes WHERE session_id='018f0000-0000-7000-8000-000000000001';").Single();
+        using var rootCommand = connection.CreateCommand();
+        rootCommand.CommandText = "SELECT node_id FROM local_workspace_nodes WHERE session_id=$session AND source_kind='execution_root';";
+        rootCommand.Parameters.AddWithValue("$session", targetSession.ToString("D"));
+        var rootId = (string)rootCommand.ExecuteScalar()!;
+        connection.Close();
         var kind = Enum.Parse<LocalRepositorySessionDetailRequestKind>(kindName);
-        var request = new LocalRepositorySessionDetailRequest(kind, SessionId,
+        var request = new LocalRepositorySessionDetailRequest(kind, targetSession.ToString("D"),
             NodeId: kind == LocalRepositorySessionDetailRequestKind.Node ? rootId : null);
-        using var readTransaction = connection.BeginTransaction();
-        using var observer = new NativeDetailObserver(connection);
-        await new LocalWorkspaceSessionDetailSnapshotContributor(registryAuthority: FixedSkillRegistryGenerationAuthority.Load())
-            .ReadAsync(new DirectReadTransaction(connection, readTransaction), request, CancellationToken.None);
-        return new(observer.Sql.ToArray(), observer.FullScanSteps.ToArray());
+        var gate = new CountingPublicationGate();
+        var connectionCount = 0;
+        NativeDetailObserver? observer = null;
+        IReadOnlyList<string>? sql = null;
+        IReadOnlyList<int>? fullScanSteps = null;
+        var service = new SqliteLocalRepositoryScopeSnapshotService(
+            temp.DatabasePath,
+            new LocalWorkspaceSessionSnapshotContributor(temp.TimeProvider),
+            SqliteLocalArchiveFactSnapshotContributor.Instance,
+            connectionOpenedObserver: opened => { connectionCount++; observer = new NativeDetailObserver(opened); },
+            finalReturnObserver: () =>
+            {
+                sql = observer!.Sql.ToArray();
+                fullScanSteps = observer.FullScanSteps.ToArray();
+                observer.Dispose();
+            },
+            publicationGate: gate,
+            skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.Load());
+        await service.ReadDetailAsync(request, CancellationToken.None);
+        Assert.NotNull(sql);
+        Assert.NotNull(fullScanSteps);
+        return new(sql, fullScanSteps, gate.ReadCount, connectionCount,
+            sql.Count(statement => statement.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)));
     }
 
-    private sealed record ObservedRead(IReadOnlyList<string> Sql, IReadOnlyList<int> FullScanSteps);
+    private sealed record ObservedRead(
+        IReadOnlyList<string> Sql,
+        IReadOnlyList<int> FullScanSteps,
+        int PublicationLeaseCount,
+        int ConnectionCount,
+        int ReadTransactionCount);
+
+    private sealed class CountingPublicationGate : ILocalWorkspacePublicationGate
+    {
+        internal int ReadCount { get; private set; }
+        public ValueTask<IAsyncDisposable> AcquireReadAsync(CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            return ValueTask.FromResult<IAsyncDisposable>(new Lease());
+        }
+        public ValueTask<IAsyncDisposable> AcquireWriteAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        private sealed class Lease : IAsyncDisposable { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
+    }
 
     private sealed class NativeDetailObserver : IDisposable
     {

@@ -13,6 +13,49 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
 {
     private const string SessionId="018f0000-0000-7000-8000-000000000001";
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SummaryHttpPipelineAcceptsExactlyEightMiBForGetAndHead(bool head)
+    {
+        var baseline = Snapshot(SessionId, new([], [], [], [], [], [], null, null, "canonical", "generation"), new string('1', 64), string.Empty);
+        var baselineLength = LocalMonitorV1SessionDetailApplication.SerializeSummary(baseline).Length;
+        var snapshot = Snapshot(SessionId, baseline.Detail, baseline.WorkspaceRevision, new string('a', 8_388_608 - baselineLength));
+        using var running = await StartDetailRouteAsync(new FixedDetailService(snapshot));
+
+        using var request = new HttpRequestMessage(head ? HttpMethod.Head : HttpMethod.Get,
+            $"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var response = await running.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(8_388_608, response.Content.Headers.ContentLength);
+        Assert.Equal(head ? 0 : 8_388_608, (await response.Content.ReadAsByteArrayAsync()).Length);
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SummaryHttpPipelineRejectsEightMiBPlusOneWithFixedBody(bool head)
+    {
+        var baseline = Snapshot(SessionId, new([], [], [], [], [], [], null, null, "canonical", "generation"), new string('1', 64), string.Empty);
+        var baselineLength = LocalMonitorV1SessionDetailApplication.SerializeSummary(baseline).Length;
+        var snapshot = Snapshot(SessionId, baseline.Detail, baseline.WorkspaceRevision, new string('a', 8_388_609 - baselineLength));
+        using var running = await StartDetailRouteAsync(new FixedDetailService(snapshot));
+
+        using var request = new HttpRequestMessage(head ? HttpMethod.Head : HttpMethod.Get,
+            $"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        using var response = await running.Client.SendAsync(request);
+
+        var expected = System.Text.Encoding.UTF8.GetBytes("{\"error\":\"workspace_too_large\"}");
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(expected.Length, response.Content.Headers.ContentLength);
+        Assert.Equal(head ? [] : expected, await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], response.Headers.GetValues("Cache-Control"));
+    }
+
     [Fact]
     public async Task SummaryReadsASeededSessionThroughTheProductionCoordinator()
     {
@@ -186,6 +229,33 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         }
     }
 
+    private sealed class FixedDetailService(LocalRepositorySessionDetailSnapshot snapshot) : ILocalRepositorySessionDetailSnapshotService
+    {
+        public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(LocalRepositorySessionDetailRequest request, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(snapshot);
+    }
+
+    private static async Task<RunningDetailRoute> StartDetailRouteAsync(ILocalRepositorySessionDetailSnapshotService service)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, new byte[32]);
+        await app.StartAsync();
+        return new(app, new HttpClient { BaseAddress = new Uri(app.Urls.Single()) });
+    }
+
+    private sealed class RunningDetailRoute(WebApplication app, HttpClient client) : IDisposable
+    {
+        internal HttpClient Client { get; } = client;
+        public void Dispose()
+        {
+            Client.Dispose();
+            app.StopAsync().GetAwaiter().GetResult();
+            app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
     private static string Scalar(SqliteConnection connection, string sql, string sessionId, string? executionId = null)
     {
         using var command = connection.CreateCommand();
@@ -195,12 +265,12 @@ public sealed class LocalMonitorV1SessionDetailRouteTests
         return (string)command.ExecuteScalar()!;
     }
 
-    private static LocalRepositorySessionDetailSnapshot Snapshot(string sessionId, LocalWorkspaceSessionDetailContribution detail, string revision)
+    private static LocalRepositorySessionDetailSnapshot Snapshot(string sessionId, LocalWorkspaceSessionDetailContribution detail, string revision, string? label = null)
     {
         var none = new LocalWorkspaceFact<long>("not_observed", null); var zero = new LocalWorkspaceFact<long>("recorded", 0);
         var activity = new LocalWorkspaceActivityFacts(zero, zero, zero, zero, zero);
         var tokens = new LocalWorkspaceTokenFacts("none", "not_observed", 0, 0, none, none, none, none, none, none, none, none);
-        var row = new LocalWorkspaceProjectionRow(sessionId, 0, 0, "not_observed", null, "completed", "full", new("not_observed", []), new("not_observed", []), activity, tokens, "not_observed", null, null, null, null, [], "revision");
+        var row = new LocalWorkspaceProjectionRow(sessionId, 0, 0, label is null ? "not_observed" : "recorded", label, "completed", "full", new("not_observed", []), new("not_observed", []), activity, tokens, "not_observed", null, null, null, null, [], "revision");
         return new(new(sessionId, row, 0, LocalRepositoryScopeAssignmentState.Unassigned, LocalRepositoryScopeAssignmentAuthority.None, null, [], true, true, true, LocalArchiveState.Active, 0, true, null), detail, revision);
     }
 
