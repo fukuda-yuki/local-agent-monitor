@@ -81,4 +81,3 @@ bounded snapshot/query counts, revision changes, raw lease races, and frozen
 surface regressions. Final validation runs the canonical skill mirror check,
 solution build, Playwright prerequisite, and one complete solution test run on
 the final HEAD.
-

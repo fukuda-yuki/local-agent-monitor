@@ -293,4 +293,3 @@ Expected: every command exits 0; the final complete solution test run is against
 - [ ] **Step 3: Inspect status/history and prepare final review range**
 
 Confirm no generated artifacts are tracked, every commit contains `Issue #134`, no scope-excluded files changed, and record `git merge-base main HEAD` plus final HEAD.
-
