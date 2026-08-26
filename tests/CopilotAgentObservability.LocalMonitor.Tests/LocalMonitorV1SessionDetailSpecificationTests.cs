@@ -239,12 +239,12 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         AssertProperties(root, "schema_version", "routes", "query_fields", "error_precedence", "errors", "success_headers", "error_headers", "forbidden_headers", "json_max_bytes", "raw_max_bytes", "content_parts");
         Assert.Equal("local-monitor-session-detail.transport.v1", root.GetProperty("schema_version").GetString());
         Assert.Equal(4, root.GetProperty("routes").GetArrayLength());
-        var expectedRoutes = new Dictionary<string, (string Path, string MediaType, string SchemaToken)>(StringComparer.Ordinal)
+        var expectedRoutes = new Dictionary<string, (string Path, string MediaType, string SchemaToken, (string Name, string Value)[] Headers)>(StringComparer.Ordinal)
         {
-            ["summary"] = ("/api/local-monitor/v1/sessions/{sessionId}/summary", "application/json; charset=utf-8", SummaryToken),
-            ["timeline"] = ("/api/local-monitor/v1/sessions/{sessionId}/timeline", "application/json; charset=utf-8", TimelineToken),
-            ["node"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}", "application/json; charset=utf-8", NodeToken),
-            ["content"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content", "text/plain; charset=utf-8", ContentToken),
+            ["summary"] = ("/api/local-monitor/v1/sessions/{sessionId}/summary", "application/json; charset=utf-8", SummaryToken, [("Cache-Control", "no-store"), ("Content-Type", "application/json; charset=utf-8"), ("Content-Length", "exact_representation_utf8_byte_length")]),
+            ["timeline"] = ("/api/local-monitor/v1/sessions/{sessionId}/timeline", "application/json; charset=utf-8", TimelineToken, [("Cache-Control", "no-store"), ("Content-Type", "application/json; charset=utf-8"), ("Content-Length", "exact_representation_utf8_byte_length")]),
+            ["node"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}", "application/json; charset=utf-8", NodeToken, [("Cache-Control", "no-store"), ("Content-Type", "application/json; charset=utf-8"), ("Content-Length", "exact_representation_utf8_byte_length")]),
+            ["content"] = ("/api/local-monitor/v1/sessions/{sessionId}/nodes/{nodeId}/content", "text/plain; charset=utf-8", ContentToken, [("Cache-Control", "no-store"), ("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", "exact_representation_utf8_byte_length"), ("X-Local-Monitor-Schema-Version", ContentToken)]),
         };
         Assert.All(root.GetProperty("routes").EnumerateArray(), route =>
         {
@@ -256,7 +256,11 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
             Assert.Equal(expected.MediaType, route.GetProperty("success_media_type").GetString());
             Assert.Equal(expected.SchemaToken, route.GetProperty("schema_token").GetString());
             Assert.Equal(405, route.GetProperty("method_not_allowed_status").GetInt32());
-            Assert.Equal(new[] { "Cache-Control", "Content-Type", "Content-Length" }, route.GetProperty("required_headers").EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal(expected.Headers, route.GetProperty("required_headers").EnumerateArray().Select(header =>
+            {
+                AssertProperties(header, "name", "value");
+                return (header.GetProperty("name").GetString()!, header.GetProperty("value").GetString()!);
+            }));
         });
         var routes = root.GetProperty("routes").EnumerateArray().ToDictionary(route => route.GetProperty("name").GetString()!, StringComparer.Ordinal);
         Assert.Empty(routes["summary"].GetProperty("query_order").EnumerateArray());
@@ -266,12 +270,12 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         var queries = root.GetProperty("query_fields").EnumerateArray().ToDictionary(field => field.GetProperty("name").GetString()!, StringComparer.Ordinal);
         Assert.Equal(new[] { "workspace_revision", "execution_id", "parent_node_id", "after", "limit", "part" }, queries.Keys);
         Assert.All(queries.Values, field => AssertProperties(field, "name", "required_on", "requires", "pattern", "minimum", "maximum", "default", "enum"));
-        Assert.Equal(new[] { "timeline", "node", "content" }, queries["workspace_revision"].GetProperty("required_on").EnumerateArray().Select(value => value.GetString()));
-        Assert.Equal("execution_id", queries["parent_node_id"].GetProperty("requires").GetString());
-        Assert.Equal(1, queries["limit"].GetProperty("minimum").GetInt32());
-        Assert.Equal(200, queries["limit"].GetProperty("maximum").GetInt32());
-        Assert.Equal(100, queries["limit"].GetProperty("default").GetInt32());
-        Assert.Equal(ContentParts, queries["part"].GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        AssertQueryField(queries["workspace_revision"], "workspace_revision", ["timeline", "node", "content"], null, "^[0-9a-f]{64}$", null, null, null, null);
+        AssertQueryField(queries["execution_id"], "execution_id", [], null, "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", null, null, null, null);
+        AssertQueryField(queries["parent_node_id"], "parent_node_id", [], "execution_id", "^node-[0-9a-f]{32}$", null, null, null, null);
+        AssertQueryField(queries["after"], "after", [], null, "^[A-Za-z0-9_-]{158}[AEIMQUYcgkosw048]$", null, null, null, null);
+        AssertQueryField(queries["limit"], "limit", [], null, "^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$", 1, 200, 100, null);
+        AssertQueryField(queries["part"], "part", ["content"], null, null, null, null, null, ContentParts);
         Assert.Equal(new[] { "host", "method", "path_identifier", "closed_query", "session", "workspace_revision", "execution_or_node_membership", "cursor", "retention_lease" }, root.GetProperty("error_precedence").EnumerateArray().Select(value => value.GetString()));
 
         var expectedErrors = new (int Status, string Code, string Bytes)[]
@@ -312,7 +316,20 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
         Assert.Equal("local-monitor-session-detail.query-grammar.v1", grammar.RootElement.GetProperty("schema_version").GetString());
         Assert.True(grammar.RootElement.GetProperty("case_sensitive").GetBoolean());
         Assert.Equal(new[] { "unknown_key", "empty_key", "empty_value", "duplicate_key", "percent_encoded_unreserved", "whitespace", "raw_plus", "noncanonical_identifier" }, grammar.RootElement.GetProperty("reject").EnumerateArray().Select(value => value.GetString()));
-        AssertProperties(grammar.RootElement.GetProperty("generated_order"), "summary", "timeline", "node", "content");
+        var generatedOrder = grammar.RootElement.GetProperty("generated_order");
+        AssertProperties(generatedOrder, "summary", "timeline", "node", "content");
+        var expectedQueryOrder = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["summary"] = [],
+            ["timeline"] = ["workspace_revision", "execution_id", "parent_node_id", "after", "limit"],
+            ["node"] = ["workspace_revision"],
+            ["content"] = ["workspace_revision", "part"],
+        };
+        foreach (var (routeName, expectedOrder) in expectedQueryOrder)
+        {
+            Assert.Equal(expectedOrder, generatedOrder.GetProperty(routeName).EnumerateArray().Select(value => value.GetString()));
+            Assert.Equal(expectedOrder, routes[routeName].GetProperty("query_order").EnumerateArray().Select(value => value.GetString()));
+        }
     }
 
     private static readonly string[] ContentParts = ["instruction", "tool_input", "tool_result", "error_message", "subagent_input", "event_content"];
@@ -559,6 +576,47 @@ public sealed class LocalMonitorV1SessionDetailSpecificationTests
 
     private static void AssertProperties(JsonElement value, params string[] expected) =>
         Assert.Equal(expected, value.EnumerateObject().Select(property => property.Name));
+
+    private static void AssertQueryField(
+        JsonElement field,
+        string name,
+        string[] requiredOn,
+        string? requires,
+        string? pattern,
+        int? minimum,
+        int? maximum,
+        int? defaultValue,
+        string[]? values)
+    {
+        Assert.Equal(name, field.GetProperty("name").GetString());
+        Assert.Equal(requiredOn, field.GetProperty("required_on").EnumerateArray().Select(value => value.GetString()));
+        AssertNullableString(field.GetProperty("requires"), requires);
+        AssertNullableString(field.GetProperty("pattern"), pattern);
+        AssertNullableInt32(field.GetProperty("minimum"), minimum);
+        AssertNullableInt32(field.GetProperty("maximum"), maximum);
+        AssertNullableInt32(field.GetProperty("default"), defaultValue);
+        var enumValue = field.GetProperty("enum");
+        if (values is null)
+        {
+            Assert.Equal(JsonValueKind.Null, enumValue.ValueKind);
+        }
+        else
+        {
+            Assert.Equal(values, enumValue.EnumerateArray().Select(value => value.GetString()));
+        }
+    }
+
+    private static void AssertNullableString(JsonElement value, string? expected)
+    {
+        if (expected is null) Assert.Equal(JsonValueKind.Null, value.ValueKind);
+        else Assert.Equal(expected, value.GetString());
+    }
+
+    private static void AssertNullableInt32(JsonElement value, int? expected)
+    {
+        if (expected is null) Assert.Equal(JsonValueKind.Null, value.ValueKind);
+        else Assert.Equal(expected.Value, value.GetInt32());
+    }
 
     private static void AssertEnum(JsonElement schema, params object?[] expected)
     {

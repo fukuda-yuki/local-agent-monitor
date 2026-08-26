@@ -16,6 +16,31 @@ Result: exit 1; 4 failed, 1 passed. The failures proved the three schemas and fi
 - Frozen Repository/Session collection specification suites: exit 0; 7 passed, 0 failed.
 - `git diff --check`: exit 0.
 
+## Review fix round 3
+
+### RED
+
+The focused suite exited 1 with 1 failure and 7 passes after route-specific
+header value and exhaustive query assertions were added. All four route rows
+still exposed header names as strings, so they could not freeze values and the
+content row omitted its required schema-version header.
+
+### Fixes
+
+- Changed each route's required headers to literal ordered `{name,value}`
+  entries. Only content carries `X-Local-Monitor-Schema-Version` with the exact
+  content schema token; JSON routes independently prove that they do not.
+- Independently asserted every property of all six query fields, including
+  required routes, dependency, canonical pattern, bounds, default, and enum.
+- Independently asserted every generated query array and cross-checked it with
+  each transport route's literal query order.
+
+### GREEN
+
+- Session detail specification suite: exit 0; 8 passed, 0 failed.
+- Frozen Repository/Session collection specification suites: exit 0; 7 passed, 0 failed.
+- `git diff --check`: exit 0.
+
 ## Artifact inventory
 
 - Three self-contained, closed Draft 2020-12 schemas for Summary, Timeline, and Node.
