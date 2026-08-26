@@ -190,8 +190,13 @@ For a current `local_workspace_projection:3` archive,
 offline structural validation. The embedded Skill invocation registry owns a
 closed exact mapping from each supported writer version to one embedded
 registry revision and that registry artifact's exact SHA-256 fingerprint. The
-mapping admits legacy writer `1.0.0` at registry r0001 and the exact current
-Persistence.Sqlite assembly informational version at r0002. Each resolved
+mapping admits exactly legacy writer ID `1.0.0` at registry r0001 and immutable
+writer ID `runtime-backup-writer-r0002` at registry r0002. These IDs are
+archive-format provenance tokens owned by the runtime-backup/registry contract;
+they are not package versions, assembly informational versions, Git revisions,
+or values inferred from the inspecting build. Manifest creation emits
+`runtime-backup-writer-r0002`. Inspection uses only this closed exact mapping;
+no prefix, wildcard, or current-assembly fallback is permitted. Each resolved
 revision and fingerprint must exactly match the complete validated embedded
 registry history. Unknown, unmapped, ambiguous, missing, or
 fingerprint-mismatched provenance is `restore_incompatible`; validation never

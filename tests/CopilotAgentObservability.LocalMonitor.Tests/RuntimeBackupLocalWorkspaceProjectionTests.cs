@@ -35,6 +35,27 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
     }
 
     [Fact]
+    public void StableR0002WriterArchiveRemainsInspectablePreviewableAndRestorableAcrossBuilds()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var archive = fixture.Path("stable-r0002-writer.zip");
+        var target = fixture.Path("stable-r0002-target.db");
+
+        var created = fixture.Service.CreateAndPublish(fixture.DatabasePath, archive);
+        var manifest = ReadManifest(archive);
+        var inspected = fixture.Service.Inspect(archive);
+        var preview = fixture.Service.Preview(archive, target);
+        var restored = fixture.Service.Restore(archive, target, new RuntimeRestoreOptions());
+
+        Assert.True(created.Success, created.ErrorCode);
+        Assert.Equal("runtime-backup-writer-r0002", manifest.SourceApplicationVersion);
+        Assert.True(inspected.Success, inspected.ErrorCode);
+        Assert.True(preview.Success, preview.ErrorCode);
+        Assert.True(restored.Success, restored.ErrorCode);
+        Assert.Equal(["demo-skill"], Strings(target, "SELECT normalized_text FROM local_workspace_session_search_facts WHERE kind='skill';"));
+    }
+
+    [Fact]
     public void PublicationUsesOneCapturedInstantToExcludeFactAtExpiryEquality()
     {
         using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt);
@@ -345,6 +366,12 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         using var target = ZipFile.Open(output, ZipArchiveMode.Create);
         Write(target, "manifest.json", RuntimeBackupJson.WriteManifest(parsed with { SourceApplicationVersion = writerVersion }));
         Write(target, "database.sqlite", database);
+    }
+
+    private static RuntimeBackupManifestData ReadManifest(string source)
+    {
+        using var archive = ZipFile.OpenRead(source);
+        return RuntimeBackupJson.ParseManifest(Read(archive.GetEntry("manifest.json")!));
     }
 
     private static byte[] Read(ZipArchiveEntry entry)

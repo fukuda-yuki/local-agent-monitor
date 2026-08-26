@@ -66,10 +66,7 @@ public sealed class SkillInvocationV2ArtifactRegistry
 
     public IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision> History => history;
 
-    public static string CurrentWriterVersion { get; } =
-        typeof(SkillInvocationV2ArtifactRegistry).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? throw InvalidArtifact();
+    public const string CurrentWriterVersion = "runtime-backup-writer-r0002";
 
     public static SkillInvocationV2ArtifactRegistry Load() => Current.Value;
 
@@ -80,8 +77,7 @@ public sealed class SkillInvocationV2ArtifactRegistry
         var expected = writerVersion switch
         {
             "1.0.0" => (Revision: 1, Fingerprint: RegistryR0001Fingerprint),
-            _ when string.Equals(writerVersion, CurrentWriterVersion, StringComparison.Ordinal) =>
-                (Revision: CurrentRevision, Fingerprint: RegistryR0002Fingerprint),
+            CurrentWriterVersion => (Revision: 2, Fingerprint: RegistryR0002Fingerprint),
             _ => default
         };
         revision = expected.Revision == 0

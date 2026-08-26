@@ -41,6 +41,7 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
     {
         var registry = SkillInvocationV2ArtifactRegistry.Load();
 
+        Assert.Equal("runtime-backup-writer-r0002", SkillInvocationV2ArtifactRegistry.CurrentWriterVersion);
         Assert.True(registry.TryResolveWriterVersion(
             SkillInvocationV2ArtifactRegistry.CurrentWriterVersion,
             out var revision));
@@ -51,6 +52,8 @@ public sealed class SkillInvocationV2ArtifactRegistryTests
         Assert.Equal(RegistryFingerprint, legacy.ArtifactFingerprint);
         Assert.False(registry.TryResolveWriterVersion("unknown", out _));
         Assert.False(registry.TryResolveWriterVersion("1.0.0-unmapped", out _));
+        Assert.False(registry.TryResolveWriterVersion("runtime-backup-writer-r0002+subsequent-build", out _));
+        Assert.False(registry.TryResolveWriterVersion("1.0.0+01fd13a215dfc8ca3f5d6d89fea9cb521885ceb0", out _));
     }
 
     [Fact]
