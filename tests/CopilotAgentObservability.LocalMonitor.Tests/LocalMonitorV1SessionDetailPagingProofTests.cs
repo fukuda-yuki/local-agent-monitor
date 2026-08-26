@@ -44,6 +44,42 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
         }
     }
 
+    [Theory]
+    [InlineData("summary", "")]
+    [InlineData("timeline", "?workspace_revision=1111111111111111111111111111111111111111111111111111111111111111")]
+    [InlineData("nodes/node-00000000000000000000000000000001", "?workspace_revision=1111111111111111111111111111111111111111111111111111111111111111")]
+    public async Task EveryJsonRouteHasExactGetHeadAndMethodNotAllowedTransport(string route, string query)
+    {
+        var snapshot = Snapshot([]);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, new FixedDetailService(snapshot), new byte[32]);
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+        var uri = $"/api/local-monitor/v1/sessions/{SessionId}/{route}{query}";
+
+        using var get = await client.GetAsync(uri);
+        Assert.Equal(System.Net.HttpStatusCode.OK, get.StatusCode);
+        var getBytes = await get.Content.ReadAsByteArrayAsync();
+        Assert.Equal(getBytes.Length, get.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", get.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], get.Headers.GetValues("Cache-Control"));
+
+        using var head = await client.SendAsync(new(HttpMethod.Head, uri));
+        Assert.Equal(get.StatusCode, head.StatusCode);
+        Assert.Equal(getBytes.Length, head.Content.Headers.ContentLength);
+        Assert.Empty(await head.Content.ReadAsByteArrayAsync());
+
+        using var put = await client.SendAsync(new(HttpMethod.Put, uri));
+        Assert.Equal(System.Net.HttpStatusCode.MethodNotAllowed, put.StatusCode);
+        Assert.Equal(["GET", "HEAD"], put.Content.Headers.Allow);
+        Assert.Equal("{\"error\":\"method_not_allowed\"}", await put.Content.ReadAsStringAsync());
+        Assert.Equal(30, put.Content.Headers.ContentLength);
+        Assert.Equal("application/json; charset=utf-8", put.Content.Headers.ContentType?.ToString());
+        Assert.Equal(["no-store"], put.Headers.GetValues("Cache-Control"));
+    }
+
     [Fact]
     public async Task StaleRevisionWinsBeforeExecutionAndNodeMembershipWithoutMixingFacts()
     {

@@ -242,6 +242,10 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         }
     }
 
+    internal static string ComputeRevisionForTest(
+        LocalRepositoryScopeSessionSnapshot session,
+        LocalWorkspaceSessionDetailContribution detail) => ComputeRevision(session, detail);
+
     private static void ValidateDetail(string sessionId, LocalRepositorySessionDetailRequest request, LocalWorkspaceSessionDetailContribution detail)
     {
         if (detail is null || detail.Executions is null || detail.Nodes is null || detail.Edges is null || detail.Content is null)
