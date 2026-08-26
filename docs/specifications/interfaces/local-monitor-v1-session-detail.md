@@ -131,6 +131,10 @@ strings. `lifecycle` is `selected|started|completed|failed|deselected|unknown`.
 `status` is `active|completed|failed|unknown`. `timing` is
 `{state,started_at,ended_at,duration_ms}` with state
 `recorded|missing|invalid`; missing/invalid never produces zero duration.
+For `recorded`, `started_at` is non-null. An active recorded interval has both
+`ended_at` and `duration_ms` null; a completed recorded interval has both
+non-null and duration is at least zero. For `missing` or `invalid`, all three
+time values are null.
 `tokens` and `activity` reuse the Session collection closed fact shapes at
 execution scope. `child_count` is an exact nonnegative integer.
 
@@ -182,6 +186,10 @@ offset  size  field
 87      32    HMAC-SHA256(key,
                     ASCII("local-monitor-timeline-cursor\0v1\0") + bytes[0..86])
 ```
+
+Because 119 bytes leave two payload bytes in the final base64 quantum, the
+159th character is exactly one of `AEIMQUYcgkosw048`; every other otherwise
+base64url character has nonzero padding bits and is noncanonical.
 
 The filter frame is
 `ASCII("local-monitor-timeline-filter\0v1\0")` followed by the canonical
@@ -320,5 +328,11 @@ never become current by inference.
 Draft 2020-12 schemas freeze the three JSON responses. Golden fixtures freeze
 empty/minimal/full JSON bytes, error bytes, HEAD lengths, content headers, and
 timeline cursor bytes. Tests assert property order in addition to schema
-validity. Existing Repository/Session collection schemas, fixtures, cursors,
-and exact bytes are immutable regression inputs.
+validity. `TestData/LocalMonitorV1SessionDetail/transport-contract.json` is the
+literal executable table for route methods, query grammar, error precedence,
+status/error bytes, success/error headers, ceilings, and content parts; route
+tests consume it without deriving expected bytes from runtime serializers.
+The sibling literal `query-grammar.json` freezes rejection classes and the
+canonical generated query order independently of the route implementation.
+Existing Repository/Session collection schemas, fixtures, cursors, and exact
+bytes are immutable regression inputs.

@@ -24,10 +24,9 @@
       "properties": {"state": {"$ref": "#/$defs/factState"}, "count": {"$ref": "#/$defs/nullableCount"}},
       "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"count": {"type": "integer", "minimum": 0}}}, "else": {"properties": {"count": {"type": "null"}}}}]
     },
-    "stringFact": {
-      "type": "object", "additionalProperties": false, "required": ["state", "values"],
-      "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}}}
-    },
+    "sourceFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 5, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
+    "modelFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
+    "versionFact": {"type": "object", "additionalProperties": false, "required": ["state", "values"], "properties": {"state": {"$ref": "#/$defs/factState"}, "values": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"state": {"const": "recorded"}}, "required": ["state"]}, "then": {"properties": {"values": {"minItems": 1}}}, "else": {"properties": {"values": {"maxItems": 0}}}}]},
     "tokenComponent": {
       "type": "object", "additionalProperties": false, "required": ["state", "value"],
       "properties": {"state": {"$ref": "#/$defs/factState"}, "value": {"$ref": "#/$defs/nullableCount"}}
@@ -41,7 +40,7 @@
       "required": ["authority", "state", "available_execution_count", "total_execution_count", "input", "output", "total", "reasoning", "cache_read", "cache_creation", "new_input", "cache_read_ratio_basis_points"],
       "properties": {
         "authority": {"enum": ["session_run", "llm_span", "mixed", "none"]}, "state": {"$ref": "#/$defs/factState"},
-        "available_execution_count": {"type": "integer", "minimum": 0, "maximum": 256}, "total_execution_count": {"type": "integer", "minimum": 0, "maximum": 256},
+        "available_execution_count": {"type": "integer", "minimum": 0}, "total_execution_count": {"type": "integer", "minimum": 0},
         "input": {"$ref": "#/$defs/tokenComponent"}, "output": {"$ref": "#/$defs/tokenComponent"}, "total": {"$ref": "#/$defs/tokenComponent"},
         "reasoning": {"$ref": "#/$defs/tokenComponent"}, "cache_read": {"$ref": "#/$defs/tokenComponent"}, "cache_creation": {"$ref": "#/$defs/tokenComponent"},
         "new_input": {"$ref": "#/$defs/tokenComponent"}, "cache_read_ratio_basis_points": {"$ref": "#/$defs/ratioComponent"}
@@ -61,7 +60,8 @@
     },
     "archive": {
       "type": "object", "additionalProperties": false, "required": ["state", "revision", "effectively_eligible", "exclusion_reason"],
-      "properties": {"state": {"enum": ["active", "archived"]}, "revision": {"type": "integer", "minimum": 0}, "effectively_eligible": {"type": "boolean"}, "exclusion_reason": {"enum": [null, "session_archived", "repository_archived"]}}
+      "properties": {"state": {"enum": ["active", "archived"]}, "revision": {"type": "integer", "minimum": 0}, "effectively_eligible": {"type": "boolean"}, "exclusion_reason": {"enum": [null, "session_archived", "repository_archived"]}},
+      "allOf": [{"if": {"properties": {"exclusion_reason": {"type": "null"}}, "required": ["exclusion_reason"]}, "then": {"properties": {"effectively_eligible": {"const": true}}}, "else": {"properties": {"effectively_eligible": {"const": false}}}}]
     },
     "instruction": {
       "type": "object", "additionalProperties": false, "required": ["state", "label", "additional_count", "content_available"],
@@ -78,7 +78,10 @@
     "executionTiming": {
       "type": "object", "additionalProperties": false, "required": ["state", "started_at", "ended_at", "duration_ms"],
       "properties": {"state": {"enum": ["recorded", "missing", "invalid"]}, "started_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "ended_at": {"oneOf": [{"$ref": "#/$defs/instant"}, {"type": "null"}]}, "duration_ms": {"$ref": "#/$defs/nullableCount"}},
-      "allOf": [{"if": {"properties": {"state": {"enum": ["missing", "invalid"]}}, "required": ["state"]}, "then": {"properties": {"started_at": {"type": "null"}, "ended_at": {"type": "null"}, "duration_ms": {"type": "null"}}}}]
+      "oneOf": [
+        {"properties": {"state": {"const": "recorded"}, "started_at": {"$ref": "#/$defs/instant"}}, "required": ["state", "started_at"], "oneOf": [{"properties": {"ended_at": {"type": "null"}, "duration_ms": {"type": "null"}}}, {"properties": {"ended_at": {"$ref": "#/$defs/instant"}, "duration_ms": {"type": "integer", "minimum": 0}}}]},
+        {"properties": {"state": {"enum": ["missing", "invalid"]}, "started_at": {"type": "null"}, "ended_at": {"type": "null"}, "duration_ms": {"type": "null"}}, "required": ["state", "started_at", "ended_at", "duration_ms"]}
+      ]
     },
     "capture": {
       "type": "object", "additionalProperties": false, "required": ["state", "notes"],
@@ -86,15 +89,15 @@
     },
     "execution": {
       "type": "object", "additionalProperties": false, "required": ["execution_id", "node_id", "source", "model", "lifecycle", "status", "timing", "tokens", "activity", "child_count"],
-      "properties": {"execution_id": {"$ref": "#/$defs/uuidv7"}, "node_id": {"$ref": "#/$defs/nodeId"}, "source": {"type": ["string", "null"], "minLength": 1, "maxLength": 256}, "model": {"type": ["string", "null"], "minLength": 1, "maxLength": 256}, "lifecycle": {"enum": ["selected", "started", "completed", "failed", "deselected", "unknown"]}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "timing": {"$ref": "#/$defs/executionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "child_count": {"type": "integer", "minimum": 0, "maximum": 4096}}
+      "properties": {"execution_id": {"$ref": "#/$defs/uuidv7"}, "node_id": {"$ref": "#/$defs/nodeId"}, "source": {"type": ["string", "null"], "minLength": 1}, "model": {"type": ["string", "null"], "minLength": 1}, "lifecycle": {"enum": ["selected", "started", "completed", "failed", "deselected", "unknown"]}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "timing": {"$ref": "#/$defs/executionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "child_count": {"type": "integer", "minimum": 0, "maximum": 4096}}
     },
     "session": {
       "type": "object", "additionalProperties": false, "required": ["session_id", "status", "completeness", "assignment", "archive", "instruction", "source", "model", "version", "timing", "tokens", "activity", "capture"],
-      "properties": {"session_id": {"$ref": "#/$defs/uuidv7"}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "completeness": {"enum": ["unbound", "partial", "rich", "full"]}, "assignment": {"$ref": "#/$defs/assignment"}, "archive": {"$ref": "#/$defs/archive"}, "instruction": {"$ref": "#/$defs/instruction"}, "source": {"$ref": "#/$defs/stringFact"}, "model": {"$ref": "#/$defs/stringFact"}, "version": {"$ref": "#/$defs/stringFact"}, "timing": {"$ref": "#/$defs/sessionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "capture": {"$ref": "#/$defs/capture"}}
+      "properties": {"session_id": {"$ref": "#/$defs/uuidv7"}, "status": {"enum": ["active", "completed", "failed", "unknown"]}, "completeness": {"enum": ["unbound", "partial", "rich", "full"]}, "assignment": {"$ref": "#/$defs/assignment"}, "archive": {"$ref": "#/$defs/archive"}, "instruction": {"$ref": "#/$defs/instruction"}, "source": {"$ref": "#/$defs/sourceFact"}, "model": {"$ref": "#/$defs/modelFact"}, "version": {"$ref": "#/$defs/versionFact"}, "timing": {"$ref": "#/$defs/sessionTiming"}, "tokens": {"$ref": "#/$defs/tokens"}, "activity": {"$ref": "#/$defs/activity"}, "capture": {"$ref": "#/$defs/capture"}}
     },
     "sessionReferences": {
       "type": "object", "additionalProperties": false, "required": ["native_session_ids", "trace_ids"],
-      "properties": {"native_session_ids": {"type": "array", "minItems": 0, "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}}, "trace_ids": {"type": "array", "minItems": 0, "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{32}$"}}}
+      "properties": {"native_session_ids": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "trace_ids": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{32}$"}}}
     }
   }
 }
