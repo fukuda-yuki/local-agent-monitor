@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -146,6 +147,28 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void StableIdentitiesExcludeEveryForbiddenDisplayAndContextInput()
+    {
+        var execution = LocalWorkspaceProjectionStore.StableExecutionId("session-a", "session_run", "source-run-1");
+        var node = LocalWorkspaceProjectionStore.StableNodeId("session_event", "source-event-1");
+
+        var forbiddenContextChanges = new[]
+        {
+            (DisplayName: "renamed", Timestamp: "2099-12-31T23:59:59Z", Ordinal: 9999,
+                NearbyRows: 0, Cardinality: 1, ToolName: "other-tool", SkillName: "other-skill"),
+            (DisplayName: "", Timestamp: "invalid", Ordinal: -1,
+                NearbyRows: 4096, Cardinality: 4097, ToolName: "", SkillName: ""),
+        };
+
+        Assert.All(forbiddenContextChanges, _ =>
+        {
+            Assert.Equal(execution,
+                LocalWorkspaceProjectionStore.StableExecutionId("session-b", "session_run", "source-run-1"));
+            Assert.Equal(node, LocalWorkspaceProjectionStore.StableNodeId("session_event", "source-event-1"));
+        });
+    }
+
+    [Fact]
     public void CrossExecutionParentUsesOneDeterministicUnknownRelationGroup()
     {
         using var connection = OpenSessionDatabase();
@@ -187,6 +210,12 @@ public sealed class LocalWorkspaceProjectionSchemaTests
             Assert.Equal("local_workspace_projection_workspace_too_large", Assert.Throws<InvalidOperationException>(() => LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch)).Message);
             Assert.Empty(Strings(connection, "SELECT component FROM schema_version WHERE component='local_workspace_projection';"));
         }
+    }
+
+    [Fact]
+    public void DetailProjectionRefreshStatementCountIsIndependentOfOneOrFourThousandNinetySixNodes()
+    {
+        Assert.Equal(MeasureRefreshStatementCount(0), MeasureRefreshStatementCount(4095));
     }
 
     [Fact]
@@ -237,6 +266,54 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         var result = new List<string>();
         while (reader.Read()) result.Add(reader.GetString(0));
         return result.ToArray();
+    }
+
+    private static int MeasureRefreshStatementCount(int eventCount)
+    {
+        using var connection = OpenSessionDatabase();
+        Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'unknown');");
+        using (var transaction = connection.BeginTransaction())
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO session_events VALUES($id,'0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,NULL,NULL,'synthetic',$id,'event','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);";
+            var id = command.Parameters.Add("$id", SqliteType.Text);
+            for (var index = 0; index < eventCount; index++)
+            {
+                id.Value = $"event-{index:D4}";
+                command.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+
+        var statements = 0;
+        string? previous = null;
+        strdelegate_trace trace = (_, sql) =>
+        {
+            // sqlite3_trace repeats the owning top-level statement once for each
+            // foreign-key trigger subprogram. Count the prepared top-level statement,
+            // while still detecting any row-dependent command loop with distinct SQL.
+            if (string.Equals(previous, sql, StringComparison.Ordinal)) return;
+            previous = sql;
+            statements++;
+        };
+        raw.sqlite3_trace(connection.Handle, trace, null);
+        try
+        {
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(
+                connection,
+                transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"],
+                DateTimeOffset.UnixEpoch);
+            transaction.Rollback();
+        }
+        finally
+        {
+            raw.sqlite3_trace(connection.Handle, (strdelegate_trace?)null, null);
+        }
+        return statements;
     }
 
     private static string[] Strings(SqliteTransaction transaction, string sql)

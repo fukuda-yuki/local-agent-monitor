@@ -43,6 +43,35 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         Assert.Equal(["invalid:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
     }
 
+    [Theory]
+    [InlineData("other-adapter", "0000000000000000000000000000000000000000000000000000000000000000", "UserPromptSubmit", "{\"prompt\":\"hello\"}")]
+    [InlineData("claude-code-hook", null, "UserPromptSubmit", "{\"prompt\":\"hello\"}")]
+    [InlineData("claude-code-hook", "short", "UserPromptSubmit", "{\"prompt\":\"hello\"}")]
+    [InlineData("claude-code-hook", "0000000000000000000000000000000000000000000000000000000000000000", "OtherEvent", "{\"prompt\":\"hello\"}")]
+    [InlineData("claude-code-hook", "0000000000000000000000000000000000000000000000000000000000000000", "UserPromptSubmit", "{\"other\":\"hello\"}")]
+    [InlineData("claude-code-hook", "0000000000000000000000000000000000000000000000000000000000000000", "UserPromptSubmit", "{\"prompt\":{}}")]
+    [InlineData("claude-code-hook", "0000000000000000000000000000000000000000000000000000000000000000", "UserPromptSubmit", "not-json")]
+    public void UnacceptedRawCarrierShapesRemainWholeEventContent(
+        string adapter,
+        string? fingerprint,
+        string eventKind,
+        string content)
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"""
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,schema_fingerprint,type,occurred_at,content_state)
+              VALUES('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','{adapter}','source-a',{(fingerprint is null ? "NULL" : $"'{fingerprint}'")},'{eventKind}','2026-08-24T00:00:00.0000000+00:00','available');
+            INSERT INTO session_event_content VALUES('event-a','application/json','{content.Replace("'", "''", StringComparison.Ordinal)}','2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["event_content:whole_event:null"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT part||':'||locator_kind||':'||COALESCE(json_pointer,'null') FROM local_workspace_node_content_refs;"));
+    }
+
     [Fact]
     public void UnconfiguredParticipantIsNoOpOnlyWhenProjectionIsAbsent()
     {

@@ -304,6 +304,29 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.Equal("local_workspace_projection_backup_invalid", exception.Message);
     }
 
+    [Theory]
+    [MemberData(nameof(EveryOwnedV4Table))]
+    public void ValidationRejectsSchemaTamperingForEveryOwnedV4Table(string table)
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, PublicationAt);
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, $"ALTER TABLE {table} ADD COLUMN injected TEXT;");
+
+        using var transaction = connection.BeginTransaction(deferred: true);
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
+    }
+
+    public static TheoryData<string> EveryOwnedV4Table
+    {
+        get
+        {
+            var data = new TheoryData<string>();
+            foreach (var table in LocalWorkspaceProjectionSchemaV1.TableNames) data.Add(table);
+            return data;
+        }
+    }
+
     [Fact]
     public void CurrentBackupInventoryIncludesVersionAndAllTwelveRowCounts()
     {
