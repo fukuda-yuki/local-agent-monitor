@@ -121,6 +121,8 @@ public sealed class SessionEventContentRetentionAdapterTests
         internal long Count(string sql) => Convert.ToInt64(Scalar(sql));
         internal string Text(string sql) => (string)Scalar(sql)!;
         internal void Execute(string sql, params (string Name, object Value)[] values) => Execute(Path, sql, [("$target", TargetEventId), .. values]);
+        internal void DriftSourceOwnerToken() => Execute(
+            "DROP TRIGGER retention_session_event_content_token_immutable; UPDATE session_event_content SET retention_owner_token=randomblob(32) WHERE event_id=$target;");
         internal void RefreshProjection(DateTimeOffset now)
         {
             using var connection = Open(Path);

@@ -6,6 +6,10 @@ using CopilotAgentObservability.LocalMonitor.Repositories;
 using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.LocalMonitor.Tests.Retention;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -132,7 +136,11 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         Assert.Equal("recorded", afterSession.Activity.Skill.State);
         Assert.Equal(2, afterSession.Activity.Skill.Value);
         var afterTimeline = await fixture.ReadTimelineAsync(after.Detail.Nodes[0].ExecutionId);
-        Assert.Contains(afterTimeline.Detail.Nodes, node => node.SourceKind == "skill_invocation" && node.NameText == "skill-after");
+        if (arm == "otel")
+            Assert.Equal(2, fixture.DetailSkillNodeCount());
+        else
+            Assert.Contains(afterTimeline.Detail.Nodes, node => node.SourceKind == "skill_invocation" && node.NameText == "skill-after");
+        await fixture.AssertStaleAsync(before);
     }
 
     [Fact]
@@ -140,6 +148,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     {
         using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(refreshAfterQueue: true);
         var service = DetailService(fixture.Path);
+        await using var routes = await DetailRouteHost.StartAsync(service);
         var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
         var beforeTimeline = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Timeline, fixture.SessionId, ExecutionId: before.Detail.Nodes[0].ExecutionId), CancellationToken.None);
         Assert.Contains(beforeTimeline.Detail.Content, item => item.SourceItemId == fixture.TargetEventId && item.State == "read_denied");
@@ -152,6 +161,7 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
         Assert.Contains(afterTimeline.Detail.Content, item => item.SourceItemId == fixture.TargetEventId && item.State == "deleted");
         Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item;"));
+        await routes.AssertStaleAsync(fixture.SessionId, before);
     }
 
     [Fact]
@@ -167,6 +177,25 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
 
         Assert.Equal(before.WorkspaceRevision, after.WorkspaceRevision);
         Assert.Equal(before.Detail.Content, after.Detail.Content);
+    }
+
+    [Fact]
+    public async Task RetentionSourceOwnerDriftChangesRevisionAndDeletionFailsClosed()
+    {
+        using var fixture = await SessionEventContentRetentionAdapterTests.Fixture.CreateAsync(refreshAfterQueue: true);
+        var service = DetailService(fixture.Path);
+        var before = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+
+        fixture.DriftSourceOwnerToken();
+        var drifted = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        Assert.NotEqual(before.WorkspaceRevision, drifted.WorkspaceRevision);
+        Assert.NotSame(CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionAdapterResult.Deleted,
+            await fixture.Adapter.DeleteAsync(fixture.Context));
+
+        var after = await service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary, fixture.SessionId), CancellationToken.None);
+        Assert.Equal(drifted.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM session_event_content WHERE event_id=$target;"));
+        Assert.Equal("read_denied", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
     }
 
     [Theory]
@@ -374,6 +403,14 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
             projection.RefreshWorkspaceProjection(sessionKey);
         }
 
+        internal int DetailSkillNodeCount() => projection.CountDetailSkillNodes(sessionKey);
+
+        internal async Task AssertStaleAsync(LocalRepositorySessionDetailSnapshot old)
+        {
+            await using var routes = await DetailRouteHost.StartAsync(service);
+            await routes.AssertStaleAsync(projection.SessionId(sessionKey), old);
+        }
+
         private static void Seed(CurrentInvocationProjectionFixture projection, string arm, string name, string trace, string span)
         {
             switch (arm)
@@ -389,6 +426,45 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         {
             projection.Dispose();
             temp.Dispose();
+        }
+    }
+
+    private sealed class DetailRouteHost(WebApplication app, HttpClient client) : IAsyncDisposable
+    {
+        internal static async Task<DetailRouteHost> StartAsync(ILocalRepositorySessionDetailSnapshotService service)
+        {
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.WebHost.UseKestrel().UseUrls("http://127.0.0.1:0");
+            var app = builder.Build();
+            LocalMonitorV1SessionDetailRoutes.Map(app, service, new byte[32]);
+            await app.StartAsync();
+            var address = Assert.Single(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses);
+            return new(app, new HttpClient { BaseAddress = new Uri(address) });
+        }
+
+        internal async Task AssertStaleAsync(string sessionId, LocalRepositorySessionDetailSnapshot old)
+        {
+            var absent = "ffffffffffffffffffffffffffffffff";
+            foreach (var path in new[]
+            {
+                $"/api/local-monitor/v1/sessions/{sessionId}/timeline?workspace_revision={old.WorkspaceRevision}&execution_id=018f0000-0000-7000-8000-{absent[..12]}",
+                $"/api/local-monitor/v1/sessions/{sessionId}/nodes/node-{absent}?workspace_revision={old.WorkspaceRevision}"
+            })
+            {
+                using var response = await client.GetAsync(path);
+                var body = await response.Content.ReadAsStringAsync();
+                Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+                Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}", body);
+                Assert.DoesNotContain(absent, body, StringComparison.Ordinal);
+                Assert.DoesNotContain(old.Detail.Nodes[0].NodeId, body, StringComparison.Ordinal);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            client.Dispose();
+            await app.StopAsync();
+            await app.DisposeAsync();
         }
     }
 }
