@@ -2,6 +2,8 @@ using System.Net;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using CopilotAgentObservability.LocalMonitor.LocalMonitorV1;
+using CopilotAgentObservability.LocalMonitor.Repositories;
+using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
@@ -38,6 +40,73 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
     {
         using var fixture = await RealFixture.CreateAsync();
         Assert.Equal((await fixture.ReadSummaryAsync()).WorkspaceRevision, (await fixture.ReadSummaryAsync()).WorkspaceRevision);
+    }
+
+    [Fact]
+    public async Task SessionArchiveAuthorityChangesSummaryRevisionAndStateWhileNoOpAndRestoreAreStableAndFenced()
+    {
+        using var fixture = await RealFixture.CreateAsync();
+        var before = await fixture.ReadSummaryAsync();
+
+        var archived = fixture.Archive(LocalArchiveTargetKind.Session, fixture.SessionId, 0, LocalArchiveAction.Archive);
+        var afterArchive = await fixture.ReadSummaryAsync();
+        Assert.NotEqual(before.WorkspaceRevision, afterArchive.WorkspaceRevision);
+        Assert.Equal(LocalArchiveState.Archived, afterArchive.Session.ArchiveState);
+        Assert.Equal(1, afterArchive.Session.ArchiveRevision);
+        var noOp = fixture.Archive(LocalArchiveTargetKind.Session, fixture.SessionId, 1, LocalArchiveAction.Archive);
+        Assert.Equal(archived, noOp);
+        await fixture.AssertStaleRoutesAsync(before);
+
+        fixture.Archive(LocalArchiveTargetKind.Session, fixture.SessionId, 1, LocalArchiveAction.Restore);
+        var restored = await fixture.ReadSummaryAsync();
+        Assert.NotEqual(afterArchive.WorkspaceRevision, restored.WorkspaceRevision);
+        Assert.Equal(LocalArchiveState.Active, restored.Session.ArchiveState);
+        Assert.Equal(2, restored.Session.ArchiveRevision);
+        await fixture.AssertStaleRoutesAsync(afterArchive);
+    }
+
+    [Fact]
+    public async Task AssignedRepositoryArchiveAuthorityChangesSummaryBytesEligibilityAndRevision()
+    {
+        using var fixture = await RealFixture.CreateAsync();
+        var repositoryId = await fixture.CreateAndAssignRepositoryAsync();
+        var before = await fixture.ReadSummaryAsync();
+        var beforeBytes = LocalMonitorV1SessionDetailApplication.SerializeSummary(before);
+        Assert.True(before.Session.IsEffectivelyEligible);
+
+        fixture.Archive(LocalArchiveTargetKind.Repository, repositoryId, 0, LocalArchiveAction.Archive);
+        var after = await fixture.ReadSummaryAsync();
+        Assert.NotEqual(before.WorkspaceRevision, after.WorkspaceRevision);
+        Assert.NotEqual(beforeBytes, LocalMonitorV1SessionDetailApplication.SerializeSummary(after));
+        Assert.False(after.Session.IsEffectivelyEligible);
+        Assert.Equal("repository_archived", after.Session.ArchiveExclusionReason);
+        Assert.Equal(1, after.Session.AssignedRepositoryArchiveRevision);
+        await fixture.AssertStaleRoutesAsync(before);
+    }
+
+    [Theory]
+    [InlineData("raw_records.payload_json", "UPDATE raw_records SET payload_json=json_set(payload_json,'$.revision_matrix',1) WHERE id=(SELECT m.raw_record_id FROM monitor_spans m JOIN session_runs r ON r.trace_id=m.trace_id WHERE r.session_id=$session ORDER BY m.raw_record_id LIMIT 1);")]
+    [InlineData("session_event_content.content_json", "UPDATE session_event_content SET content_json=json_set(content_json,'$.revision_matrix',1) WHERE event_id=(SELECT c.event_id FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id WHERE e.session_id=$session ORDER BY c.event_id LIMIT 1);")]
+    public async Task LinkedRawCarrierMutationChangesSourceRevisionAndFencesOldSnapshot(string source,string sql)
+    {
+        using var fixture=await RealFixture.CreateAsync();
+        var before=await fixture.ReadSummaryAsync();
+        Assert.True(fixture.Execute(sql,false)==1,$"{source} did not mutate its linked carrier row");
+        var after=await fixture.ReadSummaryAsync();
+        Assert.NotEqual(before.WorkspaceRevision,after.WorkspaceRevision);
+        await fixture.AssertStaleRoutesAsync(before);
+    }
+
+    [Fact]
+    public async Task RealRegistryGenerationPublicationChangesCoordinatorRevisionAndFencesOldSnapshot()
+    {
+        using var fixture=await RealFixture.CreateAsync();
+        var before=await fixture.ReadSummaryAsync();
+        fixture.PublishRegistryGeneration();
+        var after=await fixture.ReadSummaryAsync();
+        Assert.NotEqual(before.Detail.SkillRegistryGenerationIdentity,after.Detail.SkillRegistryGenerationIdentity);
+        Assert.NotEqual(before.WorkspaceRevision,after.WorkspaceRevision);
+        await fixture.AssertStaleRoutesAsync(before);
     }
 
     [Theory]
@@ -149,17 +218,52 @@ public sealed class LocalWorkspaceSessionDetailRevisionMatrixTests
         private readonly MonitorTempDirectory temp;
         private readonly RunningMonitorHost host;
         private readonly ILocalRepositorySessionDetailSnapshotService service;
-        private RealFixture(MonitorTempDirectory temp, RunningMonitorHost host, string sessionId) { this.temp=temp;this.host=host;SessionId=sessionId;service=host.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>(); }
+        private readonly SqliteLocalArchiveStore archive;
+        private readonly LocalRepositoryCatalogApplication catalog;
+        private readonly SkillInvocationV2RegistryProviderV1 registry;
+        private RealFixture(MonitorTempDirectory temp, RunningMonitorHost host, string sessionId) { this.temp=temp;this.host=host;SessionId=sessionId;service=host.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>();archive=host.Services.GetRequiredService<SqliteLocalArchiveStore>();catalog=host.Services.GetRequiredService<LocalRepositoryCatalogApplication>();registry=host.Services.GetRequiredService<SkillInvocationV2RegistryProviderV1>(); }
         internal string SessionId { get; }
         internal HttpClient Client => host.Client;
         internal static async Task<RealFixture> CreateAsync()
         {
             var temp=new MonitorTempDirectory();var id=AlertCenterRouteTests.SeedPersistedTraceAndSession(temp,"00000000000000000000000000000001",true).ToString("D");var host=await MonitorTestHost.StartAsync(temp);
-            using var c=Open(temp.DatabasePath);LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR IGNORE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT MIN(node_id),MAX(node_id),'retry','explicit',0 FROM local_workspace_nodes WHERE session_id=$session HAVING COUNT(*)>1;";q.Parameters.AddWithValue("$session",id);q.ExecuteNonQuery();t.Commit();return new(temp,host,id);
+            using var c=Open(temp.DatabasePath);LocalWorkspaceProjectionSchemaV1.Ensure(c,DateTimeOffset.UnixEpoch);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText="INSERT OR IGNORE INTO session_repository_assignment_revisions(session_id,revision,updated_at) VALUES($session,0,'2026-08-26T00:00:00.0000000+00:00'); INSERT OR IGNORE INTO session_event_content(event_id,content_kind,content_json,captured_at,expires_at,retention_owner_token) SELECT event_id,'json','{}','2026-08-26T00:00:00.0000000+00:00','2030-08-27T00:00:00.0000000+00:00',randomblob(32) FROM session_events WHERE session_id=$session ORDER BY event_id LIMIT 1; INSERT OR IGNORE INTO local_workspace_node_edges(node_id,related_node_id,relation_kind,relationship_authority,source_ordinal) SELECT MIN(node_id),MAX(node_id),'retry','explicit',0 FROM local_workspace_nodes WHERE session_id=$session HAVING COUNT(*)>1;";q.Parameters.AddWithValue("$session",id);q.ExecuteNonQuery();t.Commit();return new(temp,host,id);
         }
         internal ValueTask<LocalRepositorySessionDetailSnapshot> ReadSummaryAsync()=>service.ReadDetailAsync(new(LocalRepositorySessionDetailRequestKind.Summary,SessionId),CancellationToken.None);
+        internal string Archive(LocalArchiveTargetKind kind,string id,long revision,LocalArchiveAction action)
+        {
+            var result=archive.Mutate(action,kind,[new(id,revision)],success=>System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(success),CancellationToken.None);
+            Assert.Null(result.Error);return System.Text.Encoding.UTF8.GetString(result.Success!.Entity.Span);
+        }
+        internal async Task<string> CreateAndAssignRepositoryAsync()
+        {
+            Execute("DELETE FROM session_repository_assignment_revisions WHERE session_id=$session;",false);
+            var create=Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedCreate>>(catalog.PrepareCreate(new("Revision authority",null)));
+            LocalRepositoryMutationRepository? repository=null;
+            var created=await catalog.ExecutePreparedAsync(create.Prepared,OperationKey('a'),value=>{repository=value;return LocalRepositoryJson.WriteRepository(201,value);},CancellationToken.None);
+            Assert.IsType<LocalRepositoryMutationSucceeded>(created);
+            var assign=Assert.IsType<LocalRepositoryPreparationSucceeded<LocalRepositoryCatalogApplication.PreparedSessionAction>>(catalog.PrepareSessionAction(new(SessionId,0,"assign",repository!.RepositoryId)));
+            var assigned=await catalog.ExecutePreparedAsync(assign.Prepared,OperationKey('b'),LocalRepositoryJson.WriteAssignment,CancellationToken.None);
+            Assert.IsType<LocalRepositoryMutationSucceeded>(assigned);
+            return repository.RepositoryId;
+        }
+        internal async Task AssertStaleRoutesAsync(LocalRepositorySessionDetailSnapshot old)
+        {
+            var absent="ffffffffffffffffffffffffffffffff";
+            foreach(var path in new[]{
+                $"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={old.WorkspaceRevision}&execution_id=018f0000-0000-7000-8000-{absent[..12]}",
+                $"/api/local-monitor/v1/sessions/{SessionId}/nodes/node-{absent}?workspace_revision={old.WorkspaceRevision}"})
+            {
+                using var response=await Client.GetAsync(path);var body=await response.Content.ReadAsStringAsync();
+                Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}",body);
+                Assert.DoesNotContain(absent,body,StringComparison.Ordinal);
+                Assert.DoesNotContain(old.Detail.Nodes[0].NodeId,body,StringComparison.Ordinal);
+            }
+        }
+        internal void PublishRegistryGeneration()=>registry.PublishGeneration(SkillInvocationV2ArtifactRegistry.Load());
         internal int Execute(string sql,bool refresh){using var c=Open(temp.DatabasePath);using var t=c.BeginTransaction();using var q=c.CreateCommand();q.Transaction=t;q.CommandText=sql;q.Parameters.AddWithValue("$session",SessionId);var n=q.ExecuteNonQuery();if(refresh)LocalWorkspaceProjectionStore.Refresh(c,t,DateTimeOffset.UnixEpoch,FixedSkillRegistryGenerationAuthority.Load());t.Commit();return n;}
         private static SqliteConnection Open(string path){var c=new SqliteConnection($"Data Source={path};Pooling=False");c.Open();return c;}
+        private static string OperationKey(char value)=>"lrc1_"+new string(value,42)+"A";
         public void Dispose(){host.DisposeAsync().AsTask().GetAwaiter().GetResult();temp.Dispose();}
     }
 }
