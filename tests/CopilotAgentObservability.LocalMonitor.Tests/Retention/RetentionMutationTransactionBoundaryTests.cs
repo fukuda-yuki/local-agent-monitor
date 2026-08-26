@@ -5,6 +5,27 @@ namespace CopilotAgentObservability.LocalMonitor.Tests.Retention;
 public sealed class RetentionMutationTransactionBoundaryTests
 {
     [Fact]
+    public void ExecuteMutation_InstalledProjectionWithoutAuthorityRollsBackRetentionState()
+    {
+        using var fixture = RetentionMutationConfirmationApplicationTests.Fixture.Create();
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={fixture.Path};Pooling=False"))
+        {
+            connection.Open();
+            LocalWorkspaceProjectionSchemaV1.Ensure(connection, fixture.Time.GetUtcNow());
+        }
+        var preview = fixture.CreatePreview();
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(fixture.Application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), fixture.WorkflowKey(40)).Confirmation);
+
+        var result = fixture.Application.ExecuteMutation(new(
+            confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+            RetentionMutationTargetKind.Item, fixture.ItemId), fixture.WorkflowKey(40));
+
+        Assert.Equal(RetentionMutationErrorCodes.MutationTransactionFailed, result.ErrorCode);
+        Assert.Equal("expiring", fixture.ScalarText(
+            "SELECT state FROM retention_items WHERE item_id=$item;", ("$item", fixture.ItemId)));
+    }
+    [Fact]
     public void ExecuteMutation_CatalogOpenFailureReturnsCatalogUnavailable()
     {
         using var fixture = RetentionMutationConfirmationApplicationTests.Fixture.Create();

@@ -24,6 +24,8 @@ internal sealed partial class RetentionMutationApplicationService
     private readonly Func<string> operationIdGenerator;
     private readonly Func<string> auditEventIdGenerator;
     private readonly Action<string>? mutationCheckpoint;
+    private readonly ILocalWorkspacePublicationGate? publicationGate;
+    private readonly ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant;
 
     internal RetentionMutationApplicationService(
         RetentionCatalogStore catalog,
@@ -33,7 +35,9 @@ internal sealed partial class RetentionMutationApplicationService
         Func<string>? tokenGenerator = null,
         Func<string>? operationIdGenerator = null,
         Func<string>? auditEventIdGenerator = null,
-        Action<string>? mutationCheckpoint = null)
+        Action<string>? mutationCheckpoint = null,
+        ILocalWorkspacePublicationGate? publicationGate = null,
+        ILocalWorkspaceProjectionTransactionParticipant? workspaceParticipant = null)
     {
         this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         this.timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
@@ -43,6 +47,8 @@ internal sealed partial class RetentionMutationApplicationService
         this.operationIdGenerator = operationIdGenerator ?? (static () => Guid.NewGuid().ToString("N"));
         this.auditEventIdGenerator = auditEventIdGenerator ?? RetentionMutationIdentifiers.GenerateAuditEventId;
         this.mutationCheckpoint = mutationCheckpoint;
+        this.publicationGate = publicationGate;
+        this.workspaceParticipant = workspaceParticipant ?? UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance;
     }
 
     internal RetentionMutationPreviewApplicationResult CreatePreview(

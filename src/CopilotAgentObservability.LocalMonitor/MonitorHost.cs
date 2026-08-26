@@ -854,7 +854,8 @@ internal static class MonitorHost
         }
         DoctorRoutes.Map(app, doctorApplication);
         RetentionStatusRoutes.Map(app, retentionCatalog, () => testOptions?.StartRetentionCleanupWorker ?? true);
-        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
+        RetentionMutationRoutes.Map(app, retentionCatalog, timeProvider, publicationGate, workspaceParticipant,
+            testOptions?.RetentionMutationApplicationFactory?.Invoke(retentionCatalog, timeProvider));
         SanitizedExportRoutes.Map(app, options.DatabasePath, testOptions?.SanitizedExportSnapshotProvider);
         RawReplayRoutes.Map(
             app,

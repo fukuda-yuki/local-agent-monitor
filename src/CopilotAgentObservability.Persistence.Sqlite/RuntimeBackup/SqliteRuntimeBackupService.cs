@@ -245,7 +245,8 @@ public sealed class SqliteRuntimeBackupService
         }
         LocalWorkspaceProjectionSchemaV1.ValidateCurrentOrExactLegacy(connection, transaction);
         if (version is long current && current == LocalWorkspaceProjectionSchemaV1.Version)
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(), skillRegistryAuthority);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, timeProvider.GetUtcNow(),
+                skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
         transaction.Commit();
     }
 
@@ -380,7 +381,8 @@ public sealed class SqliteRuntimeBackupService
         installed.Transaction = transaction;
         installed.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=3);";
         if (Convert.ToInt64(installed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime, skillRegistryAuthority);
+            LocalWorkspaceProjectionStore.Refresh(connection, transaction, publicationTime,
+                skillRegistryAuthority ?? throw new InvalidOperationException("local_workspace_projection_authority_unavailable"));
         transaction.Commit();
     }
 

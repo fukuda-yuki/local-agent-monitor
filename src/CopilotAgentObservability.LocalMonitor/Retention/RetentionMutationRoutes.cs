@@ -13,9 +13,16 @@ internal static class RetentionMutationRoutes
     private const string JsonContentType = "application/json";
     private static readonly JsonSerializerOptions Json = CreateJsonOptions();
 
-    internal static void Map(WebApplication app, RetentionCatalogStore catalog, TimeProvider timeProvider, RetentionMutationApplicationService? applicationOverride = null)
+    internal static void Map(
+        WebApplication app,
+        RetentionCatalogStore catalog,
+        TimeProvider timeProvider,
+        ILocalWorkspacePublicationGate publicationGate,
+        ILocalWorkspaceProjectionTransactionParticipant workspaceParticipant,
+        RetentionMutationApplicationService? applicationOverride = null)
     {
-        var application = applicationOverride ?? new RetentionMutationApplicationService(catalog, timeProvider);
+        var application = applicationOverride ?? new RetentionMutationApplicationService(
+            catalog, timeProvider, publicationGate: publicationGate, workspaceParticipant: workspaceParticipant);
         app.MapPost("/api/retention/v1/previews", context => CreatePreviewAsync(context, application));
         app.MapGet("/api/retention/v1/previews/{previewId}", (string previewId, HttpContext context) => ReadPreviewAsync(context, application, previewId));
         app.MapPost("/api/retention/v1/confirmations", context => IssueConfirmationAsync(context, application));

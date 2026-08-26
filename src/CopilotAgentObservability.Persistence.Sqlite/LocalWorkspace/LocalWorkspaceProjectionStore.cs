@@ -7,14 +7,27 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalWorkspaceProjectionStore
 {
-    internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
+    internal static void Refresh(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now, ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {
         var ids = ReadSessionIds(connection, transaction);
         RefreshSessions(connection, transaction, ids, now, skillRegistryAuthority);
         Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
     }
 
-    internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority = null)
+    internal static void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now, ISkillRegistryGenerationAuthority skillRegistryAuthority)
+        => RefreshSessionsCore(connection, transaction, sessionIds, now, skillRegistryAuthority);
+
+    internal static void RefreshStructural(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
+    {
+        var ids = ReadSessionIds(connection, transaction);
+        RefreshSessionsStructural(connection, transaction, ids, now);
+        Execute(connection, transaction, "DELETE FROM local_workspace_sessions WHERE session_id NOT IN (SELECT session_id FROM sessions);");
+    }
+
+    internal static void RefreshSessionsStructural(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
+        => RefreshSessionsCore(connection, transaction, sessionIds, now, null);
+
+    private static void RefreshSessionsCore(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now, ISkillRegistryGenerationAuthority? skillRegistryAuthority)
     {
         RegisterProjectionFunctions(connection);
         var idsJson = JsonSerializer.Serialize(sessionIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
@@ -121,8 +134,9 @@ internal static class LocalWorkspaceProjectionStore
         var sessionIds = JsonSerializer.Deserialize<string[]>(idsJson) ?? [];
         foreach (var fact in SkillProjectionReadService.ReadCurrentOtelSearchFacts(connection, transaction, sessionIds, now))
             InsertSkillSearchFact(connection, transaction, fact.SessionId, "otel:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
-        foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
-            InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
+        if (skillRegistryAuthority is not null)
+            foreach (var fact in SkillProjectionReadService.ReadCurrentSdkSearchFacts(connection, transaction, sessionIds, skillRegistryAuthority, new ProjectionTimeProvider(now)))
+                InsertSkillSearchFact(connection, transaction, fact.SessionId, "sdk:" + fact.SourceIdentity, fact.SkillName, fact.ExpiresAt);
         if (TableExists(connection, transaction, "raw_records") && TableExists(connection, transaction, "monitor_spans") && TableExists(connection, transaction, "retention_items") && ColumnExists(connection, transaction, "monitor_spans", "tool_name"))
             ExecuteWithIds(connection, transaction, """
                 INSERT OR IGNORE INTO local_workspace_session_search_facts(session_id,kind,source_identity,normalized_text,expires_at)

@@ -4,6 +4,25 @@ public sealed class LocalWorkspaceProjectionBackfillTests
 {
     private static readonly LocalWorkspaceProjectionTransactionParticipant StructuralParticipant =
         new(new StructuralRegistryAuthority());
+
+    [Fact]
+    public void UnconfiguredParticipantIsNoOpOnlyWhenProjectionIsAbsent()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        using (var absent = connection.BeginTransaction())
+        {
+            UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+                connection, absent, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            absent.Rollback();
+        }
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        using var installed = connection.BeginTransaction();
+        Assert.Equal("local_workspace_projection_authority_unavailable", Assert.Throws<InvalidOperationException>(() =>
+            UnconfiguredLocalWorkspaceProjectionTransactionParticipant.Instance.RefreshSessions(
+                connection, installed, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"))).Message);
+        installed.Rollback();
+    }
     [Fact]
     public void BackfillUsesFirstValidStartedCreatedLastSeenInstantAndCanonicalUtc()
     {

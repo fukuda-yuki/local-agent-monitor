@@ -3,6 +3,7 @@ using CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2;
 using CopilotAgentObservability.Persistence.Sqlite;
 using CopilotAgentObservability.Persistence.Sqlite.Sessions;
 using CopilotAgentObservability.Persistence.Sqlite.SkillInvocationSnapshot;
+using CopilotAgentObservability.Persistence.Sqlite.Retention;
 using Microsoft.Data.Sqlite;
 using System.Reflection;
 using System.Text;
@@ -43,6 +44,90 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         Assert.True(created.Success, created.ErrorCode);
         Assert.Equal(0L, Scalar(fixture.DatabasePath, "SELECT COUNT(*) FROM local_workspace_session_search_facts WHERE kind='skill';"));
         Assert.Equal(PublicationAt, fixture.Clock.FirstObservedInstant);
+    }
+
+    [Fact]
+    public void RetentionPinAndUnpinRefreshSdkFactToExactEffectiveLifetimeInOwningTransaction()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var catalog = new RetentionCatalogStore(fixture.DatabasePath, fixture.Clock);
+        var application = new RetentionMutationApplicationService(
+            catalog,
+            fixture.Clock,
+            publicationGate: fixture.Gate,
+            workspaceParticipant: new LocalWorkspaceProjectionTransactionParticipant(fixture.Authority));
+        var itemId = Text(fixture.DatabasePath, "SELECT item_id FROM retention_items WHERE store_kind='session_event_content' ORDER BY item_id LIMIT 1;");
+        var workflowKey = RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat((byte)61, 32).ToArray());
+        var preview = Assert.IsType<RetentionMutationPreviewResponse>(application.CreatePreview(
+            new(new(RetentionMutationTargetKind.Item, itemId), RetentionMutationOperation.Pin,
+                RetentionMutationScope.SingleItem, RetentionMutationReasonCodes.ResearchNeeded, null), workflowKey).Preview);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), workflowKey).Confirmation);
+
+        var result = application.ExecuteMutation(new(
+            confirmation.ConfirmationToken, RetentionMutationOperation.Pin, RetentionMutationScope.SingleItem,
+            RetentionMutationTargetKind.Item, itemId), workflowKey);
+
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(1L, Scalar(fixture.DatabasePath,
+            "SELECT COUNT(*) FROM local_workspace_session_search_facts WHERE kind='skill' AND source_identity LIKE 'sdk:%' AND expires_at IS NULL;"));
+
+        var unpinKey = RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat((byte)62, 32).ToArray());
+        var unpinPreview = Assert.IsType<RetentionMutationPreviewResponse>(application.CreatePreview(
+            new(new(RetentionMutationTargetKind.Item, itemId), RetentionMutationOperation.Unpin,
+                RetentionMutationScope.SingleItem, RetentionMutationReasonCodes.ResearchNeeded, null), unpinKey).Preview);
+        var unpinConfirmation = Assert.IsType<RetentionConfirmationIssueResponse>(application.IssueConfirmation(
+            new(unpinPreview.PreviewId, unpinPreview.PreviewDigest), unpinKey).Confirmation);
+
+        var unpin = application.ExecuteMutation(new(
+            unpinConfirmation.ConfirmationToken, RetentionMutationOperation.Unpin, RetentionMutationScope.SingleItem,
+            RetentionMutationTargetKind.Item, itemId), unpinKey);
+
+        Assert.Null(unpin.ErrorCode);
+        Assert.Equal(
+            Text(fixture.DatabasePath, "SELECT expires_at FROM retention_items WHERE item_id='" + itemId + "';"),
+            Text(fixture.DatabasePath, "SELECT expires_at FROM local_workspace_session_search_facts WHERE kind='skill' AND source_identity LIKE 'sdk:%';"));
+    }
+
+    [Fact]
+    public void RetentionDeleteNowRemovesSdkFactBeforeCommitBecomesVisible()
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        var catalog = new RetentionCatalogStore(fixture.DatabasePath, fixture.Clock);
+        var application = new RetentionMutationApplicationService(catalog, fixture.Clock,
+            publicationGate: fixture.Gate,
+            workspaceParticipant: new LocalWorkspaceProjectionTransactionParticipant(fixture.Authority));
+        var itemId = Text(fixture.DatabasePath, "SELECT item_id FROM retention_items WHERE store_kind='session_event_content' ORDER BY item_id LIMIT 1;");
+        var workflowKey = RetentionMutationIdentifiers.CreateWorkflowKey(Enumerable.Repeat((byte)63, 32).ToArray());
+        var preview = Assert.IsType<RetentionMutationPreviewResponse>(application.CreatePreview(
+            new(new(RetentionMutationTargetKind.Item, itemId), RetentionMutationOperation.DeleteNow,
+                RetentionMutationScope.SingleItem, RetentionMutationReasonCodes.ResearchNeeded, null), workflowKey).Preview);
+        var confirmation = Assert.IsType<RetentionConfirmationIssueResponse>(application.IssueConfirmation(
+            new(preview.PreviewId, preview.PreviewDigest), workflowKey).Confirmation);
+
+        var result = application.ExecuteMutation(new(
+            confirmation.ConfirmationToken, RetentionMutationOperation.DeleteNow, RetentionMutationScope.SingleItem,
+            RetentionMutationTargetKind.Item, itemId), workflowKey);
+
+        Assert.Null(result.ErrorCode);
+        Assert.Equal(0L, Scalar(fixture.DatabasePath,
+            "SELECT COUNT(*) FROM local_workspace_session_search_facts WHERE kind='skill' AND source_identity LIKE 'sdk:%';"));
+    }
+
+    [Theory]
+    [InlineData("UPDATE local_workspace_session_search_facts SET normalized_text='fabricated' WHERE source_identity LIKE 'sdk:%';")]
+    [InlineData("UPDATE local_workspace_session_search_facts SET source_identity='sdk:00000000-0000-0000-0000-000000000000' WHERE source_identity LIKE 'sdk:%';")]
+    [InlineData("UPDATE local_workspace_session_search_facts SET expires_at=NULL WHERE source_identity LIKE 'sdk:%';")]
+    [InlineData("UPDATE local_workspace_session_search_facts SET expires_at='2099-01-01T00:00:00.0000000+00:00' WHERE source_identity LIKE 'sdk:%';")]
+    public void StructuralInspectionRejectsSdkFactWithoutExactReadableSourceGraph(string mutation)
+    {
+        using var fixture = new ConfiguredBackupFixture(PublicationAt, PublicationAt.AddDays(1));
+        Execute(fixture.DatabasePath, mutation);
+        using var connection = Open(fixture.DatabasePath);
+        using var transaction = connection.BeginTransaction(deferred: true);
+
+        Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
+            LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
     }
 
     [Fact]
@@ -189,6 +274,14 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    private static string Text(string path, string sql)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (string)command.ExecuteScalar()!;
+    }
+
     private static string[] Strings(string path, string sql)
     {
         using var connection = Open(path);
@@ -207,9 +300,9 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
         internal ConfiguredBackupFixture(DateTimeOffset publicationAt, DateTimeOffset expiresAt)
         {
             Clock = new RecordingTimeProvider(publicationAt);
-            var gate = new LocalWorkspacePublicationGate();
-            Authority = new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), gate);
-            Service = new SqliteRuntimeBackupService(Clock, Authority, gate);
+            Gate = new LocalWorkspacePublicationGate();
+            Authority = new SkillInvocationV2RegistryProviderV1(SkillInvocationV2ArtifactRegistry.Load(), Gate);
+            Service = new SqliteRuntimeBackupService(Clock, Authority, Gate);
             var initialized = Service.Initialize(DatabasePath);
             Assert.True(initialized.Success, initialized.ErrorCode);
             var participant = new LocalWorkspaceProjectionTransactionParticipant(Authority);
@@ -217,13 +310,14 @@ public sealed class RuntimeBackupLocalWorkspaceProjectionTests
                 SkillInvocationV2Parser.Parse(Encoding.UTF8.GetBytes(ValidRequest), new ProductionRuntimeCapability()));
             var ingested = SkillInvocationV2IngestTransactionV1.Execute(
                 DatabasePath, facts, Authority, new RecordingTimeProvider(expiresAt.AddDays(-90)),
-                () => true, () => true, CancellationToken.None, gate, participant);
+                () => true, () => true, CancellationToken.None, Gate, participant);
             Assert.Equal(SkillInvocationV2IngestOutcomeV1.Committed, ingested.Outcome);
         }
 
         internal string DatabasePath => fixture.DatabasePath;
         internal RecordingTimeProvider Clock { get; }
         internal SkillInvocationV2RegistryProviderV1 Authority { get; }
+        internal LocalWorkspacePublicationGate Gate { get; }
         internal SqliteRuntimeBackupService Service { get; }
         internal string Path(string name) => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(DatabasePath)!, name);
         public void Dispose() => fixture.Dispose();

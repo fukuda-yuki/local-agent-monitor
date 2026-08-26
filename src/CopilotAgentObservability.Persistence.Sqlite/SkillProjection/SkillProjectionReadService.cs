@@ -617,10 +617,11 @@ internal sealed class SkillProjectionReadService
         SqliteConnection connection,
         SqliteTransaction transaction,
         IReadOnlyCollection<string> sessionIds,
-        ISkillRegistryGenerationAuthority? registryAuthority,
+        ISkillRegistryGenerationAuthority registryAuthority,
         TimeProvider timeProvider)
     {
-        if (registryAuthority is null || sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
+        ArgumentNullException.ThrowIfNull(registryAuthority);
+        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
             || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
 
         using var command = connection.CreateCommand();
@@ -656,6 +657,48 @@ internal sealed class SkillProjectionReadService
                     facts.ClaimId.Value.ToString("D"),
                     authorization.SkillName,
                     facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<SkillProjectionCurrentSearchFact> ReadStructurallyValidSdkSearchFacts(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyCollection<string> sessionIds,
+        TimeProvider timeProvider)
+    {
+        if (sessionIds.Count == 0 || !ComponentInstalled(connection, transaction)
+            || !TableInstalled(connection, transaction, "skill_invocation_snapshots")) return [];
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT session_id,snapshot_id FROM skill_invocation_snapshots WHERE session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids)) ORDER BY session_id COLLATE BINARY,snapshot_id COLLATE BINARY;";
+        command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
+        using var reader = command.ExecuteReader();
+        var identities = new List<(Guid SessionId, Guid SnapshotId)>();
+        while (reader.Read())
+            if (Guid.TryParseExact(reader.GetString(0), "D", out var sessionId) && Guid.TryParseExact(reader.GetString(1), "D", out var snapshotId))
+                identities.Add((sessionId, snapshotId));
+        reader.Close();
+
+        var result = new List<SkillProjectionCurrentSearchFact>();
+        foreach (var identity in identities)
+        {
+            var metadata = SkillInvocationSnapshotMetadataReader.ReadInTransaction(connection, transaction, identity.SessionId, identity.SnapshotId, timeProvider);
+            if (metadata.Outcome != SkillInvocationSnapshotMetadataOutcome.Found
+                || metadata.Facts is not
+                {
+                    IsAvailable: true,
+                    RetentionProjection: SkillInvocationSnapshotMetadataRetentionProjection.Readable,
+                    ClaimId: not null,
+                } facts) continue;
+            var claim = ReadSdkClaimRow(connection, transaction, identity.SessionId, facts.ClaimId.Value.ToString("D"));
+            if (claim is null || !ClaimMatchesSnapshot(claim, identity.SessionId, facts)) continue;
+            result.Add(new(
+                identity.SessionId.ToString("D"),
+                facts.ClaimId.Value.ToString("D"),
+                claim.SkillName,
+                facts.EffectiveExpiresAt?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffffzzz", CultureInfo.InvariantCulture)));
         }
         return result;
     }

@@ -165,7 +165,7 @@ public sealed class LocalWorkspaceSessionSnapshotContributorTests
             """);
         using (var transaction = connection.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            LocalWorkspaceProjectionStore.RefreshStructural(connection, transaction, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
             transaction.Commit();
         }
 

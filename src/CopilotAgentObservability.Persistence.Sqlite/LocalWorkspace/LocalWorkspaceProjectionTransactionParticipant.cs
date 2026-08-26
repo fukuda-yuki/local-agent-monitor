@@ -23,8 +23,16 @@ internal sealed class UnconfiguredLocalWorkspaceProjectionTransactionParticipant
         IReadOnlyCollection<string> sessionIds,
         DateTimeOffset now)
     {
-        if (sessionIds.Count != 0)
+        if (sessionIds.Count != 0 && IsInstalled(connection, transaction))
             throw new InvalidOperationException("local_workspace_projection_authority_unavailable");
+    }
+
+    private static bool IsInstalled(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE component='local_workspace_projection' AND version=3);";
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 1;
     }
 }
 

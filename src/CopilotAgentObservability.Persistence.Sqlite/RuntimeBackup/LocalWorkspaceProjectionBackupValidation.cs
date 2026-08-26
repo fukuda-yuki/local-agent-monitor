@@ -92,6 +92,7 @@ internal static class LocalWorkspaceProjectionBackupValidation
                         throw new InvalidOperationException();
                 }
             }
+            ValidateSdkFactGraph(connection, transaction, publicationTime);
             if (skillRegistryAuthority is not null || !HasSdkClaims(connection, transaction))
                 ValidateCanonicalProjection(connection, transaction, publicationTime, skillRegistryAuthority, canonicalReplica);
             ValidateSpanFacts(connection, transaction);
@@ -99,6 +100,51 @@ internal static class LocalWorkspaceProjectionBackupValidation
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             throw new InvalidOperationException("local_workspace_projection_backup_invalid", exception);
+        }
+    }
+
+    private static void ValidateSdkFactGraph(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset? publicationTime)
+    {
+        using var timeCommand = connection.CreateCommand();
+        timeCommand.Transaction = transaction;
+        timeCommand.CommandText = "SELECT refreshed_at FROM local_workspace_projection_state WHERE projector_key='local-workspace-projection-v1';";
+        var timeText = publicationTime?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
+            ?? timeCommand.ExecuteScalar() as string;
+        if (timeText is null || !DateTimeOffset.TryParseExact(timeText, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var instant))
+            throw new InvalidOperationException();
+
+        using var idsCommand = connection.CreateCommand();
+        idsCommand.Transaction = transaction;
+        idsCommand.CommandText = "SELECT session_id FROM local_workspace_sessions ORDER BY session_id COLLATE BINARY;";
+        using var idsReader = idsCommand.ExecuteReader();
+        var sessionIds = new List<string>();
+        while (idsReader.Read()) sessionIds.Add(idsReader.GetString(0));
+        idsReader.Close();
+
+        var expected = SkillProjectionReadService.ReadStructurallyValidSdkSearchFacts(
+                connection, transaction, sessionIds, new StructuralValidationTimeProvider(instant))
+            .Select(static fact => (fact.SessionId, SourceIdentity: "sdk:" + fact.SourceIdentity,
+                NormalizedText: fact.SkillName.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant(), fact.ExpiresAt))
+            .ToHashSet();
+
+        using var factsCommand = connection.CreateCommand();
+        factsCommand.Transaction = transaction;
+        factsCommand.CommandText = "SELECT session_id,source_identity,normalized_text,expires_at FROM local_workspace_session_search_facts WHERE kind='skill' ORDER BY session_id,source_identity,normalized_text;";
+        using var factsReader = factsCommand.ExecuteReader();
+        while (factsReader.Read())
+        {
+            var sourceIdentity = factsReader.GetString(1);
+            if (sourceIdentity.StartsWith("otel:", StringComparison.Ordinal)) continue;
+            if (!sourceIdentity.StartsWith("sdk:", StringComparison.Ordinal)) throw new InvalidOperationException();
+            var actual = (
+                factsReader.GetString(0),
+                sourceIdentity,
+                factsReader.GetString(2),
+                factsReader.IsDBNull(3) ? null : factsReader.GetString(3));
+            if (!expected.Contains(actual)) throw new InvalidOperationException();
         }
     }
 
@@ -226,7 +272,10 @@ internal static class LocalWorkspaceProjectionBackupValidation
         }
         using (var replicaTransaction = replica.BeginTransaction())
         {
-            LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
+            if (skillRegistryAuthority is null)
+                LocalWorkspaceProjectionStore.RefreshStructural(replica, replicaTransaction, publicationTime.Value);
+            else
+                LocalWorkspaceProjectionStore.Refresh(replica, replicaTransaction, publicationTime.Value, skillRegistryAuthority);
             if (!before.SequenceEqual(Snapshot(replica, replicaTransaction), StringComparer.Ordinal))
                 throw new InvalidOperationException();
             replicaTransaction.Rollback();
@@ -261,6 +310,11 @@ internal static class LocalWorkspaceProjectionBackupValidation
             }
         }
         return rows.ToArray();
+    }
+
+    private sealed class StructuralValidationTimeProvider(DateTimeOffset instant) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => instant;
     }
 
 }

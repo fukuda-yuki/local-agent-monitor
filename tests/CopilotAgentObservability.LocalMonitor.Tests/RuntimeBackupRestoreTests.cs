@@ -59,7 +59,7 @@ public sealed class RuntimeBackupRestoreTests
             command.Transaction = transaction;
             command.CommandText = mutation;
             command.ExecuteNonQuery();
-            LocalWorkspaceProjectionStore.Refresh(connection, transaction, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
+            LocalWorkspaceProjectionStore.RefreshStructural(connection, transaction, DateTimeOffset.Parse(LocalRepositoryCatalogFixture.At));
             Assert.Equal("local_workspace_projection_backup_invalid", Assert.Throws<InvalidOperationException>(() =>
                 LocalWorkspaceProjectionBackupValidation.Validate(connection, transaction)).Message);
             transaction.Rollback();
