@@ -133,6 +133,41 @@ proves backup/restore equality. Retention cleanup and current-valid Skill
 changes remove obsolete facts. Migration rollback, rerun idempotence, backup,
 restore, and retention behavior are exercised by tests.
 
+## Atomic Skill authority publication
+
+One host/database owns one publication gate, one #154 registry provider, one
+authority-aware Workspace transaction participant, one collection snapshot
+service, and one online backup service. There is no static or process-global
+authority. The gate is a synchronization boundary only and never becomes a
+second Skill authority.
+
+Every authority-dependent operation acquires its host gate before opening its
+SQLite transaction. Collection snapshots and normal owning writes take a read
+lease. A proposed registry generation takes the write lease across its
+Workspace refresh commit and the non-failing current-pointer assignment. This
+lock order makes an old-generation/new-projection or new-generation/old-
+projection collection response impossible and prevents provider/SQLite lock
+inversion. The collection path remains exactly eight fixed set-based statements
+when the Skill component is installed; acquiring a gate is not a database
+statement.
+
+SDK facts are created only by the #154 current-valid reader, carry their exact
+Retention deadline in the existing v3 `expires_at` column, and are ineligible at
+or after that deadline even before cleanup. Startup, normal SDK/OTel/Session and
+Retention owning transactions, registry publication, restore staging, and
+online backup all receive the same host-scoped authority. A missing authority
+is an operation failure before mutation, never an authoritative empty Skill
+set.
+
+Online backup holds a read lease and one accepted publication instant through
+refresh, tail ensure, canonical validation, snapshot, and publication. Its
+pre-refresh remains inside the documented result-code boundary. Offline backup
+and restore use the same immutable #154 registry authority implementation; if
+that authority cannot be loaded completely, mutation or swap fails closed.
+Archive inspection remains structural and does not reinterpret historical
+facts as proof of current registry validity. These composition changes use the
+existing v3 schema and do not introduce a persisted generation marker or v4.
+
 ## Verification
 
 Implementation follows strict TDD. Focused tests cover every timestamp fallback,
