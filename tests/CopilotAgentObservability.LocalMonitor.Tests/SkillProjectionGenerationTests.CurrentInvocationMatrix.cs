@@ -13,6 +13,42 @@ namespace CopilotAgentObservability.LocalMonitor.Tests;
 public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 {
     [Fact]
+    public void PersistedSqliteMatrix_CanonicalSdkReaderHasFixedPreparedStatementSequenceForOneTwoHundredFiftySixAndTenThousandClaims()
+    {
+        string[]? expectedStatements = null;
+        foreach (var count in new[] { 1, 256, 10_000 })
+        {
+            using var fixture = new CurrentInvocationProjectionFixture();
+            fixture.SeedSdkClaims("fixed-cardinality", count);
+
+            var observed = fixture.ReadAllObserved();
+
+            Assert.Equal(count, observed.Result[fixture.SessionId("fixed-cardinality")].InvocationCount);
+            Assert.Equal(5, observed.Statements.Length);
+            expectedStatements ??= observed.Statements;
+            Assert.Equal(expectedStatements, observed.Statements);
+            Assert.Equal(1, fixture.RegistryCaptureCount);
+            Assert.Equal(1, fixture.RegistryLeaseCount);
+            Assert.Equal(1, fixture.RegistryVerifyCount);
+            Assert.Equal(1, fixture.RegistryTupleAuthorizationCount);
+        }
+    }
+
+    [Fact]
+    public void SdkPublicationParticipantRefreshesCanonicalV4NodesInsideOwningCommitAndRollback()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("publication", "baseline-skill");
+        fixture.RefreshWorkspace();
+        Assert.Equal(1, fixture.CountDetailSkillNodes("publication"));
+
+        Assert.Equal((Inside: 2, Persisted: 1),
+            fixture.PublishSdkClaim("publication", "rolled-back-skill", commit: false));
+        Assert.Equal((Inside: 2, Persisted: 2),
+            fixture.PublishSdkClaim("publication", "committed-skill", commit: true));
+    }
+
+    [Fact]
     public void PersistedSqliteMatrix_UsesOneCurrentValidAuthority()
     {
         using var fixture = new CurrentInvocationProjectionFixture();
@@ -246,6 +282,41 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         latestWrites[sessionKey] = write;
     }
 
+    internal void SeedSdkClaims(string sessionKey, int count)
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        for (var index = 0; index < count; index++)
+        {
+            var write = NewWrite(sessionKey, $"skill-{index:D5}", "1.0.65", "available", "none", expired: false);
+            var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+                connection, transaction, write, new LocalWorkspaceProjectionTransactionParticipant(authority), out _);
+            Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, outcome);
+            latestWrites[sessionKey] = write;
+        }
+        transaction.Commit();
+        sessions[sessionKey] = ResolveSession(sessionKey);
+    }
+
+    internal (int Inside, int Persisted) PublishSdkClaim(string sessionKey, string skillName, bool commit)
+    {
+        var write = NewWrite(sessionKey, skillName, "1.0.65", "available", "none", expired: false);
+        using (var connection = Open())
+        using (var transaction = connection.BeginTransaction())
+        {
+            var outcome = SessionSkillInvocationParticipant.InsertOrVerify(
+                connection, transaction, write, new LocalWorkspaceProjectionTransactionParticipant(authority), out _);
+            Assert.Equal(SessionSkillInvocationWriteOutcome.Inserted, outcome);
+            using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation';";
+            count.Parameters.AddWithValue("$session", sessions[sessionKey]);
+            var inside = Convert.ToInt32(count.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            if (commit) transaction.Commit(); else transaction.Rollback();
+            return (inside, CountDetailSkillNodes(sessionKey));
+        }
+    }
+
     internal void SeedSdkWithExplicitParent(string sessionKey, string skillName)
     {
         var parentSourceId = Guid.NewGuid().ToString("D");
@@ -302,6 +373,40 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         using var transaction = connection.BeginTransaction(deferred: true);
         return SkillProjectionReadService.ReadCurrentInvocationProjection(connection, transaction, sessions.Values, ReadAt, authority);
     }
+
+    internal (IReadOnlyDictionary<string, SkillProjectionCurrentInvocationProjection> Result, string[] Statements) ReadAllObserved()
+    {
+        authority.ResetObservations();
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var statements = new List<string>();
+        string? previous = null;
+        SQLitePCL.strdelegate_trace trace = (_, sql) =>
+        {
+            var prepared = sql;
+            foreach (var sessionId in sessions.Values)
+                prepared = prepared.Replace(sessionId, "$session", StringComparison.Ordinal);
+            if (string.Equals(previous, prepared, StringComparison.Ordinal)) return;
+            previous = prepared;
+            statements.Add(prepared);
+        };
+        SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
+        try
+        {
+            var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
+                connection, transaction, sessions.Values, ReadAt, authority);
+            return (result, statements.ToArray());
+        }
+        finally
+        {
+            SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.strdelegate_trace?)null, null);
+        }
+    }
+
+    internal int RegistryCaptureCount => authority.CaptureCount;
+    internal int RegistryLeaseCount => authority.LeaseCount;
+    internal int RegistryVerifyCount => authority.VerifyCount;
+    internal int RegistryTupleAuthorizationCount => authority.TupleAuthorizationCount;
 
     internal SkillProjectionCurrentInvocationProjection Read(string sessionKey) => ReadAll()[sessions[sessionKey]];
 
@@ -587,14 +692,32 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
 
     private sealed class MatrixRegistryAuthority(bool available) : ISkillRegistryGenerationAuthority
     {
-        public ISkillRegistryGenerationCapture? CaptureGeneration() => available ? new Capture() : null;
+        internal int CaptureCount { get; private set; }
+        internal int LeaseCount { get; private set; }
+        internal int VerifyCount { get; private set; }
+        internal int TupleAuthorizationCount { get; private set; }
+        internal void ResetObservations() => CaptureCount = LeaseCount = VerifyCount = TupleAuthorizationCount = 0;
+        public ISkillRegistryGenerationCapture? CaptureGeneration()
+        {
+            CaptureCount++;
+            return available ? new Capture() : null;
+        }
         public bool TryAcquireGenerationReadLease(ISkillRegistryGenerationCapture capture, [NotNullWhen(true)] out ISkillRegistryGenerationLease? lease)
         {
+            LeaseCount++;
             lease = available ? new Lease() : null;
             return lease is not null;
         }
-        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => available;
-        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => tuple.SourceApplicationVersion == "1.0.65";
+        public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease)
+        {
+            VerifyCount++;
+            return available;
+        }
+        public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple)
+        {
+            TupleAuthorizationCount++;
+            return tuple.SourceApplicationVersion == "1.0.65";
+        }
         private sealed class Capture : ISkillRegistryGenerationCapture { }
         private sealed class Lease : ISkillRegistryGenerationLease { public void Dispose() { } }
     }

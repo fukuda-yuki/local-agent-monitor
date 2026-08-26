@@ -332,7 +332,15 @@ internal static class LocalWorkspaceProjectionSchemaV1
     internal static void Ensure(SqliteConnection connection, DateTimeOffset now)
     {
         using var transaction = connection.BeginTransaction();
-        Ensure(connection, transaction, now);
+        Ensure(connection, transaction, now, null, null);
+        transaction.Commit();
+    }
+
+    internal static void Ensure(SqliteConnection connection, DateTimeOffset now, Action beforeV4Stamp)
+    {
+        ArgumentNullException.ThrowIfNull(beforeV4Stamp);
+        using var transaction = connection.BeginTransaction();
+        Ensure(connection, transaction, now, null, beforeV4Stamp);
         transaction.Commit();
     }
 
@@ -342,18 +350,26 @@ internal static class LocalWorkspaceProjectionSchemaV1
         ISkillRegistryGenerationAuthority skillRegistryAuthority)
     {
         using var transaction = connection.BeginTransaction();
-        Ensure(connection, transaction, now, skillRegistryAuthority);
+        Ensure(connection, transaction, now, skillRegistryAuthority, null);
         transaction.Commit();
     }
 
     internal static void Ensure(SqliteConnection connection, SqliteTransaction transaction, DateTimeOffset now)
-        => Ensure(connection, transaction, now, null);
+        => Ensure(connection, transaction, now, null, null);
 
     internal static void Ensure(
         SqliteConnection connection,
         SqliteTransaction transaction,
         DateTimeOffset now,
         ISkillRegistryGenerationAuthority? skillRegistryAuthority)
+        => Ensure(connection, transaction, now, skillRegistryAuthority, null);
+
+    private static void Ensure(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset now,
+        ISkillRegistryGenerationAuthority? skillRegistryAuthority,
+        Action? beforeV4Stamp)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -384,6 +400,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
             foreach (var definition in Definitions.Skip(V3Definitions.Count)) Execute(connection, transaction, definition.Sql);
             RefreshProjection(connection, transaction, now, skillRegistryAuthority);
             ValidateSemanticRows(connection, transaction);
+            beforeV4Stamp?.Invoke();
             Execute(connection, transaction, "UPDATE schema_version SET version=4 WHERE component='local_workspace_projection' AND version=3;");
             Validate(connection, transaction);
             return;

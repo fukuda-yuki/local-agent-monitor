@@ -6,6 +6,85 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         new(new StructuralRegistryAuthority());
 
     [Fact]
+    public void RawRetentionSelectedValueUsesExactOneMiBBoundAndIgnoresHugeSibling()
+    {
+        using var connection = OpenRawRetentionFixture(1_048_576, siblingBytes: 1_048_577);
+
+        Assert.Equal(
+            ["0198f5b8-0c00-7000-8000-000000000011:instruction:1048576:available:0", "0198f5b8-0c00-7000-8000-000000000012:instruction:1048577:oversized:1"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT source_item_id||':'||part||':'||selected_utf8_bytes||':'||availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs ORDER BY source_item_id;"));
+    }
+
+    [Fact]
+    public async Task RetentionExpiryPublicationUpdatesContentReferenceInsideOwningTransaction()
+    {
+        using var connection = OpenRawRetentionFixture(32);
+        using var gate = new LocalWorkspacePublicationGate();
+        await using var publication = await gate.AcquireReadAsync(CancellationToken.None);
+        using (var transaction = connection.BeginTransaction())
+        {
+            using var mutation = connection.CreateCommand();
+            mutation.Transaction = transaction;
+            mutation.CommandText = "UPDATE session_event_content SET expires_at=$now WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE retention_items SET expires_at=$now WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';";
+            mutation.Parameters.AddWithValue("$now", "2026-08-25T00:00:00.0000000+00:00");
+            mutation.ExecuteNonQuery();
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            using var inside = connection.CreateCommand();
+            inside.Transaction = transaction;
+            inside.CommandText = "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';";
+            Assert.Equal("expired:1", inside.ExecuteScalar());
+            transaction.Commit();
+        }
+
+        Assert.Equal(["expired:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
+    }
+
+    [Theory]
+    [InlineData("store_instance", "invalid")]
+    [InlineData("captured_at", "invalid")]
+    [InlineData("expiry_equal_now", "expired")]
+    [InlineData("catalog_receipt", "invalid")]
+    [InlineData("owner_token", "invalid")]
+    [InlineData("missing_item", "invalid")]
+    [InlineData("missing_source", "not_captured")]
+    [InlineData("deleted", "deleted")]
+    [InlineData("read_denied", "read_denied")]
+    [InlineData("error", "invalid")]
+    [InlineData("tombstone", "invalid")]
+    public void RawRetentionBindingDriftFailsClosedAndClearsCapability(string mutation, string expectedState)
+    {
+        using var connection = OpenRawRetentionFixture(32);
+        var sql = mutation switch
+        {
+            "store_instance" => "PRAGMA foreign_keys=OFF; UPDATE retention_items SET store_instance_id='other-store' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011'; PRAGMA foreign_keys=ON;",
+            "captured_at" => "UPDATE session_event_content SET captured_at='2026-08-24T00:00:01.0000000+00:00' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "expiry_equal_now" => "UPDATE session_event_content SET expires_at='2026-08-25T00:00:00.0000000+00:00' WHERE event_id='0198f5b8-0c00-7000-8000-000000000011'; UPDATE retention_items SET expires_at='2026-08-25T00:00:00.0000000+00:00' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "catalog_receipt" => "UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "owner_token" => "DROP TRIGGER retention_session_event_content_token_immutable; UPDATE session_event_content SET retention_owner_token=zeroblob(32) WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "missing_item" => "DELETE FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "missing_source" => "DELETE FROM session_event_content WHERE event_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "deleted" => "UPDATE retention_items SET state='deleted',deleted_at='2026-08-25T00:00:00.0000000+00:00' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "read_denied" => "UPDATE retention_items SET read_denied_at='2026-08-25T00:00:00.0000000+00:00' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "error" => "UPDATE retention_items SET error_code='delete_io_failed' WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            "tombstone" => "INSERT INTO retention_tombstones(item_id,receipt_at,deleted_at) SELECT item_id,'2026-08-25T00:00:00.0000000+00:00','2026-08-25T00:00:00.0000000+00:00' FROM retention_items WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation))
+        };
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, sql);
+        using (var transaction = connection.BeginTransaction())
+        {
+            StructuralParticipant.RefreshSessions(connection, transaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+            transaction.Commit();
+        }
+
+        Assert.Equal([$"{expectedState}:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
+    }
+
+    [Fact]
     public void DetailProjectionClassifiesAllSixExactRawCarriersWithCurrentRetentionAdmission()
     {
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
@@ -368,6 +447,37 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             insert.Parameters.AddWithValue("$item","item-"+row.EventId); insert.Parameters.AddWithValue("$store",store); insert.Parameters.AddWithValue("$source",row.EventId); insert.Parameters.AddWithValue("$receipt",receipt); insert.Parameters.AddWithValue("$captured",row.Captured); insert.Parameters.AddWithValue("$expires",row.Expires); insert.ExecuteNonQuery();
         }
         transaction.Commit();
+    }
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenRawRetentionFixture(int selectedBytes, int? siblingBytes = null)
+    {
+        var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,schema_fingerprint,type,occurred_at,content_state)
+              VALUES('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','claude-code-hook','0198f5b8-0c00-7000-8000-000000000021','0000000000000000000000000000000000000000000000000000000000000000','UserPromptSubmit','2026-08-24T00:00:00.0000000+00:00','available');
+            """);
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000011','application/json',$json,'2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));";
+            command.Parameters.AddWithValue("$json", System.Text.Json.JsonSerializer.Serialize(new { prompt = new string('x', selectedBytes) }));
+            command.ExecuteNonQuery();
+        }
+        if (siblingBytes is not null)
+        {
+            LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+                INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,schema_fingerprint,type,occurred_at,content_state)
+                  VALUES('0198f5b8-0c00-7000-8000-000000000012','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','claude-code-hook','0198f5b8-0c00-7000-8000-000000000022','0000000000000000000000000000000000000000000000000000000000000000','UserPromptSubmit','2026-08-24T00:00:01.0000000+00:00','available');
+                """);
+            using var sibling = connection.CreateCommand();
+            sibling.CommandText = "INSERT INTO session_event_content VALUES('0198f5b8-0c00-7000-8000-000000000012','application/json',$json,'2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32));";
+            sibling.Parameters.AddWithValue("$json", System.Text.Json.JsonSerializer.Serialize(new { prompt = new string('y', siblingBytes.Value) }));
+            sibling.ExecuteNonQuery();
+        }
+        InstallCurrentRetentionRows(connection);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        return connection;
     }
 
     private sealed class TestReadTransaction(Microsoft.Data.Sqlite.SqliteConnection connection) : ILocalRepositoryReadTransaction

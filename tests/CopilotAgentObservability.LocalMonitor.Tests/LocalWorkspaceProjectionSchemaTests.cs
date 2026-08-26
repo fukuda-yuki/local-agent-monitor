@@ -114,6 +114,43 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         Assert.Empty(Strings(connection, "SELECT name FROM sqlite_schema WHERE name='local_workspace_nodes';"));
     }
 
+    [Fact]
+    public void DataBearingExactV3MigrationRollsBackBeforeStampAndRetriesWithStableCanonicalRows()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"workspace-v3-v4-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            string[] first;
+            using (var connection = OpenSessionDatabase(path))
+            {
+                Execute(connection, "INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00'); INSERT INTO session_runs VALUES('run-exact','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,'gpt-5',NULL,NULL,10,3,13,'active'); INSERT INTO session_events VALUES('event-exact','0198f5b8-0c00-7000-8000-000000000001','run-exact','copilot-sdk',NULL,NULL,NULL,'synthetic','source-exact','event','2026-08-24T00:00:01.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);");
+                foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV3SchemaSql) Execute(connection, sql);
+                Execute(connection, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',3);");
+
+                Assert.Equal("injected_before_v4_stamp", Assert.Throws<InvalidOperationException>(() =>
+                    LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch,
+                        beforeV4Stamp: static () => throw new InvalidOperationException("injected_before_v4_stamp"))).Message);
+                Assert.Equal(["3"], Strings(connection, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+                Assert.Empty(Strings(connection, "SELECT name FROM sqlite_schema WHERE name IN ('local_workspace_execution_headers','local_workspace_nodes','local_workspace_node_edges','local_workspace_node_content_refs');"));
+
+                LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
+                first = Strings(connection, "SELECT execution_id||'|'||node_id||'|'||source_kind||'|'||source_identity FROM local_workspace_nodes ORDER BY node_id;");
+            }
+
+            using (var reopened = OpenExisting(path))
+            {
+                LocalWorkspaceProjectionSchemaV1.Ensure(reopened, DateTimeOffset.UnixEpoch);
+                Assert.Equal(first, Strings(reopened, "SELECT execution_id||'|'||node_id||'|'||source_kind||'|'||source_identity FROM local_workspace_nodes ORDER BY node_id;"));
+                Assert.Equal(["4"], Strings(reopened, "SELECT CAST(version AS TEXT) FROM schema_version WHERE component='local_workspace_projection';"));
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(256, true)]
     [InlineData(257, false)]
@@ -248,6 +285,25 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         using var transaction = connection.BeginTransaction();
         CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore.InitializeSchema(connection, transaction, DateTimeOffset.UnixEpoch);
         transaction.Commit();
+        return connection;
+    }
+
+    private static SqliteConnection OpenSessionDatabase(string path)
+    {
+        var connection = OpenExisting(path);
+        using var transaction = connection.BeginTransaction();
+        CopilotAgentObservability.Persistence.Sqlite.Sessions.SqliteSessionStore.InitializeSchema(connection, transaction, DateTimeOffset.UnixEpoch);
+        transaction.Commit();
+        return connection;
+    }
+
+    private static SqliteConnection OpenExisting(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        connection.Open();
+        using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA foreign_keys=ON;";
+        pragma.ExecuteNonQuery();
         return connection;
     }
 
