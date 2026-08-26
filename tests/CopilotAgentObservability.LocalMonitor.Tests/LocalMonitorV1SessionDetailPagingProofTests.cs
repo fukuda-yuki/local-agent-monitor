@@ -45,6 +45,33 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
     }
 
     [Fact]
+    public async Task StaleRevisionWinsBeforeExecutionAndNodeMembershipWithoutMixingFacts()
+    {
+        var oldSnapshot = EmptySnapshot();
+        var service = new FixedDetailService(oldSnapshot);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        LocalMonitorV1SessionDetailRoutes.Map(app, service, new byte[32]);
+        await app.StartAsync();
+        using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
+
+        using var summary = await client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/summary");
+        Assert.Equal(System.Net.HttpStatusCode.OK, summary.StatusCode);
+        service.Snapshot = oldSnapshot with { WorkspaceRevision = new string('2', 64) };
+
+        using var timeline = await client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/timeline?workspace_revision={oldSnapshot.WorkspaceRevision}&execution_id={ExecutionId}");
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, timeline.StatusCode);
+        Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}", await timeline.Content.ReadAsStringAsync());
+        Assert.DoesNotContain(ExecutionId, await timeline.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var node = await client.GetAsync($"/api/local-monitor/v1/sessions/{SessionId}/nodes/{RootNodeId}?workspace_revision={oldSnapshot.WorkspaceRevision}");
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, node.StatusCode);
+        Assert.Equal("{\"error\":\"workspace_snapshot_stale\"}", await node.Content.ReadAsStringAsync());
+        Assert.DoesNotContain(RootNodeId, await node.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TimelinePagesRecordedMissingAndInvalidNodesWithoutDuplicateOrDrop()
     {
         var nodes = Enumerable.Range(0, 241)
@@ -172,8 +199,10 @@ public sealed class LocalMonitorV1SessionDetailPagingProofTests
 
     private sealed class FixedDetailService(LocalRepositorySessionDetailSnapshot snapshot) : ILocalRepositorySessionDetailSnapshotService
     {
+        internal LocalRepositorySessionDetailSnapshot Snapshot { get; set; } = snapshot;
+
         public ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
             LocalRepositorySessionDetailRequest request,
-            CancellationToken cancellationToken) => ValueTask.FromResult(snapshot);
+            CancellationToken cancellationToken) => ValueTask.FromResult(Snapshot);
     }
 }
