@@ -198,11 +198,14 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 part TEXT NOT NULL CHECK(part IN ('instruction','tool_input','tool_result','error_message','subagent_input','event_content')),
                 store_kind TEXT NOT NULL,
                 source_item_id TEXT NOT NULL,
+                locator_kind TEXT NOT NULL CHECK(locator_kind IN ('whole_event','json_pointer')),
+                json_pointer TEXT NULL CHECK(json_pointer IS NULL OR json_pointer IN ('/prompt','/tool_input','/tool_response','/error','/agent_id')),
                 retention_owner_token BLOB NULL CHECK(retention_owner_token IS NULL OR (typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32)),
                 availability_state TEXT NOT NULL CHECK(availability_state IN ('available','not_captured','expired','deleted','read_denied','oversized','invalid')),
                 PRIMARY KEY(node_id,part),
                 FOREIGN KEY(node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
-                CHECK((availability_state='available')=(retention_owner_token IS NOT NULL))
+                CHECK((availability_state='available')=(retention_owner_token IS NOT NULL)),
+                CHECK((locator_kind='whole_event' AND json_pointer IS NULL AND part='event_content') OR (locator_kind='json_pointer' AND json_pointer IS NOT NULL AND part<>'event_content'))
             );
             """),
     ];

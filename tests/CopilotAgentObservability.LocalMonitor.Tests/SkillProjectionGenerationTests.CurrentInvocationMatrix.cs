@@ -33,13 +33,23 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         var otelOnly = Assert.Single(results[fixture.SessionId("otel-only")].Invocations);
         Assert.NotNull(otelOnly.OtelSourceIdentity);
         Assert.Null(otelOnly.SdkSourceIdentity);
+        Assert.Equal("session_run", otelOnly.ExecutionSourceKind);
+        Assert.NotNull(otelOnly.ExecutionSourceIdentity);
+        Assert.NotNull(otelOnly.OtelCarrierEventId);
         var sdkOnly = Assert.Single(results[fixture.SessionId("sdk-one")].Invocations);
         Assert.Null(sdkOnly.OtelSourceIdentity);
         Assert.NotNull(sdkOnly.SdkSourceIdentity);
+        Assert.Equal("session_run", sdkOnly.ExecutionSourceKind);
+        Assert.NotNull(sdkOnly.ExecutionSourceIdentity);
+        Assert.NotNull(sdkOnly.SdkCarrierEventId);
         fixture.AssertCurrent(results, "exact-pair", 1, "paired-skill");
         var exact = Assert.Single(results[fixture.SessionId("exact-pair")].Invocations);
         Assert.NotNull(exact.OtelSourceIdentity);
         Assert.NotNull(exact.SdkSourceIdentity);
+        Assert.Equal("session_run", exact.ExecutionSourceKind);
+        Assert.NotNull(exact.ExecutionSourceIdentity);
+        Assert.NotNull(exact.OtelCarrierEventId);
+        Assert.NotNull(exact.SdkCarrierEventId);
         Assert.Equal("bb".PadRight(32, 'b'), exact.ProducerTraceId);
         Assert.Equal("02".PadRight(16, '0'), exact.ProducerSpanId);
         fixture.AssertPending(results, "mismatch");
@@ -92,6 +102,23 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 
         fixture.AssertWorkspaceSkill("admitted", "recorded", 1, ["needle-skill"]);
         fixture.AssertWorkspaceSkill("pending", "certification_pending", null, []);
+    }
+
+    [Fact]
+    public void PersistedSqliteMatrix_DetailNodesUseOnlyCanonicalExecutionProof()
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedOtelOnly("otel", "otel-skill", "21", "31");
+        fixture.SeedSdkOnly("sdk", "sdk-skill");
+        fixture.SeedExactPair("pair", "pair-skill", "22", "32", duplicateObservations: 2);
+        fixture.SeedMismatchedPair("pending", "pending-skill", "23", "33", "24", "34");
+        fixture.RefreshWorkspace();
+
+        Assert.Equal(1, fixture.CountDetailSkillNodes("otel"));
+        Assert.Equal(1, fixture.CountDetailSkillNodes("sdk"));
+        Assert.Equal(1, fixture.CountDetailSkillNodes("pair"));
+        Assert.Equal(0, fixture.CountDetailSkillNodes("pending"));
+        Assert.Equal(["event"], fixture.RawSkillEventKinds("sdk"));
     }
 
     [Fact]
@@ -269,6 +296,25 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         Assert.Equal(searchFacts.Length != 0, state == "recorded" && count > 0);
     }
 
+    internal int CountDetailSkillNodes(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation' AND kind='skill';";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal string[] RawSkillEventKinds(string sessionKey)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT n.kind FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id WHERE n.session_id=$session AND e.type='skill.invoked' ORDER BY n.node_id;";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using var reader = command.ExecuteReader();
+        var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
+    }
+
     internal void AssertSdkAuthorized(string sessionKey)
     {
         var write = latestWrites[sessionKey];
@@ -303,7 +349,7 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     {
         var available = state == "available";
         return new(
-            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), null, sessionKey, null, false,
+            "copilot-sdk-stream", "copilot-sdk", Guid.NewGuid().ToString("D"), null, sessionKey, sessionKey + "-run", false,
             WrittenAt, sourceVersion, "adapter-version-1", "normalization-1", "github-copilot-sdk.skill-invoked.v1",
             Fingerprint, "{\"skill\":\"demo\"}"u8.ToArray(), state, reason, available ? name : null,
             available ? "project" : null, available ? "user-invoked" : null, available ? new string('b', 64) : null,
@@ -347,7 +393,10 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
     private void SeedOtel(string sessionKey, string skillName, string traceId, string spanId)
     {
         var ordinal = Interlocked.Increment(ref otelOrdinal);
+        var fallbackRunId = Guid.CreateVersion7().ToString("D");
+        var eventId = Guid.CreateVersion7().ToString("D");
         using var connection = Open();
+        using (var foreignKeys = connection.CreateCommand()) { foreignKeys.CommandText = "PRAGMA foreign_keys=OFF;"; foreignKeys.ExecuteNonQuery(); }
         using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT OR IGNORE INTO source_trace_compatibility_revisions(trace_id,current_revision,current_effective_state,current_exact_version,updated_at)
@@ -360,6 +409,14 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
             ON CONFLICT(trace_id) DO NOTHING;
             INSERT INTO skill_projection_invocations(generation_id,source_arm,raw_record_id,trace_id,span_id,span_ordinal,session_id,skill_name,skill_source,invocation_trigger,source_application_version,projected_at)
             VALUES((SELECT current_generation_id FROM skill_projection_trace_heads WHERE trace_id=$trace),'otel_trace_span',$raw,$trace,$span,$ordinal,$session,$skill,'project','user-invoked','1.0.65',$at);
+            INSERT INTO session_runs(run_id,session_id,source_surface,trace_id,status)
+            SELECT $fallback_run,$session,'copilot-cli',$trace,'completed'
+            WHERE NOT EXISTS(SELECT 1 FROM skill_invocation_snapshots WHERE session_id=$session);
+            INSERT INTO session_events(event_id,session_id,run_id,source_surface,trace_id,source_adapter,source_event_id,type,occurred_at,content_state)
+            SELECT $event,$session,COALESCE((SELECT run_id FROM skill_invocation_snapshots WHERE session_id=$session ORDER BY created_at DESC,snapshot_id DESC LIMIT 1),$fallback_run),
+                   COALESCE((SELECT source_surface FROM session_runs WHERE run_id=(SELECT run_id FROM skill_invocation_snapshots WHERE session_id=$session ORDER BY created_at DESC,snapshot_id DESC LIMIT 1)),'copilot-cli'),
+                   $trace,'otel-exact',$trace||'/'||$span,'otel.span',$at,'not_captured'
+            WHERE NOT EXISTS(SELECT 1 FROM session_events WHERE session_id=$session AND source_adapter='otel-exact' AND source_event_id=$trace||'/'||$span);
             """;
         command.Parameters.AddWithValue("$trace", traceId);
         command.Parameters.AddWithValue("$span", spanId);
@@ -369,7 +426,10 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.Parameters.AddWithValue("$ordinal", ordinal);
         command.Parameters.AddWithValue("$digest", new string(traceId[0], 64));
         command.Parameters.AddWithValue("$at", WrittenAt.ToString("O"));
+        command.Parameters.AddWithValue("$fallback_run", fallbackRunId);
+        command.Parameters.AddWithValue("$event", eventId);
         command.ExecuteNonQuery();
+        using var restoreForeignKeys = connection.CreateCommand(); restoreForeignKeys.CommandText = "PRAGMA foreign_keys=ON;"; restoreForeignKeys.ExecuteNonQuery();
     }
 
     private void BindLatestSdkProducer(string sessionKey, string traceId, string spanId)

@@ -192,34 +192,28 @@ internal static class LocalWorkspaceProjectionStore
                 span = invocation.ProducerSpanId,
                 otel = invocation.OtelSourceIdentity,
                 sdk = invocation.SdkSourceIdentity,
-                name = invocation.SdkSkillName ?? invocation.OtelSkillName
+                name = invocation.SdkSkillName ?? invocation.OtelSkillName,
+                executionKind = invocation.ExecutionSourceKind,
+                execution = invocation.ExecutionSourceIdentity,
+                otelEvent = invocation.OtelCarrierEventId,
+                sdkEvent = invocation.SdkCarrierEventId
             }));
-        var sdkJoin = TableExists(connection, transaction, "skill_invocation_snapshots")
-            ? "LEFT JOIN skill_invocation_snapshots s ON s.session_id=c.session_id AND c.sdk_source_identity='sdk:'||s.claim_id"
-            : "LEFT JOIN (SELECT NULL session_id,NULL claim_id,NULL event_id WHERE 0) s ON 0";
         Execute(connection, transaction, $"""
             WITH canonical AS (
               SELECT value->>'identity' canonical_identity,value->>'session' session_id,
                      value->>'trace' trace_id,value->>'span' span_id,value->>'otel' otel_source_identity,
-                     value->>'sdk' sdk_source_identity,value->>'name' skill_name
+                     value->>'sdk' sdk_source_identity,value->>'name' skill_name,value->>'executionKind' execution_source_kind,
+                     value->>'execution' execution_source_identity,value->>'otelEvent' otel_event_id,value->>'sdkEvent' sdk_event_id
               FROM json_each($skills)),
-            resolved AS (
-              SELECT c.*,e.event_id,e.run_id,e.occurred_at,
-                     row_number() OVER(PARTITION BY c.canonical_identity ORDER BY e.event_id COLLATE BINARY) resolution_ordinal,
-                     count(*) OVER(PARTITION BY c.canonical_identity) resolution_count
-              FROM canonical c
-              {sdkJoin}
-              JOIN session_events e ON e.session_id=c.session_id AND e.run_id IS NOT NULL AND
-                ((c.trace_id IS NOT NULL AND c.span_id IS NOT NULL AND e.trace_id=c.trace_id AND e.source_event_id=c.trace_id||'/'||c.span_id)
-                 OR (s.event_id IS NOT NULL AND e.event_id=s.event_id))),
-            admitted AS (
-              SELECT * FROM resolved WHERE resolution_ordinal=1 AND resolution_count=1),
             rows AS (
-              SELECT a.*,h.execution_id,local_workspace_node_id('skill_invocation',a.canonical_identity) node_id,
+              SELECT c.*,h.execution_id,local_workspace_node_id('skill_invocation',c.canonical_identity) node_id,
                      local_workspace_node_id('execution_root',h.source_identity) parent_node_id,
                      (SELECT COUNT(*) FROM local_workspace_nodes n WHERE n.execution_id=h.execution_id)+
-                       row_number() OVER(PARTITION BY h.execution_id ORDER BY a.canonical_identity COLLATE BINARY) source_ordinal
-              FROM admitted a JOIN local_workspace_execution_headers h ON h.session_id=a.session_id AND h.source_identity=a.run_id)
+                       row_number() OVER(PARTITION BY h.execution_id ORDER BY c.canonical_identity COLLATE BINARY) source_ordinal,
+                     COALESCE((SELECT occurred_at FROM session_events WHERE event_id=c.sdk_event_id AND session_id=c.session_id),
+                              (SELECT occurred_at FROM session_events WHERE event_id=c.otel_event_id AND session_id=c.session_id)) occurred_at,
+                     COALESCE(c.sdk_event_id,c.otel_event_id) event_id
+              FROM canonical c JOIN local_workspace_execution_headers h ON h.session_id=c.session_id AND h.source_kind=c.execution_source_kind AND h.source_identity=c.execution_source_identity)
             INSERT INTO local_workspace_nodes(node_id,session_id,execution_id,source_kind,source_identity,source_ordinal,parent_node_id,relationship_authority,kind,name_state,name_text,lifecycle,status,time_authority,start_utc_ticks,activity_state,token_state,trace_id,span_id,event_id,otel_source_identity,sdk_source_identity)
             SELECT node_id,session_id,execution_id,'skill_invocation',canonical_identity,source_ordinal,parent_node_id,'exact','skill',
                    CASE WHEN skill_name IS NULL OR trim(skill_name)='' THEN 'invalid' ELSE 'recorded' END,
@@ -236,8 +230,10 @@ internal static class LocalWorkspaceProjectionStore
         {
             var contentSql = TableExists(connection, transaction, "retention_items")
                 ? """
-                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,retention_owner_token,availability_state)
-                  SELECT n.node_id,local_workspace_content_part(e.type),'session_event_content',e.event_id,
+                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,retention_owner_token,availability_state)
+                  SELECT n.node_id,local_workspace_content_part(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json)),'session_event_content',e.event_id,
+                    CASE WHEN local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json) IS NULL THEN 'whole_event' ELSE 'json_pointer' END,
+                    local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),
                     CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND typeof(c.retention_owner_token)='blob' AND length(c.retention_owner_token)=32 AND i.source_item_id IS NOT NULL AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) AND length(CAST(c.content_json AS BLOB))<=1048576 THEN c.retention_owner_token END,
                     CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL THEN 'deleted'
                          WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
@@ -251,8 +247,10 @@ internal static class LocalWorkspaceProjectionStore
                   WHERE n.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids));
                   """
                 : """
-                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,retention_owner_token,availability_state)
-                  SELECT n.node_id,local_workspace_content_part(e.type),'session_event_content',e.event_id,NULL,
+                  INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,retention_owner_token,availability_state)
+                  SELECT n.node_id,local_workspace_content_part(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json)),'session_event_content',e.event_id,
+                    CASE WHEN local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json) IS NULL THEN 'whole_event' ELSE 'json_pointer' END,
+                    local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),NULL,
                     CASE WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured' WHEN e.content_state='expired_pending_deletion' THEN 'expired' ELSE 'invalid' END
                   FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
                   LEFT JOIN session_event_content c ON c.event_id=e.event_id
@@ -306,22 +304,47 @@ internal static class LocalWorkspaceProjectionStore
 
     private static string NodeKind(string type) => type switch
     {
-        "skill.invoked" => "skill",
         "tool.execution_start" or "PreToolUse" => "tool",
         "subagent.started" or "SubagentStart" => "subagent",
         "PostToolUseFailure" or "StopFailure" or "subagent.failed" => "error",
         _ => "event",
     };
 
-    private static string ContentPart(string type) => type switch
+    private static string ContentPart(string? pointer) => pointer switch
     {
-        "user.message" or "UserPromptSubmit" or "userPromptSubmitted" => "instruction",
-        "tool.execution_start" or "PreToolUse" => "tool_input",
-        "tool.execution_end" or "PostToolUse" => "tool_result",
-        "PostToolUseFailure" or "StopFailure" or "subagent.failed" => "error_message",
-        "subagent.started" or "SubagentStart" => "subagent_input",
+        "/prompt" => "instruction",
+        "/tool_input" => "tool_input",
+        "/tool_response" => "tool_result",
+        "/error" => "error_message",
+        "/agent_id" => "subagent_input",
         _ => "event_content",
     };
+
+    private static string? ContentPointer(string? adapter, string? fingerprint, string type, string? json)
+    {
+        if (!string.Equals(adapter, "claude-code-hook", StringComparison.Ordinal) || fingerprint is null || fingerprint.Length != 64 || json is null)
+            return null;
+        var candidate = type switch
+        {
+            "UserPromptSubmit" => ("/prompt", "prompt", JsonValueKind.String),
+            "PreToolUse" => ("/tool_input", "tool_input", JsonValueKind.Object),
+            "PostToolUse" => ("/tool_response", "tool_response", JsonValueKind.Undefined),
+            "PostToolUseFailure" or "StopFailure" => ("/error", "error", JsonValueKind.String),
+            "SubagentStart" => ("/agent_id", "agent_id", JsonValueKind.String),
+            _ => default,
+        };
+        if (candidate.Item1 is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty(candidate.Item2, out var value)
+                && (candidate.Item3 == JsonValueKind.Undefined || value.ValueKind == candidate.Item3)
+                ? candidate.Item1
+                : null;
+        }
+        catch (JsonException) { return null; }
+    }
 
     private static void ApplyLabels(SqliteConnection connection, SqliteTransaction transaction, string idsJson, DateTimeOffset now)
     {
@@ -433,7 +456,8 @@ internal static class LocalWorkspaceProjectionStore
         connection.CreateFunction<string, string, string>("local_workspace_node_id", StableNodeId, isDeterministic: true);
         connection.CreateFunction<string, string, string>("local_workspace_execution_id", static (kind, identity) => StableExecutionId(string.Empty, kind, identity), isDeterministic: true);
         connection.CreateFunction<string, string>("local_workspace_node_kind", NodeKind, isDeterministic: true);
-        connection.CreateFunction<string, string>("local_workspace_content_part", ContentPart, isDeterministic: true);
+        connection.CreateFunction<string?, string>("local_workspace_content_part", ContentPart, isDeterministic: true);
+        connection.CreateFunction<string?, string?, string, string?, string?>("local_workspace_content_pointer", ContentPointer, isDeterministic: true);
         connection.CreateFunction<string?, long?>("local_workspace_ticks", static value => Time(value).Ticks, isDeterministic: true);
     }
 
