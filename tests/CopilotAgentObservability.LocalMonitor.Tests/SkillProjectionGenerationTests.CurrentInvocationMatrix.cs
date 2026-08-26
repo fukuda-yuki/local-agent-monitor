@@ -129,6 +129,23 @@ public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
         fixture.RefreshWorkspace();
 
         Assert.Equal(["explicit"], fixture.SkillRelationshipAuthorities("sdk-parent"));
+        Assert.Equal(["explicit"], fixture.SkillParentEdgeAuthorities("sdk-parent"));
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("ambiguous")]
+    [InlineData("cross-run")]
+    [InlineData("cross-adapter")]
+    public void PersistedSqliteMatrix_InvalidSdkExplicitParentUsesUnknownGroup(string defect)
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkWithExplicitParent("sdk-parent", "sdk-skill");
+        fixture.CorruptExplicitParent("sdk-parent", defect);
+        fixture.RefreshWorkspace();
+
+        Assert.Equal(["unknown"], fixture.SkillRelationshipAuthorities("sdk-parent"));
+        Assert.Empty(fixture.SkillParentEdgeAuthorities("sdk-parent"));
     }
 
     [Fact]
@@ -358,6 +375,28 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         command.Parameters.AddWithValue("$session", sessions[sessionKey]);
         using var reader = command.ExecuteReader();
         var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
+    }
+
+    internal string[] SkillParentEdgeAuthorities(string sessionKey)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = "SELECT e.relationship_authority FROM local_workspace_node_edges e JOIN local_workspace_nodes n ON n.node_id=e.node_id WHERE n.session_id=$session AND n.source_kind='skill_invocation' AND e.relation_kind='parent' ORDER BY e.node_id;";
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]);
+        using var reader = command.ExecuteReader(); var result = new List<string>(); while (reader.Read()) result.Add(reader.GetString(0)); return result.ToArray();
+    }
+
+    internal void CorruptExplicitParent(string sessionKey, string defect)
+    {
+        using var connection = Open(); using var command = connection.CreateCommand();
+        command.CommandText = defect switch
+        {
+            "missing" => "DELETE FROM session_events WHERE session_id=$session AND source_event_id=(SELECT source_parent_event_id FROM skill_invocation_snapshots WHERE session_id=$session LIMIT 1);",
+            "cross-run" => "INSERT INTO session_runs(run_id,session_id,source_surface,status) VALUES($other,$session,'copilot-sdk','completed'); UPDATE session_events SET run_id=$other WHERE session_id=$session AND source_event_id=(SELECT source_parent_event_id FROM skill_invocation_snapshots WHERE session_id=$session LIMIT 1);",
+            "cross-adapter" => "UPDATE session_events SET source_adapter='other-sdk-stream' WHERE session_id=$session AND source_event_id=(SELECT source_parent_event_id FROM skill_invocation_snapshots WHERE session_id=$session LIMIT 1);",
+            "ambiguous" => "INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) SELECT $event,session_id,run_id,source_surface,'other-sdk-stream',source_event_id,type,occurred_at,content_state FROM session_events WHERE session_id=$session AND source_event_id=(SELECT source_parent_event_id FROM skill_invocation_snapshots WHERE session_id=$session LIMIT 1);",
+            _ => throw new ArgumentOutOfRangeException(nameof(defect))
+        };
+        command.Parameters.AddWithValue("$session", sessions[sessionKey]); command.Parameters.AddWithValue("$other", Guid.CreateVersion7().ToString("D")); command.Parameters.AddWithValue("$event", Guid.CreateVersion7().ToString("D")); command.ExecuteNonQuery();
     }
 
     internal void AssertSdkAuthorized(string sessionKey)

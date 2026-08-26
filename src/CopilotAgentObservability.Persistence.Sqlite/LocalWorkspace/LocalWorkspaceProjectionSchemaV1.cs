@@ -132,26 +132,52 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 lifecycle TEXT NOT NULL CHECK(lifecycle IN ('selected','started','completed','failed','deselected','unknown')),
                 status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
                 model TEXT NULL,
+                trace_id TEXT NULL CHECK(trace_id IS NULL OR length(trace_id)=32),
                 time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
                 start_utc_ticks INTEGER NULL,
                 end_utc_ticks INTEGER NULL,
                 duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms>=0),
-                activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(activity_state IN ('recorded','not_observed','capture_gap','source_unsupported','certification_pending','unavailable')),
-                activity_count INTEGER NULL CHECK(activity_count IS NULL OR activity_count>=0),
+                skill_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(skill_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported','certification_pending','projection_invalid')),
+                skill_activity_count INTEGER NULL CHECK(skill_activity_count IS NULL OR skill_activity_count>=0),
+                tool_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(tool_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                tool_activity_count INTEGER NULL CHECK(tool_activity_count IS NULL OR tool_activity_count>=0),
+                subagent_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(subagent_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                subagent_activity_count INTEGER NULL CHECK(subagent_activity_count IS NULL OR subagent_activity_count>=0),
+                error_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(error_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                error_activity_count INTEGER NULL CHECK(error_activity_count IS NULL OR error_activity_count>=0),
+                retry_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(retry_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                retry_activity_count INTEGER NULL CHECK(retry_activity_count IS NULL OR retry_activity_count>=0),
+                token_authority TEXT NOT NULL DEFAULT 'none' CHECK(token_authority IN ('session_run','llm_span','mixed','none')),
                 token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(token_state IN ('recorded','not_observed','inconsistent')),
+                available_execution_count INTEGER NOT NULL DEFAULT 0 CHECK(available_execution_count IN (0,1)),
+                total_execution_count INTEGER NOT NULL DEFAULT 1 CHECK(total_execution_count=1),
+                input_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(input_token_state IN ('recorded','not_observed','inconsistent')),
                 input_tokens INTEGER NULL CHECK(input_tokens IS NULL OR input_tokens>=0),
+                output_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(output_token_state IN ('recorded','not_observed','inconsistent')),
                 output_tokens INTEGER NULL CHECK(output_tokens IS NULL OR output_tokens>=0),
+                total_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(total_token_state IN ('recorded','not_observed','inconsistent')),
                 total_tokens INTEGER NULL CHECK(total_tokens IS NULL OR total_tokens>=0),
+                reasoning_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(reasoning_token_state IN ('recorded','not_observed','inconsistent')),
                 reasoning_tokens INTEGER NULL CHECK(reasoning_tokens IS NULL OR reasoning_tokens>=0),
+                cache_read_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_read_token_state IN ('recorded','not_observed','inconsistent')),
                 cache_read_tokens INTEGER NULL CHECK(cache_read_tokens IS NULL OR cache_read_tokens>=0),
+                cache_creation_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_creation_token_state IN ('recorded','not_observed','inconsistent')),
                 cache_creation_tokens INTEGER NULL CHECK(cache_creation_tokens IS NULL OR cache_creation_tokens>=0),
+                new_input_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(new_input_token_state IN ('recorded','not_observed','inconsistent')),
+                new_input_tokens INTEGER NULL CHECK(new_input_tokens IS NULL OR new_input_tokens>=0),
+                cache_read_ratio_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_read_ratio_state IN ('recorded','not_observed','inconsistent')),
+                cache_read_ratio_basis_points INTEGER NULL CHECK(cache_read_ratio_basis_points IS NULL OR cache_read_ratio_basis_points BETWEEN 0 AND 10000),
                 UNIQUE(session_id,source_kind,source_identity),
                 UNIQUE(session_id,source_ordinal),
                 FOREIGN KEY(session_id) REFERENCES local_workspace_sessions(session_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL)),
                 CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000)),
-                CHECK((activity_state='recorded')=(activity_count IS NOT NULL)),
-                CHECK((token_state='not_observed')=(input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_creation_tokens IS NULL))
+                CHECK((skill_activity_state='recorded')=(skill_activity_count IS NOT NULL)), CHECK((tool_activity_state='recorded')=(tool_activity_count IS NOT NULL)),
+                CHECK((subagent_activity_state='recorded')=(subagent_activity_count IS NOT NULL)), CHECK((error_activity_state='recorded')=(error_activity_count IS NOT NULL)), CHECK((retry_activity_state='recorded')=(retry_activity_count IS NOT NULL)),
+                CHECK((input_token_state='recorded')=(input_tokens IS NOT NULL)), CHECK((output_token_state='recorded')=(output_tokens IS NOT NULL)), CHECK((total_token_state='recorded')=(total_tokens IS NOT NULL)),
+                CHECK((reasoning_token_state='recorded')=(reasoning_tokens IS NOT NULL)), CHECK((cache_read_token_state='recorded')=(cache_read_tokens IS NOT NULL)), CHECK((cache_creation_token_state='recorded')=(cache_creation_tokens IS NOT NULL)),
+                CHECK((new_input_token_state='recorded')=(new_input_tokens IS NOT NULL)), CHECK((cache_read_ratio_state='recorded')=(cache_read_ratio_basis_points IS NOT NULL)),
+                CHECK((token_authority='none')=(available_execution_count=0)), CHECK((token_state='recorded')=(available_execution_count=1))
             );
             """),
         new("index", "local_workspace_executions_by_session", "local_workspace_execution_headers", "CREATE INDEX local_workspace_executions_by_session ON local_workspace_execution_headers(session_id,time_authority,start_utc_ticks,source_ordinal,execution_id);"),
@@ -172,15 +198,35 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 status TEXT NOT NULL CHECK(status IN ('active','completed','failed','unknown')),
                 time_authority TEXT NOT NULL CHECK(time_authority IN ('recorded','missing','invalid')),
                 start_utc_ticks INTEGER NULL,
-                activity_state TEXT NOT NULL CHECK(activity_state IN ('recorded','not_observed','capture_gap','source_unsupported','certification_pending','unavailable')),
-                activity_count INTEGER NULL CHECK(activity_count IS NULL OR activity_count>=0),
+                end_utc_ticks INTEGER NULL,
+                duration_ms INTEGER NULL CHECK(duration_ms IS NULL OR duration_ms>=0),
+                skill_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(skill_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported','certification_pending','projection_invalid')),
+                skill_activity_count INTEGER NULL CHECK(skill_activity_count IS NULL OR skill_activity_count>=0),
+                tool_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(tool_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                tool_activity_count INTEGER NULL CHECK(tool_activity_count IS NULL OR tool_activity_count>=0),
+                subagent_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(subagent_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                subagent_activity_count INTEGER NULL CHECK(subagent_activity_count IS NULL OR subagent_activity_count>=0),
+                error_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(error_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                error_activity_count INTEGER NULL CHECK(error_activity_count IS NULL OR error_activity_count>=0),
+                retry_activity_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(retry_activity_state IN ('recorded','not_observed','capture_gap','source_unsupported')),
+                retry_activity_count INTEGER NULL CHECK(retry_activity_count IS NULL OR retry_activity_count>=0),
+                token_authority TEXT NOT NULL DEFAULT 'none' CHECK(token_authority IN ('session_run','llm_span','mixed','none')),
                 token_state TEXT NOT NULL CHECK(token_state IN ('recorded','not_observed','inconsistent')),
+                available_execution_count INTEGER NOT NULL DEFAULT 0 CHECK(available_execution_count IN (0,1)), total_execution_count INTEGER NOT NULL DEFAULT 1 CHECK(total_execution_count=1),
+                input_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(input_token_state IN ('recorded','not_observed','inconsistent')),
                 input_tokens INTEGER NULL CHECK(input_tokens IS NULL OR input_tokens>=0),
+                output_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(output_token_state IN ('recorded','not_observed','inconsistent')),
                 output_tokens INTEGER NULL CHECK(output_tokens IS NULL OR output_tokens>=0),
+                total_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(total_token_state IN ('recorded','not_observed','inconsistent')),
                 total_tokens INTEGER NULL CHECK(total_tokens IS NULL OR total_tokens>=0),
+                reasoning_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(reasoning_token_state IN ('recorded','not_observed','inconsistent')),
                 reasoning_tokens INTEGER NULL CHECK(reasoning_tokens IS NULL OR reasoning_tokens>=0),
+                cache_read_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_read_token_state IN ('recorded','not_observed','inconsistent')),
                 cache_read_tokens INTEGER NULL CHECK(cache_read_tokens IS NULL OR cache_read_tokens>=0),
+                cache_creation_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_creation_token_state IN ('recorded','not_observed','inconsistent')),
                 cache_creation_tokens INTEGER NULL CHECK(cache_creation_tokens IS NULL OR cache_creation_tokens>=0),
+                new_input_token_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(new_input_token_state IN ('recorded','not_observed','inconsistent')), new_input_tokens INTEGER NULL CHECK(new_input_tokens IS NULL OR new_input_tokens>=0),
+                cache_read_ratio_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(cache_read_ratio_state IN ('recorded','not_observed','inconsistent')), cache_read_ratio_basis_points INTEGER NULL CHECK(cache_read_ratio_basis_points IS NULL OR cache_read_ratio_basis_points BETWEEN 0 AND 10000),
                 retry_relation_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(retry_relation_state='not_observed'),
                 recovery_relation_state TEXT NOT NULL DEFAULT 'not_observed' CHECK(recovery_relation_state='not_observed'),
                 trace_id TEXT NULL,
@@ -195,10 +241,12 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 FOREIGN KEY(parent_node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 CHECK((name_state='recorded')=(name_text IS NOT NULL)),
                 CHECK((time_authority='recorded')=(start_utc_ticks IS NOT NULL)),
+                CHECK((end_utc_ticks IS NULL AND duration_ms IS NULL) OR (time_authority='recorded' AND end_utc_ticks>=start_utc_ticks AND duration_ms=(end_utc_ticks-start_utc_ticks)/10000)),
                 CHECK((trace_id IS NULL)=(span_id IS NULL)),
                 CHECK(source_kind<>'skill_invocation' OR otel_source_identity IS NOT NULL OR sdk_source_identity IS NOT NULL),
-                CHECK((activity_state='recorded')=(activity_count IS NOT NULL)),
-                CHECK((token_state='not_observed')=(input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_creation_tokens IS NULL))
+                CHECK((skill_activity_state='recorded')=(skill_activity_count IS NOT NULL)), CHECK((tool_activity_state='recorded')=(tool_activity_count IS NOT NULL)), CHECK((subagent_activity_state='recorded')=(subagent_activity_count IS NOT NULL)), CHECK((error_activity_state='recorded')=(error_activity_count IS NOT NULL)), CHECK((retry_activity_state='recorded')=(retry_activity_count IS NOT NULL)),
+                CHECK((input_token_state='recorded')=(input_tokens IS NOT NULL)), CHECK((output_token_state='recorded')=(output_tokens IS NOT NULL)), CHECK((total_token_state='recorded')=(total_tokens IS NOT NULL)), CHECK((reasoning_token_state='recorded')=(reasoning_tokens IS NOT NULL)), CHECK((cache_read_token_state='recorded')=(cache_read_tokens IS NOT NULL)), CHECK((cache_creation_token_state='recorded')=(cache_creation_tokens IS NOT NULL)), CHECK((new_input_token_state='recorded')=(new_input_tokens IS NOT NULL)), CHECK((cache_read_ratio_state='recorded')=(cache_read_ratio_basis_points IS NOT NULL)),
+                CHECK((token_authority='none')=(available_execution_count=0)), CHECK((token_state='recorded')=(available_execution_count=1))
             );
             """),
         new("index", "local_workspace_nodes_by_parent", "local_workspace_nodes", "CREATE INDEX local_workspace_nodes_by_parent ON local_workspace_nodes(execution_id,parent_node_id,time_authority,start_utc_ticks,source_ordinal,node_id);"),
@@ -224,11 +272,18 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 json_pointer TEXT NULL CHECK(json_pointer IS NULL OR json_pointer IN ('/prompt','/tool_input','/tool_response','/error','/agent_id')),
                 selected_utf8_bytes INTEGER NULL CHECK(selected_utf8_bytes IS NULL OR selected_utf8_bytes>=0),
                 revision_input TEXT NOT NULL,
+                retention_item_id TEXT NULL,
+                retention_store_instance_id TEXT NULL,
+                source_captured_at TEXT NULL,
+                source_expires_at TEXT NULL,
+                retention_revision INTEGER NULL CHECK(retention_revision IS NULL OR retention_revision>0),
+                retention_ownership_receipt BLOB NULL CHECK(retention_ownership_receipt IS NULL OR (typeof(retention_ownership_receipt)='blob' AND length(retention_ownership_receipt)=32)),
                 retention_owner_token BLOB NULL CHECK(retention_owner_token IS NULL OR (typeof(retention_owner_token)='blob' AND length(retention_owner_token)=32)),
                 availability_state TEXT NOT NULL CHECK(availability_state IN ('available','not_captured','expired','deleted','read_denied','oversized','invalid')),
                 PRIMARY KEY(node_id,part),
                 FOREIGN KEY(node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE,
                 CHECK((availability_state='available')=(retention_owner_token IS NOT NULL)),
+                CHECK(availability_state<>'available' OR (retention_item_id IS NOT NULL AND retention_store_instance_id IS NOT NULL AND source_captured_at IS NOT NULL AND source_expires_at IS NOT NULL AND retention_revision IS NOT NULL AND retention_ownership_receipt IS NOT NULL)),
                 CHECK((locator_kind='whole_event' AND json_pointer IS NULL AND part='event_content') OR (locator_kind='json_pointer' AND json_pointer IS NOT NULL AND part<>'event_content'))
             );
             """),
@@ -376,9 +431,21 @@ internal static class LocalWorkspaceProjectionSchemaV1
 
     private static void ValidateSemanticRows(SqliteConnection connection, SqliteTransaction transaction)
     {
+        var retentionValidation = TableExists(connection, transaction, "retention_items") && TableExists(connection, transaction, "retention_store_instances") && TableExists(connection, transaction, "retention_tombstones")
+            ? """
+              OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c
+                     JOIN local_workspace_nodes n ON n.node_id=c.node_id JOIN session_events e ON e.event_id=c.source_item_id JOIN session_event_content s ON s.event_id=e.event_id
+                     LEFT JOIN retention_items i ON i.item_id=c.retention_item_id
+                     WHERE c.availability_state='available' AND (i.store_instance_id<>c.retention_store_instance_id OR i.store_instance_id<>(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
+                       OR i.store_kind<>'session_event_content' OR i.source_item_id<>c.source_item_id OR i.captured_at<>c.source_captured_at OR i.expires_at<>c.source_expires_at
+                       OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt OR s.captured_at<>c.source_captured_at OR s.expires_at<>c.source_expires_at
+                       OR s.retention_owner_token<>c.retention_owner_token OR local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,s.content_kind,s.captured_at,s.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,s.retention_owner_token,i.ownership_receipt)<>1
+                       OR i.read_denied_at IS NOT NULL OR i.deleted_at IS NOT NULL OR i.error_code IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)))
+              """
+            : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs WHERE availability_state='available')";
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT
               EXISTS(SELECT 1 FROM local_workspace_execution_headers h
                      WHERE h.execution_id<>local_workspace_execution_id(h.source_kind,h.source_identity))
@@ -387,15 +454,25 @@ internal static class LocalWorkspaceProjectionSchemaV1
                         OR NOT EXISTS(SELECT 1 FROM local_workspace_execution_headers h WHERE h.execution_id=n.execution_id AND h.session_id=n.session_id)
                         OR (n.parent_node_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM local_workspace_nodes p WHERE p.node_id=n.parent_node_id AND p.execution_id=n.execution_id)))
               OR EXISTS(SELECT 1 FROM local_workspace_node_edges e
-                     WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id))
+                     WHERE NOT EXISTS(SELECT 1 FROM local_workspace_nodes n JOIN local_workspace_nodes r ON r.node_id=e.related_node_id AND r.execution_id=n.execution_id WHERE n.node_id=e.node_id)
+                        OR (e.relation_kind='parent' AND e.relationship_authority<>(SELECT n.relationship_authority FROM local_workspace_nodes n WHERE n.node_id=e.node_id)))
               OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs c JOIN local_workspace_nodes n ON n.node_id=c.node_id
                      WHERE c.store_kind<>'session_event_content' OR n.source_kind<>'session_event' OR n.source_identity<>c.source_item_id)
+              {retentionValidation}
               OR EXISTS(SELECT 1 FROM local_workspace_nodes WHERE source_kind='skill_invocation' AND otel_source_identity IS NULL AND sdk_source_identity IS NULL)
               OR EXISTS(SELECT 1 FROM local_workspace_execution_headers GROUP BY session_id HAVING COUNT(*)>256)
               OR EXISTS(SELECT 1 FROM local_workspace_nodes GROUP BY session_id HAVING COUNT(*)>4096);
             """;
         if (Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidOperationException("local_workspace_projection_semantic_validation_failed");
+    }
+
+    private static bool TableExists(SqliteConnection connection, SqliteTransaction transaction, string name)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$name);";
+        command.Parameters.AddWithValue("$name", name);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
     }
 
 

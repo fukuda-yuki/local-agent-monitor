@@ -11,25 +11,24 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
         LocalWorkspaceProjectionSchemaTests.Execute(connection, """
             PRAGMA foreign_keys=OFF;
-            CREATE TABLE retention_items(store_kind TEXT,source_item_id TEXT,state TEXT,read_denied_at TEXT,deleted_at TEXT,error_code TEXT,expires_at TEXT);
             INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','expiring','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
-            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_runs VALUES('0198f5b8-0c00-7000-8000-000000000010','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
             INSERT INTO session_events(event_id,session_id,run_id,source_surface,source_adapter,source_event_id,type,occurred_at,content_state) VALUES
-              ('event-1','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-1','UserPromptSubmit','2026-08-24T00:00:00.0000000+00:00','available'),
-              ('event-2','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-2','PreToolUse','2026-08-24T00:00:01.0000000+00:00','available'),
-              ('event-3','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-3','PostToolUse','2026-08-24T00:00:02.0000000+00:00','available'),
-              ('event-4','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-4','PostToolUseFailure','2026-08-24T00:00:03.0000000+00:00','available'),
-              ('event-5','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-5','SubagentStart','2026-08-24T00:00:04.0000000+00:00','available'),
-              ('event-6','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk','synthetic','source-6','event','2026-08-24T00:00:05.0000000+00:00','available');
+              ('0198f5b8-0c00-7000-8000-000000000011','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-1','UserPromptSubmit','2026-08-24T00:00:00.0000000+00:00','available'),
+              ('0198f5b8-0c00-7000-8000-000000000012','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-2','PreToolUse','2026-08-24T00:00:01.0000000+00:00','available'),
+              ('0198f5b8-0c00-7000-8000-000000000013','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-3','PostToolUse','2026-08-24T00:00:02.0000000+00:00','available'),
+              ('0198f5b8-0c00-7000-8000-000000000014','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-4','PostToolUseFailure','2026-08-24T00:00:03.0000000+00:00','available'),
+              ('0198f5b8-0c00-7000-8000-000000000015','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-5','SubagentStart','2026-08-24T00:00:04.0000000+00:00','available'),
+              ('0198f5b8-0c00-7000-8000-000000000016','0198f5b8-0c00-7000-8000-000000000001','0198f5b8-0c00-7000-8000-000000000010','copilot-sdk','synthetic','source-6','event','2026-08-24T00:00:05.0000000+00:00','available');
             UPDATE session_events SET source_adapter='claude-code-hook',schema_fingerprint=printf('%064d',0);
             INSERT INTO session_event_content SELECT event_id,'application/json',CASE type
               WHEN 'UserPromptSubmit' THEN '{"prompt":"hello"}' WHEN 'PreToolUse' THEN '{"tool_input":{}}'
               WHEN 'PostToolUse' THEN '{"tool_response":{"ok":true}}' WHEN 'PostToolUseFailure' THEN '{"error":"failed"}'
               WHEN 'SubagentStart' THEN '{"agent_id":"agent-1"}' ELSE '{}' END,
               '2026-08-24T00:00:00.0000000+00:00','2026-09-01T00:00:00.0000000+00:00',randomblob(32) FROM session_events;
-            INSERT INTO retention_items SELECT 'session_event_content',event_id,'expiring',NULL,NULL,NULL,'2026-09-01T00:00:00.0000000+00:00' FROM session_events;
             PRAGMA foreign_keys=ON;
             """);
+        InstallCurrentRetentionRows(connection);
 
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
 
@@ -38,6 +37,10 @@ public sealed class LocalWorkspaceProjectionBackfillTests
             LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT part||':'||availability_state FROM local_workspace_node_content_refs ORDER BY part;"));
         Assert.Equal(["/agent_id", "/error", "/prompt", "/tool_input", "/tool_response", "whole"],
             LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT COALESCE(json_pointer,'whole') FROM local_workspace_node_content_refs ORDER BY COALESCE(json_pointer,'whole');"));
+
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "UPDATE retention_items SET ownership_receipt=zeroblob(32) WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';");
+        using (var transaction = connection.BeginTransaction()) { StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
+        Assert.Equal(["invalid:1"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT availability_state||':'||(retention_owner_token IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id='0198f5b8-0c00-7000-8000-000000000011';"));
     }
 
     [Fact]
@@ -254,10 +257,31 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         Assert.Equal(["llm_span:1", "session_run:0"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT authority||':'||authority_rank FROM local_workspace_token_observations ORDER BY authority;"));
         Assert.Equal(["10"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "WITH ranked AS (SELECT input_tokens,row_number() OVER(PARTITION BY execution_id ORDER BY authority_rank) n FROM local_workspace_token_observations) SELECT CAST(input_tokens AS TEXT) FROM ranked WHERE n=1;"));
         Assert.Equal(["recorded:2"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT state||':'||count FROM local_workspace_session_activity WHERE kind='retry';"));
-        Assert.Equal(["recorded:10:1:not_observed:not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
-            "SELECT token_state||':'||input_tokens||':'||activity_count||':'||retry_relation_state||':'||recovery_relation_state FROM local_workspace_nodes WHERE source_kind='execution_root';"));
+        Assert.Equal(["recorded:10:not_observed:not_observed:not_observed:not_observed"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT token_state||':'||input_tokens||':'||skill_activity_state||':'||tool_activity_state||':'||retry_relation_state||':'||recovery_relation_state FROM local_workspace_nodes WHERE source_kind='execution_root';"));
         Assert.Equal(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
             "SELECT trace_id||':'||span_id FROM local_workspace_nodes WHERE source_kind='session_event';"));
+    }
+
+    [Fact]
+    public void DetailFactsPersistClosedActivityTimingAndTokenAuthority()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','completed','full',NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'gpt-5','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:01:00.0000000+00:00',10,3,13,'completed');
+            INSERT INTO session_events VALUES('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,NULL,NULL,'synthetic','source-a','PreToolUse','2026-08-24T00:00:01.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            """);
+
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["not_observed:null|recorded:1|recorded:0|recorded:0|not_observed:null"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT skill_activity_state||':'||COALESCE(skill_activity_count,'null')||'|'||tool_activity_state||':'||tool_activity_count||'|'||subagent_activity_state||':'||subagent_activity_count||'|'||error_activity_state||':'||error_activity_count||'|'||retry_activity_state||':'||COALESCE(retry_activity_count,'null') FROM local_workspace_execution_headers;"));
+        Assert.Equal(["session_run:recorded:10:3:13:not_observed:null:null:null"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT token_authority||':'||token_state||':'||input_tokens||':'||output_tokens||':'||total_tokens||':'||reasoning_token_state||':'||COALESCE(reasoning_tokens,'null')||':'||COALESCE(cache_read_tokens,'null')||':'||COALESCE(cache_creation_tokens,'null') FROM local_workspace_execution_headers;"));
+        Assert.Equal(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT trace_id FROM local_workspace_execution_headers;"));
+        Assert.Equal(["recorded:639231264010000000:639231264010000000:0"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection, "SELECT time_authority||':'||start_utc_ticks||':'||end_utc_ticks||':'||duration_ms FROM local_workspace_nodes WHERE source_identity='event-a';"));
     }
 
     [Theory]
@@ -291,6 +315,30 @@ public sealed class LocalWorkspaceProjectionBackfillTests
         }
         public bool VerifyGenerationIdentity(ISkillRegistryGenerationCapture capture, ISkillRegistryGenerationLease lease) => false;
         public bool IsProducerTupleAccepted(ISkillRegistryGenerationLease lease, SkillRegistryProducerTuple tuple) => false;
+    }
+
+    private static void InstallCurrentRetentionRows(Microsoft.Data.Sqlite.SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionSchemaMigrator.Apply(connection, transaction);
+        using var storeCommand = connection.CreateCommand(); storeCommand.Transaction = transaction; storeCommand.CommandText = "SELECT store_instance_id FROM retention_store_instances WHERE id=1;";
+        var store = Assert.IsType<string>(storeCommand.ExecuteScalar());
+        using var read = connection.CreateCommand(); read.Transaction = transaction;
+        read.CommandText = "SELECT c.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token FROM session_event_content c JOIN session_events e ON e.event_id=c.event_id ORDER BY c.event_id;";
+        using var reader = read.ExecuteReader();
+        var rows = new List<(string EventId,string Kind,string Captured,string Expires,string Session,string? Run,string Adapter,string SourceEvent,byte[] Token)>();
+        while (reader.Read()) rows.Add((reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),reader.IsDBNull(5)?null:reader.GetString(5),reader.GetString(6),reader.GetString(7),(byte[])reader.GetValue(8)));
+        reader.Close();
+        foreach (var row in rows)
+        {
+            var captured = DateTimeOffset.ParseExact(row.Captured,"O",System.Globalization.CultureInfo.InvariantCulture);
+            var expires = DateTimeOffset.ParseExact(row.Expires,"O",System.Globalization.CultureInfo.InvariantCulture);
+            var receipt = CopilotAgentObservability.Persistence.Sqlite.Retention.RetentionOwnershipReceipt.CreateSession(new(store,row.EventId,row.Kind,row.Captured,captured.UtcDateTime.Ticks,row.Expires,expires.UtcDateTime.Ticks,row.Session,row.Run,row.Adapter,row.SourceEvent,row.Token));
+            using var insert = connection.CreateCommand(); insert.Transaction=transaction;
+            insert.CommandText="INSERT INTO retention_items(item_id,store_instance_id,store_kind,source_item_id,receipt_version,ownership_receipt,captured_at,expires_at,policy_id,policy_version,state,revision,adapter_coverage_version) VALUES($item,$store,'session_event_content',$source,1,$receipt,$captured,$expires,'raw-default-90d',1,'expiring',1,1);";
+            insert.Parameters.AddWithValue("$item","item-"+row.EventId); insert.Parameters.AddWithValue("$store",store); insert.Parameters.AddWithValue("$source",row.EventId); insert.Parameters.AddWithValue("$receipt",receipt); insert.Parameters.AddWithValue("$captured",row.Captured); insert.Parameters.AddWithValue("$expires",row.Expires); insert.ExecuteNonQuery();
+        }
+        transaction.Commit();
     }
 
     private sealed class TestReadTransaction(Microsoft.Data.Sqlite.SqliteConnection connection) : ILocalRepositoryReadTransaction

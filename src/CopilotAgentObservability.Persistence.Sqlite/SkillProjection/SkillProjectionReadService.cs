@@ -46,7 +46,8 @@ internal sealed record SkillProjectionCanonicalInvocation(
     string? ExecutionSourceIdentity = null,
     string? OtelCarrierEventId = null,
     string? SdkCarrierEventId = null,
-    string? SdkSourceParentEventId = null)
+    string? SdkSourceParentEventId = null,
+    string? SdkSourceAdapter = null)
 {
     internal IEnumerable<SkillProjectionCurrentSearchFact> ProjectSearchFacts()
     {
@@ -578,7 +579,8 @@ internal sealed class SkillProjectionReadService
         string? SpanId,
         string? ExecutionSourceIdentity,
         string? CarrierEventId,
-        string? SourceParentEventId);
+        string? SourceParentEventId,
+        string? SourceAdapter);
 
     private static SkillProjectionCanonicalInvocation ToOtelOnlyCanonical(InvocationFact row) => new(
         row.Fact.SourceIdentity,
@@ -593,6 +595,7 @@ internal sealed class SkillProjectionReadService
         row.ExecutionSourceIdentity is null ? null : "session_run",
         row.ExecutionSourceIdentity,
         row.CarrierEventId,
+        null,
         null,
         null);
 
@@ -610,7 +613,8 @@ internal sealed class SkillProjectionReadService
         row.ExecutionSourceIdentity,
         null,
         row.CarrierEventId,
-        row.SourceParentEventId);
+        row.SourceParentEventId,
+        row.SourceAdapter);
 
     private static SkillProjectionCanonicalInvocation ToExactPairCanonical(InvocationFact otel, InvocationFact sdk) => new(
         "producer:" + otel.TraceId + ":" + otel.SpanId,
@@ -626,7 +630,8 @@ internal sealed class SkillProjectionReadService
         otel.ExecutionSourceIdentity is not null && string.Equals(otel.ExecutionSourceIdentity, sdk.ExecutionSourceIdentity, StringComparison.Ordinal) ? otel.ExecutionSourceIdentity : null,
         otel.CarrierEventId,
         sdk.CarrierEventId,
-        sdk.SourceParentEventId);
+        sdk.SourceParentEventId,
+        sdk.SourceAdapter);
 
     private static InvocationFact[] DeduplicateExactProducerPairs(IEnumerable<InvocationFact> facts) =>
         facts.GroupBy(static row =>
@@ -681,7 +686,7 @@ internal sealed class SkillProjectionReadService
         command.Parameters.AddWithValue("$ids", System.Text.Json.JsonSerializer.Serialize(sessionIds));
         using var reader = command.ExecuteReader();
         var result = new List<InvocationFact>();
-        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null));
+        while (reader.Read()) result.Add(new(new(reader.GetString(0), "otel:" + reader.GetString(1), reader.GetString(2)), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), null, null));
         return result;
     }
 
@@ -711,7 +716,7 @@ internal sealed class SkillProjectionReadService
                     unavailable.Add(candidate.SessionId);
                 if (authorizationResult.Authorization is null) continue;
                 result.Add(new(new(candidate.SessionId, "sdk:" + candidate.ClaimId, candidate.SkillName, candidate.ExpiresAt),
-                    candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId));
+                    candidate.ProducerTraceId, candidate.ProducerSpanId, candidate.RunId, candidate.EventId, candidate.SourceParentEventId, candidate.SourceAdapter));
             }
         }
         finally
