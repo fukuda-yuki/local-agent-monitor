@@ -74,9 +74,19 @@ No SQLite text maximum, offset-string ordering, or exception-throwing parse is
 used. Negative epoch milliseconds remain valid `Int64` values.
 
 Session order remains `sort_group ASC, sort_epoch_ms DESC, session_id DESC`.
-`from` is inclusive and `to` exclusive against this same accepted instant;
-invalid-time rows do not match a non-null date bound. The existing #136 cursor
-continues to carry that exact tuple.
+After exact seven-fraction UTC parsing, each non-null `from` or `to` bound is
+converted to a signed Unix epoch millisecond as
+`floor((UTC instant - 1970-01-01T00:00:00Z) / 1ms)`, matching
+`DateTimeOffset.ToUnixTimeMilliseconds` and the projection/cursor basis. The
+accepted Session epoch millisecond is compared with `from` inclusive (`>=`) and
+`to` exclusive (`<`); invalid-time rows do not match a non-null date bound.
+Sub-millisecond fractions add no comparison precision. Pre-epoch values floor
+toward negative infinity, so one tick before the epoch becomes `-1ms`. Two
+wire-distinct bounds in the same millisecond bucket may consequently form an
+empty effective interval even though parser-level `from < to` holds. The
+existing #136 cursor continues to carry the exact sort tuple and binds the
+exact canonical request semantics and wire values, never substituted quantized
+timestamp text.
 
 Timing fields are parsed independently of the ordering fallback. Valid start
 and end values are emitted in canonical UTC
