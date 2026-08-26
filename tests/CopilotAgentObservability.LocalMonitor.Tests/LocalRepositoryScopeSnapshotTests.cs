@@ -583,6 +583,66 @@ public sealed class LocalRepositoryScopeSnapshotTests
         Assert.Equal(2, database.ReadSessionSource());
     }
 
+    [Theory]
+    [InlineData("Summary")]
+    [InlineData("Timeline")]
+    [InlineData("Node")]
+    public async Task ReadDetailAsync_UsesOneLeaseConnectionAndTransactionAndPreservesTheSnapshot(
+        string kindName)
+    {
+        var kind = Enum.Parse<LocalRepositorySessionDetailRequestKind>(kindName);
+        using var database = new ScopeDatabase();
+        var sessionId = SessionId(1);
+        var gate = new CountingPublicationGate();
+        var connections = new HashSet<SqliteConnection>(ReferenceEqualityComparer.Instance);
+        var transactions = new HashSet<SqliteTransaction>(ReferenceEqualityComparer.Instance);
+        var values = new List<long>();
+        var session = new FakeSessionContributor(async (capability, _, token) =>
+        {
+            values.Add(await Observe(capability, token));
+            database.UpdateSessionSource(2);
+            return new([new FakeSessionRow(sessionId, "detail-snapshot")]);
+        });
+        var archive = new FakeArchiveContributor(async (capability, input, token) =>
+        {
+            values.Add(await Observe(capability, token));
+            return ActiveArchiveFacts(input);
+        });
+        var detail = new FakeDetailContributor(async (capability, _, token) =>
+        {
+            values.Add(await Observe(capability, token));
+            return new([], [], [], [], [], [], null, null, "canonical", "registry");
+        });
+        var openCount = 0;
+        var request = new LocalRepositorySessionDetailRequest(kind, sessionId,
+            ExecutionId: kind == LocalRepositorySessionDetailRequestKind.Timeline ? null : null,
+            NodeId: kind == LocalRepositorySessionDetailRequestKind.Node ? "node-00000000000000000000000000000001" : null);
+
+        var snapshot = await new SqliteLocalRepositoryScopeSnapshotService(
+            database.Path, session, archive, detail,
+            connectionOpenedObserver: _ => openCount++,
+            connectionFactory: database.CreateReadOnlyConnection,
+            publicationGate: gate)
+            .ReadDetailAsync(request, CancellationToken.None);
+
+        Assert.Equal(sessionId, snapshot.Session.SessionId);
+        Assert.Equal([1L, 1L, 1L], values);
+        Assert.Equal(2, database.ReadSessionSource());
+        Assert.Equal(1, gate.AcquireCount);
+        Assert.Equal(1, gate.DisposeCount);
+        Assert.Equal(1, openCount);
+        Assert.Single(connections);
+        Assert.Single(transactions);
+
+        async ValueTask<long> Observe(ILocalRepositoryReadTransaction capability, CancellationToken token) =>
+            await capability.ReadAsync(async (connection, transaction, innerToken) =>
+            {
+                connections.Add(connection);
+                transactions.Add(transaction);
+                return await ScalarAsync(connection, transaction, "SELECT value FROM session_snapshot_source;", innerToken);
+            }, token);
+    }
+
     [Fact]
     public async Task ReadAsync_RejectsNestedAndParallelCapabilityReads()
     {
@@ -1666,6 +1726,41 @@ public sealed class LocalRepositoryScopeSnapshotTests
             CallCount++;
             LastCapability = transaction;
             return read(transaction, input, cancellationToken);
+        }
+    }
+
+    private sealed class FakeDetailContributor(
+        Func<ILocalRepositoryReadTransaction, LocalRepositorySessionDetailRequest, CancellationToken, ValueTask<LocalWorkspaceSessionDetailContribution>> read)
+        : ILocalWorkspaceSessionDetailSnapshotContributor
+    {
+        public ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
+            ILocalRepositoryReadTransaction transaction,
+            LocalRepositorySessionDetailRequest request,
+            CancellationToken cancellationToken) => read(transaction, request, cancellationToken);
+    }
+
+    private sealed class CountingPublicationGate : ILocalWorkspacePublicationGate
+    {
+        internal int AcquireCount { get; private set; }
+        internal int DisposeCount { get; private set; }
+
+        public ValueTask<IAsyncDisposable> AcquireReadAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AcquireCount++;
+            return ValueTask.FromResult<IAsyncDisposable>(new Lease(this));
+        }
+
+        public ValueTask<IAsyncDisposable> AcquireWriteAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        private sealed class Lease(CountingPublicationGate owner) : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync()
+            {
+                owner.DisposeCount++;
+                return ValueTask.CompletedTask;
+            }
         }
     }
 
