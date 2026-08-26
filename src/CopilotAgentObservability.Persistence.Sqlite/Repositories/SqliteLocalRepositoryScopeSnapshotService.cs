@@ -251,7 +251,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         {
             if (execution.SessionId != sessionId || !executions.TryAdd(execution.ExecutionId, execution)
                 || execution.ExecutionId != LocalWorkspaceProjectionStore.StableExecutionId(sessionId, execution.SourceKind, execution.SourceIdentity)
-                || execution.SourceOrdinal < 0 || string.IsNullOrWhiteSpace(execution.SourceKind) || string.IsNullOrWhiteSpace(execution.SourceIdentity)
+                || execution.SourceOrdinal < 0 || execution.SourceKind != "session_run" || string.IsNullOrWhiteSpace(execution.SourceIdentity)
                 || execution.Lifecycle is not ("selected" or "started" or "completed" or "failed" or "deselected" or "unknown")
                 || execution.Status is not ("active" or "completed" or "failed" or "unknown")
                 || !ValidTime(execution.TimeAuthority, execution.StartUtcTicks, execution.EndUtcTicks, execution.DurationMilliseconds)
@@ -265,7 +265,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         {
             if (node.SessionId != sessionId || !executions.ContainsKey(node.ExecutionId) || !nodes.TryAdd(node.NodeId, node)
                 || node.NodeId != LocalWorkspaceProjectionStore.StableNodeId(node.SourceKind, node.SourceIdentity)
-                || node.SourceOrdinal < 0 || string.IsNullOrWhiteSpace(node.SourceKind) || string.IsNullOrWhiteSpace(node.SourceIdentity)
+                || node.SourceOrdinal < 0 || node.SourceKind is not ("execution_root" or "session_event" or "skill_invocation" or "unknown_relation_group") || string.IsNullOrWhiteSpace(node.SourceIdentity)
                 || node.RelationshipAuthority is not ("exact" or "explicit" or "unknown")
                 || node.Kind is not ("execution" or "agent" or "skill" or "tool" or "subagent" or "event" or "error" or "retry" or "permission" or "unknown_relation_group")
                 || node.NameState is not ("recorded" or "not_observed" or "invalid")
