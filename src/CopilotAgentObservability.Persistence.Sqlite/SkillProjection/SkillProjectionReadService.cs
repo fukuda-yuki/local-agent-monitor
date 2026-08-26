@@ -602,8 +602,8 @@ internal sealed class SkillProjectionReadService
         {
             var sessionOtel = otelBySession.GetValueOrDefault(sessionId, []);
             var sessionSdk = sdkBySession.GetValueOrDefault(sessionId, []);
-            sessionOtel = sessionOtel.GroupBy(static row => (row.TraceId, row.SpanId)).Select(static group => group.First()).ToArray();
-            sessionSdk = sessionSdk.GroupBy(static row => (row.TraceId, row.SpanId)).Select(static group => group.First()).ToArray();
+            sessionOtel = DeduplicateExactProducerPairs(sessionOtel);
+            sessionSdk = DeduplicateExactProducerPairs(sessionSdk);
             if (sessionOtel.Length == 0 && sessionSdk.Length == 0) continue;
 
             if (sessionOtel.Length == 0)
@@ -639,6 +639,15 @@ internal sealed class SkillProjectionReadService
     }
 
     private sealed record InvocationFact(SkillProjectionCurrentSearchFact Fact, string? TraceId, string? SpanId);
+
+    private static InvocationFact[] DeduplicateExactProducerPairs(IEnumerable<InvocationFact> facts) =>
+        facts.GroupBy(static row =>
+                !string.IsNullOrEmpty(row.TraceId) && !string.IsNullOrEmpty(row.SpanId)
+                    ? "producer:" + row.TraceId + "\0" + row.SpanId
+                    : "claim:" + row.Fact.SourceIdentity,
+                StringComparer.Ordinal)
+            .Select(static group => group.First())
+            .ToArray();
     private sealed class FixedProjectionTimeProvider(DateTimeOffset value) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => value;
