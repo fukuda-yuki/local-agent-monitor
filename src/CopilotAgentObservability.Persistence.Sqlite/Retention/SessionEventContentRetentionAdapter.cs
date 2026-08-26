@@ -28,23 +28,15 @@ internal sealed class SessionEventContentRetentionAdapter : IRetentionDeletionAd
             : await publicationGate.AcquireReadAsync(context.CancellationToken);
         return await catalog.ExecuteSqliteDeletionAsync(context, (connection, transaction, grant) =>
         {
-            string? sessionId;
-            using (var owner = connection.CreateCommand())
-            {
-                owner.Transaction = transaction;
-                owner.CommandText = "SELECT session_id FROM session_events WHERE event_id=$event_id;";
-                owner.Parameters.AddWithValue("$event_id", grant.OwnershipKey.SourceItemId);
-                sessionId = owner.ExecuteScalar() as string;
-            }
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = "DELETE FROM session_event_content WHERE event_id=$event_id AND retention_owner_token=$retention_owner_token;";
             command.Parameters.AddWithValue("$event_id", grant.OwnershipKey.SourceItemId);
             grant.BindSourceToken(command);
             var deleted = command.ExecuteNonQuery() == 1;
-            if (deleted && sessionId is not null)
-                participant.RefreshSessions(connection, transaction, [sessionId], timeProvider.GetUtcNow());
             return ValueTask.FromResult(deleted ? 1 : -1);
-        });
+        }, (connection, transaction, grant, completedAt) =>
+            participant.CompleteSessionEventContentDeletion(
+                connection, transaction, grant.OwnershipKey.SourceItemId, completedAt));
     }
 }

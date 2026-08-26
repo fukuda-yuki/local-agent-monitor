@@ -299,5 +299,7 @@ public sealed class RawRecordRetentionAdapterTests
             delete.CommandText = "DELETE FROM local_workspace_session_search_facts WHERE session_id='session-1';";
             delete.ExecuteNonQuery();
         }
+
+        public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now) { }
     }
 }

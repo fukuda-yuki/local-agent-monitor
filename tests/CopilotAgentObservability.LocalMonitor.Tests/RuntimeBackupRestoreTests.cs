@@ -81,7 +81,7 @@ public sealed class RuntimeBackupRestoreTests
         Assert.True(restored.Success, restored.ErrorCode + ":" + string.Join(',', checkpoints));
         Assert.Equal(expected, temp.SnapshotOwnedRows(temp.Target, "local_workspace_"));
         using var verification = temp.Open(temp.Target);
-        Assert.Equal(12, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
+        Assert.Equal(13, LocalWorkspaceProjectionSchemaV1.TableNames.Length);
         Assert.All(LocalWorkspaceProjectionSchemaV1.TableNames, table => Assert.Equal(1L,
             temp.Scalar<long>(verification, $"SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='{table}';")));
         Assert.Equal(4L, temp.Scalar<long>(verification, "SELECT version FROM schema_version WHERE component='local_workspace_projection';"));
@@ -536,7 +536,7 @@ public sealed class RuntimeBackupRestoreTests
         using (var database = temp.Open(temp.Source))
         {
             LocalWorkspaceProjectionSchemaV1.Ensure(database, temp.Clock.GetUtcNow());
-            temp.Execute(database, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_node_content_refs; DROP TABLE local_workspace_node_edges; DROP TABLE local_workspace_nodes; DROP TABLE local_workspace_execution_headers; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
+            temp.Execute(database, "DELETE FROM schema_version WHERE component='local_workspace_projection'; DROP TABLE local_workspace_node_content_refs; DROP TABLE local_workspace_content_tombstones; DROP TABLE local_workspace_node_edges; DROP TABLE local_workspace_nodes; DROP TABLE local_workspace_execution_headers; DROP TABLE local_workspace_token_observations; DROP TABLE local_workspace_span_facts; DROP TABLE local_workspace_session_activity; DROP TABLE local_workspace_session_models; DROP TABLE local_workspace_session_sources; DROP TABLE local_workspace_session_search_facts; DROP TABLE local_workspace_projection_state; DROP TABLE local_workspace_sessions;");
             foreach (var sql in LocalWorkspaceProjectionSchemaV1.ExactV2SchemaSql) temp.Execute(database, sql);
             temp.Execute(database, "INSERT INTO schema_version(component,version) VALUES('local_workspace_projection',2);");
         }
@@ -3150,6 +3150,7 @@ public sealed class RuntimeBackupRestoreTests
                     + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
                     + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
                     + "DROP TABLE IF EXISTS local_workspace_node_content_refs;"
+                    + "DROP TABLE IF EXISTS local_workspace_content_tombstones;"
                     + "DROP TABLE IF EXISTS local_workspace_node_edges;"
                     + "DROP TABLE IF EXISTS local_workspace_nodes;"
                     + "DROP TABLE IF EXISTS local_workspace_execution_headers;"

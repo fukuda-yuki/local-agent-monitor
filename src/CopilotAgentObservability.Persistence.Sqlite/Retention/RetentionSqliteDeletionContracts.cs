@@ -17,6 +17,12 @@ internal delegate ValueTask<int> RetentionSqliteSourceMutation(
     SqliteTransaction transaction,
     RetentionSqliteDeletionGrant grant);
 
+internal delegate void RetentionSqlitePostCompletionMutation(
+    SqliteConnection connection,
+    SqliteTransaction transaction,
+    RetentionSqliteDeletionGrant grant,
+    DateTimeOffset completedAt);
+
 internal sealed class RetentionSqliteDeletionGrant
 {
     private readonly byte[] sourceToken;

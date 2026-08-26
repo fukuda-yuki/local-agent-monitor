@@ -429,6 +429,49 @@ public sealed class LocalWorkspaceProjectionBackfillTests
                 "SELECT token_state||':'||available_execution_count||'|'||input_token_state||':'||input_tokens||'|'||output_token_state||':'||output_tokens||'|'||total_token_state||':'||(total_tokens IS NULL) FROM local_workspace_execution_headers;"));
     }
 
+    [Fact]
+    public void CacheReadGreaterThanInputIsInconsistentAndDerivedValuesAreNull()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events VALUES('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO monitor_spans VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'chat','llm_call',10,3,13,2,11,1);
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+
+        Assert.Equal(["inconsistent|inconsistent:null|inconsistent:null|inconsistent:null"],
+            LocalWorkspaceProjectionSchemaTests.Strings(connection,
+                "SELECT token_state||'|'||cache_read_token_state||':'||COALESCE(cache_read_tokens,'null')||'|'||new_input_token_state||':'||COALESCE(new_input_tokens,'null')||'|'||cache_read_ratio_state||':'||COALESCE(cache_read_ratio_basis_points,'null') FROM local_workspace_execution_headers;"));
+    }
+
+    [Fact]
+    public void RetryTotalsRemainScopedToTheirExactExecution()
+    {
+        using var connection = LocalWorkspaceProjectionSchemaTests.OpenSessionDatabase();
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, """
+            CREATE TABLE monitor_spans(raw_record_id INTEGER,trace_id TEXT,span_id TEXT,span_ordinal INTEGER,operation TEXT,category TEXT,input_tokens INTEGER,output_tokens INTEGER,total_tokens INTEGER,reasoning_tokens INTEGER,cache_read_tokens INTEGER,cache_creation_tokens INTEGER);
+            INSERT INTO sessions VALUES('0198f5b8-0c00-7000-8000-000000000001','active','partial',NULL,NULL,NULL,NULL,'2026-08-24T00:00:00.0000000+00:00','not_captured','2026-08-24T00:00:00.0000000+00:00','2026-08-24T00:00:00.0000000+00:00');
+            INSERT INTO session_runs VALUES
+              ('run-a','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active'),
+              ('run-b','0198f5b8-0c00-7000-8000-000000000001','copilot-sdk',NULL,'cccccccccccccccccccccccccccccccc',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'active');
+            INSERT INTO session_events VALUES
+              ('event-a','0198f5b8-0c00-7000-8000-000000000001','run-a','copilot-sdk',NULL,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'otel-exact','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb','otel.span','2026-08-24T00:00:00.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+              ('event-b','0198f5b8-0c00-7000-8000-000000000001','run-b','copilot-sdk',NULL,'cccccccccccccccccccccccccccccccc',NULL,'otel-exact','cccccccccccccccccccccccccccccccc/dddddddddddddddd','otel.span','2026-08-24T00:00:01.0000000+00:00','not_captured',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+            INSERT INTO monitor_spans VALUES
+              (1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb',0,'chat','llm_call',NULL,NULL,NULL,NULL,NULL,NULL),
+              (2,'cccccccccccccccccccccccccccccccc','dddddddddddddddd',0,'chat','llm_call',NULL,NULL,NULL,NULL,NULL,NULL);
+            """);
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.Parse("2026-08-25T00:00:00Z"));
+        LocalWorkspaceProjectionSchemaTests.Execute(connection, "INSERT INTO local_workspace_span_facts VALUES(1,0,2,NULL),(2,0,5,NULL);");
+        using (var transaction = connection.BeginTransaction()) { StructuralParticipant.RefreshSessions(connection, transaction, ["0198f5b8-0c00-7000-8000-000000000001"], DateTimeOffset.Parse("2026-08-25T00:00:00Z")); transaction.Commit(); }
+
+        Assert.Equal(["run-a:2", "run-b:5"], LocalWorkspaceProjectionSchemaTests.Strings(connection,
+            "SELECT source_identity||':'||retry_activity_count FROM local_workspace_execution_headers ORDER BY source_identity;"));
+    }
+
     [Theory]
     [InlineData("gap_before_capture", "not_captured", "capture_gap")]
     [InlineData(null, "unsupported", "source_unsupported")]

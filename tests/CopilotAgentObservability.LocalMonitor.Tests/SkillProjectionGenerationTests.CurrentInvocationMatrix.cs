@@ -7,11 +7,26 @@ using Microsoft.Data.Sqlite;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text;
+using System.Reflection;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
 public sealed class SkillProjectionGenerationTests_CurrentInvocationMatrix
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ActualRegistryPublicationCommitsOrRollsBackGenerationSensitiveV4SkillRows(bool injectFailure)
+    {
+        using var fixture = new CurrentInvocationProjectionFixture();
+        fixture.SeedSdkOnly("registry-publication", "generation-sensitive-skill");
+
+        var result = fixture.PublishActualRegistryGeneration("registry-publication", injectFailure);
+
+        Assert.Equal(0, result.BeforeRows);
+        Assert.Equal(injectFailure ? 0 : 1, result.AfterRows);
+        Assert.Equal(injectFailure, result.OldPointerStillCurrent);
+    }
     [Fact]
     public void PersistedSqliteMatrix_CanonicalSdkReaderHasFixedPreparedStatementSequenceForOneTwoHundredFiftySixAndTenThousandClaims()
     {
@@ -409,17 +424,59 @@ internal sealed class CurrentInvocationProjectionFixture : IDisposable
         authority.ResetObservations();
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: true);
-        var commandExecutions = 0;
-        using var observation = SqliteCommandExecutionObserver.Begin(() => commandExecutions++);
+        using var observer = new LocalWorkspaceProjectionSchemaTests.NativeStatementExecutionObserver(connection);
         var result = SkillProjectionReadService.ReadCurrentInvocationProjection(
             connection, transaction, sessions.Values, ReadAt, authority);
-        return (result, commandExecutions);
+        return (result, observer.ExecutionCount);
     }
 
     internal int RegistryCaptureCount => authority.CaptureCount;
     internal int RegistryLeaseCount => authority.LeaseCount;
     internal int RegistryVerifyCount => authority.VerifyCount;
     internal int RegistryTupleAuthorizationCount => authority.TupleAuthorizationCount;
+
+    internal (int BeforeRows, int AfterRows, bool OldPointerStillCurrent) PublishActualRegistryGeneration(string sessionKey, bool injectFailure)
+    {
+        var tuple = new SkillInvocationV2CompatibilityTuple(
+            "1.0.65", "adapter-version-1", "normalization-1",
+            "github-copilot-sdk.skill-invoked.v1", Fingerprint);
+        var rejected = Registry([]);
+        var accepted = Registry([new(tuple, SkillInvocationV2CompatibilityDisposition.Accepted)]);
+        var gate = new LocalWorkspacePublicationGate();
+        var provider = new CopilotAgentObservability.LocalMonitor.Sessions.SkillInvocationV2.SkillInvocationV2RegistryProviderV1(rejected, gate);
+        using var connection = Open();
+        LocalWorkspaceProjectionSchemaV1.Ensure(connection, ReadAt, provider);
+        var before = CountSkillRows(connection, sessions[sessionKey]);
+        var old = Assert.IsAssignableFrom<ISkillRegistryGenerationCapture>(provider.CaptureGeneration());
+        provider.CurrentGenerationChanging += proposed =>
+        {
+            using var transaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.RefreshSessions(connection, transaction, [sessions[sessionKey]], ReadAt, proposed);
+            if (injectFailure) throw new InvalidOperationException("injected_generation_sensitive_refresh_failure");
+            transaction.Commit();
+        };
+        if (injectFailure)
+            Assert.Throws<InvalidOperationException>(() => provider.PublishGeneration(accepted));
+        else
+            provider.PublishGeneration(accepted);
+        var oldStillCurrent = provider.TryAcquireGenerationReadLease(old, out var lease);
+        lease?.Dispose();
+        return (before, CountSkillRows(connection, sessions[sessionKey]), oldStillCurrent);
+    }
+
+    private static int CountSkillRows(SqliteConnection connection, string sessionId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM local_workspace_nodes WHERE session_id=$session AND source_kind='skill_invocation';";
+        command.Parameters.AddWithValue("$session", sessionId);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static SkillInvocationV2ArtifactRegistry Registry(IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry> entries) =>
+        (SkillInvocationV2ArtifactRegistry)typeof(SkillInvocationV2ArtifactRegistry)
+            .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
+                [typeof(int), typeof(IReadOnlyList<SkillInvocationV2CompatibilityRegistryRevision>), typeof(IReadOnlyList<SkillInvocationV2CompatibilityRegistryEntry>)], null)!
+            .Invoke([1, Array.Empty<SkillInvocationV2CompatibilityRegistryRevision>(), entries]);
 
     internal SkillProjectionCurrentInvocationProjection Read(string sessionKey) => ReadAll()[sessions[sessionKey]];
 

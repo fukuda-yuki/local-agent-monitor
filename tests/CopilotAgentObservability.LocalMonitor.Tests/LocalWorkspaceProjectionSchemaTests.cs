@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using SQLitePCL;
+using System.Runtime.InteropServices;
 
 namespace CopilotAgentObservability.LocalMonitor.Tests;
 
@@ -18,7 +19,7 @@ public sealed class LocalWorkspaceProjectionSchemaTests
             ["local_workspace_projection:4"],
             Strings(connection, "SELECT component || ':' || version FROM schema_version WHERE component='local_workspace_projection';"));
         Assert.Equal(
-            ["local_workspace_execution_headers", "local_workspace_node_content_refs", "local_workspace_node_edges", "local_workspace_nodes", "local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
+            ["local_workspace_content_tombstones", "local_workspace_execution_headers", "local_workspace_node_content_refs", "local_workspace_node_edges", "local_workspace_nodes", "local_workspace_projection_state", "local_workspace_session_activity", "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_sources", "local_workspace_sessions", "local_workspace_span_facts", "local_workspace_token_observations"],
             Strings(connection, "SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'local_workspace_%' ORDER BY name;"));
     }
 
@@ -256,6 +257,19 @@ public sealed class LocalWorkspaceProjectionSchemaTests
     }
 
     [Fact]
+    public void NativeStatementObserverCountsEveryRepeatedTopLevelExecution()
+    {
+        using var connection = OpenSessionDatabase();
+        using var observer = new NativeStatementExecutionObserver(connection);
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT 1;";
+            for (var index = 0; index < 10_000; index++) command.ExecuteScalar();
+        }
+        Assert.Equal(10_000, observer.ExecutionCount);
+    }
+
+    [Fact]
     public void ExactParentProofDoesNotUseSessionMatchKind()
     {
         using var connection = OpenSessionDatabase();
@@ -343,16 +357,17 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         }
         LocalWorkspaceProjectionSchemaV1.Ensure(connection, DateTimeOffset.UnixEpoch);
 
-        var commandExecutions = 0;
-        using var observation = SqliteCommandExecutionObserver.Begin(() => commandExecutions++);
-        using var observedTransaction = connection.BeginTransaction();
-        LocalWorkspaceProjectionStore.RefreshSessionsStructural(
-            connection,
-            observedTransaction,
-            ["0198f5b8-0c00-7000-8000-000000000001"],
-            DateTimeOffset.UnixEpoch);
-        observedTransaction.Rollback();
-        return commandExecutions;
+        using var observer = new NativeStatementExecutionObserver(connection);
+        {
+            using var observedTransaction = connection.BeginTransaction();
+            LocalWorkspaceProjectionStore.RefreshSessionsStructural(
+                connection,
+                observedTransaction,
+                ["0198f5b8-0c00-7000-8000-000000000001"],
+                DateTimeOffset.UnixEpoch);
+            observedTransaction.Rollback();
+        }
+        return observer.ExecutionCount;
     }
 
     private static string[] Strings(SqliteTransaction transaction, string sql)
@@ -364,5 +379,49 @@ public sealed class LocalWorkspaceProjectionSchemaTests
         var result = new List<string>();
         while (reader.Read()) result.Add(reader.GetString(0));
         return result.ToArray();
+    }
+
+    internal sealed class NativeStatementExecutionObserver : IDisposable
+    {
+        private const uint Statement = 0x01;
+        private const uint Profile = 0x02;
+        private readonly IntPtr database;
+        private readonly TraceCallback callback;
+        private readonly HashSet<IntPtr> topLevel = [];
+
+        internal NativeStatementExecutionObserver(SqliteConnection connection)
+        {
+            database = connection.Handle.DangerousGetHandle();
+            callback = Observe;
+            Assert.Equal(0, sqlite3_trace_v2(database, Statement | Profile, callback, IntPtr.Zero));
+        }
+
+        internal int ExecutionCount { get; private set; }
+
+        private int Observe(uint kind, IntPtr context, IntPtr statement, IntPtr detail)
+        {
+            if (kind == Statement)
+            {
+                var sql = Marshal.PtrToStringUTF8(detail) ?? string.Empty;
+                if (!sql.TrimStart().StartsWith("-- ", StringComparison.Ordinal)) topLevel.Add(statement);
+            }
+            else if (kind == Profile && topLevel.Remove(statement))
+            {
+                ExecutionCount++;
+            }
+            return 0;
+        }
+
+        public void Dispose()
+        {
+            sqlite3_trace_v2(database, 0, null, IntPtr.Zero);
+            GC.KeepAlive(callback);
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int TraceCallback(uint kind, IntPtr context, IntPtr statement, IntPtr detail);
+
+        [DllImport("e_sqlite3", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_trace_v2(IntPtr database, uint mask, TraceCallback? callback, IntPtr context);
     }
 }

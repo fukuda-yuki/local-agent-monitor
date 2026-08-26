@@ -13,7 +13,7 @@ internal static class LocalWorkspaceProjectionSchemaV1
         "local_workspace_sessions", "local_workspace_session_sources",
         "local_workspace_session_models", "local_workspace_session_search_facts", "local_workspace_session_activity",
         "local_workspace_token_observations", "local_workspace_span_facts", "local_workspace_projection_state",
-        "local_workspace_execution_headers", "local_workspace_nodes", "local_workspace_node_edges", "local_workspace_node_content_refs",
+        "local_workspace_execution_headers", "local_workspace_nodes", "local_workspace_node_edges", "local_workspace_content_tombstones", "local_workspace_node_content_refs",
     ];
 
     private static readonly IReadOnlyList<SqliteOwnedSchemaDefinition> V3Definitions =
@@ -262,6 +262,19 @@ internal static class LocalWorkspaceProjectionSchemaV1
                 FOREIGN KEY(related_node_id) REFERENCES local_workspace_nodes(node_id) ON UPDATE RESTRICT ON DELETE CASCADE
             );
             """),
+        new("table", "local_workspace_content_tombstones", "local_workspace_content_tombstones", """
+            CREATE TABLE local_workspace_content_tombstones (
+                source_item_id TEXT PRIMARY KEY,
+                part TEXT NOT NULL CHECK(part IN ('instruction','tool_input','tool_result','error_message','subagent_input','event_content')),
+                locator_kind TEXT NOT NULL CHECK(locator_kind IN ('whole_event','json_pointer')),
+                json_pointer TEXT NULL CHECK(json_pointer IS NULL OR json_pointer IN ('/prompt','/tool_input','/tool_response','/error','/agent_id')),
+                selected_utf8_bytes INTEGER NULL CHECK(selected_utf8_bytes IS NULL OR selected_utf8_bytes>=0),
+                deleted_at TEXT NOT NULL,
+                retention_item_id TEXT NOT NULL,
+                retention_revision INTEGER NOT NULL CHECK(retention_revision>0),
+                CHECK((locator_kind='whole_event' AND json_pointer IS NULL AND part='event_content') OR (locator_kind='json_pointer' AND json_pointer IS NOT NULL AND part<>'event_content'))
+            );
+            """),
         new("table", "local_workspace_node_content_refs", "local_workspace_node_content_refs", """
             CREATE TABLE local_workspace_node_content_refs (
                 node_id TEXT NOT NULL,
@@ -466,6 +479,14 @@ internal static class LocalWorkspaceProjectionSchemaV1
                        OR i.revision<>c.retention_revision OR i.ownership_receipt<>c.retention_ownership_receipt OR s.captured_at<>c.source_captured_at OR s.expires_at<>c.source_expires_at
                        OR s.retention_owner_token<>c.retention_owner_token OR local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,s.content_kind,s.captured_at,s.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,s.retention_owner_token,i.ownership_receipt)<>1
                        OR i.read_denied_at IS NOT NULL OR i.deleted_at IS NOT NULL OR i.error_code IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)))
+              OR EXISTS(SELECT 1 FROM local_workspace_content_tombstones x
+                     LEFT JOIN session_events e ON e.event_id=x.source_item_id
+                     LEFT JOIN retention_items i ON i.item_id=x.retention_item_id AND i.store_kind='session_event_content' AND i.source_item_id=x.source_item_id
+                     LEFT JOIN local_workspace_node_content_refs c ON c.source_item_id=x.source_item_id AND c.part=x.part
+                     WHERE e.event_id IS NULL OR i.item_id IS NULL OR i.revision<>x.retention_revision
+                       OR NOT (i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id))
+                       OR c.node_id IS NULL OR c.availability_state<>'deleted' OR c.locator_kind<>x.locator_kind
+                       OR NOT (c.json_pointer IS x.json_pointer) OR c.retention_owner_token IS NOT NULL)
               """
             : "OR EXISTS(SELECT 1 FROM local_workspace_node_content_refs WHERE availability_state='available')";
         using var command = connection.CreateCommand();

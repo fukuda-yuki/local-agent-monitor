@@ -11,6 +11,34 @@ namespace CopilotAgentObservability.Persistence.Sqlite;
 
 internal static class LocalWorkspaceProjectionStore
 {
+    internal static void CompleteSessionEventContentDeletion(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sourceItemId,
+        DateTimeOffset completedAt)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO local_workspace_content_tombstones(source_item_id,part,locator_kind,json_pointer,selected_utf8_bytes,deleted_at,retention_item_id,retention_revision)
+            SELECT c.source_item_id,c.part,c.locator_kind,c.json_pointer,c.selected_utf8_bytes,$at,i.item_id,i.revision
+            FROM local_workspace_node_content_refs c
+            JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=c.source_item_id
+            WHERE c.source_item_id=$source AND c.availability_state='available'
+            ON CONFLICT(source_item_id) DO UPDATE SET
+              deleted_at=excluded.deleted_at,retention_item_id=excluded.retention_item_id,retention_revision=excluded.retention_revision;
+            UPDATE local_workspace_node_content_refs SET
+              revision_input=revision_input||'|deleted|'||(SELECT CAST(revision AS TEXT) FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
+              retention_item_id=(SELECT item_id FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
+              retention_store_instance_id=NULL,source_captured_at=NULL,source_expires_at=NULL,
+              retention_revision=(SELECT revision FROM retention_items WHERE store_kind='session_event_content' AND source_item_id=$source),
+              retention_ownership_receipt=NULL,retention_owner_token=NULL,availability_state='deleted'
+            WHERE source_item_id=$source;
+            """;
+        command.Parameters.AddWithValue("$source", sourceItemId);
+        command.Parameters.AddWithValue("$at", Canonical(completedAt));
+        command.ExecuteNonQuery();
+    }
     private static readonly Regex ExplicitOffsetInstant = new(
         "^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,7}))?(?<offset>Z|[+-][0-9]{2}:[0-9]{2})$",
         RegexOptions.CultureInvariant);
@@ -186,7 +214,9 @@ internal static class LocalWorkspaceProjectionStore
             """, ("$ids", idsJson));
         Execute(connection, transaction, """
             WITH ranked AS (
-              SELECT o.*,row_number() OVER(PARTITION BY o.session_id,o.execution_id ORDER BY o.authority_rank,o.source_identity COLLATE BINARY) ordinal
+              SELECT o.*,row_number() OVER(PARTITION BY o.session_id,o.execution_id ORDER BY
+                CASE WHEN o.input_tokens IS NULL AND o.output_tokens IS NULL AND o.total_tokens IS NULL AND o.reasoning_tokens IS NULL AND o.cache_read_tokens IS NULL AND o.cache_creation_tokens IS NULL THEN 1 ELSE 0 END,
+                o.authority_rank,o.source_identity COLLATE BINARY) ordinal
               FROM local_workspace_token_observations o WHERE o.session_id IN (SELECT CAST(value AS TEXT) FROM json_each($ids))),
             chosen AS (SELECT * FROM ranked WHERE ordinal=1)
             UPDATE local_workspace_execution_headers AS h SET
@@ -342,18 +372,18 @@ internal static class LocalWorkspaceProjectionStore
             var contentSql = hasRetentionAuthority
                 ? """
                   INSERT INTO local_workspace_node_content_refs(node_id,part,store_kind,source_item_id,locator_kind,json_pointer,selected_utf8_bytes,revision_input,retention_item_id,retention_store_instance_id,source_captured_at,source_expires_at,retention_revision,retention_ownership_receipt,retention_owner_token,availability_state)
-                  SELECT n.node_id,local_workspace_content_part(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json)),'session_event_content',e.event_id,
-                    CASE WHEN local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json) IS NULL THEN 'whole_event' ELSE 'json_pointer' END,
-                    local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),
-                    local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json),
-                    e.content_state||'|'||COALESCE(c.captured_at,'')||'|'||COALESCE(c.expires_at,'')||'|'||COALESCE(i.item_id,'')||'|'||COALESCE(i.store_instance_id,'')||'|'||COALESCE(CAST(i.revision AS TEXT),'')||'|'||COALESCE(i.state,''),
-                    i.item_id,i.store_instance_id,COALESCE(c.captured_at,i.captured_at),COALESCE(c.expires_at,i.expires_at),i.revision,i.ownership_receipt,
+                  SELECT n.node_id,COALESCE(t.part,local_workspace_content_part(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json))),'session_event_content',e.event_id,
+                    COALESCE(t.locator_kind,CASE WHEN local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json) IS NULL THEN 'whole_event' ELSE 'json_pointer' END),
+                    COALESCE(t.json_pointer,local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json)),
+                    COALESCE(t.selected_utf8_bytes,local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)),
+                    e.content_state||'|'||COALESCE(c.captured_at,'')||'|'||COALESCE(c.expires_at,'')||'|'||COALESCE(i.item_id,'')||'|'||COALESCE(i.store_instance_id,'')||'|'||COALESCE(CAST(i.revision AS TEXT),'')||'|'||COALESCE(i.state,'')||'|'||COALESCE(t.deleted_at,''),
+                    i.item_id,CASE WHEN t.source_item_id IS NULL THEN i.store_instance_id END,CASE WHEN t.source_item_id IS NULL THEN COALESCE(c.captured_at,i.captured_at) END,CASE WHEN t.source_item_id IS NULL THEN COALESCE(c.expires_at,i.expires_at) END,i.revision,CASE WHEN t.source_item_id IS NULL THEN i.ownership_receipt END,
                     CASE WHEN e.content_state='available' AND c.event_id IS NOT NULL AND i.store_instance_id=(SELECT store_instance_id FROM retention_store_instances WHERE id=1)
                       AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at AND typeof(c.retention_owner_token)='blob' AND length(c.retention_owner_token)=32
                       AND local_workspace_retention_receipt_matches(i.store_instance_id,e.event_id,c.content_kind,c.captured_at,c.expires_at,e.session_id,e.run_id,e.source_adapter,e.source_event_id,c.retention_owner_token,i.ownership_receipt)=1
                       AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id)
                       AND i.read_denied_at IS NULL AND i.deleted_at IS NULL AND i.error_code IS NULL AND (i.state='retained_by_policy' OR (i.state='expiring' AND i.expires_at>$now)) AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)<=1048576 THEN c.retention_owner_token END,
-                    CASE WHEN i.read_denied_at IS NOT NULL THEN 'read_denied' WHEN i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id) THEN 'deleted'
+                    CASE WHEN i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones rt WHERE rt.item_id=i.item_id) THEN 'deleted' WHEN i.read_denied_at IS NOT NULL THEN 'read_denied'
                          WHEN e.content_state='expired_pending_deletion' OR i.state IN ('expired_pending_deletion','deletion_queued','deleting','deletion_failed') OR (i.state='expiring' AND i.expires_at<=$now) THEN 'expired'
                          WHEN e.content_state='available' AND c.event_id IS NOT NULL AND local_workspace_content_bytes(local_workspace_content_pointer(e.source_adapter,e.schema_fingerprint,e.type,c.content_json),c.content_json)>1048576 THEN 'oversized'
                          WHEN e.content_state='not_captured' OR c.event_id IS NULL THEN 'not_captured'
@@ -363,6 +393,7 @@ internal static class LocalWorkspaceProjectionStore
                          ELSE 'invalid' END
                   FROM local_workspace_nodes n JOIN session_events e ON n.source_kind='session_event' AND n.source_identity=e.event_id
                   LEFT JOIN session_event_content c ON c.event_id=e.event_id
+                  LEFT JOIN local_workspace_content_tombstones t ON t.source_item_id=e.event_id
                   LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
                     AND ((c.event_id IS NOT NULL AND i.captured_at=c.captured_at AND i.expires_at=c.expires_at)
                       OR i.state='deleted' OR i.deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.item_id=i.item_id))

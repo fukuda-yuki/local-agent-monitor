@@ -12,7 +12,7 @@ public sealed class SessionEventContentRetentionAdapterTests
     public async Task SessionAdapter_DeletesOnlyExactContentAtomically()
     {
         using var fixture = await Fixture.CreateAsync();
-        Assert.Equal("available", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal("instruction|json_pointer|/prompt|available", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
         var result = await fixture.Adapter.DeleteAsync(fixture.Context);
 
         Assert.Same(RetentionAdapterResult.Deleted, result);
@@ -29,30 +29,53 @@ public sealed class SessionEventContentRetentionAdapterTests
         Assert.Equal(1L, fixture.Count("SELECT durable_cursor FROM retention_delete_journal WHERE item_id=$item;"));
         Assert.Equal("deleted", fixture.Text("SELECT state FROM retention_items WHERE item_id=$item;"));
         Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM retention_tombstones WHERE item_id=$item;"));
-        Assert.Equal("not_captured", fixture.Text("SELECT availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal("instruction|json_pointer|/prompt|deleted", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        using (var connection = new SqliteConnection($"Data Source={fixture.Path};Pooling=False"))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction(deferred: true);
+            CopilotAgentObservability.Persistence.Sqlite.RuntimeBackup.LocalWorkspaceProjectionBackupValidation.Validate(
+                connection, transaction,
+                skillRegistryAuthority: FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                    SkillInvocationV2ArtifactRegistry.CurrentWriterVersion));
+        }
+        Assert.Equal("1|1|1", fixture.Text("SELECT (retention_owner_token IS NULL)||'|'||(retention_ownership_receipt IS NULL)||'|'||(retention_store_instance_id IS NULL) FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+
+        using (var connection = new SqliteConnection($"Data Source={fixture.Path};Pooling=False"))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            new LocalWorkspaceProjectionTransactionParticipant(FixedSkillRegistryGenerationAuthority.ForWriterVersion(
+                SkillInvocationV2ArtifactRegistry.CurrentWriterVersion)).RefreshSessions(
+                    connection, transaction, [fixture.SessionId], DateTimeOffset.Parse("2026-07-20T00:00:00Z"));
+            transaction.Commit();
+        }
+        Assert.Equal("instruction|json_pointer|/prompt|deleted", fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
     }
 
     [Fact]
     public async Task SessionAdapter_RollbackAfterRealParticipantRefreshRestoresPriorContentReference()
     {
         using var fixture = await Fixture.CreateAsync(failAfterRefresh: true);
-        var before = fixture.Text("SELECT availability_state||'|'||retention_revision||'|'||hex(retention_owner_token) FROM local_workspace_node_content_refs WHERE source_item_id=$target;");
+        var before = fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state||'|'||retention_revision||'|'||hex(retention_owner_token) FROM local_workspace_node_content_refs WHERE source_item_id=$target;");
 
         var result = await fixture.Adapter.DeleteAsync(fixture.Context);
 
         Assert.NotSame(RetentionAdapterResult.Deleted, result);
         Assert.Equal(1L, fixture.Count("SELECT COUNT(*) FROM session_event_content WHERE event_id=$target;"));
-        Assert.Equal(before, fixture.Text("SELECT availability_state||'|'||retention_revision||'|'||hex(retention_owner_token) FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal(before, fixture.Text("SELECT part||'|'||locator_kind||'|'||json_pointer||'|'||availability_state||'|'||retention_revision||'|'||hex(retention_owner_token) FROM local_workspace_node_content_refs WHERE source_item_id=$target;"));
+        Assert.Equal(0L, fixture.Count("SELECT COUNT(*) FROM local_workspace_content_tombstones WHERE source_item_id=$target;"));
     }
 
     private sealed class Fixture : IDisposable
     {
-        private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
-            => (Path, Adapter, Context, TargetEventId, SiblingEventId, SiblingContent, SiblingCapturedAt, SiblingExpiresAt, SessionSnapshot, RunSnapshot, EventSnapshot, NativeIdSnapshot, ProjectionSnapshot) = (path, adapter, context, targetEventId, siblingEventId, siblingContent, siblingCapturedAt, siblingExpiresAt, sessionSnapshot, runSnapshot, eventSnapshot, nativeIdSnapshot, projectionSnapshot);
+        private Fixture(string path, SessionEventContentRetentionAdapter adapter, RetentionDeleteContext context, string sessionId, string targetEventId, string siblingEventId, string siblingContent, string siblingCapturedAt, string siblingExpiresAt, string sessionSnapshot, string runSnapshot, string eventSnapshot, string nativeIdSnapshot, string projectionSnapshot)
+            => (Path, Adapter, Context, SessionId, TargetEventId, SiblingEventId, SiblingContent, SiblingCapturedAt, SiblingExpiresAt, SessionSnapshot, RunSnapshot, EventSnapshot, NativeIdSnapshot, ProjectionSnapshot) = (path, adapter, context, sessionId, targetEventId, siblingEventId, siblingContent, siblingCapturedAt, siblingExpiresAt, sessionSnapshot, runSnapshot, eventSnapshot, nativeIdSnapshot, projectionSnapshot);
 
         internal string Path { get; }
         internal SessionEventContentRetentionAdapter Adapter { get; }
         internal RetentionDeleteContext Context { get; }
+        internal string SessionId { get; }
         internal string TargetEventId { get; }
         internal string SiblingEventId { get; }
         internal string SiblingContent { get; }
@@ -96,7 +119,7 @@ public sealed class SessionEventContentRetentionAdapterTests
             Assert.Equal(RetentionIntentDisposition.Committed, intent.Disposition);
 
             Execute(path, "INSERT INTO session_projection_state(projector_key,projection_cursor,unsupported_event_version_count,updated_at) VALUES('preserved',7,0,$now);", ("$now", now.ToString("O")));
-            return new Fixture(path, new SessionEventContentRetentionAdapter(catalog, time, participant, gate), new RetentionDeleteContext(claim.Fence.ItemId, claim.StoreInstanceId, claim.StoreKind, claim.Fence.ExpectedRevision, claim.Fence.LeaseOwner, claim.Fence.LeaseGeneration, claim.SourceIdentity, null, intent.IntentCursor, CancellationToken.None), target, sibling,
+            return new Fixture(path, new SessionEventContentRetentionAdapter(catalog, time, participant, gate), new RetentionDeleteContext(claim.Fence.ItemId, claim.StoreInstanceId, claim.StoreKind, claim.Fence.ExpectedRevision, claim.Fence.LeaseOwner, claim.Fence.LeaseGeneration, claim.SourceIdentity, null, intent.IntentCursor, CancellationToken.None), batch.Detail.Session.SessionId.ToString("D").ToLowerInvariant(), target, sibling,
                 Text(path, "SELECT content_json FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
                 Text(path, "SELECT captured_at FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
                 Text(path, "SELECT expires_at FROM session_event_content WHERE event_id=$sibling;", ("$sibling", sibling)),
@@ -116,9 +139,9 @@ public sealed class SessionEventContentRetentionAdapterTests
             var session = new ObservedSession(Guid.CreateVersion7(), ObservedSessionStatus.Active, SessionCompleteness.Rich, "owner/repository", "workspace", now.AddMinutes(-2), null, now, SessionRawRetentionState.Expiring, now.AddMinutes(-2), now);
             var native = new SessionNativeId(session.SessionId, SessionSourceSurface.CopilotSdk, "native-session", SessionBindingKind.Native, now.AddMinutes(-2));
             var run = new ObservedSessionRun(Guid.CreateVersion7(), session.SessionId, SessionSourceSurface.CopilotSdk, "native-run", traceId, null, "gpt-5", ObservedSessionStatus.Active, now.AddMinutes(-1), null, 10, 20, 30);
-            var target = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, traceId, "received", "copilot-sdk-stream", "target", "user.message", now, SessionContentState.Available);
+            var target = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, traceId, "received", "claude-code-hook", "target", "UserPromptSubmit", now, SessionContentState.Available, SchemaFingerprint: new string('a', 64));
             var sibling = new ObservedSessionEvent(Guid.CreateVersion7(), session.SessionId, run.RunId, SessionSourceSurface.CopilotSdk, null, traceId, "received", "copilot-sdk-stream", "sibling", "assistant.message", now.AddSeconds(1), SessionContentState.Available);
-            return new(new SessionDetail(session, [native], [run], [target, sibling]), [new SessionEventContent(target.EventId, "application/json", "{\"text\":\"target\"}", now, now.AddDays(90)), new SessionEventContent(sibling.EventId, "application/json", "{\"text\":\"sibling\"}", now.AddSeconds(1), now.AddDays(90).AddSeconds(1))]);
+            return new(new SessionDetail(session, [native], [run], [target, sibling]), [new SessionEventContent(target.EventId, "application/json", "{\"prompt\":\"target\"}", now, now.AddDays(90)), new SessionEventContent(sibling.EventId, "application/json", "{\"text\":\"sibling\"}", now.AddSeconds(1), now.AddDays(90).AddSeconds(1))]);
         }
 
         private static void Execute(string path, string sql, params (string Name, object Value)[] values) { using var connection = Open(path); using var command = connection.CreateCommand(); command.CommandText = sql; foreach (var (name, value) in values) command.Parameters.AddWithValue(name, value); command.ExecuteNonQuery(); }
@@ -131,6 +154,12 @@ public sealed class SessionEventContentRetentionAdapterTests
             public void RefreshSessions(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyCollection<string> sessionIds, DateTimeOffset now)
             {
                 inner.RefreshSessions(connection, transaction, sessionIds, now);
+                throw new InvalidOperationException("injected_after_workspace_refresh");
+            }
+
+            public void CompleteSessionEventContentDeletion(SqliteConnection connection, SqliteTransaction transaction, string sourceItemId, DateTimeOffset now)
+            {
+                inner.CompleteSessionEventContentDeletion(connection, transaction, sourceItemId, now);
                 throw new InvalidOperationException("injected_after_workspace_refresh");
             }
         }

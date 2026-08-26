@@ -9,11 +9,24 @@ public sealed partial class RetentionCatalogStore
     internal ValueTask<RetentionAdapterResult> ExecuteSqliteDeletionAsync(
         RetentionDeleteContext context,
         RetentionSqliteSourceMutation mutateSource) =>
-        ExecuteSqliteDeletionAsync(context, mutateSource, null);
+        ExecuteSqliteDeletionAsync(context, mutateSource, null, null);
+
+    internal ValueTask<RetentionAdapterResult> ExecuteSqliteDeletionAsync(
+        RetentionDeleteContext context,
+        RetentionSqliteSourceMutation mutateSource,
+        RetentionSqlitePostCompletionMutation postCompletion) =>
+        ExecuteSqliteDeletionAsync(context, mutateSource, postCompletion, null);
+
+    internal ValueTask<RetentionAdapterResult> ExecuteSqliteDeletionAsync(
+        RetentionDeleteContext context,
+        RetentionSqliteSourceMutation mutateSource,
+        Action<RetentionSqliteDeletePhase> checkpoint) =>
+        ExecuteSqliteDeletionAsync(context, mutateSource, null, checkpoint);
 
     internal async ValueTask<RetentionAdapterResult> ExecuteSqliteDeletionAsync(
         RetentionDeleteContext context,
         RetentionSqliteSourceMutation mutateSource,
+        RetentionSqlitePostCompletionMutation? postCompletion,
         Action<RetentionSqliteDeletePhase>? checkpoint)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -76,6 +89,7 @@ public sealed partial class RetentionCatalogStore
                 transaction.Rollback();
                 return RetentionAdapterResult.LeaseLost;
             }
+            postCompletion?.Invoke(connection, transaction, grant, completedAt);
             context.CancellationToken.ThrowIfCancellationRequested();
             checkpoint?.Invoke(RetentionSqliteDeletePhase.BeforeCommit);
             transaction.Commit();

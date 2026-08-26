@@ -95,6 +95,7 @@ public sealed class LocalRepositoryRuntimeBackupTests
                         + "DROP TABLE IF EXISTS skill_invocation_snapshot_receipts;"
                         + "DROP TABLE IF EXISTS skill_invocation_snapshots;"
                         + "DROP TABLE IF EXISTS local_workspace_node_content_refs;"
+                        + "DROP TABLE IF EXISTS local_workspace_content_tombstones;"
                         + "DROP TABLE IF EXISTS local_workspace_node_edges;"
                         + "DROP TABLE IF EXISTS local_workspace_nodes;"
                         + "DROP TABLE IF EXISTS local_workspace_execution_headers;"
