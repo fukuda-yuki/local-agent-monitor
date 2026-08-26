@@ -551,6 +551,12 @@ internal static class MonitorHost
                     services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
                     services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
                     publicationGate: publicationGate));
+            builder.Services.AddSingleton<ILocalRepositorySessionDetailSnapshotService>(services =>
+                new SqliteLocalRepositoryScopeSnapshotService(
+                    options.DatabasePath,
+                    services.GetRequiredService<ILocalRepositorySessionSnapshotContributor>(),
+                    services.GetRequiredService<ILocalArchiveFactSnapshotContributor>(),
+                    publicationGate: publicationGate));
             if (testOptions?.StartLocalRepositoryCatalogHostedService ?? true)
             {
                 builder.Services.AddHostedService(_ => localRepositoryHostedService);
@@ -754,9 +760,10 @@ internal static class MonitorHost
             var localRepositoryPath = LocalRepositoryRoutes.IsNamespacePath(context.Request.Path);
             var localArchivePath = LocalArchiveRoutes.IsPath(context);
             var localMonitorV1CollectionPath = LocalMonitorV1CollectionRoutes.IsPath(context.Request.Path);
+            var localMonitorV1DetailPath = LocalMonitorV1SessionDetailRoutes.IsPath(context.Request.Path);
             if (retentionPath || sanitizedExportPath || rawReplayPath || runtimeBackupPath
                 || alertPath || historicalImportPath || alertCenterPath || sanitizedImportPath || historicalAnalysisPath
-                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath)
+                || localRepositoryPath || localArchivePath || localMonitorV1CollectionPath || localMonitorV1DetailPath)
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
@@ -821,6 +828,10 @@ internal static class MonitorHost
                 {
                     await LocalMonitorV1CollectionRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
                 }
+                else if (localMonitorV1DetailPath)
+                {
+                    await LocalMonitorV1SessionDetailRoutes.Error(context, StatusCodes.Status400BadRequest, "invalid_host");
+                }
                 else
                 {
                     await WriteFailureAsync(context, StatusCodes.Status400BadRequest, "invalid_host", "Host header must be loopback.");
@@ -832,6 +843,7 @@ internal static class MonitorHost
                 && (localRepositoryPath
                     || localArchivePath
                     || localMonitorV1CollectionPath
+                    || localMonitorV1DetailPath
                     || RuntimeBackupRoutes.IsPath(context.Request.Path)
                     || IsKnownHumanRequest(context.Request)))
             {
@@ -845,6 +857,7 @@ internal static class MonitorHost
         if (!options.SanitizedOnly)
         {
             LocalMonitorV1CollectionRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositoryScopeSnapshotService>(), testOptions?.LocalMonitorV1CollectionOverrides);
+            LocalMonitorV1SessionDetailRoutes.Map(app, app.Services.GetRequiredService<ILocalRepositorySessionDetailSnapshotService>());
             var localArchiveStore = app.Services.GetRequiredService<SqliteLocalArchiveStore>();
             app.Use((context, next) => LocalArchiveRoutes.AdaptAsync(context, next, localArchiveStore));
             app.Use((context, next) => LocalRepositoryRoutes.AdaptMethodNotAllowedAsync(

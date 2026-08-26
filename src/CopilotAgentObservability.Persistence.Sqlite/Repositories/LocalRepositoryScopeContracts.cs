@@ -39,6 +39,22 @@ internal interface ILocalRepositoryScopeSnapshotService
     ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
         CancellationToken cancellationToken);
+
+}
+
+internal interface ILocalRepositorySessionDetailSnapshotService
+{
+    ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
+        string sessionId,
+        CancellationToken cancellationToken);
+}
+
+internal interface ILocalWorkspaceSessionDetailSnapshotContributor
+{
+    ValueTask<LocalWorkspaceSessionDetailContribution> ReadAsync(
+        ILocalRepositoryReadTransaction transaction,
+        string sessionId,
+        CancellationToken cancellationToken);
 }
 
 internal interface ILocalRepositorySessionSnapshotRow
@@ -75,7 +91,8 @@ internal enum LocalRepositoryScopeSnapshotError
 
 internal sealed record LocalRepositoryScopeRequest(
     LocalRepositoryScopeKind ScopeKind,
-    string? RepositoryId);
+    string? RepositoryId,
+    string? TargetSessionId = null);
 
 internal sealed record LocalRepositorySessionContribution(
     IReadOnlyList<ILocalRepositorySessionSnapshotRow> Sessions);
@@ -133,6 +150,11 @@ internal sealed record LocalRepositoryScopeSnapshot(
     LocalRepositoryScopeRequest Request,
     IReadOnlyList<LocalRepositoryCatalogSnapshot> Repositories,
     IReadOnlyList<LocalRepositoryScopeSessionSnapshot> Sessions);
+
+internal sealed record LocalRepositorySessionDetailSnapshot(
+    LocalRepositoryScopeSessionSnapshot Session,
+    LocalWorkspaceSessionDetailContribution Detail,
+    string WorkspaceRevision);
 
 internal sealed class LocalRepositoryScopeSnapshotException : Exception
 {

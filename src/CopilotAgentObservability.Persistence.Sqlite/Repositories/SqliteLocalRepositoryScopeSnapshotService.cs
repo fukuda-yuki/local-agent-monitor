@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CopilotAgentObservability.Persistence.Sqlite;
 
-internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService
+internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalRepositoryScopeSnapshotService, ILocalRepositorySessionDetailSnapshotService
 {
     private const int MaximumSessions = 10_000;
     private const int MaximumCandidatesPerSession = 128;
@@ -13,6 +13,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
     private readonly string databasePath;
     private readonly ILocalRepositorySessionSnapshotContributor sessionContributor;
     private readonly ILocalArchiveFactSnapshotContributor archiveContributor;
+    private readonly ILocalWorkspaceSessionDetailSnapshotContributor detailContributor;
     private readonly int busyTimeoutMilliseconds;
     private readonly Action<int>? compositionObserver;
     private readonly Func<ValueTask>? capabilityEntryObserver;
@@ -27,6 +28,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         string databasePath,
         ILocalRepositorySessionSnapshotContributor sessionContributor,
         ILocalArchiveFactSnapshotContributor archiveContributor,
+        ILocalWorkspaceSessionDetailSnapshotContributor? detailContributor = null,
         int busyTimeoutMilliseconds = DefaultBusyTimeoutMilliseconds,
         Action<int>? compositionObserver = null,
         Func<ValueTask>? capabilityEntryObserver = null,
@@ -45,6 +47,7 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         this.databasePath = Path.GetFullPath(databasePath);
         this.sessionContributor = sessionContributor;
         this.archiveContributor = archiveContributor;
+        this.detailContributor = detailContributor ?? new LocalWorkspaceSessionDetailSnapshotContributor();
         this.busyTimeoutMilliseconds = busyTimeoutMilliseconds;
         this.compositionObserver = compositionObserver;
         this.capabilityEntryObserver = capabilityEntryObserver;
@@ -58,6 +61,25 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
 
     public async ValueTask<LocalRepositoryScopeSnapshot> ReadAsync(
         LocalRepositoryScopeRequest request,
+        CancellationToken cancellationToken) =>
+        (await ReadCoreAsync(request, includeDetail: false, cancellationToken).ConfigureAwait(false)).Scope;
+
+    public async ValueTask<LocalRepositorySessionDetailSnapshot> ReadDetailAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (!LocalRepositoryCatalogValidation.IsCanonicalUuidV7(sessionId))
+            throw new ArgumentException("invalid_session_id", nameof(sessionId));
+        var result = await ReadCoreAsync(new(LocalRepositoryScopeKind.All, null, sessionId), includeDetail: true, cancellationToken).ConfigureAwait(false);
+        if (result.Scope.Sessions.Count == 0 || result.Detail is null)
+            throw new LocalWorkspaceSessionDetailException("session_not_found");
+        var session = result.Scope.Sessions[0];
+        return new(session, result.Detail, ComputeRevision(session, result.Detail));
+    }
+
+    private async ValueTask<(LocalRepositoryScopeSnapshot Scope, LocalWorkspaceSessionDetailContribution? Detail)> ReadCoreAsync(
+        LocalRepositoryScopeRequest request,
+        bool includeDetail,
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
@@ -110,10 +132,19 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
                     catalog,
                     cancellationToken);
 
+                LocalWorkspaceSessionDetailContribution? detail = null;
+                if (includeDetail && sessionRows.Length != 0)
+                {
+                    detail = await capability.RunContributorAsync(
+                        ReadPhase.Archive,
+                        token => detailContributor.ReadAsync(capability, request.TargetSessionId!, token),
+                        cancellationToken).ConfigureAwait(false);
+                }
+
                 var snapshot = Compose(request, sessionRows, catalog, archive, compositionObserver, cancellationToken);
                 finalReturnObserver?.Invoke();
                 cancellationToken.ThrowIfCancellationRequested();
-                return snapshot;
+                return (snapshot, detail);
             }
             finally
             {
@@ -165,6 +196,28 @@ internal sealed class SqliteLocalRepositoryScopeSnapshotService : ILocalReposito
         else if (request.RepositoryId is not null)
         {
             throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+        }
+        if (request.TargetSessionId is not null
+            && !LocalRepositoryCatalogValidation.IsCanonicalUuidV7(request.TargetSessionId))
+            throw new ArgumentException("invalid_local_repository_scope", nameof(request));
+    }
+
+    private static string ComputeRevision(LocalRepositoryScopeSessionSnapshot session, LocalWorkspaceSessionDetailContribution detail)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        hash.AppendData(System.Text.Encoding.ASCII.GetBytes("local-monitor-session-detail-revision\0v1\0"));
+        Append(session.SessionId); Append(session.AssignmentRevision); Append(session.ArchiveRevision); Append(session.Session);
+        foreach (var execution in detail.Executions) Append(execution);
+        foreach (var node in detail.Nodes) Append(node);
+        foreach (var edge in detail.Edges) Append(edge);
+        foreach (var content in detail.Content) Append(content);
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+        void Append(object value)
+        {
+            var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value);
+            Span<byte> length = stackalloc byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
+            hash.AppendData(length); hash.AppendData(bytes);
         }
     }
 

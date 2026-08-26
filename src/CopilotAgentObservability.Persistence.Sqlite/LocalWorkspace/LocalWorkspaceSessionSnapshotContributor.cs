@@ -22,13 +22,14 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
     {
         var now = timeProvider.GetUtcNow().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         return transaction.ReadAsync((connection, sqliteTransaction, token) =>
-            ReadRowsAsync(connection, sqliteTransaction, now, statementObserver, token), cancellationToken);
+            ReadRowsAsync(connection, sqliteTransaction, now, request.TargetSessionId, statementObserver, token), cancellationToken);
     }
 
     private static async ValueTask<LocalRepositorySessionContribution> ReadRowsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string now,
+        string? targetSessionId,
         Action<string>? statementObserver,
         CancellationToken cancellationToken)
     {
@@ -54,6 +55,7 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id
                 LEFT JOIN retention_items i ON i.store_kind='session_event_content' AND i.source_item_id=e.event_id
+                WHERE ($target_session_id IS NULL OR p.session_id=$target_session_id)
                 ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
                 """ : """
                 SELECT p.session_id,p.sort_group,p.sort_epoch_ms,
@@ -64,9 +66,11 @@ internal sealed class LocalWorkspaceSessionSnapshotContributor : ILocalRepositor
                 FROM local_workspace_sessions p
                 LEFT JOIN session_events e ON e.event_id=p.label_source_identity AND e.session_id=p.session_id AND e.content_state='available'
                 LEFT JOIN session_event_content c ON c.event_id=e.event_id AND c.expires_at=p.label_expires_at
+                WHERE ($target_session_id IS NULL OR p.session_id=$target_session_id)
                 ORDER BY p.session_id COLLATE BINARY LIMIT 10001;
                 """;
             command.Parameters.AddWithValue("$now", now);
+            command.Parameters.AddWithValue("$target_session_id", (object?)targetSessionId ?? DBNull.Value);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
